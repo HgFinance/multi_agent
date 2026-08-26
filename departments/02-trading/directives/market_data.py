@@ -162,9 +162,58 @@ class HttpMarketDataProvider:
         return validate_quote(value, instrument, now=now, max_age_seconds=max_age_seconds)
 
 
+class LsPaperFallbackMarketDataProvider:
+    """Use an authenticated read-only LS quote when the TSDB projection is stale."""
+
+    _FALLBACK_CODES = {
+        "TRADING_MARKET_QUOTE_STALE",
+        "TRADING_MARKET_QUOTE_UNAVAILABLE",
+    }
+
+    def __init__(self, primary: MarketDataProvider, broker: Any) -> None:
+        self.primary = primary
+        self.broker = broker
+
+    def quote(
+        self,
+        instrument: InstrumentRef,
+        *,
+        now: datetime,
+        max_age_seconds: float | None = None,
+    ) -> TrustedQuote:
+        try:
+            return self.primary.quote(
+                instrument, now=now, max_age_seconds=max_age_seconds
+            )
+        except MarketDataError as exc:
+            if exc.code not in self._FALLBACK_CODES:
+                raise
+        try:
+            level = self.broker.get_quote(instrument.symbol)
+            value = TrustedQuote(
+                instrument_id=str(instrument.instrument_id),
+                symbol=str(level["symbol"]),
+                observed_at=level["observed_at"],
+                bid=_decimal(level["bid"], "bid", positive=True),
+                ask=_decimal(level["ask"], "ask", positive=True),
+                bid_size=_decimal(level["bid_size"], "bid_size", positive=False),
+                ask_size=_decimal(level["ask_size"], "ask_size", positive=False),
+                source="ls-paper-rest:t1101",
+            )
+        except Exception as exc:
+            raise MarketDataError(
+                "TRADING_MARKET_QUOTE_UNAVAILABLE",
+                "LS PAPER REST quote fallback failed",
+            ) from exc
+        return validate_quote(
+            value, instrument, now=now, max_age_seconds=max_age_seconds
+        )
+
+
 __all__ = [
     "FixtureMarketDataProvider",
     "HttpMarketDataProvider",
+    "LsPaperFallbackMarketDataProvider",
     "MarketDataError",
     "MarketDataProvider",
     "TrustedQuote",

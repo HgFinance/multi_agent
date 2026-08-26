@@ -29,7 +29,7 @@
 - `contracts/` — StrategySignal·OrderIntent·Risk Gate 계약
 - `oms/` — 주문 상태 머신과 Broker 경계
 
-## 인증 사용자 직접 PAPER 레인
+## 고정 fixture 사용자 직접 PAPER 레인
 
 자동 전략 주문과 사용자 직접 주문은 권한 출처가 다르다.
 
@@ -38,7 +38,7 @@
 | source | Agent/alpha/strategy/rebalancer | BFF가 선택한 고정 데모 ID의 명시적 지시 |
 | priority | 전략·Risk 계약이 결정 | `USER_DIRECTIVE_HIGHEST` |
 | 경제적 veto | 결정론 Risk Decision 필수 | Risk·alpha·rebalancer가 사용자의 명시적 PAPER 결정을 veto/resize하지 않음 |
-| 실행 전 경계 | Risk·QA·OMS | auth, ACTIVE Fund/Book membership, parser, account mechanics, idempotency, PAPER-only |
+| 실행 전 경계 | Risk·QA·OMS | fixture actor map, ACTIVE Fund/Book membership, parser, account mechanics, idempotency, PAPER-only |
 | LIVE | 승인된 별도 경로가 생기기 전 금지 | 항상 금지 |
 
 Hermes는 사용자의 authority를 소유하지 않는다. 대화 원문을 자의로 보충하거나

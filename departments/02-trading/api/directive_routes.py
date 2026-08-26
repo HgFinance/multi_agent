@@ -8,7 +8,11 @@ from fastapi import APIRouter, Header
 
 from broker.ls_paper_broker import LSPaperBroker
 from directives.contracts import UserDirectiveRequest
-from directives.market_data import FixtureMarketDataProvider, HttpMarketDataProvider
+from directives.market_data import (
+    FixtureMarketDataProvider,
+    HttpMarketDataProvider,
+    LsPaperFallbackMarketDataProvider,
+)
 from directives.repository import InMemoryDirectiveRepository, PostgresDirectiveRepository
 from directives.service import DirectiveServiceError, UserDirectiveService, require_paper_execution_mode
 
@@ -32,6 +36,7 @@ def configure_directive_runtime() -> UserDirectiveService:
             "authenticated user directives require paper or ls-paper adapter",
             503,
         )
+    external_broker = LSPaperBroker.from_env() if adapter == "ls-paper" else None
     repository_mode = os.environ.get("TRADING_DIRECTIVE_REPOSITORY", "postgres").strip().lower()
     auth_mode = os.environ.get("TRADING_AUTH_MODE", "service").strip().lower()
     if auth_mode == "fixture" and _production():
@@ -65,7 +70,8 @@ def configure_directive_runtime() -> UserDirectiveService:
             "TRADING_DIRECTIVE_REPOSITORY must be postgres or memory",
             503,
         )
-    external_broker = LSPaperBroker.from_env() if adapter == "ls-paper" else None
+    if external_broker is not None:
+        market_data = LsPaperFallbackMarketDataProvider(market_data, external_broker)
     _service = UserDirectiveService(
         repository,
         market_data,

@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Mapping, Sequence
@@ -200,11 +201,40 @@ def _input_hash(request: RiskMandateAssessmentRequest) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _fallback_query_mode(question: str) -> tuple[str, str]:
-    """Fail-safe local classifier used only when Ollama is unavailable."""
+def classify_compliance_query_mode(question: str) -> tuple[str, str]:
+    """Classify a question without calling a model.
+
+    This is both the model-router fallback and the guard in front of Hermes'
+    on-demand legal tool. Keeping one classifier prevents the two entry paths
+    from drifting into different definitions of a legal request.
+    """
 
     text = question.casefold()
-    legal = any(token in text for token in ("법률", "법령", "규정", "위반", "조항", "판례", "legal"))
+    legal = any(
+        token in text
+        for token in (
+            "법률",
+            "법령",
+            "규정",
+            "위반",
+            "조항",
+            "판례",
+            "자본시장법",
+            "금융투자업규정",
+            "미공개중요정보",
+            "미공개 정보",
+            "시세조종",
+            "부정거래",
+            "내부자거래",
+            "단기매매차익",
+            "공시의무",
+            "금융위원회",
+            "대법원",
+        )
+    ) or bool(
+        re.search(r"제\s*\d+(?:의\d+)?조", text)
+        or re.search(r"\b(?:law|legal|statute|regulation|case law)\b", text)
+    )
     policy = any(
         token in text
         for token in ("내부정책", "정책", "제한목록", "restricted", "한도", "policy")
@@ -250,7 +280,7 @@ class _SafeComplianceLLM:
         self.uses_model = False
         if "routing classifier" in system:
             question = prompt.split("Question:", 1)[-1].strip()
-            mode, rationale = _fallback_query_mode(question)
+            mode, rationale = classify_compliance_query_mode(question)
             return json.dumps(
                 {"query_mode": mode, "routing_rationale": rationale},
                 ensure_ascii=False,
@@ -1192,6 +1222,7 @@ __all__ = [
     "RiskMandateAssessmentRequest",
     "assess_mandate",
     "build_risk_head_dispatch",
+    "classify_compliance_query_mode",
     "run_compliance_policy_worker",
     "run_risk_runner",
     "synthesize_risk_head",

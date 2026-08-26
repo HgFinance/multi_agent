@@ -63,7 +63,7 @@ python -m unittest discover -s tests/schema -p "test_*.py" -v
 **절대 깨면 안 되는 권한 분리** — 담당자가 같아도, 급해도 이전되지 않는다:
 - Agent Decision ≠ Strategy Signal ≠ OrderIntent ≠ Order. Agent·alpha·전략 Worker·rebalancer의 자동 주문 후보는 결정론적 Risk Engine을 통과하며, `risk-management`는 근거·권고만 만든다.
 - `trader-pm-agent`는 Risk/Compliance Gate 통과 전 주문을 보내지 않는다. CEO는 주문 제출·리스크 승인·원장 수정·NAV 확정·Audit 종결 권한이 없다.
-- [ADR-0007](docs/02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 `USER_DIRECTIVE`는 별도 권한이다. 인증된 사용자가 자기 ACTIVE Fund/Book에 명시한 PAPER 주문은 Risk·alpha·rebalancer가 경제적으로 veto하지 않지만, auth·membership·결정론 parser·cash/position/reservation·lot/tick/TTL·멱등·durable PAPER admission은 필수다. Hermes/LLM은 이 권한을 소유하거나 주문을 보충하지 않는다.
+- [ADR-0007](docs/02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 `USER_DIRECTIVE`는 별도 권한이다. BFF가 고정 fixture로 선택한 사용자·ACTIVE Fund/Book의 명시적 PAPER 주문은 Risk·alpha·rebalancer가 경제적으로 veto하지 않지만, fixture actor map·membership·결정론 parser·cash/position/reservation·lot/tick/TTL·멱등·durable PAPER admission은 필수다. Hermes/LLM은 이 권한을 소유하거나 주문을 보충하지 않으며 브라우저 로그인·세션을 만들지 않는다.
 - `hr-department`는 자기 후보를 스스로 최종 승인할 수 없다(검증=QA, 승인=CEO, 권한 생성=IAM). `quant-backtest-department`는 Production 승격을 직접 하지 않는다.
 - LLM은 관련성 판단·서술에만 쓴다. PIT 필터·인용 검증·한도 검사는 결정론적 Python(`skills/agentic-rag/src/nodes.py`).
 
@@ -93,7 +93,7 @@ python -m unittest discover -s tests/schema -p "test_*.py" -v
 1. Agent보다 데이터 계약과 Risk/OMS를 먼저 안정화한다.
 2. LLM 출력은 항상 Pydantic Schema로 검증한다.
 3. Agent Decision과 Order를 같은 객체로 취급하지 않는다.
-4. 모든 Agent·자동 전략 주문 후보는 결정론적 Risk Engine을 통과한다. 인증 사용자의 명시적 PAPER `USER_DIRECTIVE`만 ADR-0007의 별도 authority/admission 계약을 따른다.
+4. 모든 Agent·자동 전략 주문 후보는 결정론적 Risk Engine을 통과한다. 고정 fixture 사용자의 명시적 PAPER `USER_DIRECTIVE`만 ADR-0007의 별도 authority/admission 계약을 따른다.
 5. 미래 데이터가 Backtest와 과거 Replay에 들어가지 않게 한다.
 6. Position은 Fill 또는 승인된 Adjustment로만 변경한다.
 7. Replay 환경은 실제 Broker Credential을 가질 수 없다.

@@ -552,6 +552,18 @@ class TerminalProjectionTests(unittest.TestCase):
         self.assertEqual(record.evaluated_primary_task_ids, (RESEARCH, RISK))
         self.assertEqual(record.findings[0]["finding_id"], "f1")
 
+    def test_qa_accepts_worker_overall_as_the_verdict(self) -> None:
+        repository = FakeAuditRepository()
+        qa = dict(self.qa)
+        qa["metadata"] = {"overall": "FAIL", "decision": "DEFER"}
+
+        result = QaAuditProjection(repository=repository).project(
+            root_task_id=ROOT, task=qa, workflow_tasks=[*self.primary, qa, self.root]
+        )
+
+        self.assertEqual(result["original_verdict"], "FAIL")
+        self.assertEqual(result["canonical_decision"], "FAIL")
+
     def test_qa_persistence_failure_is_not_pass(self) -> None:
         repository = FakeAuditRepository()
         repository.fail = True

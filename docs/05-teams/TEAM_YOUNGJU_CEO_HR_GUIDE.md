@@ -4,6 +4,8 @@
 >
 > 이 문서는 이전 CEO/HR 팀 가이드의 운영 기준을 덮어쓴다. Mandate·Workforce API 코드가 있다는 사실을 실제 승인자 인증, 자기개선 운영, IAM Provisioning 완료로 해석하지 않는다. 최상위 기준은 [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md), [PROJECT_IMPLEMENTATION_STATUS.md](../PROJECT_IMPLEMENTATION_STATUS.md), [UNIFIED_DOMAIN_API_SPEC.md](../02-engineering/UNIFIED_DOMAIN_API_SPEC.md)다.
 
+> **현행 보정(2026-08-26):** 이 문서의 2026-08-05 완료·미완료 기록은 당시 snapshot이다. 현재 HR은 조건부 `profile-architecture-worker` 1명을 사용하고 QA Eval Runner는 구현돼 있다. 브라우저 로그인·외부 사용자 Auth·세션은 범위 밖이며 새로 만들지 않는다. 로컬 사용자 경계는 서버가 선택한 고정 fixture ID와 명시적 Fund/Book grant다.
+
 ## 0. 상태 판정 규칙
 
 | 상태 | 의미 | 대표 해석 |
@@ -53,26 +55,24 @@ CEO/HR은 다른 부서의 Risk 거부권, QA 감사권, 주문 제출권, Ledge
 | `HR-02` | `TEST_VERIFIED`(P0-3 실재성 게이트, 2026-08-05) | Draft Profile 13개 Review(조직 판단, 미착수) + 활성화 결정 자체를 스냅샷으로 남기는 감사 테이블 필요 |
 | Workforce Registry | `IMPLEMENTED` baseline | Quality Snapshot·Workforce Plan 집계/저장 로직 필요 |
 | Access Lifecycle | 구현 baseline | Platform/IAM 이벤트·Provisioning Worker 연결 필요 |
-| `HR-03` | `DOCUMENTED` | Eval Runner·Shadow Router·Promotion·Rollback 실체화 필요. **2026-08-07 코드 실측**: `audit.eval_runs`/`eval_results`/`eval_sets` DDL은 있으나 저장소 전체에 쓰기 코드 0건(참조는 전부 SELECT), Golden/Adversarial 실행 코드 0건, `workforce.eval.v1` 발행자 없음(소비자만 구현). QA API의 `*/evaluate` 3종은 Model Risk·Internal Audit·Ops 평가라 Agent 채점 Runner가 아니다 |
+| `HR-03` | `IMPLEMENTED` / 통합 `PARTIAL` | QA Eval Runner·DB write·API는 구현. 후보 Runner의 교차 프로세스 등록, Shadow/Promotion 종단 검증은 미완료 |
 | `HR-04` | `BLOCKED` | Draft Profile 13개 Review와 Tool Allowlist 보완 필요 |
-| HR 직원 계층 | **0명(2026-08-07 제안)** | LLM·결정론 Worker 모두 없음 — 부서장 + 일반 결정론 모듈. QA 독립검증·CEO 승인 대기. 근거는 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md) |
+| HR 직원 계층 | 조건부 LLM Worker 1명 | `profile-architecture-worker`가 Job Profile·Eval Set을 비바인딩으로 제안. 상태 전이·Eval·승인·권한 부여는 결정론 서비스 소유 |
 
 ## 3. Override 작업 순서
 
-### P0-1. 승인자 인증과 SoD
+### P0-1. 고정 fixture 승인 주체와 SoD
 
 **담당:** 영주. **협업:** 동규, Platform/IAM.
 
-> **⚠️ 현재 모의투자 범위 — 실제 로그인 인증이 아니다.** 이 저장소는 서명된 외부
-> Subject 인증이나 브라우저 사용자 세션을 구현하지 않는다. 로컬에서는 고정 데모 ID와
+> **현재 모의투자 범위에는 로그인이 없다.** 서명된 외부 Subject 인증이나 브라우저 사용자
+> 세션을 구현하지 않는다. 로컬에서는 서버가 선택한 고정 fixture ID와
 > `governance.user_profiles`의 `ACTIVE` 상태만 결정론적으로 확인한다
 > (`departments/00-ceo-office/src/approval/actor_identity.py`, `UnverifiedActorUserError`
-> → 403). 이것은 공개 서비스의 사용자 인증이 아니며, 실제 운영 인증을 추가하는 것은
-> 별도 범위다. 아래 §6 Release Gate의 "승인자 Identity가 서명/검증됨"은 현재 모의투자
-> 실행의 완료 조건이 아니다.
+> → 403). 이것은 로그인이나 공개 서비스 사용자 인증이 아니다.
 
-- Approval/Committee/Case API는 서명된 Subject 또는 검증 가능한 사용자 Identity를 받는다. → **현재는 위 팀 합의로 대체(실재성+ACTIVE만 검증), 서명 검증은 BLOCKED**
-- Subject의 department, role, scope, expiry, approval target을 결정론적으로 검증한다. → department/role/expiry는 기존대로 검증(`_ROLE_DECIDERS`, `is_expired`). scope(Fund 단위 권한 범위)는 `governance.fund_memberships`가 비어 있어 여전히 미검증
+- Approval/Committee/Case API는 서버가 선택한 fixture actor만 받고 브라우저가 임의 ID를 승인 주체로 승격하지 못하게 한다.
+- Fixture actor의 department, role, expiry와 approval target을 결정론적으로 검증한다. Fund 단위 범위는 명시적 fixture grant가 없으면 추측하지 않는다.
 - Risk/QA는 자체 업무의 독립 veto/verification 권한을 유지하며 CEO가 대신 결정하지 않는다.
 - `actor_agent_id`가 NULL이거나 Profile/Role과 매핑되지 않으면 `DENY`다. → **BLOCKED로 유지.** 2026-08-04 팀 결정("Agent Roster 등재는 전체 Prototype까지 미룬다")과 정면 충돌한다 - 지금 이 규칙을 적용하면 Roster 미등재 상태인 현재 모든 결정이 막힌다. Roster 등재가 끝난 뒤에 켠다.
 - 최초 Mandate, `LOOSEN`, 상한 확대, LIVE 관련 변경은 승인 증거 없이는 저장·활성화하지 않는다.
@@ -111,7 +111,7 @@ not_started — `committee.close_session()`의 `CommitteeDecisionRecord`로 대�
 
 `Candidate → Independent QA Eval → Shadow → Approval → Promotion → Rollback`
 
-- Eval Runner와 Shadow Router를 구현한다. **소유는 QA/감사본부(동규)다** — 인사팀이 자기 후보를 스스로 채점할 수 없으므로 HR이 만들 수 없다. 2026-08-07 실측상 완전 미착수이며, 이것이 풀리기 전에는 HR 직원 ACTIVE 전이가 원리적으로 불가능하다(`activation_evidence.py`가 `audit.eval_runs`의 COMPLETED 행을 요구하는데 그 행을 만들 경로가 없다). 구현 요구사항은 [EVAL_RUNNER_SPEC.md](../02-engineering/EVAL_RUNNER_SPEC.md)로 QA에 전달한다.
+- Eval Runner는 QA/감사본부가 소유하며 구현돼 있다. HR은 자기 후보를 채점하지 않는다. 남은 작업은 후보 Runner의 교차 프로세스 등록과 Shadow·Promotion·Rollback 종단 연결이며, 세부 계약은 [EVAL_RUNNER_SPEC.md](../02-engineering/EVAL_RUNNER_SPEC.md)를 따른다.
 - Identity·권한 생성은 [PLATFORM_IAM_SPEC.md](../02-engineering/PLATFORM_IAM_SPEC.md)를 따른다. **소유 부서 미정**이며, 인사팀은 요청만 하고 생성은 하지 않는다는 경계는 그대로다.
 - 비용·품질·안전·회귀 지표를 Scorecard에 저장한다.
 - Promotion과 Rollback은 동일 Agent/작성자가 단독 수행하지 못하게 한다.
@@ -164,7 +164,7 @@ python departments/07-agent-workforce/scripts/test_hr_ollama_agent.py
 
 ## 6. 최종 Release Gate
 
-- [ ] 승인자 Identity·Role·Department·expiry·scope가 서명/검증됨
+- [ ] 고정 fixture actor·Role·Department·expiry·Fund scope가 서버에서 검증됨
 - [ ] Risk veto·QA 독립성·CEO SoD가 API/DB 양쪽에서 강제됨
 - [ ] GOV-02 Case/Approval/Committee/Escalation/Notification Replay 통과
 - [ ] Mandate current Read Model과 allocation lineage가 downstream에서 조회됨

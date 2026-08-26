@@ -41,6 +41,10 @@ _CONDITIONAL_TRIGGER = re.compile(
     r"상승\s*시|하락\s*시|" + _SUPPORTED_INDICATOR_PATTERN + r")",
     re.IGNORECASE,
 )
+_RELATIVE_TIME_TRIGGER = re.compile(
+    r"(?<![\w,])(?:[1-9]\d*|[일이삼사오육칠팔구십한두세네열스물서른마흔쉰예순일흔여든아흔\s]+)"
+    r"\s*(?:초|분|시간)\s*뒤(?:에)?(?!\w)"
+)
 _NON_BINDING_CONDITIONAL = re.compile(
     r"(?:\?|해도\s*될|해야\s*할|할까|어때|알려\s*줘|설명|추천|"
     r"예시|가정|백테스트|분석\s*해)",
@@ -61,7 +65,10 @@ def looks_like_conditional_paper_rule(raw_instruction: str) -> bool:
     return bool(
         normalized
         and _ORDER_ACTION.search(normalized)
-        and _CONDITIONAL_TRIGGER.search(normalized)
+        and (
+            _CONDITIONAL_TRIGGER.search(normalized)
+            or _RELATIVE_TIME_TRIGGER.search(normalized)
+        )
         and not _NON_BINDING_CONDITIONAL.search(normalized)
     )
 
@@ -116,6 +123,13 @@ def preview_assumptions(raw_instruction: str, rule: ConditionalRuleSpec) -> tupl
         "ONE_SHOT",
         "MARKET_CLOSED_REJECTS_WITHOUT_ORDER",
     ]
+    if any(node.type is ExpressionType.TIME for node in nodes):
+        assumptions.extend(
+            (
+                "SERVER_ADMISSION_TIME_ANCHORED",
+                "FIVE_MINUTE_EXECUTION_WINDOW",
+            )
+        )
     if indicator_timeframes == {"1D"} and not _TIMEFRAME.search(normalized):
         assumptions.append("DEFAULTED_TO_DAILY_COMPLETED_BAR")
     return tuple(assumptions)

@@ -3,7 +3,10 @@
 검토일: 2026-08-04  
 상태: 설계 제안. 현재 운영 활성화나 신규 Library 도입을 의미하지 않는다.
 
-이 문서는 Risk 부서의 LangGraph 노드, RAG 기법, 내부 API 호출, 저장소 경계를 정의한다. 부서장은 Hermes와 `openai-codex/gpt-5.6-luna`를 사용한다. 직원 Worker의 AWS 운영 정본은 vLLM `qwen2.5-14b-instruct-awq`이고, Ollama `qwen3:1.7b`는 `WORKER_MODEL_BASE_URL`이 없는 로컬 개발 fallback이다. 임의의 8B·7B 모델을 운영 기본값으로 활성화하지 않는다.
+이 문서는 Risk 부서의 LangGraph 노드, RAG 기법, 내부 API 호출, 저장소 경계를
+정의한다. 부서장·직원 Worker의 현행 모델, fallback과 실행 역할은
+[Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md)와
+[Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md)를 따른다.
 
 **2026-08-06 tool 강등**: `core-risk-worker`·`derivatives-counterparty-worker`는 결정론 `risk-runner` 하나로
 합쳐졌다(`WORKER_SPECS` LLM Registry 밖, 매 케이스 항상 실행). 아래 표의 두 Worker 행은 강등 전 설계를
@@ -72,7 +75,7 @@ query normalize
 
 | 호출 대상 | 호출 주체 | 목적 | 외부 Credential |
 |---|---|---|---|
-| Ollama OpenAI-compatible endpoint | 모든 Worker의 Python LLM Node | 구조화된 advisory 생성 | 로컬 `OLLAMA_BASE_URL`만 사용 |
+| Worker Model Gateway | LLM 사용 Worker의 Python Node | 구조화된 advisory 생성 | 모델 endpoint는 gateway 설정이 소유 |
 | `GET /risk/v1/trading-state/{scope}` | Market/Liquidity Tool | 현재 Trading State 읽기 | 없음, 내부 인증 |
 | `GET /risk/v1/trading-state/{scope}/record` | Counterparty Tool | 상태 변경 이력·미확정 상태 확인 | 없음, 내부 인증 |
 | `POST /investment-cases/{case_id}/risk-check` | Pre-trade Tool | Risk Engine 계산 요청 | 없음, 내부 인증 |
@@ -162,7 +165,11 @@ audit.rag_graph_extractions
 
 이 문서의 Worker별 Stack 표는 이제 [`departments/risk_qa_worker_profiles.py`](../../departments/risk_qa_worker_profiles.py)의 `RISK_WORKER_TECH`와 Risk `WORKER_SPECS`에 반영된 실행 메타데이터와 동기화한다. Worker 결과의 `technology`와 런타임의 `technology_profiles`에서 실제 사용 기술·입력·성과 지표를 확인할 수 있다. 역할 변경은 문서만 수정하지 말고 프로필·`WORKER_SPECS`·allowlist·계약 테스트를 함께 수정한다.
 
-현재 활성화된 경로는 LangGraph guard/skill/tool adapter → Pydantic contract → 필요한 경우 Ollama advisory → trace/replay다. pgvector/BM25, PIKE-RAG, LightRAG, GraphRAG는 데이터·평가셋·비용 게이트를 통과하기 전까지 후보 설계이며 자동 활성화하지 않는다. 특히 pre-trade hot path에는 RAG·외부 HTTP·재시도형 LLM을 추가하지 않는다.
+현재 활성화된 경로는 LangGraph guard/skill/tool adapter → Pydantic contract → 필요한
+경우 Worker Model Gateway advisory → trace/replay다. pgvector/BM25, PIKE-RAG,
+LightRAG, GraphRAG는 데이터·평가셋·비용 게이트를 통과하기 전까지 후보 설계이며
+자동 활성화하지 않는다. 특히 pre-trade hot path에는 RAG·외부 HTTP·재시도형 LLM을
+추가하지 않는다.
 
 ## 10. Risk별 Graph Acceptance
 

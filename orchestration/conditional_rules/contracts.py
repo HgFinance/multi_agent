@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 class ExpressionType(StrEnum):
     LITERAL = "LITERAL"
+    TIME = "TIME"
     MARKET = "MARKET"
     PORTFOLIO = "PORTFOLIO"
     INDICATOR = "INDICATOR"
@@ -164,6 +165,7 @@ class ExpressionNode(BaseModel):
         }
         allowed: dict[ExpressionType, set[str]] = {
             ExpressionType.LITERAL: {"value", "unit"},
+            ExpressionType.TIME: {"field"},
             ExpressionType.MARKET: {"field"},
             ExpressionType.PORTFOLIO: {"field"},
             ExpressionType.INDICATOR: {
@@ -177,6 +179,7 @@ class ExpressionNode(BaseModel):
         }
         required: dict[ExpressionType, set[str]] = {
             ExpressionType.LITERAL: {"value", "unit"},
+            ExpressionType.TIME: {"field"},
             ExpressionType.MARKET: {"field"},
             ExpressionType.PORTFOLIO: {"field"},
             ExpressionType.INDICATOR: {"name", "timeframe"},

@@ -23,6 +23,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -251,15 +252,163 @@ def validate_structured_output(raw: str, schema: Mapping[str, Any]) -> str | Non
     return f"schema violation{f' at {location}' if location else ''}: {violation.message}"[:800]
 
 
+def validate_financial_semantics(raw: str) -> str | None:
+    """Check common numeric relationships without supplying an answer.
+
+    This validator only compares values already emitted by the model.  It does
+    not parse the user's prose, choose a formula, or replace a bad value.  A
+    domain engine remains authoritative; these generic relationships merely
+    prevent syntactically valid JSON from silently contradicting itself.
+    """
+
+    try:
+        value = json.loads(str(raw).strip())
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+    def number(row: Mapping[str, Any], key: str) -> Decimal | None:
+        raw_value = row.get(key)
+        if isinstance(raw_value, bool) or raw_value is None:
+            return None
+        try:
+            result = Decimal(str(raw_value))
+        except (InvalidOperation, ValueError):
+            return None
+        return result if result.is_finite() else None
+
+    def close(actual: Decimal, expected: Decimal) -> bool:
+        tolerance = max(Decimal("0.000001"), abs(expected) * Decimal("0.000001"))
+        return abs(actual - expected) <= tolerance
+
+    def check(row: Mapping[str, Any], path: str) -> str | None:
+        relationships = (
+            (("price", "quantity", "notional"), lambda p, q: p * q, "price*quantity=notional"),
+            (("entry_price", "quantity", "position_notional"), lambda p, q: p * q, "entry_price*quantity=position_notional"),
+            (("entry_price", "stop_price", "quantity", "position_risk_amount"),
+             lambda entry, stop, quantity: abs(entry - stop) * quantity,
+             "abs(entry_price-stop_price)*quantity=position_risk_amount"),
+            (("entry_price", "stop_price", "take_profit_price", "reward_risk_ratio"),
+             lambda entry, stop, take_profit: abs(take_profit - entry) / abs(entry - stop),
+             "reward/risk price distance=reward_risk_ratio"),
+            (("old_value", "new_value", "decrease_rate_pct"),
+             lambda old, new: (old - new) / old * Decimal(100),
+             "(old_value-new_value)/old_value*100=decrease_rate_pct"),
+            (("proceeds", "cost_basis", "fees", "pnl"),
+             lambda proceeds, cost, fees: proceeds - cost - fees,
+             "proceeds-cost_basis-fees=pnl"),
+        )
+        for fields, formula, label in relationships:
+            numbers = [number(row, field) for field in fields]
+            if any(item is None for item in numbers):
+                continue
+            *inputs, actual = numbers
+            try:
+                expected = formula(*inputs)
+            except (ArithmeticError, InvalidOperation, ZeroDivisionError):
+                return f"financial semantic input invalid at {path}: {label}"
+            assert actual is not None
+            if not close(actual, expected):
+                return f"financial semantic mismatch at {path}: {label}"
+        return None
+
+    def walk(node: Any, path: str = "$") -> str | None:
+        if isinstance(node, Mapping):
+            error = check(node, path)
+            if error:
+                return error
+            for key, child in node.items():
+                error = walk(child, f"{path}.{key}")
+                if error:
+                    return error
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                error = walk(child, f"{path}[{index}]")
+                if error:
+                    return error
+        return None
+
+    return walk(value)
+
+
+def validate_prompt_financial_alignment(prompt: str, raw: str) -> str | None:
+    """Anchor unambiguous price/quantity fields to explicit prompt evidence.
+
+    The check is deliberately narrow: it runs only when the prompt contains
+    exactly one labelled KRW price and/or one share quantity and the JSON uses
+    the canonical ``price``/``quantity`` fields.  Ambiguous multi-leg trades
+    are left to their domain engine.  Like the relationship validator above,
+    this rejects drift but never calculates or inserts an answer.
+    """
+
+    try:
+        value = json.loads(str(raw).strip())
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, Mapping):
+        return None
+
+    number_text = r"([+-]?\d[\d,]*(?:\.\d+)?)"
+    price_patterns = (
+        re.compile(number_text + r"\s*\uc6d0\s*(?:\uc9dc\ub9ac|\uc778)?\s*(?:\uc8fc\uc2dd|\uc885\ubaa9|\uc790\uc0b0)"),
+        re.compile(
+            r"(?:price|priced|at)\s*(?:is|=|:)?\s*(?:krw\s*)?"
+            + number_text,
+            re.IGNORECASE,
+        ),
+    )
+    quantity_patterns = (
+        re.compile(number_text + r"\s*\uc8fc(?:\ub97c|\uc758|\s|$)"),
+        re.compile(
+            r"(?:quantity|qty|shares?)\s*(?:is|=|:)?\s*" + number_text,
+            re.IGNORECASE,
+        ),
+    )
+
+    def unique(patterns: tuple[re.Pattern[str], ...]) -> Decimal | None:
+        matches: set[Decimal] = set()
+        for pattern in patterns:
+            for match in pattern.finditer(prompt):
+                try:
+                    matches.add(Decimal(match.group(1).replace(",", "")))
+                except (InvalidOperation, ValueError):
+                    continue
+        return next(iter(matches)) if len(matches) == 1 else None
+
+    for field, expected in (
+        ("price", unique(price_patterns)),
+        ("quantity", unique(quantity_patterns)),
+    ):
+        if expected is None or field not in value:
+            continue
+        raw_actual = value.get(field)
+        if isinstance(raw_actual, bool):
+            continue
+        try:
+            actual = Decimal(str(raw_actual))
+        except (InvalidOperation, ValueError):
+            continue
+        if actual != expected:
+            return f"financial source alignment mismatch: {field}"
+    return None
+
+
 def semantic_repair_prompt(original_prompt: str, raw: str, error: str) -> str:
     """Build one bounded repair turn without supplying or calculating an answer."""
 
+    previous = (
+        "Previous output omitted because it drifted from explicit source values."
+        if error.startswith("financial source alignment mismatch")
+        else f"Previous output:\n{str(raw)[:4000]}"
+    )
     return (
         f"{original_prompt}\n\n"
         "Your previous JSON failed the application contract. Repair only syntax, "
         "types, field meanings, units and scale using the original evidence. Do not "
-        "invent missing values and do not change a domain-engine decision.\n"
-        f"Validation error: {error}\nPrevious output:\n{str(raw)[:4000]}"
+        "invent missing values and do not change a domain-engine decision. When the "
+        "error is source alignment, copy the corresponding field from the single "
+        "unambiguous labelled value in the original prompt before recomputing any "
+        "dependent field.\n"
+        f"Validation error: {error}\n{previous}"
     )
 
 
@@ -269,5 +418,7 @@ __all__ = [
     "glossary_hits",
     "prepare_request",
     "semantic_repair_prompt",
+    "validate_financial_semantics",
+    "validate_prompt_financial_alignment",
     "validate_structured_output",
 ]

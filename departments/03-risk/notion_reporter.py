@@ -29,6 +29,7 @@ if str(_REPO_ROOT) not in sys.path:
 from reporting import notion_rich_text_chunks
 
 from departments.notion_markdown import markdown_to_notion_blocks
+from departments.risk_notion_schema import RISK_PROPERTY_NAMES, risk_property_name
 from orchestration.adapters.notion_idempotency import NotionIdempotency
 
 _DEV_VARS = Path(__file__).resolve().parent.parent.parent / "ai-office" / ".dev.vars"
@@ -69,6 +70,22 @@ def _post(path: str, body: dict, token: str) -> tuple[int, dict]:
         return e.code, json.loads(e.read())
 
 
+def _get(path: str, token: str) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        f"https://api.notion.com/v1/{path}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": _NOTION_VERSION,
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
 def _rich_text(s) -> dict:
     return {"rich_text": notion_rich_text_chunks(s)}
 
@@ -98,44 +115,68 @@ def upload_case(
             "reason": "NOTION_TOKEN/NOTION_RISK_DB 미설정 - 업로드 생략",
         }
 
+    try:
+        schema_status, schema_body = _get(f"databases/{db_id}", token)
+    except Exception as exc:  # noqa: BLE001 - Notion remains a non-binding projection.
+        return {"ok": False, "reason": f"Notion 스키마 조회 예외: {exc}"}
+    if schema_status != 200:
+        return {
+            "ok": False,
+            "reason": f"Notion 스키마 조회 실패: HTTP {schema_status}",
+        }
+    properties_schema = schema_body.get("properties") or {}
+
+    def prop(field: str) -> str:
+        return risk_property_name(field, properties_schema)
+
     cp = out.get("counterparty") or {}
     compliance_verdict = ((out.get("compliance") or {}).get("answer") or {}).get(
         "verdict"
     )
     approved_qty = out.get("approved_quantity")
     props = {
-        "제목": {
+        prop("title"): {
             "title": [
-                {"text": {"content": f"risk_request_id: {out['risk_request_id']}"}}
+                {
+                    "text": {
+                        "content": f"리스크 심사 · {out['risk_request_id']}"
+                    }
+                }
             ]
         },
-        "trade_case_id": _rich_text(order_intent.get("trade_case_id")),
-        "판정": {"select": {"name": out["verdict"]}},
-        "trading_state": {
+        prop("trade_case_id"): _rich_text(order_intent.get("trade_case_id")),
+        prop("verdict"): {"select": {"name": out["verdict"]}},
+        prop("trading_state"): {
             "select": {
                 "name": out.get("trading_state")
                 or context.get("trading_state")
                 or "ENABLED"
             }
         },
-        "승인 수량": {
+        prop("approved_quantity"): {
             "number": float(approved_qty) if approved_qty is not None else None
         },
-        "reason_codes": {
+        prop("reason_codes"): {
             "multi_select": [{"name": c} for c in out.get("reason_codes", [])]
         },
-        "escalate": {"checkbox": bool(out.get("escalate", False))},
-        "input_hash": _rich_text(out.get("input_hash")),
-        "calculation_version": _rich_text(out.get("calculation_version")),
-        "check_results": _rich_text(
+        prop("escalate"): {"checkbox": bool(out.get("escalate", False))},
+        prop("input_hash"): _rich_text(out.get("input_hash")),
+        prop("calculation_version"): _rich_text(out.get("calculation_version")),
+        prop("check_results"): _rich_text(
             json.dumps(out.get("check_results", []), ensure_ascii=False)
         ),
-        "counterparty_narrative": _rich_text(cp.get("counterparty_narrative")),
-        "서술": _rich_text(out.get("narrative")),
-        "생성 시각": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
+        prop("counterparty_narrative"): _rich_text(
+            cp.get("counterparty_narrative")
+        ),
+        prop("narrative"): _rich_text(out.get("narrative")),
+        prop("created_at"): {
+            "date": {"start": datetime.now(timezone.utc).isoformat()}
+        },
     }
     if compliance_verdict:
-        props["compliance_verdict"] = {"select": {"name": compliance_verdict}}
+        props[prop("compliance_verdict")] = {
+            "select": {"name": compliance_verdict}
+        }
 
     try:
         payload = {"parent": {"database_id": db_id}, "properties": props}
@@ -145,7 +186,7 @@ def upload_case(
                 f"**결정론적 MD 리포트 저장:** `{report_path}`\n\n{report_md}"
             )
             payload["children"] = markdown_to_notion_blocks(report_intro)
-        title = f"risk_request_id: {out['risk_request_id']}"
+        title = f"리스크 심사 · {out['risk_request_id']}"
         idempotency = NotionIdempotency(env, namespace="risk-reporter")
 
         def lookup():
@@ -153,7 +194,7 @@ def upload_case(
                 f"databases/{db_id}/query",
                 {
                     "filter": {
-                        "property": "제목",
+                        "property": prop("title"),
                         "title": {"equals": title},
                     },
                     "page_size": 1,
@@ -207,11 +248,22 @@ def _check_missing_config_skips_without_network():
 def _check_payload_shape():
     captured = {}
 
+    def _fake_get(path, token):
+        assert path == "databases/db1"
+        assert token == "tok"
+        return 200, {
+            "properties": {
+                names[0]: {}
+                for names in RISK_PROPERTY_NAMES.values()
+            }
+        }
+
     def _fake_post(path, body, token):
         captured["path"], captured["body"], captured["token"] = path, body, token
         return 200, {"url": "https://notion.so/fake"}
 
-    orig = _post
+    orig_get, orig_post = _get, _post
+    globals()["_get"] = _fake_get
     globals()["_post"] = _fake_post
     try:
         out = {
@@ -237,11 +289,11 @@ def _check_payload_shape():
         assert result == {"ok": True, "url": "https://notion.so/fake"}
         assert captured["path"] == "pages"
         assert captured["body"]["parent"]["database_id"] == "db1"
-        assert captured["body"]["properties"]["판정"]["select"]["name"] == "approve"
+        assert captured["body"]["properties"]["리스크 판정"]["select"]["name"] == "approve"
         assert captured["body"]["properties"]["승인 수량"]["number"] == 100.0
-        assert "compliance_verdict" not in captured["body"]["properties"]
+        assert "법률·컴플라이언스 판정" not in captured["body"]["properties"]
     finally:
-        globals()["_post"] = orig
+        globals()["_get"], globals()["_post"] = orig_get, orig_post
     print("  업로드 Payload 구성        OK")
 
 

@@ -1,6 +1,6 @@
 # AI QA/감사본부 (AI QA & Audit)
 
-부서장 `qa-audit-supervisor`는 Hermes(Codex/Claude Code)이고 직원은 [QA Worker Graph](qa_employee_workers.py)의 Ollama `qwen3:1.7b` LangGraph Worker다. 결정론적 Evidence QA Engine이 바인딩 판정을 소유한다.
+활성 역할은 Hermes Head `qa-audit-supervisor`, LLM `hallucination-critic-worker`·`incident-postmortem-worker`, 결정론 `qa-runner`다. 모델·fallback은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md), 권한은 [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md)를 따른다. 바인딩 판정은 결정론적 QA Engine이 소유한다.
 
 ## 현재 승인 상태 (2026-08-04)
 
@@ -40,7 +40,7 @@
 - 두 LLM Worker는 조건부다(`when_unsupported_claim_exists` 등) — 근거·Incident 신호가 있을 때만
   호출된다. `qa-runner`는 LLM Registry(`WORKER_SPECS`) 밖에 있고 매 케이스마다 항상 실행된다.
 - `agent.personalities`의 기존 8개 역할명은 감사·FK 호환 Alias이며 실행 직원 수에 포함하지 않는다.
-직원 Worker의 실제 모델은 `OLLAMA_CHAT_MODEL`로 주입되는 `qwen3:1.7b`이며, `agent-qa`는 수동 호환 Alias일 뿐 `scripts.py`의 실행 경로가 아니다. Hermes Profile은 `qa-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+`agent-qa`는 수동 호환 Alias일 뿐 현재 실행 역할이 아니다. Hermes Profile은 `qa-department`이며 구체 모델 좌표는 Worker Model Matrix에서 확인한다.
 
 ## Mission
 

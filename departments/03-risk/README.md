@@ -1,6 +1,6 @@
 # 리스크본부 (Risk Management)
 
-부서장 `risk-supervisor`는 Hermes(Codex/Claude Code)이고 직원은 [Risk Worker Graph](risk_employee_workers.py)의 Ollama `qwen3:1.7b` LangGraph Worker다. 결정론적 Risk Engine이 바인딩 판정을 소유한다.
+활성 역할은 Hermes Head `risk-supervisor`, LLM `compliance-policy-worker`, 결정론 `risk-runner`다. 모델·fallback은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md), 권한은 [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md)를 따른다. 바인딩 판정은 결정론적 Risk Engine이 소유한다.
 
 ## 현재 승인 상태 (2026-08-04)
 
@@ -12,7 +12,7 @@
 
 - `p1/analytics.py`가 canonical instrument UUID 매핑, PIT/staleness 검사, Exposure Snapshot, Stress/VaR/Correlation 지표와 `ENABLED` 외 진입 차단을 하나의 결정론적 경계로 묶는다.
 - `p1/repository.py`가 `risk.snapshots`, `risk.exposure_components`, `risk.stress_results`, `risk.kill_switch_events`를 한 트랜잭션으로 적재한다. Fund/Book/Instrument/승인된 Stress Scenario FK가 없으면 생성·우회하지 않고 rollback한다.
-- LS증권 어댑터는 읽기 전용이다. 실제 키·계좌·운영 DB가 주입되기 전에는 실제 데이터를 수집하거나 운영 Snapshot을 만들지 않는다. `RISK_REQUIRE_P1_ANALYTICS=true`인 pre-trade API는 P1 Snapshot이 없거나 PASS가 아니면 차단한다.
+- Risk 본부의 LS 시장 Snapshot 어댑터는 읽기 전용이다. 이는 Trading의 별도 LS PAPER broker adapter를 설명하는 문장이 아니다. 실제 키·계좌·운영 DB가 주입되기 전에는 실제 데이터를 수집하거나 운영 Snapshot을 만들지 않는다. `RISK_REQUIRE_P1_ANALYTICS=true`인 pre-trade API는 P1 Snapshot이 없거나 PASS가 아니면 차단한다.
 - 남은 운영 조건은 실제 API 자격증명, governed FK 원장, RLS/OMS E2E 및 운영 장애 검증이다. P1 계산 코드가 구현됐다는 뜻이지 실거래 승인을 뜻하지 않는다.
 - 2026-08-03 감사에서 Self-check 7개와 명시 pytest는 통과했지만 Compose Service와 실제
   `risk.risk_decisions`, `risk.trading_states`, `risk.run_log_events` Row는 0건이었다.
@@ -39,7 +39,7 @@
   있을 때만 LLM이 호출된다. `risk-runner`는 LLM Registry(`WORKER_SPECS`) 밖에 있고 매 케이스마다
   항상 실행된다.
 - `agent.personalities`의 기존 6개 역할명은 감사·FK 호환 Alias이며 실행 직원 수에 포함하지 않는다.
-직원 Worker의 실제 모델은 `OLLAMA_CHAT_MODEL`로 주입되는 `qwen3:1.7b`이며, `agent-risk`는 수동 호환 Alias일 뿐 `scripts.py`의 실행 경로가 아니다. Hermes Profile은 `risk-management`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+`agent-risk`는 수동 호환 Alias일 뿐 현재 실행 역할이 아니다. Hermes Profile은 `risk-management`이며 구체 모델 좌표는 이 문서가 아니라 Worker Model Matrix에서 확인한다.
 
 ## Mission
 

@@ -110,9 +110,7 @@ def test_research_read_apis_never_execute_session_default_read_only_sql():
                    for statement in executed_literals)
 
 
-def test_higher_intraday_bars_are_canonically_derived_from_final_one_minute_rows(
-    monkeypatch,
-):
+def _capture_bars_query(monkeypatch):
     captured = {}
     monkeypatch.setattr(market_api, "_iid_or_404", lambda _symbol: "instrument-1")
     monkeypatch.setattr(
@@ -123,19 +121,71 @@ def test_higher_intraday_bars_are_canonically_derived_from_final_one_minute_rows
         )
         or [],
     )
-    monkeypatch.setenv("MARKET_BAR_BASE_SOURCE", "ls_chart")
+    return captured
+
+
+def test_higher_intraday_bars_are_canonically_derived_from_final_one_minute_rows(
+    monkeypatch,
+):
+    captured = _capture_bars_query(monkeypatch)
 
     assert market_api.bars(
         "005930", interval="5M", limit=30, source=None, to=None
     ) == []
 
     assert "time_bucket(interval '5 minutes'" in captured["statement"]
-    assert "interval_code = '1M'" in captured["statement"]
-    assert "bool_and(is_final)" in captured["statement"]
     assert "count(*) = count(distinct bucket_time)" in captured["statement"]
     assert "max(bucket_time) - min(bucket_time)" in captured["statement"]
-    assert "'derived_1m'::text as source" in captured["statement"]
-    assert captured["params"] == ("instrument-1", "ls_chart", 30)
+    assert "'consolidated_1m'::text as source" in captured["statement"]
+    assert captured["params"] == ("instrument-1", 30)
+
+
+def test_intraday_bars_never_read_the_nightly_backfill_table(monkeypatch):
+    """Regression: 장중 프레임이 market_bars(ls_chart) 로 돌아가면 안 된다.
+
+    chart-minute-universe 잡이 배포 이미지에 등록돼 있지 않아 그 테이블의 1M 이
+    영구 0행이었고, /bars?interval=1M 이 항상 [] 를 돌려줘 조건주문 워커가
+    INSUFFICIENT_HISTORY 로만 backoff 했다(2026-08-26). 야간 백필은 원리상
+    당일 장중 규칙을 만족시킬 수 없으므로, 장중 프레임은 실시간 연속집계를
+    읽어야 한다.
+    """
+    for interval in ("1M", "5M", "15M", "1H"):
+        captured = _capture_bars_query(monkeypatch)
+
+        assert market_api.bars(
+            "005930", interval=interval, limit=30, source=None, to=None
+        ) == []
+
+        statement = captured["statement"]
+        assert "market.bars_1m_consolidated" in statement, interval
+        assert "market.market_bars" not in statement, interval
+        assert "interval_code" not in statement, interval
+        assert "ls_chart" not in statement, interval
+
+
+def test_one_minute_bars_mark_only_elapsed_buckets_final(monkeypatch):
+    """부분봉이 확정봉으로 새어 나가면 지표가 진행 중인 분을 먹는다."""
+    captured = _capture_bars_query(monkeypatch)
+
+    assert market_api.bars(
+        "005930", interval="1M", limit=122, source=None, to=None
+    ) == []
+
+    statement = captured["statement"]
+    assert "(bucket_time + interval '1 minute' <= now()) as is_final" in statement
+    assert captured["params"] == ("instrument-1", 122)
+
+
+def test_explicit_ls_chart_source_still_reads_the_backfill_table(monkeypatch):
+    """과거 백필을 명시적으로 요구한 호출자는 기존 경로를 유지한다."""
+    captured = _capture_bars_query(monkeypatch)
+
+    assert market_api.bars(
+        "005930", interval="1M", limit=30, source="ls_chart", to=None
+    ) == []
+
+    assert "market.market_bars" in captured["statement"]
+    assert captured["params"] == ("instrument-1", "1M", "ls_chart", 30)
 
 
 def test_three_minute_bars_are_rejected_instead_of_derived(monkeypatch):
@@ -164,5 +214,7 @@ def test_one_minute_bar_reads_remain_direct(monkeypatch):
 
     market_api.bars("005930", interval="1M", limit=10, source=None, to=None)
 
+    # 1M 은 파생 프레임과 달리 집계를 거치지 않고 연속집계를 그대로 읽는다.
+    # interval_code 는 더 이상 파라미터가 아니다 - 소스가 1분봉 전용 뷰다.
     assert "time_bucket" not in captured["statement"]
-    assert captured["params"] == ("instrument-1", "1M", 10)
+    assert captured["params"] == ("instrument-1", 10)

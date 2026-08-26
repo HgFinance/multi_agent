@@ -9,6 +9,7 @@ from apps.api import conditional_rule_orchestrator as orchestrator
 from apps.api.conditional_rule_workflow import InMemoryConditionalRuleRepository
 from apps.api.user_order_workflow import InMemoryUserOrderRequestRepository
 from orchestration.conditional_rules import RuleState
+from orchestration.user_order_language import deterministic_delayed_order_plan
 
 USER_ID = "11111111-1111-4111-8111-111111111111"
 FUND_ID = "22222222-2222-4222-8222-222222222222"
@@ -188,6 +189,44 @@ def test_valid_hermes_ast_is_immediately_active_and_replay_safe(
     assert replay["rule_id"] == first["rule_id"]
     assert replay["spec_sha256"] == first["spec_sha256"]
     assert len(rules.list_for_user(USER_ID)) == 1
+
+
+def test_deterministic_relative_time_rule_activates_from_parked_trading_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = (
+        "<@1536991290842030130>   @홍진표 대표 "
+        "삼성전자 이거 4분 뒤에 1주 매수해줘"
+    )
+    orders, rules, tasks = _install_workflow(
+        monkeypatch, raw_instruction=raw
+    )
+    admitted = next(iter(orders._records.values()))
+    plan = deterministic_delayed_order_plan(raw)
+    assert plan is not None
+    assert admitted.created_at is not None
+    candidate = conditional_rules.build_delayed_order_candidate(
+        plan, admitted_at=admitted.created_at
+    )
+    tasks["t_trade1"]["status"] = "blocked"
+
+    result = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidate=candidate,
+        interpretation_source="DETERMINISTIC",
+    )
+
+    assert result["rule_active"] is True
+    assert result["state"] == "ACTIVE"
+    assert result["summary"]["trigger_at"] is not None
+    assert "예약 조건주문" in result["user_message"]
+    assert len(rules.list_for_user(USER_ID)) == 1
+    assert (admitted.order_request_id, "DETERMINISTIC") in orders._interpretations
+    record = next(iter(orders._records.values()))
+    assert record.state == "COMPLETED"
+    assert record.canonical_payload is not None
+    assert record.canonical_payload["kind"] == "CONDITIONAL_PAPER_RULE"
 
 
 def test_missing_ast_requires_clarification_without_creating_a_rule(

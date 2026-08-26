@@ -7,7 +7,7 @@ from decimal import Decimal
 from enum import Enum
 from functools import lru_cache
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from mandate_limit_compiler import MandateLimitCompilation
 from position_risk_lifecycle import (
@@ -20,6 +20,9 @@ from position_risk_planner import PlanAction, PositionRiskPlan
 
 class RiskControlPersistenceError(RuntimeError):
     """A canonical Risk control could not be persisted atomically."""
+
+
+_RUN_EVENT_NAMESPACE = UUID("49af729a-1706-4e94-9f08-0e428f4ceea2")
 
 
 @lru_cache(maxsize=1)
@@ -60,6 +63,167 @@ class RiskControlRepository:
     def close(self) -> None:
         self._pool.closeall()
 
+    def record_run_event(
+        self,
+        *,
+        idempotency_key: str,
+        run_id: str,
+        trace_id: str,
+        employee_profile: str,
+        event_type: str,
+        inputs_hash: str,
+        summary: str,
+        as_of: datetime | None = None,
+        schema_id: str | None = None,
+        schema_valid: bool | None = None,
+        domain_valid: bool | None = None,
+        failed_rule: str | None = None,
+        fallback_reason: str | None = None,
+        output_hash: str | None = None,
+        task_id: str | None = None,
+        risk_plan_id: UUID | None = None,
+        mandate_version_id: UUID | None = None,
+        algorithm_version: str | None = None,
+        status: str | None = None,
+        raw: dict[str, Any] | None = None,
+    ) -> UUID:
+        """Append one bounded LangGraph audit event with deterministic replay identity.
+
+        ``risk.run_log_events`` predates an idempotency-key column.  A UUIDv5
+        primary key gives the same replay guarantee without a schema rewrite.
+        Only sanitized metadata belongs in ``raw``; mandate text and credentials
+        remain outside this operational ledger.
+        """
+
+        if not idempotency_key.strip():
+            raise RiskControlPersistenceError("run event idempotency key is required")
+        event_id = uuid5(_RUN_EVENT_NAMESPACE, idempotency_key)
+        Json, _ = _driver()
+        connection = self._pool.getconn()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    insert into risk.run_log_events (
+                      event_id, run_id, trace_id, department, hermes_profile,
+                      employee_profile, executor, event_type, as_of, inputs_hash,
+                      schema_id, schema_valid, domain_valid, failed_rule,
+                      fallback_reason, output_hash, summary, raw, task_id,
+                      risk_plan_id, mandate_version_id, algorithm_version, status
+                    ) values (
+                      %s, %s, %s, 'risk-management', '03-risk', %s,
+                      'langgraph', %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s, %s
+                    )
+                    on conflict (event_id) do nothing
+                    """,
+                    (
+                        str(event_id),
+                        run_id,
+                        trace_id,
+                        employee_profile,
+                        event_type,
+                        as_of,
+                        inputs_hash,
+                        schema_id,
+                        schema_valid,
+                        domain_valid,
+                        failed_rule,
+                        fallback_reason,
+                        output_hash,
+                        summary[:1000],
+                        Json(_json_safe(raw or {})),
+                        task_id,
+                        str(risk_plan_id) if risk_plan_id is not None else None,
+                        (
+                            str(mandate_version_id)
+                            if mandate_version_id is not None
+                            else None
+                        ),
+                        algorithm_version,
+                        status,
+                    ),
+                )
+            connection.commit()
+            return event_id
+        except Exception as exc:
+            connection.rollback()
+            raise RiskControlPersistenceError(
+                f"Risk runtime event persistence failed: {exc}"
+            ) from exc
+        finally:
+            self._pool.putconn(connection)
+
+    def runtime_observability(self) -> dict[str, Any]:
+        """Return restart-safe counts from the canonical Risk ledger."""
+
+        connection = self._pool.getconn()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select
+                      count(*) as event_count,
+                      count(distinct run_id) filter (where event_type = 'Decision')
+                        as pipeline_count,
+                      count(distinct run_id) filter (
+                        where fallback_reason is not null
+                      )
+                        as fallback_count,
+                      percentile_cont(0.5) within group (
+                        order by ((raw ->> 'duration_seconds')::double precision)
+                      ) filter (
+                        where event_type = 'Decision'
+                          and raw ? 'duration_seconds'
+                      ) as p50_seconds,
+                      percentile_cont(0.99) within group (
+                        order by ((raw ->> 'duration_seconds')::double precision)
+                      ) filter (
+                        where event_type = 'Decision'
+                          and raw ? 'duration_seconds'
+                      ) as p99_seconds,
+                      max(occurred_at) as latest_event_at
+                    from risk.run_log_events
+                    """
+                )
+                (
+                    event_count,
+                    pipeline_count,
+                    fallback_count,
+                    p50_seconds,
+                    p99_seconds,
+                    latest_event_at,
+                ) = cursor.fetchone()
+                cursor.execute(
+                    """
+                    select count(*), max(created_at)
+                    from risk.position_risk_plans
+                    """
+                )
+                plan_count, latest_plan_at = cursor.fetchone()
+            connection.commit()
+            return {
+                "event_count": int(event_count or 0),
+                "pipeline_count": int(pipeline_count or 0),
+                "fallback_count": int(fallback_count or 0),
+                "p50_seconds": float(p50_seconds or 0.0),
+                "p99_seconds": float(p99_seconds or 0.0),
+                "latest_event_at": (
+                    latest_event_at.isoformat() if latest_event_at else None
+                ),
+                "position_plan_count": int(plan_count or 0),
+                "latest_position_plan_at": (
+                    latest_plan_at.isoformat() if latest_plan_at else None
+                ),
+            }
+        except Exception as exc:
+            connection.rollback()
+            raise RiskControlPersistenceError(
+                f"Risk runtime observability query failed: {exc}"
+            ) from exc
+        finally:
+            self._pool.putconn(connection)
+
     def activate_compilation(self, compilation: MandateLimitCompilation) -> UUID:
         """Activate one compiled policy and all limits in one transaction."""
 
@@ -83,7 +247,7 @@ class RiskControlRepository:
                     where policy_id = %s
                     for update
                     """,
-                    (compilation.policy_id,),
+                    (str(compilation.policy_id),),
                 )
                 replay = cursor.fetchone()
                 if replay is not None:
@@ -103,7 +267,7 @@ class RiskControlRepository:
                     """,
                     (
                         compilation.effective_from,
-                        compilation.fund_id,
+                        str(compilation.fund_id),
                         compilation.policy_code,
                         compilation.effective_from,
                     ),
@@ -116,15 +280,15 @@ class RiskControlRepository:
                     ) values (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE', %s, %s)
                     """,
                     (
-                        compilation.policy_id,
-                        compilation.fund_id,
+                        str(compilation.policy_id),
+                        str(compilation.fund_id),
                         compilation.policy_code,
                         compilation.policy_version,
                         Json(_json_safe(compilation.policy_scope)),
                         Json(_json_safe(compilation.policy_rules)),
                         compilation.effective_from,
                         compilation.content_hash,
-                        UUID(compilation.mandate_version_id),
+                        str(compilation.mandate_version_id),
                     ),
                 )
                 for limit in compilation.limits:
@@ -136,8 +300,8 @@ class RiskControlRepository:
                         ) values (%s, %s, 'FUND', %s, %s, %s, %s, %s, %s, 'ACTIVE')
                         """,
                         (
-                            compilation.fund_id,
-                            compilation.policy_id,
+                            str(compilation.fund_id),
+                            str(compilation.policy_id),
                             str(compilation.fund_id),
                             limit.metric,
                             limit.soft_limit,
@@ -155,10 +319,10 @@ class RiskControlRepository:
                     ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
-                        UUID(compilation.mandate_version_id),
-                        compilation.mandate_id,
-                        compilation.fund_id,
-                        compilation.policy_id,
+                        str(compilation.mandate_version_id),
+                        str(compilation.mandate_id),
+                        str(compilation.fund_id),
+                        str(compilation.policy_id),
                         compilation.mindset,
                         compilation.experience,
                         compilation.preset_version,

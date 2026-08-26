@@ -88,6 +88,10 @@ JOBS: tuple[Job, ...] = (
     # 시세 평면 심박·품질 감사 - 개장 전.
     Job("data-steward", ("collectors/market_data_steward.py", "--audit"),
         daily_at=time(7, 10)),
+    # Archive export 검증이 끝난 후에만 정책 기간을 넘은 raw 청크를
+    # 내린다. 이 Job은 수집을 늘리지 않고, 검증 커버리지가 비면 무조건 보류한다.
+    Job("retention", ("collectors/retention_enforcer.py", "--enforce"),
+        daily_at=time(7, 20)),
     # 시장 Breadth - 세션 판정은 수집기 자신이 한다 (휴장이면 exit 2 = SKIP)
     Job("breadth", ("collectors/market_breadth_collector.py", "--collect"),
         every_minutes=10, window=(time(8, 30), time(16, 10))),
@@ -109,14 +113,6 @@ JOBS: tuple[Job, ...] = (
     # 일별 시장 라벨 스냅샷. 가격·breadth에서 계산한 레짐만 기록한다.
     Job("label-snapshot", ("collectors/label_snapshot_collector.py", "--collect"),
         daily_at=time(16, 30)),
-    # Conditional BAR_CLOSE rules use the market-api's canonical derived 5M
-    # feed. That feed aggregates final 1M candles, so keep a short, overlapping
-    # LS chart window for the full stock universe. It is deliberately separate
-    # from the daily chart job: daily bars cannot satisfy intraday rules.
-    Job("chart-minute-universe",
-        ("collectors/chart_backfill_collector.py",
-         "--minute", "--universe", "--days", "3", "--ncnt", "1"),
-        daily_at=time(20, 30), timeout_seconds=4 * 60 * 60),
     # 전종목 확정 일봉. 장중 LS 호출과 경합하지 않도록 21:00에 실행하며 최근
     # 3일을 겹쳐 받아 장애·휴일 구간을 멱등하게 복구한다. 긴 작업이라 마지막.
     Job("chart-daily-universe",
@@ -137,12 +133,12 @@ MARKET_DATA_JOB_NAMES = frozenset(
         "universe-restrictions",
         "chart-daily-universe",
         "label-snapshot",
-        "chart-minute-universe",
         "vkospi",
         "style-index",
         "calendar-observed",
         "data-steward",
         "market-archive",
+        "retention",
     }
 )
 FORBIDDEN_ALWAYS_ON_COLLECTOR_PATHS = frozenset(
@@ -158,7 +154,6 @@ FORBIDDEN_ALWAYS_ON_COLLECTOR_PATHS = frozenset(
         "collectors/bluesky_watch_collector.py",
         "collectors/research_data_steward.py",
         "collectors/capability_audit.py",
-        "collectors/retention_enforcer.py",
     }
 )
 

@@ -408,18 +408,6 @@ def test_unknown_or_ambiguous_name_requires_clarification(monkeypatch, rows) -> 
     assert error.value.detail == "paper_order_instrument_clarification_required"
 
 
-def test_business_route_requires_authentication(monkeypatch) -> None:
-    monkeypatch.setenv("APP_ENV", "test")
-    monkeypatch.setenv("PORTFOLIO_AUTH_MODE", "fixture")
-    monkeypatch.setenv("PORTFOLIO_AUTH_REQUIRED", "true")
-    response = TestClient(_app(authenticated=False)).post(
-        "/ui/paper-orders/sell-all",
-        headers={"Idempotency-Key": "request-0001"},
-        json={"fund_id": str(FUND_ID), "book_id": str(BOOK_ID)},
-    )
-    assert response.status_code == 401
-
-
 def test_body_cannot_spoof_user_or_account_scope() -> None:
     response = TestClient(_app()).post(
         "/ui/paper-orders/sell-all",

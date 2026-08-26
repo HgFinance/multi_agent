@@ -19,6 +19,11 @@ import hashlib
 import json
 from pathlib import Path
 
+try:  # imported as a package by the Risk runtime, flat by apps/api's sys.path
+    from .ls_http import ls_client
+except ImportError:  # pragma: no cover - flat import path
+    from ls_http import ls_client  # type: ignore[no-redef]
+
 
 class LSOpenAPIError(RuntimeError):
     """Base error for unavailable or invalid broker data."""
@@ -189,7 +194,9 @@ class LSOpenAPIClient:
         client: httpx.Client | None = None,
     ) -> None:
         self.config = config
-        self._client = client or httpx.Client(timeout=config.timeout_seconds)
+        # Not a bare httpx.Client: LS pads `tr_cont_key` with NUL and h11 throws
+        # the whole response away.  Rationale lives in `ls_http`'s docstring.
+        self._client = client or ls_client(timeout=config.timeout_seconds)
         self._token: str | None = None
         self._token_expires_at = datetime.min.replace(tzinfo=timezone.utc)
 

@@ -47,12 +47,13 @@ def test_repository_uses_one_duplicate_free_environment_template() -> None:
     assert "RISK_DATA_MODE" not in template
 
 
-def test_local_configures_exact_authenticated_fixture_grant(tmp_path: Path) -> None:
+def test_local_configures_exact_fixed_demo_fixture_grant(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     preserved = "m" * 48
     env_file.write_text(
         "# keep this comment\n"
         "UNMANAGED=value\n"
+        "PORTFOLIO_AUTH_REQUIRED=true\n"
         f"MCP_TRADING_ORDER_API_KEY={preserved}\n",
         encoding="utf-8",
     )
@@ -60,18 +61,19 @@ def test_local_configures_exact_authenticated_fixture_grant(tmp_path: Path) -> N
     result = cli.configure_environment(
         runtime="local",
         env_file=env_file,
-        generator=_generator("s" * 48, "i" * 48, "d" * 48),
+        generator=_generator("r" * 48, "s" * 48, "i" * 48, "d" * 48),
     )
     values = _values(env_file)
 
     assert result.generated_secret_keys == (
+        "MCP_RISK_API_KEY",
         "TRADING_SERVICE_AUTH_SECRET",
         "TRADING_INTERNAL_SERVICE_AUTH_SECRET",
         "CEO_DISCORD_INGRESS_API_KEY",
     )
     assert values["APP_ENV"] == "local"
     assert values["PORTFOLIO_AUTH_MODE"] == "fixture"
-    assert values["PORTFOLIO_AUTH_REQUIRED"] == "false"
+    assert "PORTFOLIO_AUTH_REQUIRED" not in values
     assert values["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
     assert values["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
     assert values["LS_ENV"] == "LIVE"
@@ -82,7 +84,7 @@ def test_local_configures_exact_authenticated_fixture_grant(tmp_path: Path) -> N
     assert grant == [
         {
             "user_id": "00000000-0000-4000-8000-00000000cec0",
-            "fund_id": "5c26db42-ce83-4daf-b1dc-c81680c13a6c",
+            "fund_id": "3838f7d6-0c7c-4e54-85f3-316a451e7eeb",
             "book_id": "07d913de-9a5b-4cf5-b893-31a625445761",
             "name": "MAIN",
             "role": "TRADER",
@@ -95,11 +97,12 @@ def test_local_configures_exact_authenticated_fixture_grant(tmp_path: Path) -> N
     assert "UNMANAGED=value" in output
 
 
-def test_preserves_four_distinct_valid_service_secrets_and_is_idempotent(
+def test_preserves_five_distinct_valid_service_secrets_and_is_idempotent(
     tmp_path: Path,
 ) -> None:
     env_file = tmp_path / ".env"
     secrets_by_key = {
+        "MCP_RISK_API_KEY": "r" * 40,
         "MCP_TRADING_ORDER_API_KEY": "a" * 40,
         "TRADING_SERVICE_AUTH_SECRET": "b" * 40,
         "TRADING_INTERNAL_SERVICE_AUTH_SECRET": "c" * 40,
@@ -137,6 +140,7 @@ def test_explicit_rotation_replaces_only_selected_mcp_credentials(
     old_research = "r" * 40
     old_order = "o" * 40
     preserved = {
+        "MCP_RISK_API_KEY": "k" * 40,
         "TRADING_SERVICE_AUTH_SECRET": "s" * 40,
         "TRADING_INTERNAL_SERVICE_AUTH_SECRET": "i" * 40,
         "CEO_DISCORD_INGRESS_API_KEY": "d" * 40,
@@ -199,7 +203,7 @@ def test_rotates_short_placeholder_and_duplicate_secrets_and_deduplicates_keys(
     cli.configure_environment(
         runtime="local",
         env_file=env_file,
-        generator=_generator("x" * 48, "y" * 48, "z" * 48),
+        generator=_generator("w" * 48, "x" * 48, "y" * 48, "z" * 48),
     )
     text = env_file.read_text(encoding="utf-8")
     values = _values(env_file)
@@ -209,7 +213,7 @@ def test_rotates_short_placeholder_and_duplicate_secrets_and_deduplicates_keys(
     assert all(text.count(f"{key}=") == 1 for key in cli.SERVICE_SECRET_KEYS)
     assert values["TRADING_SERVICE_AUTH_SECRET"] == duplicate
     assert values["CEO_DISCORD_INGRESS_API_KEY"] == "z" * 48
-    assert len(set(secret_values)) == 4
+    assert len(set(secret_values)) == 5
     assert all(len(value) >= 32 for value in secret_values)
     assert not any("change_me" in value.casefold() for value in secret_values)
 
@@ -229,7 +233,13 @@ def test_collapses_unmanaged_duplicates_without_changing_effective_value(
     result = cli.configure_environment(
         runtime="local",
         env_file=env_file,
-        generator=_generator("a" * 48, "b" * 48, "c" * 48, "d" * 48),
+        generator=_generator(
+            "a" * 48,
+            "b" * 48,
+            "c" * 48,
+            "d" * 48,
+            "e" * 48,
+        ),
     )
     text = env_file.read_text(encoding="utf-8")
 
@@ -271,6 +281,7 @@ def test_aws_sets_production_contract_without_fixture_grants(
         f"TRADING_SERVICE_AUTH_SECRET={existing_secrets[1]}\n"
         f"TRADING_INTERNAL_SERVICE_AUTH_SECRET={existing_secrets[2]}\n"
         f"CEO_DISCORD_INGRESS_API_KEY={existing_secrets[3]}\n"
+        "PORTFOLIO_AUTH_REQUIRED=true\n"
         "PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON=[{\"unsafe\":true}]\n",
         encoding="utf-8",
     )
@@ -282,7 +293,7 @@ def test_aws_sets_production_contract_without_fixture_grants(
     assert exit_code == 0
     assert values["APP_ENV"] == "production"
     assert values["PORTFOLIO_AUTH_MODE"] == "fixture"
-    assert values["PORTFOLIO_AUTH_REQUIRED"] == "false"
+    assert "PORTFOLIO_AUTH_REQUIRED" not in values
     assert values["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
     assert values["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
     assert values["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"] == "[]"
@@ -309,7 +320,9 @@ def test_aws_sets_production_contract_without_fixture_grants(
 def test_aws_preserves_all_distinct_secrets_atomically(tmp_path: Path) -> None:
     env_file = tmp_path / ".env.aws"
     keys = (*cli.SERVICE_SECRET_KEYS, *cli.AWS_DATABASE_SECRET_KEYS)
-    preserved = {key: character * 40 for key, character in zip(keys, "abcdefghij")}
+    preserved = {
+        key: character * 40 for key, character in zip(keys, "abcdefghijk")
+    }
     env_file.write_text(
         "HEDGEFUND_TSDB_PASSWORD=AdminPassword_1234567890\n"
         + "".join(f"{key}={value}\n" for key, value in preserved.items()),
@@ -356,15 +369,15 @@ def test_aws_rotates_duplicate_or_non_url_safe_database_passwords(
     cli.configure_environment(
         runtime="aws",
         env_file=env_file,
-        generator=_generator("c" * 48, "r" * 48, "o" * 48),
+        generator=_generator("c" * 48, "r" * 48, "o" * 48, "p" * 48),
     )
     values = _values(env_file)
     managed = [values[key] for key in (*cli.SERVICE_SECRET_KEYS, *cli.AWS_DATABASE_SECRET_KEYS)]
 
     assert values["MCP_TRADING_ORDER_API_KEY"] == duplicate
-    assert values["CEO_DISCORD_INGRESS_API_KEY"] == "c" * 48
-    assert values["HEDGEFUND_RUNTIME_DB_PASSWORD"] == "r" * 48
-    assert values["HEDGEFUND_ORDER_DB_PASSWORD"] == "o" * 48
+    assert values["CEO_DISCORD_INGRESS_API_KEY"] == "r" * 48
+    assert values["HEDGEFUND_RUNTIME_DB_PASSWORD"] == "o" * 48
+    assert values["HEDGEFUND_ORDER_DB_PASSWORD"] == "p" * 48
     assert len(set(managed)) == len(managed)
     assert all(
         cli._URL_SAFE_SECRET_RE.fullmatch(values[key])
@@ -377,7 +390,7 @@ def test_cli_never_prints_generated_or_preserved_values(
 ) -> None:
     env_file = tmp_path / ".env"
     preserved = "p" * 48
-    generated_values = iter(("q" * 48, "r" * 48, "s" * 48))
+    generated_values = iter(("q" * 48, "r" * 48, "s" * 48, "t" * 48))
     env_file.write_text(
         f"MCP_TRADING_ORDER_API_KEY={preserved}\n", encoding="utf-8"
     )

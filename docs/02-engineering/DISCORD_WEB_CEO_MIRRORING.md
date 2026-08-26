@@ -10,7 +10,7 @@ Hermes profile, Discord token, systemd gateway, Kanban DB를 프론트엔드가 
 Web/Discord human message
   → POST /ui/ceo/ingress
   → request_id + source_message_id dedup
-  → existing POST /ui/ceo/ask boundary
+  → single POST /ui/ceo/ask implementation
   → one CEO root Kanban task
   → Redis hf:ui-ceo-mirror:v1
   → GET /ui/ceo/events or /ui/ceo/events/stream
@@ -123,58 +123,34 @@ Discord token/API key는 현재처럼 AWS `~/.hermes/profiles/*/.env`에만 둔�
 CEO 중복 실행을 막는다. Redis가 없는 로컬 단위 테스트에서는 명시적으로
 `InMemoryMirrorStore`를 주입한다.
 
-## 채널 ↔ 테스트 계정 매핑 제안 (2026-08-18, 미구현)
+## Discord 작성자 ↔ local fixture 매핑
 
-프론트엔드는 `DISCORD_ACTOR_MAP`의 첫 유효 binding을 고정 테스트 계정으로 사용하며
-(`ai-office/app/lib/currentAccount.ts`), 계정마다 다른 Mandate를 참조한다. Discord
-쪽에는 그 계정 개념이 없어 **같은 요청이 채널만 다를 뿐 전부 "요청자 불명"으로
-들어온다.** 웹과 Discord를 같은 사용자 기준으로 비교하려면 이 매핑이 필요하다.
+Web과 Discord는 mirror ingress에서 같은 `CanonicalIngress` 계약으로 정규화된다.
+Discord 요청은 채널이 아니라 작성자 ID를 `DISCORD_ACTOR_MAP`의 고정 fixture와
+결합한다. 매핑된 `user_id`가 `owner_id`가 되며, `fund_id`는 매핑의 세 번째 값 또는
+Governance membership 역참조로 결정한다. 단일 `ceo_query`는 current Mandate를 조회해 루트 카드에
+`hgfinance.mandate-snapshot.v1` 값 블록을 동결한다. `requested_by=`도 같은 actor
+값을 사용하므로 두 채널이 서로 다른 사용자 컨텍스트를 만들지 않는다.
 
-### 지금 무엇이 빠져 있나
+`deploy/hermes-discord/gateway_patch.py`는 Discord 좌표와 actor/Fund 매핑을 이
+공용 ingress로 전달한다. 예전처럼 Hermes CEO 프로필로 바로 우회해
+`build_root_body`를 건너뛰는 경로를 현행 계약으로 설명하지 않는다.
 
-Discord gateway patch(`deploy/hermes-discord/gateway_patch.py`)는 메시지 본문에
-라우팅 컨텍스트(`discord_channel_id` 등)를 주입해 **Hermes CEO 프로필이 직접
-처리**하게 한다. `/ui/ceo/ingress`를 호출하지 않는다. 그래서 Discord 경로는
-`build_root_body`를 거치지 않고, 결과적으로 다음 둘이 붙지 않는다:
-
-- `requested_by=` — `GET /ui/ceo/tasks?owner_id=`의 계정별 필터 근거
-- `hgfinance.mandate-snapshot.v1` — 사용자 한도 스냅샷
-
-즉 **Discord로 물으면 CEO가 사용자 Mandate를 모른 채 답한다.** 웹 경로에는 둘 다
-붙으므로, 지금 두 경로는 같은 질문에 다른 근거로 답하고 있다.
-
-### 필요한 것은 어댑터 한 겹뿐이다
-
-계약은 이미 있다. `CanonicalIngress`(`apps/api/ceo_mirror.py`)에 `actor_id`와
-`fund_id` 필드가 있고, `_ceo_query`(`apps/api/ceo_mirror_api.py`)가
-`actor_type=user`인 요청의 `actor_id`를 `owner_id`로 넘긴다. 익명 fallback
-(`anonymous`/`web-user`)은 걸러내 "요청자 불명"을 정확히 유지한다.
-
-빠진 것은 Discord 어댑터가 `/ui/ceo/ingress`로 POST하면서 그 두 필드를 채우는
-것뿐이다.
-
-### 채널 기준을 제안하는 이유
-
-Discord author 기준보다 **채널 기준**을 먼저 붙일 것을 제안한다. 채널이 더
-정확해서가 아니라 - 채널은 누구나 들어가 쓸 수 있으니 오히려 덜 정확하다 -
-테스트 단계에서 담당자가 아무 계정으로나 대신 시험할 수 있어야 하기 때문이다.
-트레이딩 담당이 user1 채널에서 쳐도 user1 요청이 되는 편이 E2E 확인에 편하다.
+현재 범위는 `DISCORD_ACTOR_MAP`과 고정 `X-User-Id`가 가리키는 local fixture다.
+이 값은 로그인, 세션, 가입 또는 외부 사용자 인증이 아니다. 서버 간 Trading
+proof도 브라우저 로그인 token으로 해석하지 않는다.
 
 ```text
-DISCORD_ACTOR_MAP=<discord_user_id>:<user_id>:<fund_id>
+DISCORD_ACTOR_MAP=<discord_user_id>:<user_id>
 ```
 
-매핑표는 어댑터 환경변수 하나로 둔다. 진짜 인증이 붙으면 Discord author 기준으로
-갈아끼운다.
+Backend는 위 2칸 형식을 기본으로 사용하고, Governance 역참조가 불가능한 환경을
+위해 `<discord_user_id>:<user_id>:<fund_id>` 3칸 형식도 허용한다. 프론트의 고정
+fixture까지 같은 환경변수에서 설정하려면 3칸 형식이 필요하다. 이 프로젝트 범위에서
+별도 로그인 시스템은 추가하지 않는다.
 
-### 매핑이 없는 채널·DM
+### 매핑되지 않은 Discord 작성자
 
-`fund_id` 없이 그대로 넘긴다. `ceo_query`가 Mandate 조회를 건너뛰고 스냅샷 없이
-진행하므로 "이 요청에는 사용자 한도가 없다"가 정확히 유지된다 - 임의의 기본
-계정으로 채우지 않는다(개발 원칙 9). 이미 그렇게 동작한다.
-
-### 이 문서가 정하지 않는 것
-
-`/agent-logs` 화면이 Discord 대화를 어떻게 계정별로 나눠 보여줄지는 정하지
-않는다. 그 화면은 다른 브랜치에서 개발 중이고, 위 매핑이 붙으면 이벤트에
-`actor_id`가 실리므로 화면 쪽 필터는 그 값을 쓰면 된다.
+매핑이 없으면 `owner_id`·`fund_id`를 만들지 않는다. `ceo_query`는 Mandate 조회를
+건너뛰고 snapshot 없이 진행하므로 “이 요청에는 사용자 한도가 없다”가 정확히
+유지된다. 임의 기본 계정이나 로그인 사용자를 만들지 않는다.

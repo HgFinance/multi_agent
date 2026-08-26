@@ -21,7 +21,7 @@
 3. 정형 데이터와 제한된 RAG 근거로 투자 가설을 만든다.
 4. 가설을 간단한 전략 규칙으로 변환하고 백테스트한다.
 5. 승인된 전략을 Shadow와 Paper 환경에 배포한다.
-6. 결정론적 Risk Engine을 통과한 주문만 실행한다.
+6. 자동 전략 주문은 결정론적 Risk Engine을 통과한 경우에만 실행한다. 로컬 고정 fixture 사용자의 명시적 PAPER `USER_DIRECTIVE`는 별도 admission 계약을 따른다.
 7. 판단, 주문, 체결, PnL을 기록하고 전략 성능을 재평가한다.
 
 사용자에게는 하나의 투자 에이전트로 보이지만 내부에서는 `Research`, `Portfolio`, `Risk`, `Execution` 책임을 분리한다. 실제 회사의 모든 부서를 구현하는 것이 아니라 투자 폐쇄 루프에 필요한 최소 역할만 구현한다.
@@ -40,7 +40,7 @@ Core는 다음 질문에 실제 동작으로 답할 수 있어야 한다.
 - Agent 판단은 구조화된 Schema와 근거 ID를 가진다.
 - 전략은 Point-in-Time Dataset으로 재현 가능한 백테스트를 통과한다.
 - 승인된 전략만 Shadow/Paper 상태로 승격된다.
-- Risk Engine을 우회해 주문할 수 없다.
+- 자동 전략 주문은 Risk Engine을 우회할 수 없다. 로컬 사용자 직접 PAPER 지시는 [ADR-0007](../02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 fixture·membership·계좌 mechanics·멱등성 admission을 우회할 수 없다.
 - 주문부터 체결, Position, PnL과 전략 성과까지 추적된다.
 - 데이터나 모델 장애 시 신규 진입이 자동 차단된다.
 - 일일 운용 결과와 전략 상태를 하나의 화면에서 확인할 수 있다.
@@ -489,7 +489,7 @@ P0 Event Bus는 Redis Streams로 고정한다. Process 내부 Queue는 Unit Test
 - [ ] 각 Strategy Version의 Data·Instrument·Execution·Risk·Accounting Capability를 검사한다.
 - [ ] Long/Short, Market Neutral, Event Driven과 Quant 대표 Fixture가 같은 Registry·Backtest·Risk 계약을 통과한다.
 - [ ] 승인되지 않은 Strategy가 Paper 주문을 생성할 수 없다.
-- [ ] 모든 주문이 결정론적 Risk Gate를 통과한다.
+- [ ] 모든 자동 전략 주문이 결정론적 Risk Gate를 통과하고, 로컬 사용자 직접 PAPER 지시는 ADR-0007의 별도 admission을 통과한다.
 - [ ] OMS가 재시작 후 주문과 Position을 복구한다.
 - [ ] Feed/Position/Risk 이상 시 Entry가 자동 차단된다.
 - [ ] Kill Switch와 미체결 주문 취소가 검증된다.

@@ -10,16 +10,17 @@
  * 사이에서 전달하면 CORS 규칙 자체가 적용되지 않는다.
  */
 
+import { FIXED_DEMO_USER_ID } from "../app/lib/demoIdentity";
+
 export const BFF_PROXY_PREFIX = "/bff";
 
 const DEFAULT_BFF_ORIGIN = "http://127.0.0.1:8001";
 
-/** BFF가 실제로 읽는 헤더만 전달한다(쿠키 등은 넘기지 않는다). */
+/** BFF가 실제로 읽는 비식별 헤더만 전달한다(쿠키·사용자 헤더는 넘기지 않는다). */
 const FORWARDED_REQUEST_HEADERS = [
   "accept",
   "accept-language",
   "content-type",
-  "x-user-id",
   "idempotency-key",
   "x-request-id",
   "last-event-id",
@@ -103,6 +104,9 @@ export async function proxyBffRequest(request: Request, env: BffProxyEnv): Promi
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
+  // Browser input and build-time environment can never select another user.
+  // This is a closed-network fixture identifier, not an authentication token.
+  headers.set("x-user-id", FIXED_DEMO_USER_ID);
   const origin = new URL(request.url);
   headers.set("x-forwarded-host", origin.host);
   headers.set("x-forwarded-proto", origin.protocol.replace(":", ""));

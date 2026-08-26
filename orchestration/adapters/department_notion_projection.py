@@ -20,6 +20,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from departments.notion_markdown import markdown_to_notion_blocks
+from departments.risk_notion_schema import (
+    human_metadata_rows,
+    risk_property_name,
+)
 from orchestration.adapters.notion_idempotency import (
     NotionIdempotency,
 )
@@ -32,6 +36,7 @@ from orchestration.adapters.terminal_projection_utils import (
     task_body,
     task_id,
     terminal_success,
+    text_value,
     workflow_root,
 )
 from orchestration.canonical_profiles import department_for_canonical_profile
@@ -162,6 +167,35 @@ class _NotionTransport:
             "PATCH", f"blocks/{page_id}/children", {"children": list(children)}
         )
 
+    def replace_blocks(
+        self, page_id: str, children: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Replace a projection body while preserving the Notion page itself."""
+
+        existing: list[Mapping[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            suffix = f"?page_size=100&start_cursor={cursor}" if cursor else "?page_size=100"
+            page = self._request("GET", f"blocks/{page_id}/children{suffix}")
+            existing.extend(
+                item
+                for item in page.get("results", [])
+                if isinstance(item, Mapping)
+            )
+            if not page.get("has_more"):
+                break
+            cursor = str(page.get("next_cursor") or "").strip() or None
+            if cursor is None:
+                raise DepartmentNotionProjectionError(
+                    "Notion block pagination omitted next_cursor"
+                )
+
+        self.append_blocks(page_id, children)
+        for block in existing:
+            block_id = str(block.get("id") or "").strip()
+            if block_id:
+                self._request("PATCH", f"blocks/{block_id}", {"archived": True})
+
 
 @dataclass(frozen=True)
 class DepartmentProjectionResult:
@@ -240,6 +274,67 @@ def _task_title(task: Mapping[str, Any], department: str) -> str:
     return f"{tid} · {raw}"[:1900]
 
 
+def _result_text(task: Mapping[str, Any], metadata: Mapping[str, Any]) -> str:
+    """Prefer the complete user-facing result over a short handoff summary."""
+
+    return (
+        text_value(metadata.get("final_answer")).strip()
+        or text_value(task.get("result")).strip()
+        or summary(task, metadata).strip()
+    )
+
+
+def _risk_body_markdown(
+    *,
+    task: Mapping[str, Any],
+    root_task_id: str,
+    result_text: str,
+    metadata: Mapping[str, Any],
+) -> str:
+    status = str(task.get("status") or "").casefold()
+    status_label = "완료" if status in {"done", "completed"} else status or "미확인"
+    title = str(task.get("title") or task.get("name") or "리스크 검토").strip()
+    parts = [
+        "# 리스크 부서 검토 결과",
+        "",
+        "## 검토 정보",
+        "",
+        f"- 검토 제목: {title}",
+        f"- 검토 ID: `{task_id(task)}`",
+        f"- 상위 요청 ID: `{root_task_id}`",
+        f"- 처리 상태: {status_label}",
+        "",
+        "## 검토 결과",
+        "",
+        result_text or "결과 본문이 없습니다.",
+    ]
+
+    rows = human_metadata_rows(metadata)
+    if rows:
+        parts.extend(["", "## 주요 운영 정보", ""])
+        parts.extend(f"- {label}: {value}" for label, value in rows)
+
+    risk_plan = metadata.get("position_risk_plan") or metadata.get("risk_plan")
+    if isinstance(risk_plan, Mapping):
+        parts.extend(
+            [
+                "",
+                "## 포지션 리스크 계획",
+                "",
+                format_position_risk_plan(risk_plan),
+            ]
+        )
+
+    parts.extend(
+        [
+            "",
+            "> 이 페이지는 사람의 검토를 위한 읽기 전용 복사본입니다. "
+            "권위 상태와 집행 권한은 Risk 데이터베이스와 결정론적 Risk Engine에 남습니다.",
+        ]
+    )
+    return "\n".join(parts)
+
+
 def _body_markdown(
     *,
     task: Mapping[str, Any],
@@ -248,6 +343,14 @@ def _body_markdown(
     result_text: str,
 ) -> str:
     metadata = merged_run_metadata(task)
+    if department == "risk":
+        return _risk_body_markdown(
+            task=task,
+            root_task_id=root_task_id,
+            result_text=result_text,
+            metadata=metadata,
+        )
+
     original_instruction = task_body(task)
 
     safe_metadata = safe_json(metadata)
@@ -469,25 +572,40 @@ class DepartmentNotionProjection:
         title = _task_title(task, department)
 
         metadata = merged_run_metadata(task)
-        result_text = correction or summary(task, metadata)
+        result_text = correction or _result_text(task, metadata)
 
         props: dict[str, Any] = {
             title_property: _title(title),
         }
 
-        if "서술" in properties_schema:
-            props["서술"] = _rich_text(result_text)
+        narrative_property = (
+            risk_property_name("narrative", properties_schema)
+            if department == "risk"
+            else "서술"
+        )
+        if narrative_property in properties_schema:
+            props[narrative_property] = _rich_text(result_text)
 
-        if "원본 리포트" in properties_schema:
-            props["원본 리포트"] = _rich_text(result_text)
+        original_report_property = (
+            risk_property_name("original_report", properties_schema)
+            if department == "risk"
+            else "원본 리포트"
+        )
+        if original_report_property in properties_schema:
+            props[original_report_property] = _rich_text(result_text)
 
         created = (
             task.get("completed_at") or task.get("updated_at") or task.get("created_at")
         )
-        if "생성 시각" in properties_schema:
+        created_property = (
+            risk_property_name("created_at", properties_schema)
+            if department == "risk"
+            else "생성 시각"
+        )
+        if created_property in properties_schema:
             date_value = _date(created)
             if date_value is not None:
-                props["생성 시각"] = date_value
+                props[created_property] = date_value
 
         # Domain IDs are never repurposed as Kanban IDs.
         for key in ("trade_case_id", "trace_id"):
@@ -606,19 +724,15 @@ class DepartmentNotionProjection:
                 page_id = str(existing[0].get("id") or "").strip()
                 update_page = getattr(transport, "update_page", None)
                 append_blocks = getattr(transport, "append_blocks", None)
+                replace_blocks = getattr(transport, "replace_blocks", None)
                 if not page_id or not callable(update_page):
                     raise DepartmentNotionProjectionError(
                         "Notion transport does not support page upsert"
                     )
                 update_page(page_id, props)
-                correction_is_in_properties = any(
-                    name in props for name in ("서술", "원본 리포트")
-                )
-                if (
-                    correction
-                    and callable(append_blocks)
-                    and not correction_is_in_properties
-                ):
+                if callable(replace_blocks):
+                    replace_blocks(page_id, children)
+                elif correction and callable(append_blocks):
                     append_blocks(page_id, children)
                 return projection_result("updated", page_id)
             created = create()

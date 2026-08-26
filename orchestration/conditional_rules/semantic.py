@@ -44,6 +44,10 @@ PORTFOLIO_FIELDS: dict[str, ValueUnit] = {
     "AVAILABLE_CASH": ValueUnit.KRW,
 }
 
+TIME_FIELDS: dict[str, ValueUnit] = {
+    "OBSERVED_AT_EPOCH_SECONDS": ValueUnit.NUMBER,
+}
+
 
 class RuleSemanticError(ValueError):
     def __init__(self, code: str, message: str) -> None:
@@ -181,6 +185,12 @@ def _infer(
         if node.unit is not ValueUnit.BOOL and isinstance(node.value, bool):
             raise _error("LITERAL_TYPE_MISMATCH", "numeric literal must not be boolean")
         return node.unit or ValueUnit.NUMBER
+
+    if node.type is ExpressionType.TIME:
+        unit = TIME_FIELDS.get(node.field or "")
+        if unit is None:
+            raise _error("UNSUPPORTED_TIME_FIELD", f"unsupported time field {node.field!r}")
+        return unit
 
     if node.type is ExpressionType.MARKET:
         unit = MARKET_FIELDS.get(node.field or "")

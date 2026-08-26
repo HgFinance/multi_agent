@@ -116,6 +116,66 @@ def test_direct_market_quote_uses_ls_env(
     assert selected == [True]
 
 
+def test_ls_realtime_refreshes_rest_projection_before_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    config = SimpleNamespace(environment="PAPER")
+
+    async def issue_token(_config: SimpleNamespace) -> tuple[str, float]:
+        return "token", time.time() + 60
+
+    async def resync(_config: SimpleNamespace, _token: str) -> None:
+        calls.append("holdings")
+
+    async def resync_today(_config: SimpleNamespace, _token: str) -> None:
+        calls.append("today")
+
+    def connect(_url: str) -> object:
+        calls.append("websocket")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(ls_account_stream, "FEED", ls_account_stream._Feed())
+    monkeypatch.setattr(ls_account_stream, "_config", lambda: (config, "wss://example.test/websocket"))
+    monkeypatch.setattr(ls_account_stream, "_issue_token", issue_token)
+    monkeypatch.setattr(ls_account_stream, "_configured_account", lambda _environment: "account")
+    monkeypatch.setattr(ls_account_stream, "_resync", resync)
+    monkeypatch.setattr(ls_account_stream, "_resync_today_activity", resync_today)
+    monkeypatch.setattr(ls_account_stream, "_connect_order_stream", connect)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ls_account_stream._run_feed())
+
+    assert calls == ["holdings", "today", "websocket"]
+
+
+def test_ls_account_projection_has_periodic_rest_resync():
+    source = Path(ls_account_stream.__file__).read_text(encoding="utf-8")
+
+    assert "ACCOUNT_PROJECTION_RESYNC_SECONDS" in source
+    assert "socket.recv(), timeout=ACCOUNT_PROJECTION_RESYNC_SECONDS" in source
+    assert "except asyncio.TimeoutError:" in source
+    timeout_branch = source.split("except asyncio.TimeoutError:", 1)[1]
+    assert "await _resync(config, token)" in timeout_branch
+    assert "await _resync_today_activity(config, token)" in timeout_branch
+
+
+def test_ls_realtime_disables_protocol_ping_keepalive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+    connection = object()
+
+    def connect(url: str, **kwargs: object) -> object:
+        calls.append((url, kwargs))
+        return connection
+
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=connect))
+
+    assert ls_account_stream._connect_order_stream("wss://example.test/websocket") is connection
+    assert calls == [("wss://example.test/websocket", {"ping_interval": None})]
+
+
 def test_ls_auth_error_detail_keeps_broker_reason_without_credentials() -> None:
     class Response:
         status_code = 403

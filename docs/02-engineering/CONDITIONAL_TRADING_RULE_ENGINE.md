@@ -7,7 +7,7 @@
 ## 흐름
 
 ```text
-authenticated user
+fixed local fixture user
   -> BFF preview (untrusted AST candidate)
   -> schema + semantic + ambiguity validation
   -> exact spec_sha256 confirmation
@@ -26,7 +26,8 @@ Hermes/LLM은 후보 AST를 만들 수 있지만 지표 계산, trigger 판정, 
 
 ## 관리 API
 
-모든 경로는 기존 BFF 사용자 인증과 Fund/Book access check를 사용한다.
+모든 경로는 BFF가 선택한 고정 fixture ID와 Fund/Book access check를 사용한다.
+브라우저 로그인·세션·Supabase Auth를 전제로 하지 않는다.
 
 - `POST /ui/conditional-rules/preview`: 후보를 정규화하고 clarification, assumptions,
   canonical spec과 `spec_sha256` 반환

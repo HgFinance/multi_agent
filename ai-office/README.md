@@ -2,24 +2,13 @@
 
 `ai-office`는 HgFinance의 부서·직원 흐름을 보여주는 DEMO Projection이다. 실제 Hermes 세션, LangGraph 실행, 주문, Risk Limit, 원장 상태의 Source of Truth는 아니다. 로컬 모의투자에서는 고정 데모 ID로 BFF에 연결하고, 시장·계좌 카드는 LS PAPER 읽기 전용 데이터를 표시한다. LIVE 주문과 브라우저 로그인·Supabase Auth는 지원하지 않는다.
 
-## Demo organization snapshot (historical)
+## 조직 표시 경계
 
-> This read-only demo table is not the current worker registry. Current organization and counts are documented in [CURRENT_PROJECT_ARCHITECTURE.md](../docs/CURRENT_PROJECT_ARCHITECTURE.md).
-
-실제 조직은 CEO와 7개 Hermes 부서다.
-
-| 조직 | Hermes Head | 독립 LangGraph Worker | Worker 모델 |
-|---|---|---:|---|
-| CEO | `ceo-agent` · `openai-codex/gpt-5.6-luna` | 1 | `qwen3:1.7b` |
-| HR | `hr-department` · `openai-codex/gpt-5.6-luna` | 5 | `qwen3:1.7b` |
-| Research | `research-department` · `openai-codex/gpt-5.6-luna` | 6 | `qwen3:1.7b` |
-| Trading | `trading-department` · `openai-codex/gpt-5.6-luna` | 6 | `qwen3:1.7b` |
-| Risk | `risk-management` · `openai-codex/gpt-5.6-luna` | 4 | `qwen3:1.7b` |
-| Quant/Backtest | `quant-backtest-department` · `openai-codex/gpt-5.6-luna` | 7 | `qwen3:1.7b` |
-| Accounting/Portfolio | `accounting-portfolio-department` · `openai-codex/gpt-5.6-luna` | 8 | `qwen3:1.7b` |
-| AI QA/Audit | `qa-department` · `openai-codex/gpt-5.6-luna` | 5 | `qwen3:1.7b` |
-
-부서 흐름은 `Hermes Head → Worker별 독립 LangGraph → Worker Context → Hermes 종합`이다. Worker Context는 non-binding이며, Risk Gate와 Evidence QA Gate는 결정론적 코드가 소유한다.
+현재 조직·Worker 수·모델은 이 화면 문서가 소유하지 않는다. 조직과 실행 편제는
+[Current Architecture](../docs/CURRENT_PROJECT_ARCHITECTURE.md), 모델은
+[Worker Model Matrix](../docs/02-engineering/WORKER_MODEL_MATRIX.md)를 따른다.
+Worker Context는 non-binding이며 Risk Gate와 Evidence QA Gate는 결정론적 코드가
+소유한다.
 
 화면 엔진의 고정 ID 호환성을 위해 `company.config.ts`에는 위 조직 외에 `secretary` 공간이 남아 있다. 이는 `CEO Office shared-support projection`일 뿐 별도의 Hermes 부서나 추가 인원으로 집계하지 않는다.
 
@@ -27,15 +16,18 @@
 
 - CEO·7개 부서·CEO 지원 공간을 2층 Pixel Office로 표시한다.
 - `RiskQaPanel`은 Risk 2명(LLM 1명 + 결정론 runner 1명), QA 3명(LLM 2명 + 결정론 runner 1명)의 Worker Registry와 Head 모델을 별도로 표시한다.
-- Head는 Hermes + Codex/Luna, Worker는 독립 LangGraph + Ollama `qwen3:1.7b`로 표시한다.
+- Head·Worker 모델 표시는 Runtime 정본 값을 투영하며 이 문서에서 모델명을 고정하지 않는다.
 - `Simulation working`은 `app/game/sim.ts`의 데모 상태일 뿐 외부 런타임 성공 증거가 아니다.
 - Risk/QA의 주문 제출·원장 기록·Risk Limit 변경 권한은 화면과 연결하지 않는다.
 - `DEMO`, `PAPER`, `LIVE` 상태를 혼동하지 않으며, 화면은 DEMO 오피스 위에 PAPER 브로커 조회를 투영한다.
 - CEO Control Room은 일반 자문과 명시적 PAPER 주문을 같은 입력창에서 구분한다.
-  주문 문장은 CEO Kanban → Trading Hermes의 비구속 해석 → 서버 검증 → PAPER OMS로
-  전달되고 Accounting ACK까지 별도 상태로 추적한다. 여러 ACTIVE Book 중 하나를
-  자동 추측하지 않는다. 별도 PAPER 주문 패널의 `/trading/agent/order` 호환 경로도
-  동일한 인증·Fund/Book·PAPER 전용 admission을 사용한다.
+  이 주문 계약은 활성화된 PAPER 환경에서 CEO Kanban → Trading Hermes의 비구속 해석
+  → 서버 검증 → PAPER OMS로 전달되고 Accounting ACK까지 별도 상태로 추적한다.
+  루트 로컬 Compose는 PAPER workflow를 활성화하며 모든 요청을 고정 데모 사용자와
+  LS 모의투자 계좌로 제한한다.
+  여러 ACTIVE Book 중 하나를 자동 추측하지 않는다. 별도 PAPER 주문 패널의
+  `/trading/agent/order` 호환 경로도 활성화 시 동일한 고정 fixture·Fund/Book·PAPER 전용
+  admission을 사용한다.
 
 ## 실행
 
@@ -65,18 +57,14 @@ NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001 npm run dev -- --port 3000
 
 이미 `ai-office` 디렉터리에 있다면 BFF 명령은 `cd ..`로 저장소 루트로 이동한 뒤 실행한다. 루트의 `.venv`는 프론트 폴더 안에 있지 않다.
 
-프론트는 `NEXT_PUBLIC_BFF_URL`이 없으면 `http://localhost:8001`을 사용하고, 연결 후 Snapshot을 400ms마다 갱신한다. BFF가 꺼져 있거나 실제 LangGraph run이 없으면 가짜 업무를 표시하지 않고 `OFFLINE`/대기 상태를 보여준다. 투자금액별 목표 금액과 사용자 추천 승인 단계까지 표시한다. 현금화 필요 기간은 화면에서 받지 않고 BFF가 `MEDIUM` 기본값으로 처리한다. 추천 승인은 주문 제출·Risk 승인·원장 변경을 수행하지 않는다.
-
-연동 상태는 BFF의 `GET /ui/integrations`에서 읽으며, 비밀값은 브라우저로 보내지 않는다.
-
 ## BFF 통신 방식
 
 AI Office는 사용자 계정 화면 없이 고정된 데모 ID
 `00000000-0000-4000-8000-00000000cec0`를 BFF에 전달한다. 브라우저 요청은
-항상 동일 출처 `/bff/*`로 보내고 Worker가 `X-User-Id`를 내부 BFF로 전달하므로
-브라우저 CORS preflight가 발생하지 않는다. 직접 `8001/ui/me`를 헤더 없이
-호출하면 401이지만, 이것은 로그인 실패가 아니라 내부 ID 헤더 경계이며 정상
-프론트 경로에서는 자동으로 200이 된다. PAPER 계좌는 로컬 `.env`의
+항상 동일 출처 `/bff/*`로 보내고 Worker가 브라우저 입력과 무관하게 같은
+`X-User-Id`를 내부 BFF에 설정하므로 브라우저 CORS preflight가 발생하지 않는다.
+직접 `8001/ui/me`를 헤더 없이 호출해도 같은 데모 사용자로 200을 반환한다.
+PAPER 계좌는 로컬 `.env`의
 `LS_ACCOUNT_NO_PAPER=5601`을 사용한다.
 
 `8001` 포트가 이미 사용 중이면 기존 프로세스를 확인한 뒤 종료하거나 다른 포트를 사용한다.

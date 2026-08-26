@@ -608,7 +608,6 @@ class CeoTaskApiTest(unittest.TestCase):
                 {
                     "APP_ENV": "test",
                     "PORTFOLIO_AUTH_MODE": "fixture",
-                    "PORTFOLIO_AUTH_REQUIRED": "false",
                 },
                 clear=False,
             ),
@@ -630,7 +629,6 @@ class CeoTaskApiTest(unittest.TestCase):
                 {
                     "APP_ENV": "test",
                     "PORTFOLIO_AUTH_MODE": "fixture",
-                    "PORTFOLIO_AUTH_REQUIRED": "false",
                 },
                 clear=False,
             ),
@@ -653,7 +651,6 @@ class CeoTaskApiTest(unittest.TestCase):
                 {
                     "APP_ENV": "test",
                     "PORTFOLIO_AUTH_MODE": "fixture",
-                    "PORTFOLIO_AUTH_REQUIRED": "false",
                 },
                 clear=False,
             ),
@@ -917,7 +914,6 @@ class HermesKanbanBoardApiTest(unittest.TestCase):
             {
                 "APP_ENV": "test",
                 "PORTFOLIO_AUTH_MODE": "fixture",
-                "PORTFOLIO_AUTH_REQUIRED": "false",
             },
             clear=False,
         )

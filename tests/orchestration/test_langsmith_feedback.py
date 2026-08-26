@@ -13,12 +13,14 @@ from orchestration.langsmith_feedback import (
     FeedbackLedger,
     LangSmithFeedbackService,
     TraceObservation,
+    attribute_workflow_bottleneck,
     evaluation_run_id,
     evaluate_observation,
     observation_from_run,
 )
 from orchestration.langsmith_feedback import _aggregate_metric_window
 from orchestration.semantic_qa import evaluate_answer, evaluate_prompt_answer
+from orchestration.qa_feedback_benchmarks import run_pending_feedback_benchmarks
 
 
 class _Run:
@@ -44,6 +46,31 @@ class _Run:
     }
     inputs = {"prompt": "must never be read"}
     outputs = {"answer": "must never be read"}
+
+
+def _actionable_result(
+    source_run_id: str,
+    *,
+    request_id: str,
+    department: str = "qa-department",
+):
+    return evaluate_observation(
+        TraceObservation(
+            source_run_id=source_run_id,
+            name=f"worker.{department}",
+            status="error",
+            started_at=None,
+            ended_at=None,
+            metadata={
+                "request_id": request_id,
+                "department": department,
+                "stage": department,
+                "status": "DEGRADED",
+                "error_count": 1,
+                "raw_payloads_sent": False,
+            },
+        )
+    )
 
 
 def test_observation_allowlists_metadata_and_never_reads_payload() -> None:
@@ -88,6 +115,72 @@ def test_evaluator_creates_bounded_improvement_findings() -> None:
     assert "WORKER_OR_WORKFLOW_DEGRADED" in result.finding_codes
     assert "LATENCY_ABOVE_THRESHOLD" in result.finding_codes
     assert "CORRELATION_METADATA_MISSING" in result.finding_codes
+
+
+def test_root_latency_is_attributed_to_longest_primary_kanban_task(tmp_path) -> None:
+    database_path = tmp_path / "kanban.db"
+    with sqlite3.connect(database_path) as database:
+        database.execute(
+            """
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                body TEXT,
+                assignee TEXT,
+                created_at INTEGER NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER,
+                idempotency_key TEXT
+            )
+            """
+        )
+        database.executemany(
+            "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                ("t_root", "request", "ceo-agent", 1, 1, 31, "request-1"),
+                (
+                    "t_trading",
+                    "workflow_root_task_id=t_root\nworkflow_role=primary",
+                    "trading-department",
+                    35,
+                    36,
+                    97,
+                    "t_root:primary:trading-department",
+                ),
+                (
+                    "t_research",
+                    "workflow_root_task_id=t_root\nworkflow_role=primary",
+                    "research-department",
+                    35,
+                    36,
+                    48,
+                    "t_root:primary:research-department",
+                ),
+            ),
+        )
+
+    attributed = attribute_workflow_bottleneck(
+        TraceObservation(
+            source_run_id="run-root",
+            name="hgfinance.user-query",
+            status="completed",
+            started_at=None,
+            ended_at=None,
+            metadata={
+                "request_id": "request-1",
+                "stage": "ceo-ingress",
+                "trace_kind": "workflow_root",
+                "latency_scope": "end_to_end",
+                "latency_ms": 98_590,
+            },
+        ),
+        kanban_db_path=str(database_path),
+    )
+
+    assert attributed.department == "trading-department"
+    assert attributed.metadata["primary_bottleneck_duration_ms"] == 61_000
+    assert attributed.metadata["joint_improvement_targets"] == "ceo-workflow / observability"
+    assert attributed.metadata["observation_point"] == "ceo-ingress"
+    assert attributed.metadata["latency_attribution_status"] == "MEASURED"
 
 
 def test_semantic_answer_contract_is_redacted_and_evaluated() -> None:
@@ -208,12 +301,26 @@ def test_ledger_is_idempotent_and_approval_creates_bounded_hint(tmp_path) -> Non
     assert ledger.enqueue("source-1", "First") is False
     job = ledger.claim()
     assert job is not None
-    result = evaluate_observation(observation_from_run(_Run()))
+    result = _actionable_result(
+        "source-1", request_id="discord:actionable-1", department="risk-management"
+    )
     artifact_id = ledger.complete("source-1", "eval-1", result)
 
     assert ledger.pending(10)[0]["artifact_id"] == artifact_id
-    assert ledger.approve(artifact_id, "APPROVED", "qa-user", "reviewed") is True
-    assert ledger.approve(artifact_id, "APPROVED", "qa-user", "duplicate") is False
+    assert ledger.approve(
+        artifact_id,
+        "APPROVED",
+        "qa-user",
+        "reviewed",
+        improvement_type="PROMPT_POLICY",
+    ) is True
+    assert ledger.approve(
+        artifact_id,
+        "APPROVED",
+        "qa-user",
+        "duplicate",
+        improvement_type="PROMPT_POLICY",
+    ) is False
     assert ledger.approved_hints(None, limit=3, max_chars=1200) is None
     candidates = ledger.benchmark_candidates(10)
     assert candidates[0]["artifact_id"] == artifact_id
@@ -226,10 +333,76 @@ def test_ledger_is_idempotent_and_approval_creates_bounded_hint(tmp_path) -> Non
         report_ref="sha256:report",
         result_summary="offline gate passed",
     ) is True
-    hint = ledger.approved_hints(None, limit=3, max_chars=1200)
+    hint = ledger.approved_hints("risk", limit=3, max_chars=1200)
     assert hint is not None
+    assert hint["items"][0]["department"] == "risk"
     assert hint["items"][0]["source"] == "qa-approved-langsmith-feedback"
     assert "prompt" not in str(hint)
+
+
+def test_privacy_safe_runner_executes_registered_code_fix_suite(tmp_path) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    artifact_id = ledger.complete(
+        "source-latency",
+        "eval-latency",
+        _actionable_result(
+            "source-latency",
+            request_id="request-latency",
+            department="ceo-ingress",
+        ),
+    )
+    # The helper finding is degradation; add latency through a normal observed
+    # result so the registered attribution suite is selected.
+    with ledger._connect() as db:
+        db.execute(
+            "UPDATE langsmith_feedback_artifacts SET finding_codes=? WHERE artifact_id=?",
+            ('["LATENCY_ABOVE_THRESHOLD"]', artifact_id),
+        )
+    assert ledger.approve(
+        artifact_id,
+        "APPROVED",
+        "discord:manager",
+        "latency attribution fix",
+        improvement_type="CODE_FIX",
+    )
+    assert run_pending_feedback_benchmarks(ledger) == {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+    }
+    candidate = ledger.approved_hints(None, limit=3, max_chars=1200)
+    assert candidate is not None
+    assert "LATENCY_ABOVE_THRESHOLD" in candidate["items"][0]["finding_codes"]
+
+
+def test_pass_or_no_action_cannot_enter_approved_feedback(tmp_path) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    assert ledger.enqueue("source-pass", "First")
+    assert ledger.claim() is not None
+    pass_artifact = ledger.complete(
+        "source-pass", "eval-pass", evaluate_observation(observation_from_run(_Run()))
+    )
+    assert not ledger.approve(
+        pass_artifact,
+        "APPROVED",
+        "qa-user",
+        "nothing to improve",
+        improvement_type="PROMPT_POLICY",
+    )
+
+    assert ledger.enqueue("source-no-action", "First")
+    assert ledger.claim() is not None
+    actionable_artifact = ledger.complete(
+        "source-no-action",
+        "eval-no-action",
+        _actionable_result("source-no-action", request_id="discord:no-action"),
+    )
+    assert not ledger.approve(
+        actionable_artifact,
+        "APPROVED",
+        "qa-user",
+        "no action classification",
+    )
 
 
 def test_ledger_merges_same_request_department_and_finding(tmp_path) -> None:
@@ -324,9 +497,15 @@ def test_active_hint_is_local_only_and_requires_passed_benchmark(tmp_path, monke
     artifact_id = ledger.complete(
         "source-active",
         "eval-active",
-        evaluate_observation(observation_from_run(_Run())),
+        _actionable_result("source-active", request_id="discord:active"),
     )
-    assert ledger.approve(artifact_id, "APPROVED", "qa-user", "reviewed") is True
+    assert ledger.approve(
+        artifact_id,
+        "APPROVED",
+        "qa-user",
+        "reviewed",
+        improvement_type="PROMPT_POLICY",
+    ) is True
 
     monkeypatch.setenv("LANGSMITH_FEEDBACK_MODE", "active")
     monkeypatch.setenv("LANGSMITH_FEEDBACK_STATE_PATH", str(path))
@@ -356,8 +535,18 @@ def test_ledger_cleanup_removes_expired_artifacts_and_decisions(tmp_path) -> Non
     ledger = FeedbackLedger(str(path))
     ledger.enqueue("source-old", "First")
     assert ledger.claim() is not None
-    artifact_id = ledger.complete("source-old", "eval-old", evaluate_observation(observation_from_run(_Run())))
-    assert ledger.approve(artifact_id, "APPROVED", "qa-user", "reviewed") is True
+    artifact_id = ledger.complete(
+        "source-old",
+        "eval-old",
+        _actionable_result("source-old", request_id="discord:old"),
+    )
+    assert ledger.approve(
+        artifact_id,
+        "APPROVED",
+        "qa-user",
+        "reviewed",
+        improvement_type="PROMPT_POLICY",
+    ) is True
 
     with sqlite3.connect(path) as db:
         db.execute("UPDATE langsmith_feedback_artifacts SET created_at='2000-01-01T00:00:00+00:00'")
@@ -392,6 +581,44 @@ def test_unanswered_artifact_expires_without_becoming_rejected(tmp_path) -> None
     assert ledger.pending(10) == []
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT COUNT(*) FROM langsmith_feedback_decisions").fetchone() == (0,)
+
+
+def test_metric_windows_share_one_six_hour_incident_artifact(tmp_path) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    artifact_ids = []
+    for number, window_start in enumerate(
+        ("2026-08-26T00:00:00+00:00", "2026-08-26T00:05:00+00:00"),
+        start=1,
+    ):
+        source_run = f"metrics-window-{number}"
+        assert ledger.enqueue(source_run, "HgFinance-Metrics")
+        assert ledger.claim() is not None
+        result = evaluate_observation(
+            TraceObservation(
+                source_run_id=source_run,
+                name="metrics.window",
+                status="degraded",
+                started_at=window_start,
+                ended_at=window_start,
+                metadata={
+                    "source": "metrics-window",
+                    "stage": "metrics-window",
+                    "department": "metrics",
+                    "status": "degraded",
+                    "error_count": 1,
+                    "window_start": window_start,
+                    "raw_payloads_sent": False,
+                },
+            ),
+            source_project="HgFinance-Metrics",
+        )
+        artifact_ids.append(ledger.complete(source_run, f"eval-metrics-{number}", result))
+
+    assert len(set(artifact_ids)) == 1
+    with sqlite3.connect(ledger.path) as db:
+        assert db.execute(
+            "SELECT count(*) FROM langsmith_feedback_artifact_sources"
+        ).fetchone()[0] == 2
 
 
 def test_evaluation_run_id_is_stable_and_stale_jobs_are_reclaimable(tmp_path) -> None:

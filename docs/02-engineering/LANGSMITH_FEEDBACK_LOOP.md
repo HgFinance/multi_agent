@@ -33,6 +33,33 @@ First/Metrics metadata
 model, Hermes 동작은 바뀌지 않는다. `PASSED` 뒤에도 hint는 비권위 참고자료일
 뿐이며, 자동 prompt/model 배포는 하지 않는다.
 
+### Evolution Skill 분기
+
+관리자가 1차 승인에서 `SKILL_CREATE` 또는 `SKILL_EVOLVE`로 분류한 artifact만
+benchmark PASS 뒤 Evolution bridge로 전달된다. 다른 유형은 기존 feedback 원장에
+남고 Skill 후보를 만들지 않는다. Evolution은 별도 원장을 새로 만들지 않고 QA
+SQLite의 artifact/decision/benchmark ID를 기존 occurrence provenance에 투영한다.
+
+```text
+QA artifact → QA Hermes → 관리자 1차 승인 + 유형
+  → redacted baseline-evidence admission benchmark PASS
+  → 서로 다른 semantic QA artifact 3건
+  → Qwen2.5-14B-Instruct-AWQ 제안
+  → 결정론적 구조·경계·provenance 검증
+  → Discord exact Skill/provenance hash 2차 승인
+  → 비-LLM control worker 정본 승격
+  → ACTIVE_PENDING_FEEDBACK
+  → 운영 성과 3건 → VERIFIED_IMPROVED / REGRESSION_CANDIDATE
+```
+
+이 admission benchmark는 원문 재실행이나 해결책 효과 검증이 아니라 artifact ID,
+독립 source lineage, redaction, finding, 담당 귀속을 검사하는 진입 게이트다. 첫 승인,
+benchmark PASS, Skill 활성화, 문제 해결 확인은 서로 다른 상태다. 제안
+worker는 정본 skills를 읽기만 하며, control worker만 승인된 hash를 재검증한 뒤
+쓸 수 있다. `scripts/evolution_skills.py report <proposal-id>`와 내부
+`GET /qa/v1/evolution/proposals/{proposal_id}`가 문제 증거, 변경 hash, 승인자,
+활성화, 후속 성과를 한 묶음으로 보여준다.
+
 ### Internal QA Discord boundary
 
 AI Office에는 feedback artifact, 부서 comment, 승인/반려 UI를 노출하지 않는다.
@@ -52,9 +79,11 @@ marker가 일반 self-message/mention 규칙 때문에 유실되지 않는다.
 `Manage Channels` 권한이 없으므로 채널 visibility 정책은 서버 소유자가 관리한다.
 외부 멤버를 guild에 추가할 때는 channel overwrite를 사람 팀원,
 `HERMES-QA`, `HERMES-CEO`로 제한해야 한다. 요청 marker는 `HERMES-QA` self
-identity만 생성할 수 있으며, CEO 봇은 대화 참여만 가능하고 승인 주체가 아니다.
+identity만 생성할 수 있다. QA 전용 채널의 승인·거부 명령은 `qa-hermes`만
+처리하고, CEO를 포함한 다른 프로필은 일반 사용자 질의로 전달하지 않는다.
 사람은 QA Agent 응답에 Reply해
-`승인 <사유>` / `거부 <사유>`를 쓰거나, `승인 feedback-... <사유>` 형식을 쓴다.
+`승인 유형=<개선유형> <사유>` / `거부 <사유>`를 쓰거나,
+`승인 feedback-... 유형=<개선유형> <사유>` 형식을 쓴다.
 artifact ID만 입력하거나 사유를 생략한 결정은 fail-closed로 기록하지 않는다.
 게이트웨이는 `QA_DISCORD_APPROVER_USER_IDS` 또는
 `QA_DISCORD_APPROVER_ROLE_IDS`의 명시적 allowlist를 확인하며 Discord guild owner도
@@ -64,7 +93,11 @@ local administrator로 허용한다. 봇 계정과 미등록 사람은 fail-clos
 승인 직후 상태는 적용 완료가 아니라 `benchmark_status=PENDING`이다.
 
 카드는 원문 prompt/answer 없이 project, `source_run_id`, correlation ID, 관측 구간,
-latency scope, 관측값과 기준값을 증거 참조로 제공한다. Metrics 집계의 `metric_count`는
+latency scope, 관측값과 기준값을 증거 참조로 제공한다. End-to-end 지연 카드는
+Kanban의 완료된 primary task 실행시간으로 `주요 병목`을 정하고,
+`ceo-workflow / observability`를 공동 개선 대상으로 표시한다. `ceo-ingress`는
+타이머의 관측 시작 지점일 뿐 원인 부서로 표시하지 않는다. 단계별 실행시간을
+읽을 수 없으면 담당을 추측하지 않고 `미확정`으로 남긴다. Metrics 집계의 `metric_count`는
 API 호출량으로 과장하지 않고 "집계된 metric trace 수"로 표기한다. QA Hermes는 이
 증거만으로 사실과 추론을 분리하고 담당 부서, 한 가지 조치, 재검증 방법을 제안한다.
 한 Agent 응답은 triggering message의 artifact 한 건만 다루며 다른 대기 카드를 합치지 않는다.
@@ -121,7 +154,8 @@ fallback에서 `true`로 명시되며, `cache_age_seconds`와 `cache_reason`으�
 
 유입이 처리량을 넘으면 업무 흐름을 보호하기 위해 pending 상한(기본 500)을 넘는
 관측 finding을 버린다. Metrics는 개별 event를 approval queue에 넣지 않고 5분당
-최대 1개 artifact로 축약한다. local ledger는 기본 30일 후 정리되고, 외부 LangSmith
+최대 1개 Evals 관측으로 축약하며, 같은 finding의 QA artifact는 6시간 incident
+bucket 안에서 다시 합친다. local ledger는 기본 30일 후 정리되고, 외부 LangSmith
 trace 보존은 workspace retention 정책으로 별도 관리된다.
 
 ### Legacy compatibility
@@ -200,9 +234,10 @@ outage retries with bounded backoff and never affects the business worker.
 `HgFinance-Metrics` is not evaluated one run at a time. The worker closes one
 configurable metric window (default five minutes), reduces at most
 `LANGSMITH_FEEDBACK_METRICS_MAX_RUNS` records to a single p95/error/count
-observation, and creates at most one corresponding Evals artifact per window.
-This keeps high-frequency metrics useful for QA without turning them into a
-per-event approval queue.
+observation, and creates at most one corresponding Evals observation per
+window. Equivalent findings in the same six-hour UTC incident bucket share one
+local QA artifact and one Discord delivery. This keeps high-frequency metrics
+useful for QA without turning them into a repeated approval queue.
 
 The local coordination ledger removes expired jobs, redacted artifacts, and
 their approval decisions after `LANGSMITH_FEEDBACK_RETENTION_DAYS`. LangSmith

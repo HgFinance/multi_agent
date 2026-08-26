@@ -1,9 +1,9 @@
 # Agent Workforce 인사팀 (HR)
 
-> 현재 직원 런타임은 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. 이 기준이 아래의 과거 Modelfile 설명보다 우선한다.
+> 현재 활성 역할과 권한은 [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md), 모델·fallback은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md)가 소유한다.
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-현재 Head 런타임은 Hermes Profile `hr-department` + `openai-codex/gpt-5.6-luna`이며, 승인된 Claude Code를 대체 런타임으로 사용할 수 있다. 직원 5명은 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. `Modelfile`의 `qwen2.5`/`agent-hr` alias는 로컬·역사적 보조 실행용이며 현재 Worker 기준이 아니다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+Hermes Profile은 `hr-department`이고 현재 활성 LLM Worker는 `profile-architecture-worker`다. 구 5개 역할명과 Modelfile alias는 역사적 분류이며 현재 Worker 수의 기준이 아니다.
 현재 실행 상태와 영주님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#44-영주님-ceo-office와-agent-workforce-인사팀)을 따른다.
 
 ## Mission
@@ -54,14 +54,17 @@ hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA
 Round-trip은 아직 검증되지 않았다. asyncpg는 `requirements.txt`에 있으며 Department API Container에서
 같은 Test를 수행해야 한다.
 
-미구현(후속): 위 검증, Eval Runner/Shadow Router 실체 연결(QA·audit 소유), CEO 예산·조직 승인과
-Scorecard 관찰의 실제 API 배선.
+후속: 위 검증, QA Eval Runner에 후보 Runner를 등록하는 교차 프로세스 경로,
+Shadow Router·CEO 예산/조직 승인과 Scorecard 관찰의 실제 API 배선. Eval Runner 자체와
+`audit.eval_runs` 기록 API는 구현돼 있으므로 미구현 항목으로 세지 않는다.
 
 ## Profile Seed
 
 - `supabase/seed.sql`은 HR-00~HR-04 5명의 DRAFT Profile Version을 멱등 등록한다.
   P0는 HR-00·HR-01·HR-04, P1은 HR-02·HR-03이다. 모델 티어는 판단이 산출물인 역할
-  (HR-00·02·03)이 Deep(Bedrock), 결정론 인접 역할(HR-01·04)이 Quick(Ollama)이다.
+  (HR-00·02·03)이 `Deep`, 결정론 인접 역할(HR-01·04)이 `Quick`으로 seed된다. 이는
+  Profile의 역사적 tier label이며 현재 Worker provider/model 선택은
+  [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md)가 소유한다.
 - `prompt_artifact_path`의 Anchor는 직원 코드가 아니라 `hermes/config.yaml`의 실제 personality 이름인
   `display_name`을 사용한다.
 - Supervisor `model` 설정과 개별 직원의 `agent_profile_versions.model_id`는 다른 계층이다. 어느 쪽도

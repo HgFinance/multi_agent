@@ -34,7 +34,7 @@
 | `timescaledb/migrations/` | 시장 시계열 DB Migration |
 | `db/001_execution.sql`~`db/004_seed.sql` | D0~D2 Prototype 전용 SQL |
 | `ai-office/` | 현재 프론트엔드 Demo 실행 경로 |
-| `apps/api/` | Read-only Projection + ADR-0007의 좁은 인증 사용자 PAPER Command BFF |
+| `apps/api/` | Read-only Projection + ADR-0007의 좁은 고정 fixture PAPER Command BFF |
 
 `ai-office/`는 향후 `apps/operator-web/`로 이전할 목표 경로가 있지만, 현재 작업에서는 이름만 바꾸거나 금융 상태를 실제 운영 상태처럼 표현하지 않는다. `ai-office/app/game/`는 시뮬레이션 엔진이므로 커스터마이징 작업에서 수정하지 않는다.
 
@@ -64,7 +64,7 @@
 - `Agent Decision` ≠ `Strategy Signal` ≠ `OrderIntent` ≠ `Order`다.
 - Agent·alpha·전략 Worker·rebalancer가 만든 모든 자동 주문 후보는 결정론적 Risk Engine을 통과한다. Risk Agent는 근거와 권고만 만들고 바인딩 집행·한도 관리는 Risk Engine이 맡는다.
 - `trader-pm-agent`를 포함한 Agent는 주문을 직접 전송하지 않는다. 자동 주문에는 Risk/Compliance Gate가 선행돼야 한다.
-- 예외는 [ADR-0007](docs/02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 `USER_DIRECTIVE`뿐이다. 인증된 사용자가 자기 ACTIVE Fund/Book에 명시한 PAPER 주문은 Agent 주문이 아닌 사용자 권한이며 Risk·alpha·rebalancer의 경제적 veto 대상이 아니다. 그래도 auth, membership, 결정론 parser, cash/position/reservation, lot/tick/TTL, 멱등성, durable PAPER store admission은 우회할 수 없다.
+- 예외는 [ADR-0007](docs/02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 `USER_DIRECTIVE`뿐이다. BFF가 고정 fixture로 선택한 사용자·ACTIVE Fund/Book의 명시적 PAPER 주문은 Agent 주문이 아닌 사용자 지시이며 Risk·alpha·rebalancer의 경제적 veto 대상이 아니다. 그래도 fixture actor map, membership, 결정론 parser, cash/position/reservation, lot/tick/TTL, 멱등성, durable PAPER store admission은 우회할 수 없다. 브라우저 로그인·세션은 만들지 않는다.
 - Hermes는 위 사용자 권한을 갖지 않는다. 원문 명령을 자의로 보충하거나 주문을 만들지 않고 대화 인터페이스로만 전달하며, 결정론 parser와 BFF가 구조화한다. LIVE 주문은 허용하지 않는다.
 - CEO는 주문 제출, 리스크 승인, 원장 수정, NAV 확정, Audit Finding 종결 권한이 없다.
 - `quant-backtest-department`는 Production 승격을 직접 수행하지 않는다. CEO·Risk·QA 승인이 필요하다.

@@ -1,7 +1,7 @@
 # HgFinance Worker 역할·통합 판정
 
-검토일: 2026-08-07 (KST)
-상태: **최종 확정** (단, HR 5 -> 0 통합은 2026-08-07 **제안**이며 QA 독립검증·CEO 승인 대기)
+검토일: 2026-08-26 (UTC)
+상태: **CURRENT REFERENCE / 최종 확정**
 
 이 문서는 직원 수를 늘리거나 줄일 때 사용하는 역할 경계와 통합 판정의 기준이다. 실행 기준은 각 부서의 `hermes/config.yaml`과 `employee_workers.py`의 `WORKER_SPECS`이며, `agent.personalities`의 예전 역할명은 호환용 Alias로만 취급한다.
 
@@ -151,7 +151,6 @@ CEO는 **기준 1을 HR과 같은 방식으로는 통과하지 못한다.** 부�
   Matrix의 compatibility index, runtime 문서의 serving contract, QA 회귀,
   CEO/승인 절차를 함께 통과해야 한다. 이 문서는 모델 이름이나 serving
   default를 다시 정의하지 않는다.
-- **향후 모델 변경**: 후보 모델·adapter의 Golden/Adversarial 회귀와 QA·승인·rollback 절차는 [FINAL_RUNTIME_ARCHITECTURE.md](FINAL_RUNTIME_ARCHITECTURE.md)의 runtime contract와 [WORKER_MODEL_MATRIX.md](WORKER_MODEL_MATRIX.md)의 compatibility index를 따른다. 이 문서는 변경 절차를 반복해서 정의하지 않는다.
 - **Notion**: 부서별 Reporter와 Markdown-to-Notion block 변환기는 어댑터다. 실제 업로드는 `NOTION_TOKEN`과 부서별 DB ID가 설정되고 API 호출이 성공한 경우에만 `upload_succeeded=true`로 본다. Notion은 Projection이며 원본 판정을 소유하지 않는다.
 - **LangSmith**: 일부 부서의 handoff 필드는 존재하지만 기본 tracing은 꺼져 있다. 환경변수·자격증명·DNS·네트워크가 모두 확인되고 민감 필드 마스킹을 통과한 실제 run만 trace 성공으로 본다. 코드나 API Key의 존재만으로 연결 완료로 표시하지 않는다.
 - **Langfuse (2026-08-10 신규)**: HR(07-agent-workforce)이 6개 투자본부 Worker의 유휴 여부를 관측하는 전용 경로다. LangSmith와 이중 계측이며 부서 코드는 겹치지 않는다 — `orchestration/workflows/portfolio_recommendation.py`의 Worker 실행 지점 한 곳(`publish_langfuse_metric`)이 6개 부서 전부를 자동으로 계측하고, HR은 `departments/07-agent-workforce/scorecard/observability.py`(결정론, LLM 없음)로 timestamp만 조회한다. 자격증명이 없거나 조회가 실패하면 `IDLE`이 아니라 `UNAVAILABLE`로 판정한다 — "쉬고 있다"와 "우리가 모른다"를 구분한다. 근거·제거 기준은 [TECH_STACK_DECISIONS.md](TECH_STACK_DECISIONS.md) 11절.
@@ -161,7 +160,7 @@ CEO는 **기준 1을 HR과 같은 방식으로는 통과하지 못한다.** 부�
 
 이 절은 역할 문서와 실행 코드의 드리프트를 막기 위한 명시적 계약이다. 상세 메타데이터의 Source of Truth는 [`departments/risk_qa_worker_profiles.py`](../../departments/risk_qa_worker_profiles.py)이며, 각 부서의 `WORKER_SPECS`가 해당 프로필을 반드시 참조한다. 문서에 적힌 기술은 권한을 확장하지 않는다. Risk·QA Worker의 출력은 `worker-context.v1` advisory이고, 주문·Risk 승인·원장·QA Finding 종결을 직접 수행하지 않는다.
 
-공통 실행 경로는 `allow-listed read/calculation tool → 결정론적 guard/skill → Pydantic context/result 검증 → 필요한 경우 Ollama qwen3:1.7b advisory → trace/replay`다. Risk의 `risk-runner`(옛 `core-risk-worker`)와 Risk Engine 사이에는 RAG·외부 HTTP·재시도형 LLM을 넣지 않는다 — `risk-runner`는 애초에 LLM을 호출하지 않는다. Compliance와 Hallucination만 증거가 필요한 경우 Agentic RAG 경로를 사용하며, PIT·ACL·citation·provenance 검증이 실패하면 `DEGRADED/HOLD/ESCALATE`로 끝낸다.
+공통 실행 경로는 `allow-listed read/calculation tool → 결정론적 guard/skill → Pydantic context/result 검증 → 필요한 경우 Runtime-selected advisory model → trace/replay`다. 정확한 serving 값과 fallback은 [Worker Model Matrix](WORKER_MODEL_MATRIX.md)가 소유한다. Risk의 `risk-runner`(옛 `core-risk-worker`)와 Risk Engine 사이에는 RAG·외부 HTTP·재시도형 LLM을 넣지 않는다 — `risk-runner`는 애초에 LLM을 호출하지 않는다. Compliance와 Hallucination만 증거가 필요한 경우 Agentic RAG 경로를 사용하며, PIT·ACL·citation·provenance 검증이 실패하면 `DEGRADED/HOLD/ESCALATE`로 끝낸다.
 
 ### Risk 본부
 

@@ -14,8 +14,8 @@
 #   sys.path에 넣는 전제라 이미지 안에서도 같은 상대 경로(/app/departments/03-risk/...)를
 #   유지해야 한다. compose에서는 build.context: . / build.dockerfile: departments/03-risk/Dockerfile.
 #
-# ▶ 하나의 Image, command만 바꿔 여러 프로세스를 돌리는 원칙(research와 동일)은 유지하되
-#   지금은 risk-api 하나뿐이다. risk-projection-worker(계획서 6.4)는 넣지 않았다 -
+# ▶ 하나의 Image, command만 바꿔 risk-api와 읽기 전용 risk-mcp를 실행한다.
+#   risk-projection-worker(계획서 6.4)는 넣지 않았다 -
 #   risk_events/redis_event_bus.py에 Publisher만 있고 Consumer 루프가 아직 없다
 #   (2026-08-03 확인). 코드 없는 역할을 컨테이너부터 만들지 않는다.
 
@@ -30,8 +30,8 @@ FROM python:3.12-slim
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
     psycopg2-binary==2.9.12 python-dotenv==1.2.1 redis==7.0.1 \
-    openai==2.35.1 langgraph==0.6.11 \
-    langfuse==4.14.3
+    openai==2.35.1 langgraph==0.6.11 numpy==2.3.2 \
+    langfuse==4.14.3 mcp==1.26.0
 
 WORKDIR /app
 # 저장소 루트 기준 상대 경로를 그대로 유지한다 - api/app.py의 parents[3] 계산과 맞아야 한다.
@@ -40,6 +40,7 @@ COPY departments/03-risk ./departments/03-risk
 # vLLM/Qwen14B coordinates; without them the local Ollama fallback remains.
 COPY departments/worker_model_gateway.py ./departments/worker_model_gateway.py
 COPY departments/qwen_hybrid_runtime.py ./departments/qwen_hybrid_runtime.py
+COPY departments/risk_notion_schema.py ./departments/risk_notion_schema.py
 COPY departments/01-research/config/worker_model_registry.json ./departments/01-research/config/worker_model_registry.json
 COPY benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json ./benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json
 # Risk's employee graph imports these shared runtime contracts directly.

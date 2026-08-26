@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -21,6 +22,17 @@ from zoneinfo import ZoneInfo
 import httpx
 import hashlib
 from pathlib import Path
+
+# The LS HTTP quirk repair is shared with the Risk adapter and apps/api, which
+# already treat this directory as the LS integration path.  Duplicating it here
+# would mean one copy gets fixed and the order lane keeps the broken parser.
+_LS_INTEGRATIONS = (
+    Path(__file__).resolve().parents[2] / "03-risk" / "integrations"
+)
+if str(_LS_INTEGRATIONS) not in sys.path:
+    sys.path.append(str(_LS_INTEGRATIONS))
+
+from ls_http import ls_client  # noqa: E402 - sys.path 조정 뒤
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -204,7 +216,9 @@ class LSPaperBroker:
         client: httpx.Client | None = None,
     ) -> None:
         self.config = config
-        self._client = client or httpx.Client(timeout=config.timeout_seconds)
+        # Not a bare httpx.Client: LS pads `tr_cont_key` with NUL and h11 throws
+        # the whole response away.  Rationale lives in `ls_http`'s docstring.
+        self._client = client or ls_client(timeout=config.timeout_seconds)
         self._token: str | None = None
         self._token_expires_at = datetime.min.replace(tzinfo=timezone.utc)
         self._history_cache_lock = threading.Lock()
@@ -351,6 +365,26 @@ class LSPaperBroker:
                 ambiguous=placement,
             )
         return body
+
+    def get_quote(self, symbol: str) -> dict[str, Any]:
+        """Read a fresh PAPER L1 quote for order admission fallback."""
+        normalized = str(symbol or "").strip()
+        if not normalized:
+            raise LSPaperBrokerError("LS_PAPER_QUOTE_INVALID", "symbol is required")
+        body = self._post_tr(
+            "t1101",
+            {"t1101InBlock": {"shcode": normalized}},
+            path="/stock/market-data",
+        )
+        block = _object(body.get("t1101OutBlock"), "t1101OutBlock")
+        return {
+            "symbol": normalized,
+            "observed_at": datetime.now(timezone.utc),
+            "bid": _decimal(block.get("bidho1"), "bidho1"),
+            "ask": _decimal(block.get("offerho1"), "offerho1"),
+            "bid_size": _decimal(block.get("bidrem1"), "bidrem1"),
+            "ask_size": _decimal(block.get("offerrem1"), "offerrem1"),
+        }
 
     @staticmethod
     def _row_order_datetime(row: dict[str, Any], order_day: date) -> datetime | None:

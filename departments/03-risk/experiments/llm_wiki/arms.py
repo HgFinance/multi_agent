@@ -49,6 +49,31 @@ MODEL = os.environ.get("LLM_WIKI_GENERATE_MODEL", "gpt-4o-mini")
 _BREAKER = CircuitBreaker("llm-wiki-arms", failure_threshold=3, recovery_timeout_seconds=30)
 _CACHE = RedisJsonCache("risk-qa:llm-wiki:generate", ttl_seconds=7 * 24 * 3600)
 
+_LEGAL_VERDICT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["no_breach", "breach", "ambiguous"],
+        },
+        "cited_documents": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "rationale": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "escalate": {"type": "boolean"},
+    },
+    "required": [
+        "verdict",
+        "cited_documents",
+        "rationale",
+        "confidence",
+        "escalate",
+    ],
+}
+
 # 생성 프롬프트 튜닝(2026-08-07, Arm B/C 전용 — 프로덕션 nodes.py PERSONA_PROMPTS는
 # Arm A가 그대로 쓰므로 손대지 않는다): 1차 LLM-judge 평가에서 A(plain RAG)가 B/C보다
 # 높게 나온 원인을 순서대로 고쳤다.
@@ -142,6 +167,49 @@ def _bm25_index() -> BM25Index:
     return BM25Index(documents)
 
 
+def _generation_model_label() -> str:
+    """Return a cache-safe model label without exposing credentials."""
+
+    if (os.environ.get("WORKER_MODEL_BASE_URL") or "").strip():
+        try:
+            from departments.worker_model_gateway import resolve
+
+            binding = resolve("compliance-policy-worker")
+            return f"{binding.provider}:{binding.model}"
+        except Exception:  # noqa: BLE001 - the real call remains fail-closed below.
+            return "worker-gateway:unresolved"
+    return f"openai:{MODEL}"
+
+
+def _call_generation_model(system: str, user: str) -> dict[str, Any]:
+    """Use the production Qwen gateway, retaining OpenAI as a local fallback.
+
+    The compliance worker resolves to the Qwen base model. Hybrid Upgrade v1
+    may select the arithmetic LoRA only when this specific request contains
+    numeric cues; it is never forced onto every legal query.
+    """
+
+    if (os.environ.get("WORKER_MODEL_BASE_URL") or "").strip():
+        from departments.worker_model_gateway import llm_for_worker
+
+        worker_llm, _binding = llm_for_worker("compliance-policy-worker")
+        raw = worker_llm(system, user, json_schema=_LEGAL_VERDICT_SCHEMA)
+        return json.loads(raw)
+
+    from openai import OpenAI
+
+    response = OpenAI().chat.completions.create(
+        model=MODEL,
+        response_format={"type": "json_object"},
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    return json.loads(response.choices[0].message.content)
+
+
 def _generate_verdict(query: str, context: str, system: str | None = None) -> dict[str, Any]:
     """wiki_reader의 bounded context로 verdict JSON을 만든다. 빈 컨텍스트는 fail-closed.
 
@@ -161,33 +229,25 @@ def _generate_verdict(query: str, context: str, system: str | None = None) -> di
 
     system = system or prompts["generate_system"]
     user = f"{prompts['query_label']}:\n{query}\n\n{prompts['docs_label']}:\n{context}"
-    fingerprint = _CACHE.fingerprint(MODEL, system, user)
+    model_label = _generation_model_label()
+    fingerprint = _CACHE.fingerprint(model_label, system, user)
     cached = _CACHE.get(fingerprint)
     if isinstance(cached, dict):
-        emit_metric("llm_wiki_generate_cache_hit")
+        emit_metric("llm_wiki_generate_cache_hit", model=model_label)
         return cached
 
     try:
-        from openai import OpenAI
-
-        response = _BREAKER.call(
-            lambda: OpenAI().chat.completions.create(
-                model=MODEL,
-                response_format={"type": "json_object"},
-                temperature=0,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-        )
-        result = json.loads(response.choices[0].message.content)
+        result = _BREAKER.call(lambda: _call_generation_model(system, user))
     except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
-        emit_metric("llm_wiki_generate_failure", error=type(exc).__name__)
+        emit_metric(
+            "llm_wiki_generate_failure",
+            model=model_label,
+            error=type(exc).__name__,
+        )
         return {
             "verdict": prompts["no_evidence_verdict"],
             "cited_documents": [],
-            "rationale": f"External model unavailable ({type(exc).__name__}); deterministic escalation required.",
+            "rationale": f"Configured model unavailable ({type(exc).__name__}); deterministic escalation required.",
             "confidence": 0.0,
             "escalate": True,
         }

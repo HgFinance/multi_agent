@@ -1,6 +1,6 @@
 # Risk·QA TEST / PRODUCTION Pipeline Runbook
 
-검토일: 2026-08-04  
+검토일: 2026-08-26
 상태: TEST E2E 구현, PRODUCTION 의도적 OFF
 
 ## 1. 실행 프로파일
@@ -8,7 +8,7 @@
 | 프로파일 | 입력 | Head | 직원 | 외부 연결 | 상태 |
 |---|---|---|---|---|---|
 | `test` | synthetic `ResearchPacket v1` | 결정론적 Hermes-shaped stub | 결정론적 Qwen-shaped `LangGraph` Worker | 없음 | 실행 가능 |
-| `production` | 승인된 Research/API/DB 입력 | 실제 Hermes Profile | 승인된 Ollama Worker | DB·Redis·외부 API 필요 | OFF/HOLD |
+| `production` | 승인된 Research/API/DB 입력 | 실제 Hermes Profile | 승인된 Worker Model Gateway 경로 | DB·Redis·외부 API 필요 | OFF/HOLD |
 
 TEST는 운영 성공이 아니다. 계약, Graph topology, handoff, trace/replay, fallback을 검증하며 실제 주문·Risk 승인·QA PASS·원장 변경을 수행하지 않는다.
 
@@ -103,7 +103,7 @@ PRODUCTION mode는 다음 값을 반환하고 Worker를 실행하지 않는다.
 다음 조건을 모두 별도 acceptance로 통과하기 전까지 Production flag와 credential을 만들지 않는다.
 
 1. 실제 ResearchPacket v1 조회와 PIT/ACL 검증
-2. 실제 Hermes Head adapter와 Ollama Worker timeout/retry/cost 검증
+2. 실제 Hermes Head adapter와 승인된 Worker Model Gateway timeout/retry/cost 검증
 3. Risk deterministic gate와 QA Evidence Gate golden/replay 검증
 4. 실제 정책 corpus 교체 및 citation/contradiction golden set 통과
 5. Supabase migration/RLS, Redis Stream, Event idempotency/recovery 통합 검증

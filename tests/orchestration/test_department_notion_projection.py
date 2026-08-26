@@ -3,6 +3,7 @@ import pytest
 from orchestration.adapters.department_notion_projection import (
     DepartmentNotionProjection,
     DepartmentNotionProjectionError,
+    _NotionTransport,
 )
 
 
@@ -16,6 +17,7 @@ class FakeTransport:
         self.create_calls = 0
         self.updated = []
         self.appended = []
+        self.replaced = []
 
     def database_schema(self, database_id):
         self.schema_calls += 1
@@ -37,6 +39,37 @@ class FakeTransport:
     def append_blocks(self, page_id, children):
         self.appended.append((page_id, children))
         return {"id": page_id}
+
+    def replace_blocks(self, page_id, children):
+        self.replaced.append((page_id, children))
+
+
+def test_notion_transport_replaces_existing_body_without_recreating_page():
+    class RecordingTransport(_NotionTransport):
+        def __init__(self):
+            super().__init__("token")
+            self.calls = []
+
+        def _request(self, method, path, body=None):
+            self.calls.append((method, path, body))
+            if method == "GET":
+                return {
+                    "results": [{"id": "old-1"}, {"id": "old-2"}],
+                    "has_more": False,
+                }
+            return {"id": "page-1"}
+
+    transport = RecordingTransport()
+    children = [{"object": "block", "type": "paragraph", "paragraph": {}}]
+
+    transport.replace_blocks("page-1", children)
+
+    assert transport.calls == [
+        ("GET", "blocks/page-1/children?page_size=100", None),
+        ("PATCH", "blocks/page-1/children", {"children": children}),
+        ("PATCH", "blocks/old-1", {"archived": True}),
+        ("PATCH", "blocks/old-2", {"archived": True}),
+    ]
 
 
 def _trading_task():
@@ -137,6 +170,8 @@ def test_correction_upserts_existing_department_page():
     assert result.status == "updated"
     assert result.page_id == "existing-page"
     assert "248250" in str(transport.updated[0][1])
+    assert len(transport.replaced) == 1
+    assert "248250" in str(transport.replaced[0][1])
     assert not transport.appended
     assert not transport.created
 
@@ -310,3 +345,54 @@ def test_risk_projection_uses_explicit_risk_database():
     assert records[0]["target"] == "NOTION"
     assert records[0]["delivery_status"] == "DELIVERED"
     assert records[0]["readback_status"] == "NOT_CHECKED"
+
+
+def test_risk_projection_prefers_complete_result_and_human_labels():
+    transport = FakeTransport(
+        {
+            "제목": {"type": "title"},
+            "리스크 검토 요약": {"type": "rich_text"},
+            "상세 검토 보고서": {"type": "rich_text"},
+            "작성 시각": {"type": "date"},
+        }
+    )
+    projection = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x", "NOTION_RISK_DB": "risk-db"},
+        transport=transport,
+    )
+    task = _trading_task()
+    task.update(
+        {
+            "assignee": "risk-management",
+            "title": "삼성전자 포지션 리스크 검토",
+            "result": "### 종합 위험도\nMODERATE\n\n완전한 리스크 검토 본문입니다.",
+            "run_metadata": {
+                "summary": "짧은 전달용 요약",
+                "analysis_mode": "fast_advisory",
+                "rating": "MODERATE",
+                "portfolio_authoritative": False,
+                "order_authorized": False,
+                "worker_session_id": "must-not-be-projected",
+            },
+        }
+    )
+
+    result = projection.project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    _, props, children = transport.created[0]
+    assert props["제목"]["title"][0]["text"]["content"].startswith(
+        "t_trade1 · 삼성전자"
+    )
+    assert "완전한 리스크 검토 본문" in str(
+        props["리스크 검토 요약"]
+    )
+    assert "짧은 전달용 요약" not in str(props)
+    rendered = str(children)
+    assert "리스크 부서 검토 결과" in rendered
+    assert "분석 방식" in rendered
+    assert "포트폴리오 권위 데이터" in rendered
+    assert "Department Task Result" not in rendered
+    assert "Original Instruction" not in rendered
+    assert "worker_session_id" not in rendered
+    assert "workflow_root_task_id" not in rendered

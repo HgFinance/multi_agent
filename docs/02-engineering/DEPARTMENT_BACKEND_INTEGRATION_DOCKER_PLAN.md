@@ -290,7 +290,7 @@ DB 권한:
 | Container | 책임 |
 |---|---|
 | `market-stream-worker` | LS WebSocket 수신, Normalize, Sequence·Stale 검사 |
-| `research-batch-worker` | 시세·공시목록·재무·Reference·Corporate Action 수집 |
+| `research-batch-worker` | 시장 시세·거래가능성·Calendar·DQ·Reference 수집. 공시·재무·뉴스·거시는 요청형 MCP 소유 |
 | `market-api` | Snapshot, Bar, Microstructure, Breadth, DQ Read API |
 | `research-api` | Research Packet, Document, Evidence, Point-in-Time Query |
 | `research-hermes` | 조사 계획, Evidence 요약, Research Packet 초안 |

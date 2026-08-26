@@ -1,16 +1,17 @@
 # 헤지펀드 디지털 직원 채용 및 Agent Profile 설계서
 
-> The dated roster below is a historical profile snapshot. Current worker counts and execution status are owned by `departments/*/hermes/config.yaml`, worker registries, and [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md).
-
-> **Current snapshot (2026-08-25 재검토)**: 실제 실행 기준은 8개 Hermes Head, 10개 LLM Worker, 5개 결정론 runner다. 총 실행 역할은 23개이며 Trading은 1개(LLM 0 + `desk-runner`), Accounting/Portfolio는 2개(LLM 1 + `back-office-runner`)다. Head는 `openai-codex/gpt-5.6-luna`, LLM Worker 운영 기본은 Worker Model Gateway 뒤의 Qwen2.5-14B-Instruct-AWQ이고 Ollama `qwen3:1.7b`는 local fallback이다. 아래 논리적 역할·Specialist Agent·LangGraph Node는 채용 후보·legacy taxonomy이며 현재 Worker 수·실행 여부의 기준이 아니다. 현재 역할·trigger·tool은 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md)와 executable registry를 따른다.
-
-> 2026-08-24 전사 실행 계층 재확정: LLM Registry는 CEO 1·HR 1·Research 2·Trading 0·Risk 1·Quant/Backtest 2·Accounting/Portfolio 1·QA 2(총 10)이고, 결정론 runner 5개(`desk-runner`/`risk-runner`/`qa-runner`/`back-office-runner`/`ceo-runner`)를 포함한 총 직원 수는 23명이다. 기존 RSK/QAA/RES/TRD/QNT/ACC Profile ID는 역할·권한·평가의 레거시 식별자로 보존하며(`workforce.agent_profiles`에는 `RETIRED`로 등재), 실행 프로세스는 각 Profile의 `workers`, `runtime_personalities`와 결정론 Worker Registry를 따른다.
+> 아래 roster는 과거 채용·역할 taxonomy다. 현재 Worker 수·실행 상태·모델은
+> `departments/*/hermes/config.yaml`, executable registry,
+> [Current Architecture](../CURRENT_PROJECT_ARCHITECTURE.md),
+> [Worker Role Boundaries](../02-engineering/WORKER_ROLE_BOUNDARIES.md)와
+> [Worker Model Matrix](../02-engineering/WORKER_MODEL_MATRIX.md)가 소유한다. 이 문서는
+> 현재값을 다시 복사하지 않는다.
 
 > **감축 전수조사 이력** (`WORKER_ROLE_BOUNDARIES.md`와 `supabase/migrations/20260824000100_workforce_roster_full_reconcile.sql` 대조, 2026-08-24): 2026-08-06 Trading LLM 6→2명 강등(42명 규모), 이어 Risk·QA 강등(38명), 2026-08-07 Accounting 8→1명 강등(32명)과 HR 5→1명 통합(25명), 2026-08-10~11 Trading Bull/Bear 폐지(2→0명, 21명)와 Research 6→2명·Quant 7→2명 축소(19명 경유)를 거쳐 현재 10개 LLM Worker + 5개 결정론 runner로 정착했다. 강등된 역할의 업무는 전부 결정론 모듈(`risk_engine.py`, `evidence_qa_engine.py`, `ledger.py`, `broker_rules.py` 등)로 흡수됐으며 삭제가 아니라 서술 계층만 없앤 것이다 — 판정 로직 자체는 그대로 남아있다.
 
 부서장 Hermes와 LangGraph 직원의 실행 경계는 [Department Worker Graph Architecture](../02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
 
-> 문서 상태: Agent Organization v1.4
+> 문서 상태: HISTORICAL ROLE CATALOG / TARGET PROFILE REFERENCE v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 대상 조직: CEO 에이전트 + CEO 직속 Agent Workforce 인사팀 + 6개 본부  
 > 목적: 어떤 디지털 직원을 채용하고, 어떤 Skill과 Tool 권한을 부여하며, 각 직원이 실제 업무를 어떻게 수행할지 정의  
@@ -644,7 +645,7 @@ Agent Workforce 인사팀은 6개 본부의 채용 요청을 중앙 관리한다
 ### RSK-00 리스크본부장 / Chief Risk Officer Agent
 
 - **채용 등급·Runtime:** P0, 독립 Hermes Supervisor 1명.
-- **미션:** 모든 주문과 Portfolio 위험을 독립 심사하고 승인, 축소, 거부 또는 보호 조치를 결정한다.
+- **미션:** 모든 자동 전략 주문 후보와 Portfolio 위험을 독립 심사하고 승인, 축소, 거부 또는 보호 조치를 결정한다. 로컬 fixture `USER_DIRECTIVE`의 별도 admission은 이 역할 taxonomy 밖이다.
 - **필수 Skill:** `ORG-01~05`, `RSK-01~06`, Risk Budget, Model Limitation, Independent Challenge.
 - **입력·Tool:** Order Intent, Portfolio Exposure, Market/Liquidity State, Compliance Result, Stress와 Margin 결과.
 - **업무 수행:** 결정론적 Risk Engine 결과를 먼저 확인하고 필요한 전문 Risk Agent를 호출한다. 단순 Rule 위반은 자동 거부하고, 경계 사례는 근거를 기록해 `APPROVE/RESIZE/REJECT`한다. 장중 Breach 시 LLM 응답을 기다리지 않고 Control Service의 보호 상태를 우선 적용한다.

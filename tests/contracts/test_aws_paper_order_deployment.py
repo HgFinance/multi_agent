@@ -109,7 +109,7 @@ def test_portfolio_bff_stays_fixture_only_beside_private_operational_data() -> N
     assert environment["APP_ENV"] == "production"
     assert environment["PORTFOLIO_DATA_MODE"] == "production"
     assert environment["PORTFOLIO_AUTH_MODE"] == "fixture"
-    assert environment["PORTFOLIO_AUTH_REQUIRED"] == "false"
+    assert "PORTFOLIO_AUTH_REQUIRED" not in environment
     assert environment["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
     assert environment["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
     assert environment["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"].startswith(

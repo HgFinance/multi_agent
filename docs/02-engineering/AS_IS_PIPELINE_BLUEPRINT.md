@@ -6,6 +6,12 @@
 > **방법론**: 기존 문서/README를 근거로 쓰지 않고, 실제 코드·compose·마이그레이션의 실행 흐름을 역추적했다. 모든 주장은 `파일:줄` 근거를 단다. 문서와 코드가 어긋나는 곳은 코드를 사실로 채택하고 "드리프트"로 표기했다.
 > **범위**: `multi_agent/` 저장소 전체 (부서 8개, apps, orchestration, 데이터 플레인, 인프라, ai-office 프런트엔드)
 
+> **현행 참조:** 이 본문은 2026-08-13 snapshot을 보존한다. 이후 변경된 단일
+> `/ui/ceo/ask`·Mandate 전달, 요청형 Research MCP, Qwen AWQ 운영 모델, 자동 전략
+> 레인과 별도인 fixed-fixture LS PAPER directive는
+> [Current Architecture](../CURRENT_PROJECT_ARCHITECTURE.md)가 소유한다. 아래의
+> 당시 결함·컨테이너·모델·브로커 주장을 현재값으로 사용하지 않는다.
+
 ---
 
 ## 목차
@@ -33,16 +39,16 @@
 | 층 | 상태 | 한 줄 판정 |
 |---|---|---|
 | **전략 공장 루프** (리서치 발굴→실험 제안→Gate 0→백테스트→판정→교훈 환류) | ✅ **완결 가동** | 사람 0명으로 15분 주기 자동 순환. 저장소에서 유일하게 끝까지 닫힌 E2E 루프 |
-| **사용자 질의 루프** (CEO ask→루트 카드→부서 팬아웃→QA→합성→응답) | ✅ 가동 (제약 있음) | 동작하나 mandate 스냅샷이 실전 경로에서 유실되는 등 결함 존재 (§5.7) |
-| **시장 데이터 파이프라인** (실시간 호가/체결 + 배치 수집 + 보존/아카이브) | ✅ 가동 | 2,595종목 실시간 + 일 21개 배치 잡. 유니버스 이원화(350/전체)는 해소됨 |
-| **주문·리스크·회계 실행 계층** | 🔴 **단절** | 도메인 모델·원장·아웃박스는 정교하게 완성됐으나, **주문 제출 경로를 잇는 코드가 존재하지 않는다** (§8.5 D1–D5) |
+| **사용자 질의 루프** (CEO ask→루트 카드→부서 팬아웃→QA→합성→응답) | ✅ 가동 (제약 있음) | 당시 mirror에서 mandate snapshot이 유실되는 결함이 있었음 (§5.7, 현행 해결) |
+| **시장 데이터 파이프라인** (실시간 호가/체결 + 배치 수집 + 보존/아카이브) | ✅ 가동 | 당시 2,595종목 실시간 + 일 21개 배치 잡 |
+| **주문·리스크·회계 실행 계층** | 🔴 **당시 자동 전략 레인 단절** | D1–D5는 2026-08-13 자동 전략 경로 감사 결과이며 이후 추가된 사용자 PAPER 레인을 설명하지 않음 |
 | **관측·보안·IAM** | 🟡 부분 | HS256 서비스 토큰은 라우트 ~6개만 보호, Prometheus/OTel은 계측만 있고 수집기 없음, `platform_iam`은 완성됐지만 실행 주체 없음 |
 
 핵심 구조 사실 세 가지:
 
 1. **이 저장소에는 자체 에이전트 루프가 없다.** 에이전트 세션·칸반 보드·워커 스폰은 전부 외부 오픈소스 **NousResearch `hermes-agent` CLI**가 소유한다. 저장소가 기여하는 것은 그 주변의 (a) 루트 카드를 만드는 FastAPI BFF, (b) 카드 본문에 심는 workflow-scope 계약, (c) 종료 이벤트에 반응하는 결정론적 supervisor, (d) 죽은 부모 카드를 강제 종료하는 watchdog이다 (`orchestration/adapters/ceo_supervisor.py:1-7`).
 2. **부서 간 계약의 실체는 HTTP가 아니라 DB 행이다.** 리서치→퀀트 핸드오프는 `research.experiment_proposals` → `quant.hypotheses` → `research.experiment_outcomes`라는 세 테이블의 상태 전이이고 (§6.3), 체결→회계는 `execution.outbox` → Redis 스트림 → 원장 분개다 (§8.4). 칸반 카드는 계약이 아니라 **디스패치 수단**이다.
-3. **LLM은 3계층으로 분리돼 있다.** 부서장(Hermes head) = OpenAI Codex `gpt-5.6-luna`, 대안 경로 = 호스트 프록시 경유 Claude, 직원 워커(LangGraph) = Ollama `qwen3:1.7b`(개발) 또는 vLLM `qwen2.5-14b-instruct-awq`(AWS GPU). 백테스트 판정·리스크 게이트·QA 판정은 **LLM이 아니라 결정론적 코드**다.
+3. **당시 LLM은 3계층으로 분리돼 있었다.** 부서장(Hermes head), 호스트 프록시 경유 Claude 대안 경로, Ollama 또는 vLLM FP8 직원 Worker다. 현재 모델과 fallback 좌표는 [Worker Model Matrix](WORKER_MODEL_MATRIX.md)가 소유한다. 백테스트 판정·리스크 게이트·QA 판정은 **LLM이 아니라 결정론적 코드**다.
 
 ---
 
@@ -138,7 +144,7 @@ flowchart TB
 
 ### 3.2 서비스 전체 표 (기본 기동 기준)
 
-**루트 compose (28개 정의, 기본 기동 25개):**
+**루트 compose (29개 정의, 기본 기동 25개):**
 
 | 서비스 | 이미지/빌드 | 커맨드 | 포트 | 역할 |
 |---|---|---|---|---|
@@ -166,6 +172,7 @@ flowchart TB
 | `card-watchdog` | `hedgefund-factory:latest` | `card_watchdog.py --loop --interval-min 3` | — | 죽은 부모 카드 release |
 | `hermes-dashboard` | hermes 이미지 | `dashboard :9119` | `127.0.0.1:9119` | **profiles 게이트 — 기본 미기동** |
 | `paper-search-mcp` `youtube-transcript-mcp` | uv 이미지 | uvx | — | **profiles 게이트 — 기본 미기동** |
+| `ui-bff` | factory 이미지 | uvicorn (레거시) | — | **profiles 게이트 — 레거시, 그대로 켜면 고장** (§12) |
 
 † `factory-experiment-worker`/`card-watchdog`은 `build:` 없이 `hedgefund-factory:latest`를 참조 — `factory-autopilot`이 같은 호스트에서 먼저 빌드해야만 뜬다 (`docker-compose.yml:1205, 1235`).
 
@@ -196,7 +203,7 @@ flowchart TB
 | Hermes 프로필 경로 | `${USERPROFILE}/.hermes-<부서>` (`override:29-106`) | `/home/ubuntu/.hermes/profiles/<부서>` | **Hermes 자체가 없음** |
 | dispatcher 이미지 | `Dockerfile.agent-runtime` 빌드 (quant-py, agent-reach, gh, mcporter 포함) | `nousresearch/hermes-agent:latest` **맨몸** | — |
 | dispatcher 메모리 | 8g + `--max 3` 스폰 캡 | **1g** (`docker-compose.yml:1081` — 과거 OOM 유발값) | — |
-| 직원 워커 LLM | Ollama `qwen3:1.7b` (8초 타임아웃) | 현재 vLLM 오버레이는 `qwen2.5-14b-instruct-awq`; 당시 FP8 설명은 폐기 | — |
+| 직원 워커 LLM | Ollama `qwen3:1.7b` (8초 타임아웃) | 당시 vLLM `qwen2.5-14b` FP8 | — |
 | 서비스 구성 | 전체 스택 | 전체 스택 | 7개만: portfolio-bff/worker, trading-api/relay, accounting-api/consumer, 전용 redis |
 | 부서 에이전트 질의 | 가능 | 가능 | `/{부서}/agent/ask` **503 고정** (`deploy/eb/docker-compose.yml:20-22`) |
 | NAV 계산 | 가능 | 가능 | **불가** (market-api 부재로 마크 없음, `deploy/eb/README.md:100-108`) |
@@ -231,20 +238,19 @@ Hermes는 이 저장소의 코드가 아니다. 업스트림 **NousResearch `her
 
 부서 게이트웨이 8개가 `sleep infinity`인 이유: 업스트림 s6가 Discord 게이트웨이를 소유하게 하되, 임베디드 디스패치는 전부 끈다(`HERMES_KANBAN_DISPATCH_IN_GATEWAY=false` ×9). 게이트웨이의 `/opt/data` 자체가 프로필이라 `profiles/` 하위 디렉터리가 없어 스폰이 `skipped_nonspawnable`로 떨어지기 때문 (`docker-compose.yml:678-686`).
 
-### 4.3 LLM 3계층
+### 4.3 당시 LLM 3계층
 
 | 플레인 | 프로바이더 | 모델 | 근거 |
 |---|---|---|---|
 | 부서장 (Hermes head) | `openai-codex` | `gpt-5.6-luna` (`https://chatgpt.com/backend-api/codex`) | 8개 프로필 전부, 예: `departments/00-ceo-office/hermes/config.yaml:8-11` |
 | 부서장 대안 | `anthropic-claude-code` | sonnet/opus/haiku 별칭 | `docker-compose.claude.yml:28-41` + 호스트 프록시 `scripts/claude_code_proxy.py` (`hermes → host.docker.internal:8787 → claude -p`). `ANTHROPIC_API_KEY`는 **의도적으로 미주입** — 종량 과금 방지 (`claude.yml:19-24`) |
-| 직원 워커 (LangGraph) | `ollama` (dev) / `vllm-openai` (AWS) | `qwen3:1.7b` / `qwen2.5-14b-instruct-awq` | `departments/worker_model_gateway.py:163-201` — `WORKER_MODEL_BASE_URL` 유무로 분기 |
+| 직원 워커 (LangGraph) | `ollama` (dev) / `vllm-openai` (AWS) | `qwen3:1.7b` / 당시 `qwen2.5-14b` FP8 | snapshot 당시 compose와 Worker gateway |
 
 프로바이더는 compose에 하드코딩하지 않고 `/opt/data/config.yaml`의 `provider:`와 `auth.json`이 결정한다 (`docker-compose.yml:708-711`).
 
-**모델 플레인 (GPU 오버레이)** — `docker-compose.model.yml`:
-- vLLM은 digest-pinned `vllm/vllm-openai` 이미지, `127.0.0.1:8000` 루프백 전용, `--model /models/Qwen2.5-14B-Instruct-AWQ --served-model-name qwen2.5-14b-instruct-awq --max-model-len 4096 --gpu-memory-utilization 0.85 --kv-cache-dtype fp8 --enable-lora --max-loras 4` (`docker-compose.model.yml`), `HF_HUB_OFFLINE=1` (무단 다운로드 방지), healthcheck start_period 600s. 기동·점검은 `scripts/model_plane/vllm_runtime.sh`만 사용한다.
-- 모델 준비 스크립트: `scripts/model_plane/fetch_base_model.sh` (S3→EBS, RedHatAI FP8 사전 양자화 체크포인트), `quantize_fp8.py` (llm-compressor, 파이프라인 검증용 1.5B), `model_manifest.py` (파일별 sha256 + 복합 digest).
-- `WORKER_MODEL_*`/`VLLM_*`/`HGF_MODEL_DIR`는 모델 오버레이와 `.env.example`에 선언한다. 오버레이를 잊은 로컬 개발은 의도적으로 Ollama fallback이지만 AWS 운영은 `vllm_runtime.sh check`가 Compose·이미지·네트워크·모델 alias 불일치를 실패시킨다. arithmetic LoRA는 vLLM에 로드되지만 레지스트리에서 explicit route로만 선택되며 FinanceBench HOLD를 품질 승격으로 우회하지 않는다.
+이 절은 당시 구조 기록만 보존한다. 현행 base model, context length, GPU utilization,
+KV cache, LoRA 및 fallback 값은 [Worker Model Matrix](WORKER_MODEL_MATRIX.md)를 따르며
+여기에 복제하지 않는다.
 
 ### 4.4 프로필 체계
 
@@ -268,7 +274,7 @@ qa-department ← 06-ai-qa-audit     hr-department ← 07-agent-workforce
 
 의도: dispatcher의 유일한 라우팅 손잡이가 assignee→프로필이므로, **읽기전용 창구를 별도 프로필로 두는 것 = 큐·워커풀 분리**다 (`canonical_profiles.py:36-41`). CEO SOUL이 라우팅 규칙을 명시한다: 사용자 읽기 질의 → `research-liaison`/`quant-liaison`, 공장 사이클/격상 작업 → 본체 프로필 (`departments/00-ceo-office/hermes/SOUL.md:37-53`).
 
-**실제로 구현된 절반 — MCP surface**: 같은 이미지·같은 코드에서 `RESEARCH_MCP_SURFACE=liaison`이면 공장 제출·수식 생성·Worker 실행/진단 도구를 서버 기동 시 제거하고, 제거 실패 시 **기동을 거부**한다. 퇴역한 `run_research_packet`은 full/liaison 양쪽 모두에 등록되지 않는다. 루프 차단: `origin=factory` 카드에는 `MISROUTED` 응답 규칙 (RFC 3834식, `hermes-liaison/SOUL.md:23-28` ↔ `ceo_workflow_scope.py:281-284`의 `origin=user-query` 도장).
+**실제로 구현된 절반 — MCP surface**: 같은 이미지·같은 코드에서 `RESEARCH_MCP_SURFACE=liaison`이면 `run_research_packet`, `factory_submit_leads`, `factory_submit_proposal` 3개 도구를 서버 기동 시 제거하고, 제거 실패 시 **기동을 거부**한다 (`departments/01-research/api/mcp_server.py:423-461`). reports 볼륨도 읽기전용 마운트 (`docker-compose.yml:637-639`). 루프 차단: `origin=factory` 카드에는 `MISROUTED` 응답 규칙 (RFC 3834식, `hermes-liaison/SOUL.md:23-28` ↔ `ceo_workflow_scope.py:281-284`의 `origin=user-query` 도장).
 
 **미구현된 절반 — 프로필**: `hermes-liaison/`에는 SOUL.md만 있고 config.yaml이 없다. sync/install 스크립트 대상 목록(8개)에도, dispatcher 프로필 마운트(8개)에도 없다. 따라서 **로컬에서 `research-liaison`으로 배정된 카드는 non-spawnable로 영구 스킵**된다. 추가로 `hermes_boundary.py:498`의 self-check(`PROFILE_CONTAINERS == CANONICAL_PROFILES`)가 liaison 추가로 **현재 실패 상태**이고, `orchestration/skill_contract.py:13-24`는 8개 이름을 중복 하드코딩해 liaison을 "unknown profile"로 거부한다. → 진행 중(untracked) 작업.
 
@@ -323,11 +329,11 @@ sequenceDiagram
     B-->>U: 부서별 진행/요약/판정
 ```
 
-### 5.2 입구의 이중 등록 — mirror가 이긴다
+### 5.2 당시 입구의 이중 등록 — mirror가 이긴다
 
-`apps/api/main.py:186-187`에서 `ceo_mirror_router`(prefix `/ui/ceo`)가 `ceo_router`보다 먼저 등록된다. 둘 다 `POST /ui/ceo/ask`를 선언하므로 FastAPI 등록 순서상 **`mirror_ask`(`ceo_mirror_api.py:149-173`)가 실전 핸들러**이고 `ceo.ceo_query`(`ceo.py:408`)는 함수 호출로만 도달한다(의도된 구성, `main.py:183-185`).
+당시 `apps/api/main.py:186-187`에서 `ceo_mirror_router`(prefix `/ui/ceo`)가 `ceo_router`보다 먼저 등록됐다. 둘 다 `POST /ui/ceo/ask`를 선언해 FastAPI 등록 순서상 **`mirror_ask`가 실전 핸들러**이고 `ceo.ceo_query`는 함수 호출로만 도달했다.
 
-mirror 계층의 역할 = 멱등/중복 차단: `execute_once`(`ceo_mirror.py:485-540`)가 Redis(`hf:ui-ceo-mirror:v1` 스트림, dedupe TTL 7일)로 `request_id`를 클레임한다. 이미 응답이 있으면 재생, 진행 중이면 최대 3초 대기 후 `request_in_progress`. ⚠️ 이때 `HTTPException(status_code=202)`를 **raise**하므로 클라이언트는 `{"detail":"request_in_progress"}`만 받고 `task_id`가 없다 (`ceo_mirror_api.py:171-172`).
+mirror 계층은 Redis(`hf:ui-ceo-mirror:v1`)에서 `request_id`를 클레임해 완료 응답을 재생하고 진행 중 요청의 중복 실행을 막았다. 현행은 중복 route를 제거한 단일 `/ask` 구현이므로 [Current Architecture](../CURRENT_PROJECT_ARCHITECTURE.md)의 일반 CEO 질의 흐름을 따른다.
 
 ### 5.3 루트 카드와 상관키
 
@@ -380,9 +386,12 @@ wake-up당 `decide_supervisor`(`:316-503`)가 **정확히 하나의 액션**을 
 
 종료 관찰자(비구속): `CeoNotionProjection`(합성 → Notion 페이지, 멱등키 `ceo-synthesis:<root>:<task>`) + `QaAuditProjection`(§9.3).
 
-### 5.7 결함 — 실전 경로에서 mandate가 유실된다
+### 5.7 당시 결함 — mirror에서 Mandate snapshot 유실
 
-`CeoAsk.fund_id`(`ceo.py:98`)는 mirror 경로에서 **조용히 탈락**한다 — `mirror_ask`가 `AgentAsk(query, request_id)`만 재구성하므로 (`ceo_mirror_api.py:58`) `fetch_current_mandate_by_fund`는 항상 `None`을 받고, **실전 경로에서는 루트 body에 mandate 스냅샷이 실리지 않는다**. `Depends(optional_current_user)`도 직접 함수 호출이라 실행되지 않는다.
+당시 `mirror_ask`가 `query`와 `request_id`만 재구성해 `CeoAsk.fund_id`를 버렸고,
+실전 route에서는 Mandate snapshot이 루트 body에 실리지 않았다. 이 결함은 이후
+단일 `/ask` 구현과 actor/Fund 전달로 해결됐다. 현행 계약은
+[Discord/Web CEO Mirroring](DISCORD_WEB_CEO_MIRRORING.md)이 소유한다.
 
 ### 5.8 card-watchdog — 그래프 정체 해소기
 
@@ -531,7 +540,10 @@ flowchart LR
 
 ## 7. 흐름 3 — 시장 데이터 파이프라인
 
-### 7.1 수집 컨테이너 4종
+### 7.1 당시 수집 컨테이너 4종
+
+아래 표는 snapshot 당시 구성이다. 현행 비시장 정성정보는 요청형 MCP로 전환됐으며
+[MCP On-demand Architecture](MCP_ONDEMAND_ARCHITECTURE.md)가 그 경계를 소유한다.
 
 | 컨테이너 | 대상 | 목적지 | 유니버스 |
 |---|---|---|---|
@@ -540,11 +552,11 @@ flowchart LR
 | `ls-news` | LS NWS 푸시 | Supabase (제목/메타만 — 본문은 ToS 보류) | — |
 | `batch-collectors` | 아래 스케줄 전체 | 양쪽 DB + `market-archive/` | — |
 
-### 7.2 배치 스케줄 (KST, `collector_scheduler.py:85-291`)
+### 7.2 당시 배치 스케줄 (KST, `collector_scheduler.py:85-291`)
 
 - **주기**: disclosure 10분(07–19시), breadth 10분(08:30–16:10), derivatives 10분(08:40–17:00), bluesky-watch 60분
 - **일별**: 06:50 market-archive → 07:05 universe-restrictions → 07:10 retention+data-steward → 07:15 research-data-steward → 07:40 capability-audit → **15:50 chart-daily(350종목, 최근 7일)** → 16:05 vkospi → 16:06 style-index → 16:20 calendar → 16:30 label-snapshot → 18:00 packet-outcome → 18:10 financial → 18:30 corporate-action → 18:50 cashflow → 19:00 company-profile → **21:00 chart-daily-universe(전 종목, 3시간 타임아웃)**
-- **꺼진 잡 (주석 처리, 소비자는 생존)**: `macro`(→ MCP `external_macro`로 대체), `document-archive`(RAG 코퍼스 동결 원인), `geopolitical`(분석기는 MCP로 여전히 서빙되며 점점 낡은 값을 반환)
+- **꺼진 잡 (주석 처리, 소비자는 생존)**: `macro`, `document-archive`, `geopolitical`
 
 **350 vs 전체의 진상**: 일봉은 두 잡이 다 받는다. 15:50 잡은 watchlist 350(빠른 마감 후 갱신), 21:00 잡은 Supabase `reference.instruments` 조인으로 **상장폐지 포함 전 종목**(생존 편향 회피, `chart_backfill_collector.py:253-274`). 과거 350개만 쌓이던 사건은 21:00 잡이 없어서였고, rate limit 1req/s × ~3,900종목 ≈ 2시간이 분리 배치의 이유 (`collector_scheduler.py:114-134`).
 
@@ -570,7 +582,11 @@ flowchart LR
 
 ## 8. 흐름 4 — 주문·리스크·회계
 
-**요지: 도메인 모델은 저장소에서 가장 정교하지만, 흐름을 잇는 코드가 없다.** 아래 다이어그램에서 ❌가 단절 지점이다.
+**이 절은 snapshot 당시 자동 전략 레인만 감사한 기록이다.** 이후 추가된 fixed-fixture
+사용자 PAPER authority는 [ADR-0007](adr/0007-authenticated-user-paper-directive-authority.md)이
+소유하며 이 절의 D1–D5를 그대로 적용하지 않는다.
+
+당시 요지: 도메인 모델은 정교했지만 자동 전략 흐름을 잇는 코드가 없었다.
 
 ```mermaid
 flowchart LR
@@ -611,7 +627,7 @@ flowchart LR
 
 `apply_fill` → 같은 트랜잭션에서 `execution.outbox` enqueue → `trading-outbox-relay`가 Redis `trading_events`로 XADD(`SENT`) → `accounting-ledger-consumer`가 `SENT`만 소비 → 분개 → T+2 결제 → 프로젝션 → `outbox_consumed` ack(분개 커밋 후). 실패 설계: publisher 없으면 drain 거부, 재시도 12회, DLQ에 last_error 보존, 마크 부재는 NAV만 유예하고 분개는 진행.
 
-### 8.5 단절 지점 (실측 확정)
+### 8.5 당시 자동 전략 레인의 단절 지점
 
 | # | 결함 | 근거 |
 |---|---|---|
@@ -621,13 +637,15 @@ flowchart LR
 | **D4** | 내구 Intent 삽입이 요구하는 소유 행 사슬(`strategy.versions(PAPER)`, `strategy.signals`, 활성 funds/books…)을 만드는 코드가 self-check 픽스처뿐 | `store_postgres.py:156-242, 953` |
 | **D5** | 전략 스위치보드가 프로세스 메모리 싱글턴 — 재시작 시 전 전략 조용히 OFF | `strategy_switch.py:53-59, 116` |
 
-추가: `risk_gate.to_risk_decision`(risk-api 응답→OMS 결정 변환의 유일한 어댑터)은 생산 호출자 0. trading-api는 인증 전무(루프백 바인딩만). trading-api 자가검사는 현재 `KeyError`로 실패 (`api/app.py:719`).
+추가: 당시 `risk_gate.to_risk_decision`은 생산 호출자가 없었다.
 
 **"발주는 PROPOSED만 본다"의 진상**: 그 발주(發注)는 브로커 주문이 아니라 **실험 잡 디스패치**다 (`factory_autopilot._SQL_NEEDS_EXPERIMENT`). 브로커 주문 경로에는 가설 테이블을 읽는 코드가 아예 없다.
 
 ### 8.6 브로커 통합의 실체
 
-유일한 증권사 연동은 LS증권 OpenAPI이고 **읽기 전용**이다: `get_quote`/`get_portfolio_snapshot` (`departments/03-risk/integrations/ls_openapi.py:193,212`) + 리서치의 t1717 수급 조회. 주문/정정/취소 TR은 `execution/broker_rules.py`가 **문서를 파싱해 rate limit 실행가능성만 검사**할 뿐(CSPAT00601/701/801), 호출 코드가 없다. `LS_ENV=PAPER`. `compose.yaml:12-13` 스스로 "broker-adapter는 아직 없다 - 코드가 없다"고 기록.
+당시 LS 연동은 시세·계좌 관측 read-only 코드만 확인됐고 주문 호출자는 없었다.
+이후 LS LIVE read-only와 LS PAPER directive adapter가 분리됐으므로 현행 경계는
+[ADR-0007](adr/0007-authenticated-user-paper-directive-authority.md)을 따른다.
 
 ---
 
@@ -668,7 +686,7 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 ## 10. 프런트엔드 — ai-office
 
 - **정체**: Next.js 16 App Router를 `vinext`(Vite 기반 런타임)로 구동, Cloudflare Workers 타깃, React 19 + Tailwind 4. 이 저장소의 유일한 JS 앱(루트 `package.json`이 위임). **레거시가 아니라 현행 운영 프런트** — 8/12~13에 사실상 재건축된 커밋 이력.
-- **연결**: 자체 DB 없음(drizzle 스키마 의도적으로 빈 파일, D1/R2 언바운드). 모든 실데이터는 BFF `NEXT_PUBLIC_BFF_URL`(기본 `127.0.0.1:8001`)의 `/ui/*` 6계열 엔드포인트로만. 인증은 `DISCORD_ACTOR_MAP` 첫 binding에서 읽는 무서명 `X-User-Id` fixture 값(파일 스스로 "인증이 아니다"라고 문서화). Supabase/Hermes 직접 호출 0.
+- **연결**: 자체 DB 없음(drizzle 스키마 의도적으로 빈 파일, D1/R2 언바운드). 모든 실데이터는 BFF `NEXT_PUBLIC_BFF_URL`(기본 `127.0.0.1:8001`)의 `/ui/*` 6계열 엔드포인트로만. 당시 하드코딩 테스트 사용자 3명의 무서명 `X-User-Id`를 썼으며 파일 스스로 “인증이 아니다”라고 문서화했다. Supabase/Hermes 직접 호출 0.
 - **화면 4개**:
   - `/` — 픽셀 오피스 시뮬레이션 게임 (완전 로컬, 백엔드 호출 0)
   - `/dashboard` — CEO ask(계약 v1·v2 수용) + 부서별 진행 카드(1초→5초 폴링, NO_ANSWER/STALE/NO_ASSIGNEE 명시 구분). 칸반 임베드는 **자리표시자만**. KPI 타일은 미기동 로컬 심 스냅샷(전부 0), "결과물 창고"는 하드코딩 2행
@@ -734,7 +752,7 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 | 04-quant `api/` | 소스 삭제, `__pycache__`만 잔존 — 주석들은 여전히 "quant-api /jobs/stuck"을 살아있는 것처럼 언급 |
 | 02-trading `contracts/risk_gate.py`, `packet_gate.py`, `skills/`, `multileg/`(DB 영속 NotImplemented) | 생산 호출자 0 |
 | 03-risk `risk_events/projection_worker.py`, `harness/`, `experiments/llm_wiki/` | compose 서비스/호출자 없음 |
-| 01-research Line B (`scripts.py` 2,687줄 + analysts 10종) | **의도적 은퇴**(8/10 재편, 코드만 감사 계보로 보존) — Runtime 이미지·MCP 실행 표면에서 제거 |
+| 01-research Line B (`scripts.py` 2,687줄 + analysts 10종) | **의도적 은퇴**(8/10 재편, 코드 보존 명시) — 당시 MCP `run_research_packet`으로 여전히 실행 가능, 최종 산출물 8/4 |
 | orchestration `adapters/paper_*`, `workflows/runner.py`, YAML manifest 6종 | 테스트 전용 |
 | ai-office Worker `/api/report`·`/api/integrations`, `ceoMirrorClient.ts` | 호출자 삭제됨/부재 |
 
@@ -743,9 +761,9 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 - 릴리스 게이트를 통과해도 **승격 파이프라인이 없어** `strategy.versions`로 이어지지 않는다 (§8 D4의 상류).
 - vLLM Multi-LoRA 장치 — enabled 어댑터 0.
 - RAG 코퍼스 — 인덱서(`rag_librarian.py`)는 CLI 전용 + 원문 수집기 꺼짐 → `/evidence/search`는 동결 코퍼스 검색.
-- ~~`geopolitical_state` MCP 도구~~ — 08-18 제거. 굳은 테이블을 "현재"로 서빙하는 경로를 닫았다.
+- `geopolitical_state` MCP 도구 — 수집기 꺼진 테이블을 읽어 점점 낡은 값 반환.
 - `macro` 테이블 — 수집 중단, 소비자(`data_resolution`, `narrative_guard` 등) 다수 생존 → 조용한 노화.
-- `hermes-dashboard`, `paper-search-mcp`, `youtube-transcript-mcp` — profiles 게이트로 기본 미기동. 중복·고장 상태였던 `ui-bff` 정의는 제거했고 `portfolio-bff`만 HTTP 관문을 소유한다.
+- `hermes-dashboard`, `paper-search-mcp`, `youtube-transcript-mcp`, `ui-bff` — profiles 게이트로 기본 미기동. 특히 `ui-bff`는 켜도 이미지에 `hermes` 바이너리가 없고 읽기 함수들이 `HERMES_EXEC_MODE`를 무시해 **켜자마자 고장**.
 - `kanban_tracker` — 플래그 기본 false + 어떤 compose도 안 켬 → 포트폴리오 런 부서 카드 생성 코드는 사실상 미작동.
 - QA `qa-check`, P1 analytics 게이트, 리스크 DB 컨텍스트, P1 영속, QA trace/incident 영속 — 전부 플래그 OFF.
 
@@ -772,7 +790,7 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 
 ## 13. 구조적 결론
 
-1. **실제 가치가 흐르는 유일한 폐순환은 전략 공장이다.** 발굴(웹 스카우트) → 리드 → 제안(계약 3층) → Gate 0 → 사전등록 백테스트 → 결정론 판정 → 교훈 환류 → 다음 제안의 중복 거부. 이 루프의 모든 관절이 DB 상태 전이로 명시돼 있고 멱등·원자성이 지켜진다. 반면 **"헤지펀드"의 이름값인 주문 실행 계층은 부품만 완성된 미조립 상태**다 — SUPPORTED 가설 → 전략 승격 → 시그널 → 주문 의도 → (D1–D5) 어느 한 관절도 이어져 있지 않다.
+1. **당시 실제 가치가 흐르는 유일한 폐순환은 전략 공장이었다.** 발굴→리드→제안→Gate 0→사전등록 백테스트→결정론 판정→교훈 환류가 DB 상태 전이로 닫혔고, 자동 전략의 SUPPORTED 가설→전략 승격→Signal→OrderIntent 구간은 미조립 상태였다. 이후 별도 사용자 PAPER 레인은 이 결론의 범위 밖이다.
 
 2. **강제(enforcement)의 실제 위치를 착각하기 쉽다.** 프로필의 tool_allowlist는 장식이고, 실제 능력 경계는 ① liaison MCP의 기동 시 도구 제거, ② 리서치 MCP에 quant.hypotheses 도구 부재, ③ 결정론 게이트들(Gate 0, RiskEngine, release gate, publish gate), ④ DB 제약(CHECK/FK/unique)이다. 즉 **이 시스템의 신뢰 경계는 프롬프트가 아니라 도구 표면과 스키마**에 있다.
 

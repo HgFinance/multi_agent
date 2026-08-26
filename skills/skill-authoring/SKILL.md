@@ -35,8 +35,10 @@ metadata:
 
 ## 운영 흐름
 
-사건은 운영 상태 원장에만 넣고 모델이나 Worker가 저장소 `skills/`를 직접
-수정하지 않게 한다.
+QA finding은 QA Hermes 검토와 관리자 1차 승인, baseline reproduction benchmark
+PASS를 거친 뒤에만 운영 occurrence 원장으로 들어간다. `SKILL_CREATE`와
+`SKILL_EVOLVE`가 아닌 유형은 Skill 파이프라인으로 보내지 않는다. 모델이나 제안
+Worker가 저장소 `skills/`를 직접 수정하지 않게 한다.
 
 ```bash
 python3 scripts/evolution_skills.py ingest \
@@ -46,7 +48,8 @@ python3 scripts/evolution_skills.py status
 ```
 
 후보 생성은 운영 정본 `qwen2.5-14b-instruct-awq`만 사용한다. 결정론적 구조,
-경계, provenance 검증을 통과해도 자동 활성화하지 않는다.
+경계, provenance 검증을 통과하면 Discord에 본문·provenance hash와 원인 artifact를
+담은 2차 승인 카드를 게시한다. 이 승인 전에는 자동 활성화하지 않는다.
 
 ```bash
 python3 scripts/evolution_skills.py approve <proposal-id> \
@@ -55,8 +58,17 @@ python3 scripts/evolution_skills.py promote <proposal-id>
 python3 scripts/evolution_skills.py validate
 ```
 
-승격기는 `skills/evolved/<slug>/`와 `skills/evolution-registry.json`을 함께
-갱신한다. 제안 Worker의 공유 스킬 마운트는 읽기 전용이어야 한다.
+운영 승격은 모델 자격증명이 없는 `control-daemon`만 수행한다. 승격기는
+`skills/evolved/<slug>/`와 `skills/evolution-registry.json`을 함께 갱신하고
+회귀 검증 실패 시 파일을 이전 snapshot으로 복구한다. 제안 Worker의 공유 스킬
+마운트는 읽기 전용이어야 한다.
+
+```bash
+python3 scripts/evolution_skills.py report <proposal-id>
+```
+
+활성화 직후 상태는 `ACTIVE_PENDING_FEEDBACK`이다. 독립 운영 실행 3건의 성과가
+검증되기 전에는 문제를 해결했다고 표현하지 않는다.
 
 ## 변경과 퇴역
 

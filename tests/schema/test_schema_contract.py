@@ -292,6 +292,14 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # Roster 프로필 미배정 13건에 Profile Version v1 배정
                  # (부서장 openai-codex/gpt-5.6-luna, Worker vllm/qwen2.5:14b)
                  "20260826000100_workforce_unassigned_profile_versions.sql",
+                 # Advisory Accounting view access, dynamic Risk policies,
+                 # and the batch collector each retain separate service roles.
+                 "20260826000200_accounting_advisory_view_grants.sql",
+                 "20260826000300_dynamic_risk_service_role_policies.sql",
+                 "20260826000400_research_batch_collector_role.sql",
+                 # Idempotent Kanban QA finding inserts may read only their
+                 # deterministic conflict key, not full finding payloads.
+                 "20260826000500_qa_projection_finding_conflict_read.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -312,6 +320,18 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertRegex(sql.lstrip().lower(), r"^begin;")
                 self.assertRegex(sql.rstrip().lower(), r"commit;$")
+
+    def test_qa_projection_conflict_read_is_column_scoped(self) -> None:
+        migration = (
+            SUPABASE_MIGRATIONS
+            / "20260826000500_qa_projection_finding_conflict_read.sql"
+        ).read_text(encoding="utf-8").lower()
+
+        self.assertIn(
+            "grant select (finding_id) on audit.findings to svc_audit_api",
+            migration,
+        )
+        self.assertNotIn("grant select on audit.findings", migration)
 
     def test_capacity_snapshot_unique_index_uses_valid_nulls_syntax(self) -> None:
         """PostgreSQL places NULLS NOT DISTINCT after the index column list."""

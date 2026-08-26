@@ -17,7 +17,6 @@ def test_removed_external_auth_mode_fails_closed_at_the_bff_boundary() -> None:
         os.environ,
         {
             "PORTFOLIO_AUTH_MODE": "external",
-            "PORTFOLIO_AUTH_REQUIRED": "false",
         },
         clear=False,
     ):
@@ -33,7 +32,6 @@ def test_local_mock_bff_accepts_the_fixed_identity_header() -> None:
         {
             "APP_ENV": "local",
             "PORTFOLIO_AUTH_MODE": "fixture",
-            "PORTFOLIO_AUTH_REQUIRED": "false",
             "ACCOUNTING_MODE": "OFFLINE",
             "DATABASE_URL": "",
         },
@@ -53,7 +51,6 @@ def test_local_mock_bff_allows_anonymous_read_only_snapshot_when_configured() ->
         {
             "APP_ENV": "local",
             "PORTFOLIO_AUTH_MODE": "fixture",
-            "PORTFOLIO_AUTH_REQUIRED": "false",
             "ACCOUNTING_MODE": "OFFLINE",
             "DATABASE_URL": "",
         },

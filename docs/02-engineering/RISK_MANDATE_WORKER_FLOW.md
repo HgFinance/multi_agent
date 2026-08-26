@@ -408,8 +408,9 @@ Risk Head
 보내면 그대로 쓰고 LLM은 부르지 않는다(§4 구조화 우선). 없고 자연어 질문
 (`compliance.query`/`compliance.question`)만 있으면 `compliance-policy-worker`의
 LangGraph가 `route → tool → worker_llm → validate` 순서로 스스로 분류한다 —
-라우팅 판단과 최종 서술 모두 **동일한 모델**(로컬 Ollama `qwen3:1.7b`,
-`default_worker_llm`)이 맡고, 별도 분류 모델을 새로 두지 않는다. 라우팅이 고른
+라우팅 판단과 최종 서술 모두 Worker Model Gateway가 해당 실행에 선택한 **동일한 모델**이 맡고,
+별도 분류 모델을 새로 두지 않는다. 구체적인 endpoint·모델·fallback은
+[Worker Model Matrix](WORKER_MODEL_MATRIX.md)를 따른다. 라우팅이 고른
 `query_mode`에 따라 `_compliance_tool`이 결정론적으로 근거를 채운다
 (`LEGAL_QUERY`/`MIXED_REVIEW` → `tools/legal_wiki_tool.py`, 그 외 → 기존
 evidence-passthrough). 이 tool의 결과(`tool_output`, LEGAL_QUERY의 경우 OpenAI

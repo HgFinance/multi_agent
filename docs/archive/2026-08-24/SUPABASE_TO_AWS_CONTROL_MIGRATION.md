@@ -1,6 +1,9 @@
 # Supabase → AWS control 도메인 데이터 이전
 
-상태: **완주 — 60행 이전 완료·검증됨** · 2026-08-24
+> **상태:** HISTORICAL SNAPSHOT · 2026-08-24 완료 기록
+> 이 문서의 행 수와 실행 상태는 당시 이행 증거이며 현재 DB 상태를 뜻하지 않는다.
+
+결과: **완주 — 60행 이전 완료·검증됨**
 
 실행 기록: 배선 수정 → 이력 정합화(95→100) → dry-run PASS → 60행 이전 COMPLETED →
 재실행 멱등 확인(to_insert 0). 보류: `audit.eval_runs`/`eval_results` 28행(9절).

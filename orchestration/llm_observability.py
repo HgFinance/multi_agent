@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 
 @dataclass
@@ -228,7 +229,10 @@ def trace_correlation_metadata(
         or case_id
     )
     if not resolved_trace:
-        resolved_trace = f"local:{_text(input_hash, 32)[:24] or 'unknown'}"
+        stable_hash = _text(input_hash, 32)[:24]
+        resolved_trace = (
+            f"local:{stable_hash}" if stable_hash else f"local:{uuid4().hex}"
+        )
 
     resolved_request = _text(
         request_id
@@ -290,11 +294,7 @@ def worker_graph_trace_config(
         "role": role,
         "raw_payloads_sent": False,
     }
-    if isinstance(correlation, Mapping):
-        for key in ("request_id", "root_id", "task_id", "trace_id"):
-            value = str(correlation.get(key) or "").strip()
-            if value:
-                metadata[key] = value[:160]
+    metadata.update(trace_correlation_metadata(correlation))
     return {
         "run_name": f"worker.{worker_id}",
         "tags": ["hgfinance", f"stage:{stage}", "redacted"],
@@ -331,11 +331,9 @@ def redacted_trace(
             "model_name": model_name,
             "stage": stage,
         }
-        if isinstance(correlation, Mapping):
-            for key in ("request_id", "root_id", "task_id", "trace_id"):
-                value = str(correlation.get(key) or "").strip()
-                if value:
-                    metadata[key] = value[:160]
+        metadata.update(
+            trace_correlation_metadata(correlation, trace_id=trace_id)
+        )
         observer = tracing_context(
             client=_safe_langsmith_client(),
             project_name=langsmith_project("workflow"),
@@ -386,6 +384,15 @@ def publish_metric(
     try:
         client = _safe_langsmith_client()
         safe = _metric_metadata(metric, trace_id=trace_id)
+        safe.update(
+            {
+                key: value
+                for key, value in trace_correlation_metadata(
+                    safe, trace_id=trace_id
+                ).items()
+                if not safe.get(key)
+            }
+        )
         client.create_run(
             name="llm.performance.metric",
             run_type="chain",
@@ -435,6 +442,12 @@ def publish_root_trace(
         "blocked",
         "degraded",
     }
+    correlation = trace_correlation_metadata(
+        request_id=request_id,
+        root_id=root_id,
+        task_id=root_id,
+        trace_id=request_id,
+    )
     metadata: dict[str, Any] = {
         "schema_version": "llm.workflow-root.v1",
         "worker_id": "ceo-root",
@@ -443,8 +456,7 @@ def publish_root_trace(
         "status": normalized_status,
         "trace_kind": "workflow_root",
         "latency_scope": "standalone_observation",
-        "request_id": str(request_id),
-        "root_id": str(root_id) if root_id else None,
+        **correlation,
         "workflow_mode": str(workflow_mode) if workflow_mode else None,
         "source": str(source) if source else None,
         "raw_payloads_sent": False,
@@ -496,16 +508,25 @@ def start_root_trace(
     try:
         from langsmith import RunTree
 
+        correlation = trace_correlation_metadata(
+            request_id=request_id,
+            root_id=request_id,
+            task_id=f"{request_id}-task",
+            trace_id=request_id,
+        )
         metadata = _metric_metadata(
             {
                 "schema_version": "llm.workflow-root.v2",
                 "worker_id": "ceo-root",
                 "role": "workflow_root",
                 "stage": "ceo-ingress",
+                "department": "ceo-workflow",
+                "observation_point": "ceo-ingress",
+                "joint_improvement_targets": "ceo-workflow / observability",
                 "status": "accepted",
                 "trace_kind": "workflow_root",
                 "latency_scope": "end_to_end",
-                "request_id": str(request_id),
+                **correlation,
                 "workflow_mode": str(workflow_mode),
                 "source": str(source) if source else None,
                 "raw_payloads_sent": False,
@@ -578,19 +599,25 @@ def close_root_trace(
             if run is None:
                 return False
             resolved_run_id = str(run.id)
+        correlation = trace_correlation_metadata(
+            request_id=request_id,
+            root_id=root_id,
+            task_id=task_id or root_id,
+            trace_id=str(trace_context),
+        )
         metadata = _metric_metadata(
             {
                 "schema_version": "llm.workflow-root.v2",
                 "worker_id": "ceo-root",
                 "role": "workflow_root",
                 "stage": "ceo-terminal",
+                "observation_point": "ceo-ingress",
+                "joint_improvement_targets": "ceo-workflow / observability",
                 "status": str(status),
                 "trace_kind": "workflow_root",
                 "latency_scope": "end_to_end",
-                "request_id": str(request_id) if request_id else None,
-                "root_id": str(root_id) if root_id else None,
-                "task_id": str(task_id or root_id) if (task_id or root_id) else None,
-                "department": str(department) if department else None,
+                **correlation,
+                "department": str(department) if department else "ceo-workflow",
                 "workflow_mode": str(workflow_mode) if workflow_mode else None,
                 "source": str(source) if source else None,
                 "raw_payloads_sent": False,

@@ -1,6 +1,11 @@
 # Claude용 AWS 부서별 이관 실행계획
 
-상태: 실행 지시안
+> **상태:** HISTORICAL SNAPSHOT
+> **기준일:** 2026-08-13 · 마지막 내용 갱신: 2026-08-18
+> 현재 지원 실행 경로가 아니다. 현행 로컬 Runtime은
+> [Local Compose Runtime Baseline](../../02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md),
+> AWS PAPER overlay의 현재 경계는 [`deploy/aws/README.md`](../../../deploy/aws/README.md)를 따른다.
+
 기준일: 2026-08-13
 대상 저장소: `HgFinance/multi_agent`
 목표: 로컬에서 검증한 Pipeline 배선을 AWS Pilot에 보존하면서, 8개 부서를 한 번에 하나씩 독립 PR로 이관한다.

@@ -16,6 +16,7 @@ PATCH = ROOT / "deploy" / "hermes-dispatch-guard" / "sitecustomize.py"
 PREFLIGHT = ROOT / "deploy" / "hermes-dispatch-guard" / "check_guard.py"
 SENSITIVE_ENV = (
     "MCP_RESEARCH_API_KEY",
+    "MCP_RISK_API_KEY",
     "MCP_TRADING_ORDER_API_KEY",
     "TIMESCALE_DATABASE_URL",
 )
@@ -82,6 +83,7 @@ def test_dispatch_guard_keeps_legacy_lane_signature_compatible(monkeypatch):
     ("quant-backtest-department", {
         "MCP_RESEARCH_API_KEY", "TIMESCALE_DATABASE_URL"}),
     ("trading-department", {"MCP_TRADING_ORDER_API_KEY"}),
+    ("risk-management", {"MCP_RISK_API_KEY"}),
     ("ceo-agent", set()),
     ("unknown-profile", set()),
 ])
@@ -97,13 +99,15 @@ def test_dispatch_spawn_scopes_mcp_secrets_by_assignee(
         del task, workspace, board
         observed.append({
             name for name in (
-                "MCP_RESEARCH_API_KEY", "MCP_TRADING_ORDER_API_KEY",
+                "MCP_RESEARCH_API_KEY", "MCP_RISK_API_KEY",
+                "MCP_TRADING_ORDER_API_KEY",
                 "TIMESCALE_DATABASE_URL")
             if name in os.environ
         })
         return 123
 
     monkeypatch.setenv("MCP_RESEARCH_API_KEY", "research-test-secret")
+    monkeypatch.setenv("MCP_RISK_API_KEY", "risk-test-secret")
     monkeypatch.setenv("MCP_TRADING_ORDER_API_KEY", "order-test-secret")
     monkeypatch.setenv("TIMESCALE_DATABASE_URL", "postgresql://test/market")
     module = _load_module(
@@ -115,6 +119,7 @@ def test_dispatch_spawn_scopes_mcp_secrets_by_assignee(
     # The long-lived dispatcher retains both credentials for the next profile;
     # only the spawned child receives the scoped view.
     assert os.environ["MCP_RESEARCH_API_KEY"] == "research-test-secret"
+    assert os.environ["MCP_RISK_API_KEY"] == "risk-test-secret"
     assert os.environ["MCP_TRADING_ORDER_API_KEY"] == "order-test-secret"
     assert os.environ["TIMESCALE_DATABASE_URL"] == "postgresql://test/market"
 
@@ -130,6 +135,7 @@ def test_dispatch_spawn_restores_environment_after_failure(monkeypatch):
         raise RuntimeError("spawn failed")
 
     monkeypatch.setenv("MCP_RESEARCH_API_KEY", "research-test-secret")
+    monkeypatch.setenv("MCP_RISK_API_KEY", "risk-test-secret")
     monkeypatch.setenv("MCP_TRADING_ORDER_API_KEY", "order-test-secret")
     module = _load_module(monkeypatch, original_guard, spawn=failing_spawn)
 
@@ -137,6 +143,7 @@ def test_dispatch_spawn_restores_environment_after_failure(monkeypatch):
         module._default_spawn(
             SimpleNamespace(assignee="research-department"), "/tmp/work")
     assert os.environ["MCP_RESEARCH_API_KEY"] == "research-test-secret"
+    assert os.environ["MCP_RISK_API_KEY"] == "risk-test-secret"
     assert os.environ["MCP_TRADING_ORDER_API_KEY"] == "order-test-secret"
 
 

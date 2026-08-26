@@ -14,7 +14,6 @@ os.environ["DATABASE_URL"] = ""
 os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(
     tempfile.gettempdir(), f"hgfinance-governance-transport-tests-{os.getpid()}.sqlite3"
 )
-os.environ["PORTFOLIO_AUTH_REQUIRED"] = "false"
 
 import apps.api.main as bff_main
 # main.py deliberately imports this module by its unqualified runtime name.
@@ -70,9 +69,10 @@ class GovernanceTransportResponseTest(unittest.TestCase):
             reason="timeout",
             trace_id="trace-456",
         )
-        with (
-            patch.object(bff_main, "PORTFOLIO_AUTH_REQUIRED", False),
-            patch("apps.api.main._governance_request", new_callable=AsyncMock, side_effect=transport_error),
+        with patch(
+            "apps.api.main._governance_request",
+            new_callable=AsyncMock,
+            side_effect=transport_error,
         ):
             response = TestClient(bff_main.app).post(
                 "/ui/mandates/m1/change-requests",

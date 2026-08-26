@@ -153,6 +153,14 @@ services:
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
 
+  # Risk Hermes' legal MCP executes the same conditional compliance worker as
+  # risk-api, so it must resolve the identical Qwen/Hybrid model plane.
+  risk-mcp:
+    environment:
+      <<: *worker-model-environment
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+
   # QA's independent employee Workers use the same gateway. qa-worker and
   # qa-reproduction-worker stay deterministic/event-driven and intentionally
   # do not receive model credentials.
@@ -190,17 +198,63 @@ services:
       - /opt/shared-skills/evolution-registry.json
       - daemon
       - --department
+      - 00-ceo-office
+      - --department
       - 01-research
       - --department
+      - 02-trading
+      - --department
+      - 03-risk
+      - --department
       - 04-quant-backtest
+      - --department
+      - 05-accounting-portfolio
+      - --department
+      - 06-ai-qa-audit
+      - --department
+      - 07-agent-workforce
       - --model-base-url
       - http://vllm:8000/v1
+      - --feedback-state-path
+      - /var/lib/portfolio/langsmith-feedback.sqlite3
       - --interval-seconds
       - ${EVOLUTION_SKILL_INTERVAL_SECONDS:-900}
     environment:
       <<: *worker-model-environment
       EVOLUTION_SKILLS_HOME: /var/lib/evolution-skills
       EVOLUTION_SKILL_REGISTRY_PATH: /opt/shared-skills/evolution-registry.json
+      QA_DISCORD_CHANNEL_ID: ${QA_DISCORD_CHANNEL_ID:-1541636723006775477}
+      DISCORD_BOT_TOKEN_QA: ${DISCORD_BOT_TOKEN_QA:-}
     volumes:
       - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
       - ./skills:/opt/shared-skills:ro
+      - portfolio_runtime_data:/var/lib/portfolio
+
+  # Exact-hash approval is consumed by a separate, non-LLM control plane.
+  # This is the only Evolution service with a writable canonical skills mount.
+  skill-evolution-control-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.factory
+    image: hedgefund-factory:latest
+    container_name: hedgefund-skill-evolution-control-worker
+    restart: unless-stopped
+    command:
+      - python
+      - scripts/evolution_skills.py
+      - --state-root
+      - /var/lib/evolution-skills
+      - --registry
+      - /workspace/skills/evolution-registry.json
+      - control-daemon
+      - --repository-root
+      - /workspace
+      - --interval-seconds
+      - ${EVOLUTION_SKILL_CONTROL_INTERVAL_SECONDS:-60}
+    environment:
+      EVOLUTION_SKILLS_HOME: /var/lib/evolution-skills
+      QA_DISCORD_CHANNEL_ID: ${QA_DISCORD_CHANNEL_ID:-1541636723006775477}
+      DISCORD_BOT_TOKEN_QA: ${DISCORD_BOT_TOKEN_QA:-}
+    volumes:
+      - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
+      - ./skills:/workspace/skills:rw

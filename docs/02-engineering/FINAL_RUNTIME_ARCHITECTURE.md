@@ -8,6 +8,13 @@
 > [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선한다.
 > 이 문서는 상세 실행 계약과 historical/design baseline이다.
 
+이 범위는 Agent·자동 전략의 자문 파이프라인이다. 로컬 화면의 명시적 사용자 PAPER
+주문은 [Local PAPER Runtime](LOCAL_PAPER_RUNTIME.md)과
+[ADR-0007](adr/0007-authenticated-user-paper-directive-authority.md)이 소유하는 별도
+`USER_DIRECTIVE` 레인이다. 이 레인은 고정 fixture ID를 사용하며 브라우저 로그인,
+세션, Supabase Auth를 만들지 않는다. LS PAPER adapter는 이 로컬 레인에만 있고,
+LS LIVE 주문 경로는 없다.
+
 이 문서는 구현자가 별도 구두 설명 없이 runtime Pipeline을 구현할 수 있도록 작성한 실행 계약이다. Master Plan과 Domain API·DB Contract를 대체하지 않는다. 현재-state 충돌 시 현재 checkout의 executable code/config와 [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선하고, 이 문서는 runtime 세부를 보완한다. `HEDGE_FUND_MASTER_PLAN.md`는 target-state 문서다.
 
 1. 현재 checkout의 executable code/config 및 provenance가 있는 runtime evidence

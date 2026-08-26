@@ -8,12 +8,14 @@ source and its registry entry live in the repository.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
 import re
 import tempfile
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,18 +27,37 @@ SCHEMA_VERSION = "hgfinance.evolution-skills.v1"
 REGISTRY_VERSION = "hgfinance.evolution-skill-registry.v1"
 PRODUCTION_GENERATION_MODEL = "qwen2.5-14b-instruct-awq"
 OWNED_DEPARTMENTS = {
+    "00-ceo-office": "ceo-agent",
     "01-research": "research-department",
+    "02-trading": "trading-department",
+    "03-risk": "risk-management",
     "04-quant-backtest": "quant-backtest-department",
+    "05-accounting-portfolio": "accounting-portfolio-department",
+    "06-ai-qa-audit": "qa-department",
+    "07-agent-workforce": "hr-department",
 }
 OWNER_TO_DEPARTMENT = {
     owner: department for department, owner in OWNED_DEPARTMENTS.items()
 }
 TRACE_DEPARTMENT_TO_OWNER = {
+    "ceo": "00-ceo-office",
+    "ceo-agent": "00-ceo-office",
     "research": "01-research",
     "research-department": "01-research",
+    "trading": "02-trading",
+    "trading-department": "02-trading",
+    "risk": "03-risk",
+    "risk-management": "03-risk",
     "quant": "04-quant-backtest",
     "quant-backtest": "04-quant-backtest",
     "quant-backtest-department": "04-quant-backtest",
+    "accounting": "05-accounting-portfolio",
+    "accounting-portfolio": "05-accounting-portfolio",
+    "accounting-portfolio-department": "05-accounting-portfolio",
+    "qa": "06-ai-qa-audit",
+    "qa-department": "06-ai-qa-audit",
+    "hr": "07-agent-workforce",
+    "hr-department": "07-agent-workforce",
 }
 MIN_OCCURRENCES = 3
 MAX_SKILLS_PER_RUN = 2
@@ -94,6 +115,48 @@ def _write_json_atomic(path: Path, value: object) -> None:
             tmp.unlink()
 
 
+def _write_text_atomic(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_tmp = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    tmp = Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _restore_text(path: Path, previous: str | None) -> None:
+    """Restore an atomic text snapshot after a failed multi-file promotion."""
+
+    if previous is None:
+        path.unlink(missing_ok=True)
+        return
+    _write_text_atomic(path, previous)
+
+
+@contextmanager
+def _proposal_state_lock(target: Path):
+    """Serialize every cross-process mutation of one proposal state file."""
+
+    lock_path = target / ".state.lock"
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+", encoding="utf-8") as lock:
+        try:
+            import fcntl
+
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            pass
+        yield
+
+
 def _append_jsonl(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n"
@@ -117,6 +180,10 @@ class Occurrence:
     symbol: str = ""
     at: str = ""
     department: str = "01-research"
+    source_type: str = "legacy"
+    source_artifact_id: str = ""
+    benchmark_id: str = ""
+    improvement_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,6 +195,9 @@ class SkillCandidate:
     department: str
     version: int = 1
     parent_version: int | None = None
+    source_artifact_ids: tuple[str, ...] = ()
+    benchmark_ids: tuple[str, ...] = ()
+    improvement_type: str = "SKILL_CREATE"
 
     @property
     def slug(self) -> str:
@@ -224,7 +294,7 @@ def detect_candidates(
     active_versions: Mapping[str, int] | None = None,
     consumed_runs: Mapping[str, Iterable[str]] | None = None,
 ) -> list[SkillCandidate]:
-    """Select repeatable candidates from distinct, not-yet-consumed runs."""
+    """Select repeatable candidates from distinct, not-yet-consumed evidence."""
 
     if department not in OWNED_DEPARTMENTS:
         raise PermissionError(f"{department} is not allowed to author evolution skills")
@@ -239,18 +309,29 @@ def detect_candidates(
     candidates: list[SkillCandidate] = []
     for kind, items in buckets.items():
         slug = SkillCandidate(kind, 0, (), (), department).slug
-        # A source execution ID is mandatory: without it, retries and repeated
-        # serialization of one failure could masquerade as independent proof.
+        # An independent evidence ID is mandatory. For direct runtime feedback
+        # this is the execution ID; for QA feedback it is the semantic artifact
+        # ID. A trace fan-out for one request must never masquerade as repeated
+        # proof.
         usable = [
             item
             for item in items
-            if item.run_id and item.run_id not in consumed.get(slug, set())
+            if item.run_id
+            and item.run_id not in consumed.get(slug, set())
+            and item.source_type in {"qa-benchmark", "skill-performance"}
         ]
         runs = tuple(sorted({item.run_id for item in usable if item.run_id}))
         distinct = len(runs)
         if distinct < min_occurrences:
             continue
         parent = active_versions.get(slug)
+        requested_types = {
+            item.improvement_type for item in usable if item.improvement_type
+        }
+        if "SKILL_EVOLVE" in requested_types and parent is None:
+            # A requested evolution must bind to an active canonical parent;
+            # silently turning it into a new skill would bypass owner review.
+            continue
         candidates.append(
             SkillCandidate(
                 kind=kind,
@@ -260,6 +341,19 @@ def detect_candidates(
                 department=department,
                 version=(parent or 0) + 1,
                 parent_version=parent,
+                source_artifact_ids=tuple(
+                    sorted(
+                        {
+                            item.source_artifact_id
+                            for item in usable
+                            if item.source_artifact_id
+                        }
+                    )
+                ),
+                benchmark_ids=tuple(
+                    sorted({item.benchmark_id for item in usable if item.benchmark_id})
+                ),
+                improvement_type=("SKILL_EVOLVE" if parent else "SKILL_CREATE"),
             )
         )
     candidates.sort(key=lambda candidate: (-candidate.count, candidate.slug))
@@ -414,6 +508,7 @@ class EvolutionSkillStore:
         self.occurrences_path = self.root / "occurrences.jsonl"
         self.candidates_path = self.root / "candidates.jsonl"
         self.events_path = self.root / "events.jsonl"
+        self.feedback_path = self.root / "feedback.jsonl"
         self.proposals_dir = self.root / "proposals"
 
     def append_occurrences(self, occurrences: Iterable[Occurrence]) -> int:
@@ -472,6 +567,20 @@ class EvolutionSkillStore:
             )
         return candidate_id
 
+    def _proposal_markdown_for_version(self, slug: str, version: int) -> str:
+        if version < 1 or not self.proposals_dir.is_dir():
+            return ""
+        for state_path in sorted(self.proposals_dir.glob("*/state.json")):
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if state.get("slug") == slug and int(state.get("version") or 0) == version:
+                skill_path = state_path.with_name("SKILL.md")
+                if skill_path.is_file():
+                    return skill_path.read_text(encoding="utf-8")
+        return ""
+
     def create_proposal(
         self,
         candidate: SkillCandidate,
@@ -488,6 +597,22 @@ class EvolutionSkillStore:
         if body is None:
             raise EvolutionSkillError("LLM returned no usable skill body")
         markdown = render_skill(candidate, body)
+        previous_markdown = self._proposal_markdown_for_version(
+            candidate.slug, int(candidate.parent_version or 0)
+        )
+        proposal_diff = "".join(
+            difflib.unified_diff(
+                previous_markdown.splitlines(keepends=True),
+                markdown.splitlines(keepends=True),
+                fromfile=(
+                    f"{candidate.slug}@v{candidate.parent_version}/SKILL.md"
+                    if candidate.parent_version
+                    else "/dev/null"
+                ),
+                tofile=f"{candidate.slug}@v{candidate.version}/SKILL.md",
+            )
+        )
+        diff_hash = hashlib.sha256(proposal_diff.encode()).hexdigest()
         provenance = {
             "schema_version": SCHEMA_VERSION,
             "classification": "evolved",
@@ -505,6 +630,10 @@ class EvolutionSkillStore:
             "occurrences": candidate.count,
             "runs": list(candidate.runs),
             "samples": list(candidate.samples),
+            "source_artifact_ids": list(candidate.source_artifact_ids),
+            "benchmark_ids": list(candidate.benchmark_ids),
+            "improvement_type": candidate.improvement_type,
+            "proposal_diff_hash": diff_hash,
             "generated_at": _utcnow(),
         }
         validation = validate_artifacts(
@@ -530,6 +659,7 @@ class EvolutionSkillStore:
             raise EvolutionSkillError(f"proposal already exists: {proposal_id}")
         target.mkdir(parents=True)
         (target / "SKILL.md").write_text(markdown, encoding="utf-8")
+        (target / "diff.patch").write_text(proposal_diff, encoding="utf-8")
         _write_json_atomic(target / "provenance.json", provenance)
         state = {
             "schema_version": SCHEMA_VERSION,
@@ -539,8 +669,15 @@ class EvolutionSkillStore:
             "owner_profile": OWNED_DEPARTMENTS[candidate.department],
             "status": "VALIDATED" if validation["ok"] else "PROPOSED",
             "validation": validation,
+            "content_hash": validation.get("content_hash"),
+            "provenance_hash": hashlib.sha256(_json_bytes(provenance)).hexdigest(),
+            "diff_hash": diff_hash,
+            "source_artifact_ids": list(candidate.source_artifact_ids),
+            "benchmark_ids": list(candidate.benchmark_ids),
+            "improvement_type": candidate.improvement_type,
             "approved_by": None,
             "qa_verdict": None,
+            "review_delivery_status": "PENDING",
             "created_at": _utcnow(),
             "updated_at": _utcnow(),
         }
@@ -549,6 +686,131 @@ class EvolutionSkillStore:
         if validation["ok"]:
             self.record_event(proposal_id, "VALIDATED", validation)
         return state
+
+    def pending_review_proposals(self) -> list[dict[str, Any]]:
+        """Return validated proposals that have not claimed a Discord card."""
+
+        if not self.proposals_dir.is_dir():
+            return []
+        rows: list[dict[str, Any]] = []
+        for state_path in sorted(self.proposals_dir.glob("*/state.json")):
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (
+                state.get("status") == "VALIDATED"
+                and state.get("review_delivery_status", "PENDING") == "PENDING"
+            ):
+                rows.append(state)
+        return rows
+
+    def pending_approved_proposals(self) -> list[dict[str, Any]]:
+        """Return only exact-hash proposals that passed the second approval."""
+
+        if not self.proposals_dir.is_dir():
+            return []
+        rows: list[dict[str, Any]] = []
+        for state_path in sorted(self.proposals_dir.glob("*/state.json")):
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (
+                state.get("status") == "APPROVED"
+                and state.get("qa_verdict") == "PASS"
+                and state.get("approved_by")
+            ):
+                rows.append(state)
+        return rows
+
+    def pending_activation_notices(self) -> list[dict[str, Any]]:
+        """Return active proposals whose evidence card has not been claimed."""
+
+        if not self.proposals_dir.is_dir():
+            return []
+        rows: list[dict[str, Any]] = []
+        for state_path in sorted(self.proposals_dir.glob("*/state.json")):
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (
+                state.get("status") == "ACTIVE"
+                and state.get("activation_delivery_status", "PENDING") == "PENDING"
+            ):
+                rows.append(state)
+        return rows
+
+    def update_review_delivery(
+        self,
+        proposal_id: str,
+        *,
+        expected: str,
+        status: str,
+        message_id: str = "",
+        error_code: str = "",
+    ) -> bool:
+        """Atomically fence one proposal review delivery transition."""
+
+        if status not in {"CLAIMED", "DELIVERED", "FAILED_FINAL"}:
+            raise EvolutionSkillError("invalid proposal review delivery status")
+        target = self.proposal_dir(proposal_id)
+        state_path = target / "state.json"
+        with _proposal_state_lock(target):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if state.get("review_delivery_status", "PENDING") != expected:
+                return False
+            state.update(
+                {
+                    "review_delivery_status": status,
+                    "review_message_id": message_id or None,
+                    "review_delivery_error": error_code or None,
+                    "updated_at": _utcnow(),
+                }
+            )
+            _write_json_atomic(state_path, state)
+        self.record_event(
+            proposal_id,
+            f"REVIEW_{status}",
+            {"message_id": message_id or None, "error_code": error_code or None},
+        )
+        return True
+
+    def update_activation_delivery(
+        self,
+        proposal_id: str,
+        *,
+        expected: str,
+        status: str,
+        message_id: str = "",
+        error_code: str = "",
+    ) -> bool:
+        """Atomically fence the one-shot activation evidence card."""
+
+        if status not in {"CLAIMED", "DELIVERED", "FAILED_FINAL"}:
+            raise EvolutionSkillError("invalid activation delivery status")
+        target = self.proposal_dir(proposal_id)
+        state_path = target / "state.json"
+        with _proposal_state_lock(target):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if state.get("activation_delivery_status", "PENDING") != expected:
+                return False
+            state.update(
+                {
+                    "activation_delivery_status": status,
+                    "activation_message_id": message_id or None,
+                    "activation_delivery_error": error_code or None,
+                    "updated_at": _utcnow(),
+                }
+            )
+            _write_json_atomic(state_path, state)
+        self.record_event(
+            proposal_id,
+            f"ACTIVATION_NOTICE_{status}",
+            {"message_id": message_id or None, "error_code": error_code or None},
+        )
+        return True
 
     def load_proposal(self, proposal_id: str) -> tuple[Path, dict[str, Any]]:
         target = self.proposal_dir(proposal_id)
@@ -561,39 +823,54 @@ class EvolutionSkillStore:
         return target, state
 
     def approve(
-        self, proposal_id: str, *, approved_by: str, qa_verdict: str
+        self,
+        proposal_id: str,
+        *,
+        approved_by: str,
+        qa_verdict: str,
+        reason: str = "",
+        decision_ref: str = "",
     ) -> dict[str, Any]:
-        target, state = self.load_proposal(proposal_id)
-        if state["status"] != "VALIDATED":
-            raise EvolutionSkillError("only a validated proposal can be approved")
         if qa_verdict not in {"PASS", "FAIL"} or not approved_by.strip():
             raise EvolutionSkillError(
                 "review requires PASS or FAIL and a named approver"
             )
-        if qa_verdict == "FAIL":
-            return self.set_status(
-                proposal_id,
-                "REJECTED",
-                {
+        target = self.proposal_dir(proposal_id)
+        event = "APPROVED" if qa_verdict == "PASS" else "REJECTED"
+        with _proposal_state_lock(target):
+            _, state = self.load_proposal(proposal_id)
+            if state["status"] != "VALIDATED":
+                raise EvolutionSkillError("only a validated proposal can be approved")
+            if qa_verdict == "FAIL":
+                detail = {
                     "approved_by": approved_by.strip(),
                     "qa_verdict": "FAIL",
+                    "review_reason": reason[:240],
+                    "decision_ref": decision_ref[:160],
                     "reviewed_at": _utcnow(),
-                },
-            )
-        state.update(
-            {
-                "status": "APPROVED",
-                "approved_by": approved_by.strip(),
-                "qa_verdict": qa_verdict,
-                "approved_at": _utcnow(),
-                "updated_at": _utcnow(),
-            }
-        )
-        _write_json_atomic(target / "state.json", state)
+                }
+            else:
+                detail = {
+                    "approved_by": approved_by.strip(),
+                    "qa_verdict": qa_verdict,
+                    "approved_at": _utcnow(),
+                    "review_reason": reason[:240],
+                    "decision_ref": decision_ref[:160],
+                }
+            state.update({"status": event, "updated_at": _utcnow(), **detail})
+            _write_json_atomic(target / "state.json", state)
         self.record_event(
             proposal_id,
-            "APPROVED",
-            {"approved_by": approved_by, "qa_verdict": qa_verdict},
+            event,
+            {
+                "approved_by": approved_by,
+                "qa_verdict": qa_verdict,
+                "reason": reason[:240],
+                "decision_ref": decision_ref[:160],
+                "content_hash": state.get("content_hash"),
+                "provenance_hash": state.get("provenance_hash"),
+                "diff_hash": state.get("diff_hash"),
+            },
         )
         return state
 
@@ -602,16 +879,18 @@ class EvolutionSkillStore:
     ) -> dict[str, Any]:
         if status not in PROPOSAL_STATES:
             raise EvolutionSkillError(f"unknown lifecycle state: {status}")
-        target, state = self.load_proposal(proposal_id)
-        current = str(state["status"])
-        if status not in ALLOWED_TRANSITIONS[current]:
-            raise EvolutionSkillError(
-                f"invalid lifecycle transition: {current} -> {status}"
-            )
-        state["status"] = status
-        state["updated_at"] = _utcnow()
-        state.update(detail)
-        _write_json_atomic(target / "state.json", state)
+        target = self.proposal_dir(proposal_id)
+        with _proposal_state_lock(target):
+            _, state = self.load_proposal(proposal_id)
+            current = str(state["status"])
+            if status not in ALLOWED_TRANSITIONS[current]:
+                raise EvolutionSkillError(
+                    f"invalid lifecycle transition: {current} -> {status}"
+                )
+            state["status"] = status
+            state["updated_at"] = _utcnow()
+            state.update(detail)
+            _write_json_atomic(target / "state.json", state)
         self.record_event(proposal_id, status, detail)
         return state
 
@@ -649,7 +928,7 @@ class EvolutionSkillStore:
                 "feedback department is not an evolution skill owner"
             )
         _append_jsonl(
-            self.root / "feedback.jsonl",
+            self.feedback_path,
             {
                 "schema_version": SCHEMA_VERSION,
                 "slug": slug,
@@ -672,6 +951,8 @@ class EvolutionSkillStore:
                         )[:180],
                         run_id=run_id.strip(),
                         department=department,
+                        source_type="skill-performance",
+                        improvement_type="SKILL_EVOLVE",
                     )
                 ]
             )
@@ -715,6 +996,180 @@ def record_trace_occurrences(
     return store.append_occurrences(rows)
 
 
+def record_qa_feedback_occurrences(
+    store: EvolutionSkillStore,
+    *,
+    department: str,
+    source_run_ids: Iterable[str],
+    finding_codes: Iterable[str],
+    detail: str,
+    artifact_id: str,
+    benchmark_id: str,
+    improvement_type: str,
+    target_skill_slug: str = "",
+    at: str = "",
+) -> int:
+    """Admit only manager-approved, benchmark-passed QA evidence.
+
+    The feedback SQLite ledger remains the approval/benchmark authority. This
+    function projects one semantic QA artifact into the existing Evolution
+    JSONL occurrence ledger. Source trace IDs are lineage within that artifact,
+    not independent repetitions. The normal three-distinct-evidence gate must
+    therefore be satisfied by three different approved artifacts.
+
+    Reconciliation is safe to repeat because append_occurrences deduplicates by
+    department, kind, and artifact ID.
+    """
+
+    owner_department = TRACE_DEPARTMENT_TO_OWNER.get(str(department).strip().lower())
+    if not owner_department:
+        return 0
+    if improvement_type not in {"SKILL_CREATE", "SKILL_EVOLVE"}:
+        return 0
+    if not artifact_id.startswith("feedback-") or not benchmark_id.strip():
+        raise EvolutionSkillError(
+            "QA feedback occurrence requires artifact and passed benchmark IDs"
+        )
+    normalized_findings = sorted(
+        {
+            re.sub(r"[^a-z0-9]+", "-", str(code).lower()).strip("-")
+            for code in finding_codes
+            if str(code).strip()
+        }
+    )
+    if improvement_type == "SKILL_EVOLVE":
+        if not _NAME_RE.fullmatch(target_skill_slug):
+            raise EvolutionSkillError(
+                "SKILL_EVOLVE requires a canonical target skill slug"
+            )
+        kind = target_skill_slug
+    else:
+        if not normalized_findings:
+            raise EvolutionSkillError("SKILL_CREATE requires a finding code")
+        kind = f"{owner_department}-{normalized_findings[0]}"
+
+    source_runs = {
+        str(value).strip() for value in source_run_ids if str(value).strip()
+    }
+    if not source_runs:
+        raise EvolutionSkillError("QA feedback occurrence requires source lineage")
+    return store.append_occurrences(
+        [
+            Occurrence(
+                kind=kind,
+                detail=detail[:180],
+                run_id=artifact_id,
+                at=at,
+                department=owner_department,
+                source_type="qa-benchmark",
+                source_artifact_id=artifact_id,
+                benchmark_id=benchmark_id.strip(),
+                improvement_type=improvement_type,
+            )
+        ]
+    )
+
+
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
+
+
+def build_resolution_report(
+    store: EvolutionSkillStore, proposal_id: str
+) -> dict[str, Any]:
+    """Build one auditable problem-to-outcome view without claiming early success."""
+
+    target, state = store.load_proposal(proposal_id)
+    provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
+    events = [
+        row
+        for row in _load_jsonl(store.events_path)
+        if row.get("proposal_id") == proposal_id
+    ]
+    feedback = [
+        row
+        for row in _load_jsonl(store.feedback_path)
+        if row.get("slug") == state.get("slug")
+        and int(row.get("version") or 0) == int(state.get("version") or 0)
+    ]
+    distinct_feedback = {
+        str(row.get("run_id") or ""): row
+        for row in feedback
+        if str(row.get("run_id") or "")
+    }
+    scores = [float(row["score"]) for row in distinct_feedback.values()]
+    mean_score = sum(scores) / len(scores) if scores else None
+    lifecycle = str(state.get("status") or "UNKNOWN")
+    if lifecycle == "ACTIVE" and len(scores) >= MIN_OCCURRENCES:
+        if all(score >= 0.8 for score in scores):
+            outcome = "VERIFIED_IMPROVED"
+        elif all(score < 0.5 for score in scores):
+            outcome = "REGRESSION_CANDIDATE"
+        else:
+            outcome = "POST_ACTIVATION_REVIEW_REQUIRED"
+    elif lifecycle == "ACTIVE":
+        outcome = "ACTIVE_PENDING_FEEDBACK"
+    elif lifecycle == "APPROVED":
+        outcome = "APPROVED_PENDING_PROMOTION"
+    elif lifecycle == "VALIDATED":
+        outcome = "VALIDATED_PENDING_SECOND_APPROVAL"
+    else:
+        outcome = lifecycle
+    return {
+        "schema_version": f"{SCHEMA_VERSION}.resolution.v1",
+        "proposal_id": proposal_id,
+        "skill": {
+            "slug": state.get("slug"),
+            "version": state.get("version"),
+            "owner_profile": state.get("owner_profile"),
+            "content_hash": state.get("content_hash"),
+            "provenance_hash": state.get("provenance_hash"),
+            "diff_hash": state.get("diff_hash"),
+        },
+        "problem_evidence": {
+            "kind": provenance.get("kind"),
+            "samples": provenance.get("samples") or [],
+            "source_run_ids": provenance.get("runs") or [],
+            "source_artifact_ids": provenance.get("source_artifact_ids") or [],
+            "baseline_benchmark_ids": provenance.get("benchmark_ids") or [],
+        },
+        "change_evidence": {
+            "generation_model": provenance.get("generation_model"),
+            "parent_version": provenance.get("parent_version"),
+            "validation": state.get("validation"),
+            "approved_by": state.get("approved_by"),
+            "approved_at": state.get("approved_at"),
+            "activated_at": state.get("activated_at"),
+            "canonical_path": state.get("canonical_path"),
+        },
+        "outcome_evidence": {
+            "status": outcome,
+            "required_distinct_runs": MIN_OCCURRENCES,
+            "observed_distinct_runs": len(scores),
+            "mean_score": round(mean_score, 6) if mean_score is not None else None,
+            "runs": sorted(distinct_feedback),
+            "claim": (
+                "반복 운영 성과로 개선 확인"
+                if outcome == "VERIFIED_IMPROVED"
+                else "아직 해결 완료로 판정하지 않음"
+            ),
+        },
+        "lifecycle_events": events,
+    }
+
+
 def load_registry(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"registry_version": REGISTRY_VERSION, "skills": {}}
@@ -743,6 +1198,7 @@ def promote_proposal(
     ):
         raise EvolutionSkillError("promotion requires recorded QA PASS and approval")
     markdown = (target / "SKILL.md").read_text(encoding="utf-8")
+    proposal_diff = (target / "diff.patch").read_text(encoding="utf-8")
     provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
     validation = validate_artifacts(
         markdown,
@@ -756,6 +1212,8 @@ def promote_proposal(
         raise EvolutionSkillError(
             f"proposal changed after validation: {validation['errors']}"
         )
+    if hashlib.sha256(proposal_diff.encode()).hexdigest() != state.get("diff_hash"):
+        raise EvolutionSkillError("proposal diff changed after validation")
 
     repo = repository_root.resolve()
     registry_file = (registry_path or repo / "skills/evolution-registry.json").resolve()
@@ -781,6 +1239,28 @@ def promote_proposal(
             f"{existing_regression['errors']}"
         )
     existing = existing_registry["skills"].get(state["slug"])
+    if (
+        existing
+        and existing.get("proposal_id") == proposal_id
+        and existing.get("status") == "active"
+        and existing.get("content_hash") == validation["content_hash"]
+    ):
+        regression = validate_canonical_registry(repo, registry_file)
+        if not regression["ok"]:
+            raise EvolutionSkillError(
+                f"partially promoted registry failed validation: {regression['errors']}"
+            )
+        return store.set_status(
+            proposal_id,
+            "ACTIVE",
+            {
+                "activated_at": existing.get("activated_at") or _utcnow(),
+                "canonical_path": str(skill_path),
+                "regression_validation": regression,
+                "activation_delivery_status": "PENDING",
+                "promotion_reconciled": True,
+            },
+        )
     if existing and int(existing.get("current_version") or 0) >= int(state["version"]):
         raise EvolutionSkillError("registry already contains this or a newer version")
     if existing and existing.get("status") != "active":
@@ -788,7 +1268,6 @@ def promote_proposal(
             "retired skill cannot be overwritten; create a new slug"
         )
 
-    skill_path.write_text(markdown, encoding="utf-8")
     canonical_provenance = dict(provenance)
     canonical_provenance.update(
         {
@@ -798,7 +1277,17 @@ def promote_proposal(
             "content_hash": validation["content_hash"],
         }
     )
-    _write_json_atomic(provenance_path, canonical_provenance)
+    previous_skill = (
+        skill_path.read_text(encoding="utf-8") if skill_path.is_file() else None
+    )
+    previous_provenance = (
+        provenance_path.read_text(encoding="utf-8")
+        if provenance_path.is_file()
+        else None
+    )
+    previous_registry = (
+        registry_file.read_text(encoding="utf-8") if registry_file.is_file() else None
+    )
     existing_registry["skills"][state["slug"]] = {
         "classification": "evolved",
         "status": "active",
@@ -810,8 +1299,22 @@ def promote_proposal(
         "qa_verdict": state["qa_verdict"],
         "activated_at": canonical_provenance["activated_at"],
         "replacement": None,
+        "proposal_id": proposal_id,
     }
-    _write_json_atomic(registry_file, existing_registry)
+    try:
+        _write_text_atomic(skill_path, markdown)
+        _write_json_atomic(provenance_path, canonical_provenance)
+        _write_json_atomic(registry_file, existing_registry)
+        regression = validate_canonical_registry(repo, registry_file)
+        if not regression["ok"]:
+            raise EvolutionSkillError(
+                f"canonical registry regression failed: {regression['errors']}"
+            )
+    except Exception:
+        _restore_text(skill_path, previous_skill)
+        _restore_text(provenance_path, previous_provenance)
+        _restore_text(registry_file, previous_registry)
+        raise
 
     if existing:
         previous_id = existing.get("proposal_id")
@@ -819,13 +1322,6 @@ def promote_proposal(
             store.set_status(
                 str(previous_id), "SUPERSEDED", {"superseded_by": proposal_id}
             )
-    existing_registry["skills"][state["slug"]]["proposal_id"] = proposal_id
-    _write_json_atomic(registry_file, existing_registry)
-    regression = validate_canonical_registry(repo, registry_file)
-    if not regression["ok"]:
-        raise EvolutionSkillError(
-            f"canonical registry regression failed: {regression['errors']}"
-        )
     return store.set_status(
         proposal_id,
         "ACTIVE",
@@ -833,6 +1329,7 @@ def promote_proposal(
             "activated_at": canonical_provenance["activated_at"],
             "canonical_path": str(skill_path),
             "regression_validation": regression,
+            "activation_delivery_status": "PENDING",
         },
     )
 
@@ -1052,27 +1549,29 @@ def inventory_skills(
 
 
 __all__ = [
-    "EvolutionSkillError",
-    "EvolutionSkillStore",
     "MAX_SKILLS_PER_RUN",
     "MIN_OCCURRENCES",
     "OWNED_DEPARTMENTS",
     "OWNER_TO_DEPARTMENT",
-    "Occurrence",
     "PRODUCTION_GENERATION_MODEL",
     "REGISTRY_VERSION",
     "SCHEMA_VERSION",
+    "EvolutionSkillError",
+    "EvolutionSkillStore",
+    "Occurrence",
     "SkillCandidate",
     "active_registry_bindings",
     "append_occurrences_to_path",
+    "build_resolution_report",
     "check_boundary",
     "detect_candidates",
     "draft_body",
-    "load_registry",
     "inventory_skills",
+    "load_registry",
     "promote_proposal",
-    "render_skill",
+    "record_qa_feedback_occurrences",
     "record_trace_occurrences",
+    "render_skill",
     "retire_skill",
     "validate_artifacts",
     "validate_canonical_registry",

@@ -1,13 +1,14 @@
 # Risk·AI QA/감사본부 Docker 컨테이너 명세서
 
-담당: 동규 (리스크/QA) · 작성: 2026-08-03 · 기준 갱신: 2026-08-10
+담당: 동규 (리스크/QA) · 작성: 2026-08-03 · 기준 갱신: 2026-08-26
 
 현재 서비스·Profile·포트의 기준은 [LOCAL_COMPOSE_RUNTIME_BASELINE.md](LOCAL_COMPOSE_RUNTIME_BASELINE.md)이며, 이 문서는 Risk·QA 서비스의 상세 운영 절차만 다룬다.
 근거: [DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md](DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md) 6.4·6.7·9·10절, [HERMES_DOCKER_RUNBOOK.md](HERMES_DOCKER_RUNBOOK.md)(재일, Hermes 공통 절차)
 
-Hermes 로그인·프로필 동기화·모델/과금 같은 8부서 공통 절차는 여기서 반복하지 않는다.
-[HERMES_DOCKER_RUNBOOK.md](HERMES_DOCKER_RUNBOOK.md) 4-3(로그인)·5(모델/과금)를 그대로 따른다.
-이 문서는 리스크·QA 소유 컨테이너 6개(`redis` 포함)만 다룬다.
+Hermes provider credential·프로필 동기화·모델/과금 같은 8부서 공통 절차는 여기서 반복하지 않는다.
+[HERMES_DOCKER_RUNBOOK.md](HERMES_DOCKER_RUNBOOK.md)의 공통 절차를 그대로 따른다.
+이 문서는 아래 표의 Risk·QA 서비스와 공통 Redis 운영 절차만 다룬다. 전체 서비스
+수는 [Local Compose Runtime Baseline](LOCAL_COMPOSE_RUNTIME_BASELINE.md)이 소유한다.
 
 ## 1. 컨테이너 목록
 
@@ -19,7 +20,7 @@ Hermes 로그인·프로필 동기화·모델/과금 같은 8부서 공통 절�
 | `qa-worker` | `audit-api`와 동일 이미지, command만 다름 | Risk Decision Stream → QA 감사 이력 적재 (`qa_events/worker.py`) | QA |
 | `qa-reproduction-worker` | `audit-api`와 동일 이미지, command만 다름 | 승인된 주식 포워드 PASS를 별도 권한·별도 프로세스에서 재실행 | QA |
 | `risk-hermes` | `nousresearch/hermes-agent:latest` | Risk 부서 Supervisor | Risk |
-| `qa-hermes` | `nousresearch/hermes-agent:latest` | QA 부서 Supervisor | QA |
+| `qa-hermes` | `Dockerfile.hermes-discord`로 빌드한 `hedgefund-hermes-discord:qa-feedback-v1` | QA 부서 Supervisor와 Discord feedback bridge | QA |
 
 `risk-api`·`audit-api`·`qa-worker`는 research 계열과 달리 **Build Context가 부서 폴더가 아니라 저장소 루트(`.`)** 다.
 `api/app.py`가 `departments/02-trading/contracts`, `skills/agentic-rag`, `apps/observability`를 부서 경계 밖에서 import하고
@@ -85,6 +86,7 @@ Quant 프로세스가 만든 결과를 그대로 승인하지 않는다. `qa-wor
 | 임대 | 30~7,200초, heartbeat/complete/fail 모두 lease token으로 fencing |
 | 결과 권한 | `promotion_authority=false`; 불일치는 감사 결과일 뿐 자동 승격하지 않음 |
 | 준비성 | claim API를 트랜잭션 안에서 실행 후 rollback하고 시장 DB read-only를 확인 |
+| Compose 의존 | `timescaledb` healthcheck. Metadata/session DB는 URL과 준비성 검사로 fail-closed하며 Compose `depends_on` 대상은 아님 |
 
 `DATABASE_SESSION_URL`을 우선 사용한다. Supavisor transaction pool 주소만 있으면
 `SET ROLE`이 요청 사이에 유지되지 않을 수 있으므로 준비성 검사가 fail-closed된다.
@@ -92,32 +94,33 @@ Quant 프로세스가 만든 결과를 그대로 승인하지 않는다. `qa-wor
 
 ## 3. Hermes 컨테이너 (risk-hermes / qa-hermes)
 
-research-hermes/quant-hermes와 같은 패턴 — Backend Image에 Hermes를 넣지 않고 공식 이미지를 별도 컨테이너로 띄운다.
+Backend Image에 Hermes를 넣지 않고 별도 컨테이너로 띄운다. Risk는 upstream 이미지를 사용하고, QA는 Discord feedback bridge가 포함된 저장소 이미지를 사용한다.
 
 | 항목 | risk-hermes | qa-hermes |
 |---|---|---|
-| 이미지 | `nousresearch/hermes-agent:latest` | `nousresearch/hermes-agent:latest` |
+| 이미지 | `nousresearch/hermes-agent:latest` | `hedgefund-hermes-discord:qa-feedback-v1` (`Dockerfile.hermes-discord`) |
 | volume | `/home/ubuntu/.hermes/profiles/risk-management:/opt/data` | `/home/ubuntu/.hermes/profiles/qa-department:/opt/data` |
 | Provider | Codex(`config.yaml`+`auth.json`, 하드코딩 안 함) | Codex(`config.yaml`+`auth.json`, 하드코딩 안 함) |
-| command | `gateway run` | `gateway run` |
+| Compose command | `sleep infinity` | `sleep infinity` |
+| Gateway lifecycle | 이미지의 s6 lifecycle이 관리 | 이미지의 s6 lifecycle이 관리 |
 
-Provider는 컨테이너 env가 아니라 각 Profile의 `/opt/data/config.yaml`(`provider:`)과 `auth.json`이 결정한다
-(risk/qa 둘 다 2026-08-10 기준 Codex 배정 — CLAUDE.md 표). 로그인·`auth.json` 취급·프로필 동기화
-(`sync_hermes_profiles.sh`)는 [HERMES_DOCKER_RUNBOOK.md](HERMES_DOCKER_RUNBOOK.md) 4-3절을 그대로 따른다 — 여기서 반복하지 않는다.
+Provider는 컨테이너 env가 아니라 각 Profile의 `/opt/data/config.yaml`(`provider:`)과 credential 파일이 결정한다.
+Compose의 `sleep infinity`는 gateway 명령을 직접 소유하지 않으며, 이미지 bootstrap과 s6 lifecycle이 gateway를 관리한다.
+Credential 취급과 프로필 동기화(`sync_hermes_profiles.sh`)는 [HERMES_DOCKER_RUNBOOK.md](HERMES_DOCKER_RUNBOOK.md)를 따른다.
 
 ## 4. 자원 한도
 
 전 서비스 공통으로 `mem_limit`/`cpus`/`pids_limit`을 건다 (로컬 P0 정책, 계획서 11절).
 
-| 서비스 | mem_limit | cpus | 비고 |
-|---|---|---|---|
-| `redis` | 256m | 0.5 | AOF `everysec` + 명명 volume `redis_data`로 Stream 영속화 |
-| `risk-api` | 256m | 0.5 | |
-| `audit-api` | 256m | 0.5 | |
-| `qa-worker` | 256m | 0.3 | `stop_grace_period: 20s` — 소비 중인 이벤트가 있으면 강제 종료 전에 끝내도록 |
-| `qa-reproduction-worker` | 2g | 1.0 | 장시간 포워드 재실행; lease와 statement timeout으로 상한 제한 |
-| `risk-hermes` | 1g (reservation 192m) | 1.0 | |
-| `qa-hermes` | 1g (reservation 192m) | 1.0 | |
+| 서비스 | mem_limit | cpus | pids_limit | 비고 |
+|---|---|---:|---:|---|
+| `redis` | 256m | 0.5 | 64 | AOF `everysec` + 명명 volume `redis_data`로 Stream 영속화 |
+| `risk-api` | 256m | 0.5 | 64 | |
+| `audit-api` | 256m | 0.5 | 64 | |
+| `qa-worker` | 256m | 0.3 | 64 | `stop_grace_period: 20s` — 소비 중인 이벤트가 있으면 강제 종료 전에 끝내도록 |
+| `qa-reproduction-worker` | 2g | 1.0 | 128 | 장시간 포워드 재실행; lease와 statement timeout으로 상한 제한 |
+| `risk-hermes` | 1g (reservation 192m) | 1.0 | 256 | |
+| `qa-hermes` | 1g (reservation 192m) | 1.0 | 256 | |
 
 ## 5. 실행·검증
 
@@ -143,11 +146,14 @@ docker exec hedgefund-redis redis-cli CONFIG GET appendonly appendfsync
 python -m pytest departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py -q
 ```
 
-## Local Ollama and Redis startup contract
+## Model readiness와 Redis startup contract
 
-Risk API와 QA API의 LangGraph Worker는 호스트 Ollama를 사용한다. 호스트 프로세스는 OLLAMA_BASE_URL을 사용하고, Docker 컨테이너는 OLLAMA_DOCKER_BASE_URL 또는 기본값 host.docker.internal을 사용한다. 기본 모델은 qwen3:1.7b이며 OLLAMA_CHAT_MODEL, OLLAMA_TIMEOUT_SECONDS로 변경할 수 있다.
+Risk·QA Worker의 운영 모델, endpoint와 local fallback은
+[Worker Model Matrix](WORKER_MODEL_MATRIX.md)와
+[Final Runtime Architecture](FINAL_RUNTIME_ARCHITECTURE.md)가 소유한다. 이 Runbook은
+모델명을 복사하지 않고 아래 읽기 전용 preflight로 현재 환경의 준비성을 확인한다.
 
-Redis는 healthcheck가 통과한 뒤 Risk API, QA API, QA Worker가 시작한다. 실제 모델 존재 여부는 다음 읽기 전용 preflight로 확인한다.
+Redis는 healthcheck가 통과한 뒤 Risk API, QA API, QA Worker가 시작한다.
 
 기본 Redis는 `appendonly yes`, `appendfsync everysec`, 명명 volume `redis_data`를
 사용한다. 포워드 QA stream은 미소비 감사 요청을 길이 제한으로 제거하지 않는다.
@@ -156,20 +162,19 @@ DB·Redis 같은 의존성 장애는 횟수와 무관하게 pending에서 지수
 Outbox 재조정 발행은 event ID별 원자적 `XADD + marker`라 장기 장애 중에도 같은
 메시지와 AOF가 무한 증가하지 않는다.
 
-    source ~/claude/bin/activate
-    python scripts/run_risk_qa_production_preflight.py --as-of 2026-08-10
+    .venv/bin/python scripts/run_risk_qa_production_preflight.py \
+      --as-of "$(date -u +%F)"
 
-OLLAMA_MODEL_MISSING이면 호스트에서 ollama pull qwen3:1.7b를 실행해야 한다. 정책 Corpus가 SAMPLE_PLACEHOLDER인 동안에는 QA Production 승격을 수행하지 않는다.
+모델 preflight가 실패하면 해당 환경의 모델 정본과 artifact 준비 절차를 확인한다.
+정책 Corpus가 `SAMPLE_PLACEHOLDER`인 동안에는 QA Production 승격을 수행하지 않는다.
 
 ## 6. 알려진 미결 (기록만, 코드 아님)
 
-- **risk-projection-worker 없음** — 계획서 6.4절이 말하는 "Position·Market·Mandate Event를 Risk Snapshot으로
-  투영"하는 Worker는 아직 만들지 않았다. 저장소 전체에서 `market.snapshot.v1`/`portfolio.snapshot.v1`/
-  `governance.mandate.changed.v1`을 Redis Stream에 발행(`XADD`)하는 곳이 하나도 없다 (Trading/Accounting/CEO
-  쪽 미구현 — 본부 경계 밖이라 Risk가 대신 만들 수 없다). `risk_events/redis_event_bus.py`는 Risk→QA 결정
-  이벤트 Publisher만 있고 이 방향의 Consumer 루프는 없다. `P1RiskSnapshot`(`p1/analytics.py`)은 이미 있지만
-  Pre-trade 요청 경로에서 `evaluate_p1_gate`로 동기 계산되는 것이라 이 백로그의 비동기 투영과는 다른
-  메커니즘이다. 업스트림 Publisher가 생기기 전에 컨테이너·코드를 먼저 만들지 않는다 — 백로그는
-  `departments/03-risk/hermes/config.yaml`(2026-08-03 항목)에 기록해 뒀다.
+- **Risk input projection 배포 미연결** — `risk_events/projection_worker.py`와 단위 테스트는 구현돼 있고
+  `market.snapshot.v1`·`portfolio.snapshot.v1`·`governance.mandate.changed.v1`을 `risk.input_snapshots`에
+  투영한다. 그러나 루트 Compose에는 아직 `risk-projection-worker` 서비스가 없다. Governance API에는
+  Mandate event publisher가 있지만 Market·Portfolio snapshot의 운영 Redis publisher와 세 stream의 통합
+  기동 증거는 완성되지 않았다. 따라서 현재 상태는 코드 구현 완료가 아니라 **배포·업스트림 연결 대기**로
+  판정한다. 동기 `evaluate_p1_gate` 경로와 이 비동기 투영 경로를 같은 완료 증거로 사용하지 않는다.
 - `USERPROFILE` 미설정 경고 — macOS 개발 환경에서 `docker compose config` 실행 시 뜬다. Windows 배포 대상
   volume 경로 템플릿이라 발생하는 기존 동작이며(research-hermes/quant-hermes도 동일), 기능에는 영향 없다.

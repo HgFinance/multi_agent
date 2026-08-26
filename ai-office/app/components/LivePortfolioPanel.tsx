@@ -555,6 +555,11 @@ export default function LivePortfolioPanel() {
                 {data?.environment_label ?? "PAPER"} · {data?.account.masked ?? "계좌 확인 중"} · {recentOrders.length}건
               </span>
             </div>
+            {data?.stream.status !== "CONNECTED" ? (
+              <p role="status" className="m-0 border-b border-outline-variant bg-surface-container px-4 py-2 text-xs text-on-surface-variant">
+                실시간 주문 알림을 다시 연결하는 중입니다. 주문 내역과 계좌 정보는 조회 결과로 계속 표시합니다.
+              </p>
+            ) : null}
             {data?.orders.error ? (
               <p role="alert" className="m-0 border-b border-error/40 bg-error-container px-4 py-2 text-xs text-on-error-container">
                 과거 주문 사건을 불러오지 못해 실시간 수신분만 표시합니다: {data.orders.error}
@@ -614,11 +619,6 @@ export default function LivePortfolioPanel() {
         {data?.holdings.error ? (
           <p role="alert" className="m-0 rounded border border-error/40 bg-error-container px-3 py-2 text-xs text-on-error-container">
             잔고 확인 실패: {data.holdings.error}
-          </p>
-        ) : null}
-        {data?.stream.error ? (
-          <p role="alert" className="m-0 rounded border border-error/40 bg-error-container px-3 py-2 text-xs text-on-error-container">
-            연결 오류: {data.stream.error}
           </p>
         ) : null}
 

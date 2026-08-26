@@ -21,4 +21,6 @@ test("트레이딩 상세는 오늘 거래 흐름을 사용자 관점으로 보�
   assert.match(panel, /조건주문/);
   assert.match(panel, /출처 미확인/);
   assert.match(panel, /LS PAPER 계좌 기준/);
+  assert.match(panel, /실시간 주문 알림을 다시 연결하는 중입니다/);
+  assert.doesNotMatch(panel, /연결 오류: \{data\.stream\.error\}/);
 });

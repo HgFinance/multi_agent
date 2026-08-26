@@ -14,6 +14,7 @@ from orchestration.evolution_skills import (
     EvolutionSkillStore,
     Occurrence,
     active_registry_bindings,
+    build_resolution_report,
     detect_candidates,
     inventory_skills,
     promote_proposal,
@@ -21,6 +22,7 @@ from orchestration.evolution_skills import (
     retire_skill,
     validate_canonical_registry,
 )
+from scripts.evolution_skills import _proposal_history
 
 
 def _body(slug: str) -> str:
@@ -47,6 +49,10 @@ def _candidate(*, first_run: int = 1, active_version: int | None = None):
             detail=f"timeout in run {number}",
             run_id=f"run-{number}",
             department="01-research",
+            source_type="qa-benchmark",
+            source_artifact_id=f"feedback-{number:032x}",
+            benchmark_id="offline-v1",
+            improvement_type="SKILL_CREATE",
         )
         for number in range(first_run, first_run + 3)
     ]
@@ -67,6 +73,7 @@ def _approved_proposal(store: EvolutionSkillStore, *, candidate=None) -> dict:
         model_metadata=_metadata(),
     )
     assert state["status"] == "VALIDATED"
+    assert (store.proposal_dir(state["proposal_id"]) / "diff.patch").is_file()
     return store.approve(
         state["proposal_id"],
         approved_by="qa-owner@example.com",
@@ -112,6 +119,59 @@ def test_concurrent_occurrence_writers_cannot_double_count_one_run(
     assert len(EvolutionSkillStore(state).load_occurrences()) == 1
 
 
+def test_proposal_state_mutations_share_one_cross_process_fence(
+    tmp_path: Path,
+) -> None:
+    store = EvolutionSkillStore(tmp_path / "state")
+    state = store.create_proposal(
+        _candidate(),
+        lambda _prompt: _body("repeated-quote-timeout"),
+        model_metadata=_metadata(),
+    )
+    proposal_id = state["proposal_id"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        delivery = pool.submit(
+            store.update_review_delivery,
+            proposal_id,
+            expected="PENDING",
+            status="CLAIMED",
+        )
+        approval = pool.submit(
+            store.approve,
+            proposal_id,
+            approved_by="qa",
+            qa_verdict="PASS",
+        )
+        assert delivery.result() is True
+        assert approval.result()["status"] == "APPROVED"
+
+    _, final_state = store.load_proposal(proposal_id)
+    assert final_state["status"] == "APPROVED"
+    assert final_state["review_delivery_status"] == "CLAIMED"
+
+
+def test_pending_proposal_is_not_an_active_version_and_rejected_evidence_stays_consumed(
+    tmp_path: Path,
+) -> None:
+    store = EvolutionSkillStore(tmp_path / "state")
+    candidate = _candidate()
+    state = store.create_proposal(
+        candidate,
+        lambda _prompt: _body(candidate.slug),
+        model_metadata=_metadata(),
+    )
+
+    open_slugs, consumed = _proposal_history(store)
+    assert open_slugs == {candidate.slug}
+    assert consumed[candidate.slug] == set(candidate.runs)
+
+    store.approve(state["proposal_id"], approved_by="qa", qa_verdict="FAIL")
+    open_slugs, consumed = _proposal_history(store)
+    assert open_slugs == set()
+    assert consumed[candidate.slug] == set(candidate.runs)
+
+
 def test_candidate_requires_three_distinct_unconsumed_runs() -> None:
     duplicate_runs = [
         Occurrence(kind="tool timeout", run_id="same", department="01-research")
@@ -127,7 +187,11 @@ def test_candidate_requires_three_distinct_unconsumed_runs() -> None:
     assert (
         detect_candidates(
             [
-                Occurrence(kind="repeated quote timeout", run_id=f"run-{number}")
+                Occurrence(
+                    kind="repeated quote timeout",
+                    run_id=f"run-{number}",
+                    source_type="qa-benchmark",
+                )
                 for number in range(1, 4)
             ],
             department="01-research",
@@ -228,6 +292,31 @@ def test_promotion_registers_and_activates_without_runtime_writes(
     active, owners = active_registry_bindings(registry)
     assert active == {"repeated-quote-timeout"}
     assert owners["repeated-quote-timeout"] == {"research-department"}
+    report = build_resolution_report(store, approved["proposal_id"])
+    assert report["outcome_evidence"]["status"] == "ACTIVE_PENDING_FEEDBACK"
+    assert report["problem_evidence"]["source_artifact_ids"]
+
+
+def test_resolution_report_requires_three_positive_post_activation_runs(
+    tmp_path: Path,
+) -> None:
+    store = EvolutionSkillStore(tmp_path / "state")
+    repo = tmp_path / "repo"
+    approved = _approved_proposal(store)
+    promote_proposal(store, approved["proposal_id"], repository_root=repo)
+
+    for number in range(1, 4):
+        store.record_feedback(
+            slug="repeated-quote-timeout",
+            version=1,
+            run_id=f"post-activation-{number}",
+            score=0.9,
+            department="01-research",
+        )
+
+    report = build_resolution_report(store, approved["proposal_id"])
+    assert report["outcome_evidence"]["status"] == "VERIFIED_IMPROVED"
+    assert report["outcome_evidence"]["claim"] == "반복 운영 성과로 개선 확인"
 
 
 def test_tampering_after_validation_blocks_promotion(tmp_path: Path) -> None:
@@ -240,6 +329,20 @@ def test_tampering_after_validation_blocks_promotion(tmp_path: Path) -> None:
     )
 
     with pytest.raises(EvolutionSkillError, match="changed after validation"):
+        promote_proposal(
+            store, approved["proposal_id"], repository_root=tmp_path / "repo"
+        )
+
+
+def test_diff_tampering_after_second_approval_blocks_promotion(
+    tmp_path: Path,
+) -> None:
+    store = EvolutionSkillStore(tmp_path / "state")
+    approved = _approved_proposal(store)
+    proposal_dir = store.proposal_dir(approved["proposal_id"])
+    (proposal_dir / "diff.patch").write_text("tampered", encoding="utf-8")
+
+    with pytest.raises(EvolutionSkillError, match="proposal diff changed"):
         promote_proposal(
             store, approved["proposal_id"], repository_root=tmp_path / "repo"
         )
@@ -409,6 +512,10 @@ def test_low_performance_feedback_drives_next_version_candidate(tmp_path: Path) 
             symbol=str(row.get("symbol") or ""),
             at=str(row.get("at") or ""),
             department=str(row.get("department") or ""),
+            source_type=str(row.get("source_type") or "legacy"),
+            source_artifact_id=str(row.get("source_artifact_id") or ""),
+            benchmark_id=str(row.get("benchmark_id") or ""),
+            improvement_type=str(row.get("improvement_type") or ""),
         )
         for row in store.load_occurrences()
     ]
@@ -435,7 +542,9 @@ def test_low_performance_feedback_drives_next_version_candidate(tmp_path: Path) 
         )
 
 
-def test_trace_findings_feed_only_owned_departments(tmp_path: Path) -> None:
+def test_legacy_trace_findings_are_recorded_but_never_become_candidates(
+    tmp_path: Path,
+) -> None:
     store = EvolutionSkillStore(tmp_path)
     assert (
         record_trace_occurrences(
@@ -454,11 +563,30 @@ def test_trace_findings_feed_only_owned_departments(tmp_path: Path) -> None:
             run_id="trace-2",
             finding_codes=("order_failure",),
         )
-        == 0
+        == 1
     )
-    row = store.load_occurrences()[0]
+    rows = store.load_occurrences()
+    row = rows[0]
     assert row["kind"] == "trace-high-latency"
     assert row["department"] == "01-research"
+    assert rows[1]["department"] == "02-trading"
+    assert (
+        detect_candidates(
+            [
+                Occurrence(
+                    **{
+                        key: value
+                        for key, value in item.items()
+                        if key in Occurrence.__dataclass_fields__
+                    }
+                )
+                for item in rows
+            ],
+            department="01-research",
+            min_occurrences=1,
+        )
+        == []
+    )
 
 
 def test_inventory_distinguishes_sources_and_never_authorizes_deletion(

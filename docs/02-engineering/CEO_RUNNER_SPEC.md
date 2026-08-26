@@ -24,7 +24,7 @@ Trading·Accounting은 이미 이 필드를 갖고 있다.
 |---|---|---|---|
 | ID | `executive-orchestrator` | `ceo-runner` | `executive-briefing-worker` |
 | 런타임 | Hermes Agent | 평범한 Python 함수 | 독립 LangGraph Graph |
-| 모델 | `openai-codex/gpt-5.6-luna` | **없음** | Ollama `qwen3:1.7b` |
+| 모델 | Profile/Runtime 정본 참조 | **없음** | [Worker Model Matrix](WORKER_MODEL_MATRIX.md) 참조 |
 | 호출 주체 | Hermes gateway | `run_employee_workers()`가 조건 없이 1회 | `run_worker_registry()` |
 | 산출물 | `ceo_case_summary` (사용자 설명) | `facts` / `blockers` (**서술 필드 없음**) | `advisory_context` (서술) |
 | 판단 | 함 (Mandate 해석·라우팅·재배분) | **안 함** (`decided_by: deterministic`) | 함 (부서 결과 종합·서술) |
@@ -81,7 +81,7 @@ Trading·Accounting은 이미 이 필드를 갖고 있다.
 
 ### 구현 위치와 템플릿
 
-- 파일: `departments/00-ceo-office/employee_workers.py` (현재 30줄, 여기에 추가)
+- 파일: `departments/00-ceo-office/employee_workers.py`에 구현 완료. 아래 내용은 최초 구현 템플릿이며 현재 코드를 덮어쓰는 지침이 아니다.
 - **템플릿으로 삼을 것**: `desk_runner()` —
   [departments/02-trading/employee_workers.py:140-191](../../departments/02-trading/employee_workers.py)
   그리고 그 호출부 202-222줄. `back_office_runner()`(05-accounting-portfolio/employee_workers.py:276-311)도

@@ -23,34 +23,32 @@ def test_auth_mode_rejects_removed_external_mode(removed_mode: str) -> None:
             auth.auth_mode()
 
 
-def test_fixture_identity_accepts_explicit_header_and_can_be_optional() -> None:
+def test_fixture_identity_accepts_explicit_header_without_login_fallback() -> None:
     subject = str(uuid4())
     with patch.dict(
         os.environ,
-        {"PORTFOLIO_AUTH_MODE": "fixture", "PORTFOLIO_AUTH_REQUIRED": "false"},
+        {"PORTFOLIO_AUTH_MODE": "fixture"},
         clear=False,
     ):
         assert auth.authenticate_request_headers(x_user_id=subject) == subject
         assert auth.authenticate_request_headers(x_user_id=None) is None
 
 
-def test_required_fixture_identity_rejects_missing_header() -> None:
+def test_removed_required_switch_cannot_reintroduce_browser_login() -> None:
     with patch.dict(
         os.environ,
-        {"PORTFOLIO_AUTH_MODE": "fixture", "PORTFOLIO_AUTH_REQUIRED": "true"},
+        {"PORTFOLIO_AUTH_MODE": "fixture"},
         clear=False,
     ):
-        with pytest.raises(HTTPException) as error:
-            auth.authenticate_request_headers(x_user_id=None)
-    assert error.value.status_code == 401
-    assert error.value.detail == "portfolio_authentication_required"
+        assert auth.auth_required() is False
+        assert auth.authenticate_request_headers(x_user_id=None) is None
 
 
 def test_current_user_reads_only_the_fixed_identity_header() -> None:
     subject = str(uuid4())
     with patch.dict(
         os.environ,
-        {"PORTFOLIO_AUTH_MODE": "fixture", "PORTFOLIO_AUTH_REQUIRED": "true"},
+        {"PORTFOLIO_AUTH_MODE": "fixture"},
         clear=False,
     ):
         assert auth.current_user(x_user_id=subject) == subject
@@ -60,7 +58,7 @@ def test_fixture_scope_never_requires_database_membership() -> None:
     with (
         patch.dict(
             os.environ,
-            {"PORTFOLIO_AUTH_MODE": "fixture", "PORTFOLIO_AUTH_REQUIRED": "false"},
+            {"PORTFOLIO_AUTH_MODE": "fixture"},
             clear=False,
         ),
         patch.object(auth, "authorized_fund_memberships") as memberships,
@@ -127,9 +125,8 @@ def test_authorized_funds_include_only_rows_returned_by_active_grant_query() -> 
 
 def test_require_owner_enforces_only_the_local_demo_contract() -> None:
     owner = str(uuid4())
-    with patch.dict(os.environ, {"PORTFOLIO_AUTH_REQUIRED": "true"}, clear=False):
-        auth.require_owner(owner, owner)
-        with pytest.raises(HTTPException) as error:
-            auth.require_owner(owner, str(uuid4()))
+    auth.require_owner(owner, owner, required=True)
+    with pytest.raises(HTTPException) as error:
+        auth.require_owner(owner, str(uuid4()), required=True)
     assert error.value.status_code == 403
     assert error.value.detail == "portfolio_recommendation_forbidden"

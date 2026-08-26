@@ -37,7 +37,7 @@ Route 계약 테스트는 각 FastAPI의 app.openapi()를 별도 subprocess에�
 | 같은 부서 Head ↔ Worker | worker-context.v1 | 위임, 근거 수집, 비바인딩 결과 전달 |
 | 부서 간 동기 호출 | Domain API DTO | allow-list된 조회, 계산, Gate, 상태 확인 |
 | 부서 간 비동기 호출 | event-envelope-v1 | 상태 변경, 장시간 작업, 감사, 재처리 |
-| UI·Operator | Read-only Projection + 인증 사용자 PAPER Command BFF | 원장·Risk·OMS·Credential을 소유하지 않으며, ADR-0007의 좁은 사용자 authority만 전달 |
+| UI·Operator | Read-only Projection + 고정 local-fixture PAPER Command BFF | 원장·Risk·OMS·Credential을 소유하지 않으며, ADR-0007의 좁은 fixture authority만 전달. 로그인·세션을 만들지 않음 |
 
 Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-context.v1을 유지한다. Worker가 새로운 공개 Business API나 권한 우회 경로가 되어서는 안 된다.
 
@@ -62,24 +62,13 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 - apps/api의 GET /accounting/v1/portfolio-snapshot은 Accounting Domain의 쓰기 API가 아닌 read-only Projection이다.
 - /metrics와 같은 운영 관측 Route는 include_in_schema=false이면 OpenAPI actual Route에서 제외하고 Registry의 excluded_routes에 기록한다.
 
-### 2.2 현재 구현 요약
+### 2.2 실행 Route와 구현 상태의 정본
 
-| App | OpenAPI 상태 | actual operation | 기본 상태 |
-|---|---:|---:|---|
-| research-evidence-api | ready | 11 | Legacy implemented |
-| market-read-api | ready | 10 | Legacy implemented |
-| trading-api | ready | 16 | Paper only |
-| risk-api | ready | 13 | Production blocked |
-| qa-api | ready | 35 | Production blocked |
-| workforce-api | ready | 34 | Test implementation |
-| governance-api | ready | 32 | Test implementation |
-| accounting-api | ready | 21 | Paper only |
-| operator-bff | ready | 56 | Projection/Test |
-| Research Workflow, Quant, MSU Case | planned | 0 | Planned |
-
-현재 Registry에는 ready 앱의 228개 actual operation과 33개 planned operation이 분리되어 있다. Research Workflow·Quant·MSU Case의 FastAPI Route는 계획에 기록되어 있지만 현재 구현 Route로 세지 않는다. Accounting은 `accounting-api`가 ready로 전환되어 더 이상 planned가 아니다(2026-08-18 실측).
-
-이 표의 수치는 [Route Status Registry](contracts/route-registry.v1.json)의 `actual_routes`를 센 값이고, Registry는 각 앱의 `app.openapi()`와 exact comparison으로 검증된다. 표와 Registry가 어긋나면 **Registry가 기준**이다 - 표는 사람이 읽는 요약이라 갱신이 늦을 수 있다.
+App별 `actual_routes`, `planned_routes`, `excluded_routes`와 operation 수는
+[Route Status Registry](contracts/route-registry.v1.json)가 소유하며 각 앱의
+`app.openapi()`와 exact comparison으로 검증한다. 이 문서에는 변동 수치를 복제하지
+않는다. 영역별 준비도와 Production 차단 조건은
+[Project Implementation Status](../PROJECT_IMPLEMENTATION_STATUS.md)를 따른다.
 
 ## 3. 공통 API 계약
 
@@ -92,30 +81,21 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 - CEO·Worker·LLM에게 Supabase Service Role, Broker Credential, LS Credential을 제공하지 않는다.
 - Agent Tool은 allow-list된 제안·조회·검증 도구만 노출한다. 주문 Submit, Risk 결정 적용, Ledger Posting, 권한 Provisioning은 Agent Tool이 직접 수행하지 않는다.
 
-#### 3.1.1 인증 사용자 PAPER authority
+#### 3.1.1 고정 local-fixture 사용자 PAPER authority
 
-[ADR-0007](adr/0007-authenticated-user-paper-directive-authority.md)은 자동 주문과
-사용자 직접 주문을 분리한다.
+[ADR-0007](adr/0007-authenticated-user-paper-directive-authority.md)이 자동 주문과
+사용자 직접 주문의 권한, admission, 집계 상태 및 broker 정본을 소유한다. 이 API
+명세에는 전송 경계만 둔다.
 
-- Agent·alpha·전략 Worker·rebalancer가 만든 자동 주문 후보는 기존 Risk Decision을
-  반드시 통과한다.
-- BFF가 선택한 고정 데모 ID가 자기 ACTIVE Fund/Book에 명시한 `USER_DIRECTIVE`는 별도 사용자
-  authority다. alpha·rebalancer·Risk는 이 PAPER 결정을 경제적으로 veto/resize하지
-  않는다.
-- BFF는 body `user_id`를 권한으로 쓰지 않고 고정 데모 ID를 actor로 결합하며,
-  `OWNER | CIO | TRADER` membership과 canonical Fund/Book 관계를 확인한다.
-- Trading Hermes는 표시된 CEO 주문 원문을 strict schema/evidence span으로
-  비구속 구조화할 수 있지만 주문 권한은 없다. 원문 digest와 의미는 결정론 verifier가
-  독립적으로 다시 검사하고 모호한 문장은 실행하지 않는다. `/trading/agent/order`도
-  같은 인증 사용자 호환 ingress이며 Agent submit route가 아니다.
-- mutation은 `Idempotency-Key`가 필수이고 `mode`는 항상 `PAPER`다. BFF는 Supabase
-  token이나 LS credential을 downstream으로 전달하지 않고 짧은 수명의 최소 claim
-  service proof만 사용한다.
-- 배포된 사용자 직접 주문 레인의 cash, position, broker order와 execution 결과의
-  경제적 정본은 LS증권 모의투자(`LS PAPER`) 계좌다. Trading의 PAPER 전용 adapter만
-  주문·취소·상태조회를 수행한다. durable directive/leg/reservation/fill ledger는
-  멱등성·재시작·감사·회계 투영을 보존하고 broker snapshot과 대사한다. LS LIVE는
-  시세·호가·체결 read-only이며 LIVE order route는 없다.
+- BFF는 요청 본문의 `user_id`가 아니라 고정 local fixture를 actor로 결합한다. 별도
+  로그인·가입·세션은 만들지 않는다.
+- `/trading/agent/order`도 같은 fixture 호환 ingress이며 Agent submit route가 아니다.
+- mutation은 `Idempotency-Key`, `mode=PAPER`, 최소 claim의 내부 service proof를
+  요구한다. 사용자 token이나 LS credential은 downstream으로 전달하지 않는다.
+- Trading service는 LS PAPER 주문·취소·상태조회만 허용한다. LS LIVE mutation route는
+  없다.
+- Agent·alpha·전략 Worker가 만든 자동 주문 후보는 이 예외 경로가 아니며 기존 Risk
+  Decision을 통과해야 한다.
 
 ### 3.2 멱등성과 동시성
 
@@ -312,31 +292,22 @@ case_id는 Case 종속 Event에서 required이며, Mandate·Workforce·Reporting
 
 실시간 흐름에서 Risk 뒤 QA Gate를 거치며 QA PASS 없이 Broker Submit을 하지 않는다. 전략 연구 흐름에서 Quant의 SUPPORTED를 Production 주문 승인으로 취급하지 않는다. Research·Quant·QA는 서로의 원장을 직접 수정하지 않는다.
 
-위 흐름은 `AUTOMATED_STRATEGY` 주문에 대한 불변식이다. 인증 사용자의 명시적
-PAPER 명령은 다음의 별도 흐름이며 자동 전략과 권한 증거를 공유하지 않는다.
+위 흐름은 `AUTOMATED_STRATEGY` 주문에 대한 불변식이다. 고정 local-fixture 사용자의 명시적
+PAPER 명령은 다음의 별도 전송 흐름이며 자동 전략과 권한 증거를 공유하지 않는다.
 
     User natural-language command → fixed fixture ID + exact Fund/Book admission
       → CEO Kanban root → Trading Hermes non-binding candidate
       → exact-text/digest/evidence deterministic verifier
       → current Fund/Book membership + mechanical admission + idempotency
-      → durable USER_DIRECTIVE → local PaperBroker/OMS
+      → durable USER_DIRECTIVE → LS PAPER adapter/OMS
 
-mechanical admission에는 canonical cash/position/open-order reservation, lot/tick/TTL과
-PAPER mode 검증이 포함된다. 이 단계는 alpha 점수·목표 비중·Risk budget을 근거로
-사용자의 결정을 다시 판단하는 경제적 Risk veto가 아니다.
-
-`SELL_ALL`은 canonical positive sellable position만 reduce-only SELL 자식으로 만들며
-현재 long-only PAPER 범위에서 short를 열거나 확대하거나 자동 cover하지 않는다.
-`CANCEL_ALL`은 canonical open PAPER order만 대상으로 한다. 두 명령은 자식 결과를
-합성해 `RECEIVED | RUNNING | IN_PROGRESS | PARTIAL | COMPLETED | FAILED | UNKNOWN`
-중 하나를 반환하며, 한 자식이라도 실패하면 `COMPLETED`가 아니다. `SELL_ALL`의
-zero-leg 완료는 같은 snapshot에서 positive accounting position과 open SELL
-reservation이 모두 0인 경우에만 허용한다.
+세부 authority, mechanical admission, `SELL_ALL`·`CANCEL_ALL` 의미와 집계 상태는
+[ADR-0007](adr/0007-authenticated-user-paper-directive-authority.md)을 따른다.
 
 ### 7.2 실패 폐쇄
 
 - Research·Market PIT 실패, 근거 부족, stale DQ는 결과를 만들지 않고 422·503·BLOCKED 중 적절한 상태로 남긴다.
-- 자동 주문에서 Risk Engine·P1/P2·Trading State 조회가 불가능하면 신규 진입을 차단하고 HOLD·ENTRY_BLOCKED·503을 반환한다. 사용자 PAPER 지시는 Risk verdict를 요구하지 않지만 auth·canonical account·durable store·mechanical admission 중 하나라도 불확실하면 동일하게 fail closed한다.
+- 자동 주문에서 Risk Engine·P1/P2·Trading State 조회가 불가능하면 신규 진입을 차단하고 HOLD·ENTRY_BLOCKED·503을 반환한다. 사용자 PAPER 지시는 Risk verdict를 요구하지 않지만 fixture binding·내부 service proof·canonical account·durable store·mechanical admission 중 하나라도 불확실하면 동일하게 fail closed한다.
 - QA timeout·grounded=false·UNSUPPORTED·citation/PIT 실패는 PASS가 아니다.
 - Broker 무응답은 UNKNOWN이다. Accounting은 Fill 없이 Position·Cash·NAV를 변경하지 않는다.
 - Ledger·Position·NAV·Risk State·Profile Lifecycle의 실패는 자동 승인·자동 승격·권한 확대 방향으로 fallback하지 않는다.
@@ -355,19 +326,12 @@ reservation이 모두 0인 경우에만 허용한다.
 
 CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종결 권한이 없다. Quant는 Production 승격을 직접 수행하지 않는다. Risk·QA·OMS·Ledger는 담당자가 같아도 권한을 합치지 않는다.
 
-## 9. 구현 상태와 Production 활성화 조건
+## 9. API Production 활성화 조건
 
-| 영역 | 현재 상태 | Production 활성화 조건 |
-|---|---|---|
-| Research Evidence·Market | Legacy Read API 실행 | PIT·production_authorized 매핑·ACL·재시작 복구 |
-| Research Workflow·Quant | Contract/Worker 중심, FastAPI Route planned | 영속 Job·Dataset·Artifact 저장과 상태 Migration |
-| Trading | 결정론 Paper OMS API + 인증 사용자 PAPER directive 실행 | LS PAPER 계좌·PAPER 전용 credential·durable admission ledger·주문/취소 UNKNOWN 복구·부분 실패/재시작 검증; LIVE는 별도 승인 |
-| Risk | API·Test 실행, Production blocked | P1/P2 실데이터·Redis/DB Outbox·Risk Gate 장애 테스트 |
-| QA | API·Test 실행, Production blocked | 승인 corpus/profile·독립 Verifier·write-through·SoD |
-| Governance·Workforce | 일부 API 실행, 일부 Route planned | Transport·RLS·Committee/Plan 저장소·IAM 연계 |
-| Accounting·Portfolio | Ledger/Reconciliation Prototype, Domain FastAPI planned | 단일 영속 Ledger·Market Mark·Reconciliation·공식 NAV 승인 |
-
-다음 조건이 모두 통과되기 전에는 Production 주문이나 공식 NAV를 활성화하지 않는다.
+영역별 현재 구현 상태와 준비도는
+[Project Implementation Status](../PROJECT_IMPLEMENTATION_STATUS.md)가 소유한다. 이
+문서에는 API·Event 경계에서 공통으로 확인할 활성화 조건만 둔다. 다음 조건이 모두
+통과되기 전에는 Production 주문이나 공식 NAV를 활성화하지 않는다.
 
 1. Route Registry와 각 app.openapi()의 exact comparison이 CI에서 통과한다.
 2. Event Registry의 Producer·Consumer가 event-envelope-v1 필드를 검증하고 Outbox·DLQ·중복 제거를 갖춘다.
@@ -390,9 +354,9 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 10. Worker DEGRADED/ESCALATE Context가 Head를 통과해도 APPROVE/PASS로 자동 승격되지 않는다.
 11. HR 개선 Candidate의 작성자와 승인자가 같으면 403이고 Access Request가 Credential을 직접 만들지 않는다.
 12. Event를 중복 소비해도 Ledger Posting·Profile Transition·QA Finding이 중복 생성되지 않는다.
-13. Agent/alpha 주문은 Risk 없이 submit되지 않지만, 인증 사용자의 명시적 PAPER directive는 Risk 경제적 veto 없이도 fund/book·account mechanics·idempotency를 통과하면 접수된다.
-14. `SELL_ALL`/`CANCEL_ALL` 자식 중 하나라도 실패하면 aggregate는 `COMPLETED`가 아니며, 같은 directive 상태 조회가 자식별 결과를 재현한다.
-15. LS PAPER adapter만 사용자 PAPER 주문·취소·상태조회를 수행하고 broker snapshot이 durable 회계 투영과 대사된다. LS LIVE 연결은 market read만 제공하며 사용자 route에 LIVE order나 LIVE credential이 나타나지 않는다.
+13. 자동 주문과 고정 local-fixture PAPER directive의 분리, batch 상태, LS PAPER/LIVE
+    경계는 [ADR-0007](adr/0007-authenticated-user-paper-directive-authority.md)의
+    acceptance 및 계약 테스트를 통과한다.
 
 ### 10.1 Operator BFF의 부서·통신 Projection
 
@@ -449,9 +413,7 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 
 추천 결과의 `instrument_recommendations`는 `portfolio_id`, `symbol`, `exchange`, `name`, `asset_class`, `currency`, `target_weight`, `target_amount`, `expected_return`, `expected_return_status`, `expected_return_basis`, `data_status`, `evidence_refs`를 포함한다. `TEST` 또는 PIT 검증 시장 근거가 없는 상태에서 `expected_return`은 `null`이어야 하며 수익률 보장 문구를 표시하지 않는다.
 
-### 10.5 자유 쿼리·카테고리 라우팅 Projection
-
-`POST /ui/portfolio-recommendations`는 다음 선택 입력을 추가로 받는다.
+같은 `POST /ui/portfolio-recommendations`는 다음 선택 입력도 받는다.
 
 - `category`: `PORTFOLIO_RECOMMENDATION`, `MARKET_RESEARCH`, `RISK_REVIEW`, `TAX_LIQUIDITY`, `REBALANCING_PROPOSAL`, `STRATEGY_PROPOSAL` 중 하나다. **다만 서버는 이 목록을 `Literal`로 강제하지 않는다** — 목록 밖 문자열이 와도 422가 아니라 더 넓은 부서 집합으로 fallback하고, 응답 `task_plan.category_recognized: false`로 그 사실을 남긴다. 대화형 제품에서 새 의도가 표보다 먼저 도착하므로 질문을 통째로 실패시키지 않되, 조용히 넘기지도 않는다는 뜻이다(근거: [CEO_CONVERSATIONAL_ROUTING_SPEC.md](CEO_CONVERSATIONAL_ROUTING_SPEC.md) 2.5).
 - `STRATEGY_PROPOSAL`은 `task_plan.workflow`가 `strategy-research`로 나온다 — 이 그래프가 정식 처리 주체가 아니라는 표시다. 현재 BFF는 아직 워크플로별 디스패치를 하지 않으므로 자문 전용 축소 집합(`research`·`qa`·`ceo`)만 실행된다(같은 문서 3.1).
@@ -461,11 +423,12 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 
 프론트엔드 공개 자산 Projection은 현재 국내 주식만 포함한다. 파생상품 토글은 계약 호환성을 위해 유지하지만 국내 주식 전용 유니버스에서는 후보를 만들지 않는다. 채권·현금성 자산은 `instrument_recommendations`와 사용자 화면에 노출하지 않는다. 두 토글이 모두 꺼지거나 PIT 국내 종목이 없으면 종목 결과는 `UNAVAILABLE`, `safe_action`은 `HOLD`가 된다.
 
-CEO 라우터는 `category`를 최소 부서 집합의 시작점으로 삼고 `query`의 의도를 결정론적으로 정규화한다. 응답의 `task_plan`에는 `original_query`, `rewritten_query`, `requested_departments`, `matched_terms`가 포함된다. 이는 부서·Worker 배정과 설명을 위한 값이며 주문, Risk 승인, 원장 변경을 실행하지 않는다.
+CEO 라우터는 `category`를 최소 부서 집합의 시작점으로 삼고 `query`의 의도를
+결정론적으로 정규화한다. 이 값은 부서·Worker 배정과 설명에만 사용한다.
 
 `GET /ui/snapshot`의 `operations.runtime`는 `run_id`, `active_workers`, 부서별 `status`, `department_reports`, 최근 실행 메시지를 제공한다. 프론트엔드는 이를 Kanban Projection으로 표시하며, `SKIPPED` 부서는 요청 범위에 포함되지 않은 부서로 표시한다. 실행이 완료된 뒤에도 결과의 출처는 새 `run_id`로 식별하며 캐시된 금융 상태로 간주하지 않는다.
 
-## 10.6 BFF 응답·수치·국내 유니버스 계약 보완
+### 10.6 BFF 응답·수치·국내 유니버스 계약 보완
 
 - BFF 포트폴리오 경로의 `POST /ui/portfolio-recommendations`, `GET /ui/portfolio-recommendations/{run_id}`, `POST /ui/portfolio-recommendations/{run_id}/approval`, `GET /ui/portfolio-universes`는 `apps/api/portfolio_schemas.py`의 Pydantic response DTO를 사용한다. 외부 응답 envelope와 `result` core는 `extra=forbid`이며, 새 필드는 DTO·OpenAPI·계약 테스트를 함께 갱신하는 additive change로만 추가한다.
 - `max_drawdown_pct`는 퍼센트가 아닌 비율이다. `0.10`은 최대 손실률 10%를 뜻하며 `10`은 유효하지 않다. 허용 범위는 `0 < value <= 1`이다.

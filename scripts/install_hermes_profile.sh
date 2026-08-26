@@ -62,7 +62,10 @@ install_one() {
       python_env="$(cygpath -w "$python_env")"
       python_tmp="$(cygpath -w "$python_tmp")"
     fi
-    PYTHONIOENCODING=utf-8 python - "$python_cfg" "$python_env" "$python_tmp" <<'PYEOF'
+    local python_bin
+    python_bin="$(command -v python3 || command -v python || true)"
+    [ -n "$python_bin" ] || { echo "  ✗ Python interpreter not found"; rm -f "$tmp"; return 1; }
+    PYTHONIOENCODING=utf-8 "$python_bin" - "$python_cfg" "$python_env" "$python_tmp" <<'PYEOF'
 import os, re, sys
 cfg, envf = sys.argv[1], sys.argv[2]
 env = {}

@@ -327,6 +327,13 @@ def classify_message(msg: dict) -> tuple[str, str | None, dict | None]:
     return ("other", tr_cd, None)
 
 
+def _connect_market_stream(ws_url: str):
+    """LS가 지원하지 않는 protocol ping을 보내지 않고 시세 소켓을 연다."""
+    import websockets
+
+    return websockets.connect(ws_url, open_timeout=20, ping_interval=None)
+
+
 class LsRealtimeWorker:
     """구독 목록을 받아 한 소켓으로 실시간 수집한다."""
 
@@ -392,10 +399,8 @@ class LsRealtimeWorker:
     async def _session(self, max_seconds, max_messages):
         import asyncio
 
-        import websockets
-
         token = self._token_provider()
-        async with websockets.connect(self._ws_url, open_timeout=20, ping_interval=30) as ws:
+        async with _connect_market_stream(self._ws_url) as ws:
             # **재접속하면 반드시 재구독한다.** 소켓만 열고 구독을 빠뜨리면
             # 조용히 아무것도 안 받는 상태가 된다.
             for tr_cd, symbol in self._subs:

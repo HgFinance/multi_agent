@@ -350,7 +350,7 @@ def _block_owned_task(task_id: str, *, reason: str = BLOCK_REASON) -> bool:
 def _run_real_worker(argv: Sequence[str]) -> int:
     """Run the unmodified Hermes worker and inherit its task log streams."""
 
-    env = os.environ.copy()
+    env = _real_worker_environment()
     # The dispatcher points HERMES_BIN at this wrapper.  The delegated Hermes
     # process must see the real binary so any nested Hermes resolution cannot
     # recurse back into the wrapper.
@@ -368,6 +368,40 @@ def _run_real_worker(argv: Sequence[str]) -> int:
     return int(completed.returncode)
 
 
+def _real_worker_environment() -> dict[str, str]:
+    """Preserve Kanban's workspace without its false deprecated-env warning.
+
+    Hermes' dispatcher starts this wrapper with ``cwd`` set to the task's
+    resolved workspace and also exports the same path as ``TERMINAL_CWD``.
+    Current Hermes then mistakes that task-scoped export for a deprecated
+    profile ``.env`` entry.  The terminal and file tools already fall back to
+    the process cwd, so removing only this dispatcher-owned duplicate keeps
+    per-task isolation and avoids pinning a changing scratch path in a static
+    profile config.
+    """
+
+    env = os.environ.copy()
+    if env.get("HERMES_KANBAN_TASK") and env.get("HERMES_KANBAN_RUN_ID"):
+        env.pop("TERMINAL_CWD", None)
+    return env
+
+
+def _drop_dispatcher_terminal_cwd() -> None:
+    """Remove the dispatcher's duplicate cwd from this dedicated worker.
+
+    QA workers retain this wrapper as their parent process while the real
+    Hermes process runs.  Removing the duplicate from the wrapper too keeps
+    nested subprocesses from rediscovering it and emitting the same false
+    deprecation warning.  The dispatcher has already changed the process cwd
+    to the task workspace before invoking this entry point.
+    """
+
+    if os.environ.get("HERMES_KANBAN_TASK") and os.environ.get(
+        "HERMES_KANBAN_RUN_ID"
+    ):
+        os.environ.pop("TERMINAL_CWD", None)
+
+
 def _is_qa_kanban_worker() -> bool:
     task_id, run_id = _task_context()
     return (
@@ -380,10 +414,12 @@ def _is_qa_kanban_worker() -> bool:
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
+    _drop_dispatcher_terminal_cwd()
+
     # Ordinary QA CLI/gateway commands are byte-for-byte delegated to Hermes;
     # only dispatcher-owned QA workers get the terminal-contract guard.
     if not _is_qa_kanban_worker():
-        env = os.environ.copy()
+        env = _real_worker_environment()
         env["HERMES_BIN"] = REAL_HERMES
         worker_argv = _bounded_worker_argv(
             args,

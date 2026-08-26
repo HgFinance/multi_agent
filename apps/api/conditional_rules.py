@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -22,6 +23,7 @@ from orchestration.conditional_rules import (
     rule_fingerprint,
     validate_rule_spec,
 )
+from orchestration.user_order_language import DelayedPaperOrderPlan
 
 try:
     from .conditional_rule_language import clarification_codes, preview_assumptions
@@ -71,6 +73,82 @@ class ConditionalRuleCandidate(BaseModel):
         if value is not None and value.tzinfo is None:
             raise ValueError("expires_at must include timezone")
         return value
+
+
+DELAYED_ORDER_EXECUTION_WINDOW_SECONDS = 5 * 60
+
+
+def build_delayed_order_candidate(
+    plan: DelayedPaperOrderPlan,
+    *,
+    admitted_at: datetime,
+) -> ConditionalRuleCandidate:
+    """Map a strict relative-time order onto the existing rule contract."""
+
+    if admitted_at.tzinfo is None:
+        raise ValueError("admitted_at must include timezone")
+    trigger_at = admitted_at.astimezone(timezone.utc) + timedelta(
+        seconds=plan.delay_seconds
+    )
+    expires_at = trigger_at + timedelta(
+        seconds=DELAYED_ORDER_EXECUTION_WINDOW_SECONDS
+    )
+    payload = plan.payload
+    return ConditionalRuleCandidate.model_validate(
+        {
+            "symbol": payload.instrument_mention,
+            "condition": {
+                "type": "COMPARISON",
+                "operator": "GTE",
+                "left": {
+                    "type": "TIME",
+                    "field": "OBSERVED_AT_EPOCH_SECONDS",
+                },
+                "right": {
+                    "type": "LITERAL",
+                    "value": str(int(trigger_at.timestamp())),
+                    "unit": "NUMBER",
+                },
+            },
+            "action": {
+                "side": payload.side.value,
+                "sizing": {
+                    "type": "FIXED_SHARES",
+                    "value": payload.quantity,
+                },
+                "order_type": payload.order_type.value,
+                "limit_price": payload.limit_price,
+                "time_in_force": payload.time_in_force,
+            },
+            "evaluation": {"clock": "QUOTE"},
+            "expires_at": expires_at,
+        }
+    )
+
+
+def relative_time_trigger_at(condition: ExpressionNode) -> datetime | None:
+    """Read the canonical trigger instant from a deterministic time rule."""
+
+    if (
+        condition.type.value == "COMPARISON"
+        and condition.operator == "GTE"
+        and condition.left is not None
+        and condition.left.type.value == "TIME"
+        and condition.left.field == "OBSERVED_AT_EPOCH_SECONDS"
+        and condition.right is not None
+        and condition.right.type.value == "LITERAL"
+        and condition.right.unit is not None
+        and condition.right.unit.value == "NUMBER"
+        and not isinstance(condition.right.value, bool)
+    ):
+        try:
+            epoch = Decimal(str(condition.right.value))
+            if not epoch.is_finite() or epoch != epoch.to_integral_value():
+                return None
+            return datetime.fromtimestamp(int(epoch), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
 
 
 class ConditionalRulePreviewRequest(BaseModel):

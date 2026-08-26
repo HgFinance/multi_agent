@@ -29,6 +29,9 @@
     "glossary_enabled": true,
     "glossary_path": "benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json",
     "guided_json": true,
+    "structured_output_max_tokens": 256,
+    "text_output_max_tokens": 768,
+    "semantic_repair_max_tokens": 192,
     "semantic_repair_max_attempts": 1,
     "deterministic_answer_fallback": false,
     "quality_note": "Upgrade v1 paired A/B candidate enabled; FinanceBench diagnostic remains HOLD and is tracked separately."

@@ -2,8 +2,9 @@
 """Portfolio BFF의 로컬 모의투자 사용자 경계를 담당한다.
 
 이 저장소는 로그인·세션·외부 사용자 인증을 구현하지 않는다. 로컬 모의투자
-실행에서는 ``DISCORD_ACTOR_MAP``으로 정한 하나의 고정 데모 ID를
-``X-User-Id``로 전달한다. 이 헤더는 공개 서비스의 사용자 인증 수단이 아니다.
+실행에서는 하나의 고정 데모 ID를 사용한다. 브라우저와 동일 출처 프록시는
+``X-User-Id``를 같은 값으로 보내고, ``/ui/me``의 직접 조회도 그 ID로
+초기화된다. 이 헤더는 공개 서비스의 사용자 인증 수단이 아니다.
 
 ``PORTFOLIO_AUTH_MODE``에 다른 값이 들어오면 fixture-only 계약 위반으로 즉시
 실패한다. 운영 배포와 외부 사용자 로그인 연동은 이 모의투자 범위에 포함하지 않는다.
@@ -18,9 +19,9 @@ from uuid import UUID
 import psycopg2
 from fastapi import Header, HTTPException, Request
 
-_AUTH_REQUIRED_DEFAULT = "false"
 _REQUEST_STATE_KEY = "portfolio_authenticated_user_id"
 _MISSING = object()
+FIXED_DEMO_USER_ID = "00000000-0000-4000-8000-00000000cec0"
 
 
 class AuthConfigurationError(RuntimeError):
@@ -33,14 +34,9 @@ def _http_error(status_code: int, detail: str) -> HTTPException:
 
 
 def auth_required() -> bool:
-    """Return whether fixture mode also requires an identified user."""
+    """The closed-network fixture never waits for a browser login."""
 
-    return os.getenv("PORTFOLIO_AUTH_REQUIRED", _AUTH_REQUIRED_DEFAULT).casefold() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return False
 
 
 def auth_mode() -> str:
@@ -462,17 +458,18 @@ def authenticate_request_headers(
     x_user_id: str | None,
     required: bool | None = None,
 ) -> str | None:
-    """Resolve the fixed local demo identity from the explicit header."""
+    """Resolve the fixed local demo identity without a login dependency."""
 
     try:
         auth_mode()
     except AuthConfigurationError as exc:
         raise _http_error(503, "portfolio_authentication_unavailable") from exc
 
+    # Keep accepting an explicit fixture subject for internal contract tests
+    # and server-to-server calls. Browser traffic is pinned by the frontend
+    # proxy. A missing header is anonymous transport, not a login challenge.
     owner_id = (x_user_id or "").strip()
-    effective_required = auth_required() if required is None else required
-    if not owner_id and effective_required:
-        raise _http_error(401, "portfolio_authentication_required")
+    del required
     return owner_id or None
 
 
@@ -489,7 +486,7 @@ def set_authenticated_request_user(request: Request, owner_id: str | None) -> No
 def current_user(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> str | None:
-    """Read the fixed demo identity used by the local mock stack."""
+    """Read the optional fixture identity supplied by a trusted local caller."""
 
     if not isinstance(x_user_id, str):
         x_user_id = None
@@ -513,8 +510,6 @@ def optional_current_user(
         from discord_ingress_auth import bearer_is_authorized  # type: ignore[no-redef]
 
     if bearer_is_authorized(authorization):
-        return None
-    if not (x_user_id or '').strip():
         return None
     return authenticate_request_headers(x_user_id=x_user_id, required=False)
 
@@ -541,6 +536,7 @@ __all__ = [
     "auth_mode",
     "auth_required",
     "authenticate_request_headers",
+    "FIXED_DEMO_USER_ID",
     "current_user",
     "optional_current_user",
     "require_any_fund_membership",

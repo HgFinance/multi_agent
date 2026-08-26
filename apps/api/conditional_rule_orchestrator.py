@@ -30,6 +30,7 @@ try:
         ConditionalRuleCandidate,
         ConditionalRulePreviewRequest,
         _build_preview,
+        relative_time_trigger_at,
     )
     from .user_order_orchestrator import (
         PaperOrderOrchestrationRejected,
@@ -61,6 +62,7 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
         ConditionalRuleCandidate,
         ConditionalRulePreviewRequest,
         _build_preview,
+        relative_time_trigger_at,
     )
     from user_order_orchestrator import (  # type: ignore[no-redef]
         PaperOrderOrchestrationRejected,
@@ -83,7 +85,7 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
 
 RESULT_SCHEMA_VERSION = "conditional-paper-rule-orchestration.v1"
 _ROOT_EXECUTABLE = frozenset({"ready", "running", "done"})
-_TRADING_NEW = frozenset({"running"})
+_TRADING_NEW = frozenset({"blocked", "running"})
 _TRADING_REPLAY = frozenset({"done"})
 _MAX_RULES_PER_REQUEST = 4
 
@@ -140,6 +142,12 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
     )
     timeframe_fallback = "TIMEFRAME_FALLBACK_3M_TO_5M" in assumptions
     expiry_kst = spec.expires_at.astimezone(timezone(timedelta(hours=9)))
+    trigger_at = relative_time_trigger_at(spec.condition)
+    trigger_kst = (
+        trigger_at.astimezone(timezone(timedelta(hours=9)))
+        if trigger_at is not None
+        else None
+    )
     user_message = (
         (
             "요청한 3분봉 기능이 없어 5분봉 완성봉 기준으로 대체했습니다. "
@@ -148,8 +156,15 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
         if timeframe_fallback
         else ""
     ) + (
-        "조건주문은 접수 처리 시점에 PAPER 모드 ACTIVE 전환이 완료되었습니다. "
-        "이 문구는 생성 영수증이며 현재 상태 조회 결과가 아닙니다. "
+        (
+            "PAPER 예약 조건주문이 ACTIVE 전환되었습니다. "
+            f"실행 기준 시각은 {trigger_kst:%Y-%m-%d %H:%M:%S} KST이며, "
+            "해당 시각 후 5분 안에 최신 시세·장 운영·자금 검증을 "
+            "모두 통과한 경우에만 PAPER OMS로 제출됩니다. "
+            if trigger_kst is not None
+            else "조건주문은 접수 처리 시점에 PAPER 모드 ACTIVE 전환이 완료되었습니다. "
+        )
+        + "이 문구는 생성 영수증이며 현재 상태 조회 결과가 아닙니다. "
         f"종목 {spec.symbol}, {spec.action.side.value}, 수량 {sizing_text}, "
         f"주문유형 {spec.action.order_type}"
         + (
@@ -188,6 +203,7 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
             ),
             "expires_at": spec.expires_at.isoformat(),
             "repeat_policy": "ONCE",
+            "trigger_at": trigger_at.isoformat() if trigger_at is not None else None,
             **(
                 {
                     "timeframe_fallback": {
@@ -283,6 +299,7 @@ def process_user_conditional_paper_rule(
     | list[ConditionalRuleCandidate]
     | None = None,
     clarification_reason: str | None = None,
+    interpretation_source: str = "HERMES",
 ) -> dict[str, Any]:
     """Validate one tool call containing one or more independent PAPER rules."""
 
@@ -330,6 +347,9 @@ def process_user_conditional_paper_rule(
             ),
         }
 
+    source = str(interpretation_source or "").strip().upper()
+    if source not in {"HERMES", "DETERMINISTIC"}:
+        _reject("CONDITIONAL_INTERPRETATION_SOURCE_INVALID")
     interpretation = {
         "schema_version": "conditional-rule-candidate-set.v1",
         "candidates": [
@@ -343,7 +363,7 @@ def process_user_conditional_paper_rule(
             trading_task_id=trading_task_id,
             interpretation=interpretation,
             interpretation_sha256=interpretation_digest,
-            source="HERMES",
+            source=source,
         )
     except (UserOrderRequestConflict, UserOrderRequestStateError) as exc:
         raise PaperOrderOrchestrationRejected(
@@ -447,7 +467,7 @@ def process_user_conditional_paper_rule(
                         index=index,
                         count=len(previews),
                     ),
-                    parser_source="HERMES",
+                    parser_source=source,
                 )
             )
         activated: list[Any] = []

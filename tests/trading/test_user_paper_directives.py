@@ -29,7 +29,12 @@ from directives.contracts import (  # noqa: E402
     DirectiveState,
     UserDirectiveRequest,
 )
-from directives.market_data import FixtureMarketDataProvider, TrustedQuote  # noqa: E402
+from directives.market_data import (
+    FixtureMarketDataProvider,
+    LsPaperFallbackMarketDataProvider,
+    MarketDataError,
+    TrustedQuote,
+)  # noqa: E402
 from directives.repository import (  # noqa: E402
     DirectiveLeg,
     InMemoryDirectiveRepository,
@@ -119,6 +124,36 @@ def _read_token(record, subject: UUID, *, now=NOW) -> str:
             "scope": "trading.user-directive.read",
         }
     )
+
+
+def test_stale_tsdb_quote_falls_back_to_fresh_ls_paper_rest_quote():
+    instrument = InstrumentRef(uuid4(), "005930", Decimal(1), None, "KRW")
+
+    class StaleProvider:
+        def quote(self, *_args, **_kwargs):
+            raise MarketDataError(
+                "TRADING_MARKET_QUOTE_STALE", "projection is stale", 409
+            )
+
+    class Broker:
+        def get_quote(self, symbol):
+            return {
+                "symbol": symbol,
+                "observed_at": NOW,
+                "bid": Decimal("256000"),
+                "ask": Decimal("256500"),
+                "bid_size": Decimal("100"),
+                "ask_size": Decimal("120"),
+            }
+
+    quote = LsPaperFallbackMarketDataProvider(
+        StaleProvider(), Broker()
+    ).quote(instrument, now=NOW)
+
+    assert quote.symbol == "005930"
+    assert quote.bid == Decimal("256000")
+    assert quote.ask == Decimal("256500")
+    assert quote.source == "ls-paper-rest:t1101"
 
 
 class Harness:

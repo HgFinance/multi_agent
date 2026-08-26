@@ -3,7 +3,7 @@
 검토일: 2026-08-04  
 상태: 설계 제안. 현재 구현·운영 활성화와 향후 확장을 구분한다.
 
-AI-QA 부서는 Risk·Research·Trading·Quant·Accounting의 결과를 독립 검증한다. 부서장은 Hermes와 `openai-codex/gpt-5.6-luna`를 사용하고, 직원 Worker는 현재 Ollama `qwen3:1.7b`를 사용한다. Worker 결과는 `qa.worker-context.v1` advisory이며 `EvidenceQaEngine`, `ModelRiskEngine`, `InternalAuditEngine`, Permission Engine, Incident 상태 머신이 최종 통제한다.
+AI-QA 부서는 Risk·Research·Trading·Quant·Accounting의 결과를 독립 검증한다. Head/Worker 모델은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md)를 따르며 이 설계 문서에 버전값을 복사하지 않는다. Worker 결과는 `qa.worker-context.v1` advisory이고 `EvidenceQaEngine`, `ModelRiskEngine`, `InternalAuditEngine`, Permission Engine, Incident 상태 머신이 최종 통제한다.
 
 **2026-08-06 tool 강등**: `evidence-qa-worker`·`model-and-internal-audit-worker`·`ops-and-permission-worker`는
 결정론 `qa-runner` 하나로 합쳐졌다(`WORKER_SPECS` LLM Registry 밖, 매 케이스 항상 실행). 아래 표의 세
@@ -109,7 +109,7 @@ incident timeline
 
 | 호출 대상 | 호출 Worker | 목적 | 외부 Credential |
 |---|---|---|---|
-| Ollama OpenAI-compatible endpoint | 모든 Worker의 Python LLM Node | JSON advisory·분류·근거 서술 | 로컬 `OLLAMA_BASE_URL` |
+| Worker Model Gateway | LLM 사용 Worker의 Python Node | JSON advisory·분류·근거 서술 | 모델 endpoint는 gateway 설정이 소유 |
 | `POST /qa/v1/evidence/check` | Evidence Worker | Agentic Evidence RAG | 내부 Evidence/Embedding Gateway |
 | `POST /qa/v1/model-risk/evaluate` | Model Risk Worker | 결정론적 Model Risk 평가 | 없음, 내부 인증 |
 | `POST /qa/v1/internal-audit/evaluate` | Internal Audit Worker | SoD·재현성·계보 평가 | 없음, 내부 인증 |
@@ -175,7 +175,7 @@ QA 판정·Audit Trail(`audit.rag_runs` 등)의 Source of Truth는 계속 Supaba
 3. QA Evidence에 PIKE-style decomposition과 AdaptiveRAG Router를 추가한다.
 4. Model Risk/Internal Audit에 기존 관계형 계보 기반 GraphRAG를 추가한다.
 5. Incident 데이터가 충분히 쌓인 뒤 HyperExtraction을 human-reviewed inference로 추가한다.
-6. `qwen3:1.7b`의 decomposition·entity extraction 품질을 benchmark하고, 모델 변경은 HR·QA·CEO 승인 후 수행한다.
+6. Worker Model Matrix의 활성 모델로 decomposition·entity extraction 품질을 benchmark하고, 모델 변경은 HR·QA·CEO 승인 후 수행한다.
 
 참조: [QA Profile](hermes/config.yaml), [QA Worker Graph](qa_employee_workers.py), [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md), [Unified Domain API](../../docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md), [Agentic RAG](../../skills/agentic-rag/SKILL.md).
 

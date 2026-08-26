@@ -142,6 +142,11 @@ from eval_runner import (
     EvalSet,
     InMemoryEvalAuditRepository,
 )
+from orchestration.evolution_skills import (
+    EvolutionSkillError,
+    EvolutionSkillStore,
+    build_resolution_report,
+)
 from orchestration.langsmith_feedback import FeedbackConfig, FeedbackLedger
 from tool_permission_check import (
     AgentToolPolicy,
@@ -529,6 +534,14 @@ class ObservabilityFeedbackDecisionRequest(BaseModel):
     decision: str = Field(pattern=r"^(APPROVED|REJECTED)$")
     approved_by: str = Field(min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=240)
+    improvement_type: str = Field(
+        default="NO_ACTION",
+        pattern=(
+            r"^(SKILL_CREATE|SKILL_EVOLVE|CODE_FIX|PROMPT_POLICY|"
+            r"RUNTIME_CONFIG|DATA_QUALITY|NO_ACTION)$"
+        ),
+    )
+    target_skill_slug: str = Field(default="", max_length=64)
 
 
 class ObservabilityBenchmarkStatusRequest(BaseModel):
@@ -537,6 +550,12 @@ class ObservabilityBenchmarkStatusRequest(BaseModel):
     score: float | None = Field(default=None, ge=0, le=1)
     report_ref: str = Field(default="", max_length=240)
     result_summary: str = Field(default="", max_length=240)
+
+
+class EvolutionProposalDecisionRequest(BaseModel):
+    decision: str = Field(pattern=r"^(APPROVED|REJECTED)$")
+    approved_by: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=240)
 
 
 # --- App --------------------------------------------------------------------------
@@ -572,6 +591,7 @@ def _serialize_eval_execution(function):
 _eval_comparisons: dict[str, ChampionComparison | None] = {}
 _eval_idempotency: dict[str, tuple[str, EvalRunResponse]] = {}
 _feedback_ledger: FeedbackLedger | None = None
+_evolution_store_instance: EvolutionSkillStore | None = None
 
 
 def _observability_feedback_ledger() -> FeedbackLedger:
@@ -579,6 +599,15 @@ def _observability_feedback_ledger() -> FeedbackLedger:
     if _feedback_ledger is None:
         _feedback_ledger = FeedbackLedger(FeedbackConfig.from_env().state_path)
     return _feedback_ledger
+
+
+def _evolution_skill_store() -> EvolutionSkillStore:
+    global _evolution_store_instance
+    if _evolution_store_instance is None:
+        _evolution_store_instance = EvolutionSkillStore(
+            Path(os.environ.get("EVOLUTION_SKILLS_HOME", "/var/lib/evolution-skills"))
+        )
+    return _evolution_store_instance
 
 def _eval_request_fingerprint(body: EvalRunRequest) -> str:
     payload = json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
@@ -785,6 +814,25 @@ def model_risk_evaluate(body: ModelRiskCheckRequest):
         "calculation_version": result.calculation_version,
         "input_hash": result.input_hash,
     }
+
+
+@app.get("/qa/v1/evolution/proposals/{proposal_id}")
+def get_evolution_skill_proposal(
+    proposal_id: str,
+    authorization: str | None = Header(default=None),
+):
+    """Return the immutable lineage and current outcome-verification status."""
+
+    _require_eval_service_token(
+        authorization, required_scope="qa.observability.read"
+    )
+    try:
+        return build_resolution_report(_evolution_skill_store(), proposal_id)
+    except (EvolutionSkillError, OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "EVOLUTION_PROPOSAL_NOT_FOUND"},
+        ) from exc
 
 
 @app.post("/qa/v1/internal-audit/evaluate")
@@ -1048,13 +1096,60 @@ def decide_observability_feedback(
         body.decision,
         body.approved_by,
         body.reason,
+        improvement_type=body.improvement_type,
+        target_skill_slug=body.target_skill_slug,
     ):
         raise HTTPException(status_code=409, detail={"error_code": "FEEDBACK_DECISION_EXISTS_OR_INVALID"})
     return {
         "status": body.decision,
         "artifact_id": artifact_id,
         "approved_by": body.approved_by,
+        "improvement_type": body.improvement_type,
+        "target_skill_slug": body.target_skill_slug or None,
         "benchmark_status": "PENDING" if body.decision == "APPROVED" else None,
+    }
+
+
+@app.post("/qa/v1/evolution/proposals/{proposal_id}/decision")
+def decide_evolution_skill_proposal(
+    proposal_id: str,
+    body: EvolutionProposalDecisionRequest,
+    authorization: str | None = Header(default=None),
+    discord_message_id: str | None = Header(
+        default=None, alias="X-HgFinance-Discord-Message-Id"
+    ),
+):
+    """Record the second human decision against the exact proposal hashes."""
+
+    _require_eval_service_token(
+        authorization, required_scope="qa.observability.approve"
+    )
+    try:
+        state = _evolution_skill_store().approve(
+            proposal_id,
+            approved_by=body.approved_by,
+            qa_verdict="PASS" if body.decision == "APPROVED" else "FAIL",
+            reason=body.reason,
+            decision_ref=(
+                f"discord:{discord_message_id}" if discord_message_id else ""
+            ),
+        )
+    except (EvolutionSkillError, OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "EVOLUTION_PROPOSAL_DECISION_REJECTED",
+                "reason": str(exc),
+            },
+        ) from exc
+    return {
+        "status": state["status"],
+        "proposal_id": proposal_id,
+        "content_hash": state.get("content_hash"),
+        "provenance_hash": state.get("provenance_hash"),
+        "next_step": "CONTROL_PLANE_PROMOTION"
+        if state["status"] == "APPROVED"
+        else "CLOSED",
     }
 
 

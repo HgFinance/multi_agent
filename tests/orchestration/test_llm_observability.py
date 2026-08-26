@@ -98,6 +98,14 @@ def test_worker_trace_config_carries_request_root_task_correlation() -> None:
     assert "prompt" not in config["metadata"]
 
 
+def test_worker_trace_config_generates_complete_opaque_correlation() -> None:
+    first = worker_graph_trace_config(stage="risk", worker_id="risk-worker")
+    second = worker_graph_trace_config(stage="risk", worker_id="risk-worker")
+    for key in ("request_id", "root_id", "task_id", "trace_id"):
+        assert first["metadata"][key]
+    assert first["metadata"]["trace_id"] != second["metadata"]["trace_id"]
+
+
 def test_trace_correlation_has_deterministic_legacy_fallbacks() -> None:
     correlation = trace_correlation_metadata({}, input_hash="sha256:abc123")
 
@@ -327,6 +335,8 @@ def test_publish_root_trace_sends_empty_payload_with_correlation_metadata(
     metadata = kwargs["extra"]["metadata"]
     assert metadata["request_id"] == "discord:req-1"
     assert metadata["root_id"] == "t_root"
+    assert metadata["task_id"] == "t_root"
+    assert metadata["trace_id"] == "discord:req-1"
     assert metadata["workflow_mode"] == "analysis"
     assert metadata["source"] == "discord"
     assert "api_key" not in metadata
@@ -398,6 +408,8 @@ def test_start_root_trace_posts_and_returns_only_dotted_order_context(
     assert handle.run_id is None
     assert FakeRunTree.posted == 1
     assert FakeRunTree.instance.kwargs["project_name"] == "First"
+    metadata = FakeRunTree.instance.kwargs["extra"]["metadata"]
+    assert all(metadata[key] for key in ("request_id", "root_id", "task_id", "trace_id"))
     assert not hasattr(handle, "prompt")
 
 

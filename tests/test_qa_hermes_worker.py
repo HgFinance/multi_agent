@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sqlite3
 from pathlib import Path
 
@@ -269,3 +270,37 @@ def test_explicit_response_reasoning_and_turn_budget_are_preserved(tmp_path):
     assert qa_worker._bounded_worker_argv(
         explicit, db_path=db, task_id="t_qa"
     ) == explicit
+
+
+def test_dispatch_worker_uses_process_cwd_instead_of_deprecated_terminal_env(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_12345678")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "42")
+    monkeypatch.setenv("TERMINAL_CWD", "/opt/data/shared-kanban/workspace")
+    monkeypatch.setenv("UNCHANGED_SENTINEL", "preserved")
+
+    env = qa_worker._real_worker_environment()
+
+    assert "TERMINAL_CWD" not in env
+    assert env["UNCHANGED_SENTINEL"] == "preserved"
+
+
+def test_interactive_worker_keeps_explicit_terminal_env(monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    monkeypatch.setenv("TERMINAL_CWD", "/interactive/project")
+
+    env = qa_worker._real_worker_environment()
+
+    assert env["TERMINAL_CWD"] == "/interactive/project"
+
+
+def test_dispatch_worker_drops_terminal_env_from_wrapper(monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_12345678")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "42")
+    monkeypatch.setenv("TERMINAL_CWD", "/opt/data/shared-kanban/workspace")
+
+    qa_worker._drop_dispatcher_terminal_cwd()
+
+    assert "TERMINAL_CWD" not in os.environ

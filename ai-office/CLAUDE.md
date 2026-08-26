@@ -21,7 +21,7 @@
 
 ## 화면
 
-- `라이브 오피스`: 포트폴리오 입력, BFF runtime에 연결된 직원 이동·업무·부서장 handoff, CEO Console·추천 승인. 로컬 모의투자에서는 고정 데모 계정의 읽기 전용 화면만 제공하며 사용자 로그인과 주문 제출은 구현하지 않는다.
+- `라이브 오피스`: 포트폴리오 입력, BFF runtime에 연결된 직원 이동·업무·부서장 handoff, CEO Console·추천 승인. 브라우저 로그인은 구현하지 않는다. 루트 로컬 Compose는 고정 데모 사용자와 LS 모의투자 계좌에 한해 PAPER workflow를 사용한다.
 - `대시보드`: CEO task routing Kanban, 조직 요약, 연동 상태·운영 지표(포트폴리오 입력창·라이브 오피스 결과창 복제 금지).
 - `DEMO`/`PAPER`/`LIVE`는 BFF snapshot 값을 그대로 표시 — 임의로 LIVE처럼 승격하지 않는다.
 

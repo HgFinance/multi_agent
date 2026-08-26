@@ -161,6 +161,15 @@ usage:
   run: "risk-management chat -q 'Assess risk of AAPL long position'"
   collaborate: "risk-management chat -q 'Evaluate portfolio risk with 25% volatility, then check compliance against the current Mandate'"
 
+# Hermes가 법률 질의에만 여는 읽기 전용 간선. 서버에도 같은 결정론적
+# legal-scope guard가 있어 일반 수치 리스크를 잘못 전달해도 Qwen을 호출하지 않는다.
+mcp_servers:
+  risk-legal:
+    url: http://risk-mcp:8047/mcp
+    headers:
+      Authorization: Bearer ${MCP_RISK_API_KEY}
+    enabled: true
+
 # 직원 실행 계층 v2. Hermes의 model은 부서장 전용이며 직원은 독립 LangGraph
 # Worker Graph에서 Ollama Qwen을 사용한다.
 staff_registry:

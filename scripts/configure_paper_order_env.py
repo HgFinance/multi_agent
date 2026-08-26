@@ -37,6 +37,7 @@ from typing import Callable, Mapping, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 SERVICE_SECRET_KEYS = (
+    "MCP_RISK_API_KEY",
     "MCP_TRADING_ORDER_API_KEY",
     "TRADING_SERVICE_AUTH_SECRET",
     "TRADING_INTERNAL_SERVICE_AUTH_SECRET",
@@ -52,14 +53,16 @@ AWS_DATABASE_SECRET_KEYS = (
 )
 ROTATABLE_MCP_KEYS = (
     "MCP_RESEARCH_API_KEY",
+    "MCP_RISK_API_KEY",
     "MCP_TRADING_ORDER_API_KEY",
 )
+REMOVED_ENV_KEYS = frozenset({"PORTFOLIO_AUTH_REQUIRED"})
 AWS_REQUIRED_KEYS = (
     "HEDGEFUND_TSDB_PASSWORD",
 )
 
 LOCAL_USER_ID = "00000000-0000-4000-8000-00000000cec0"
-LOCAL_FUND_ID = "5c26db42-ce83-4daf-b1dc-c81680c13a6c"
+LOCAL_FUND_ID = "3838f7d6-0c7c-4e54-85f3-316a451e7eeb"
 LOCAL_BOOK_ID = "07d913de-9a5b-4cf5-b893-31a625445761"
 LOCAL_TRADING_GRANT = json.dumps(
     [
@@ -244,9 +247,7 @@ def _runtime_settings(runtime: str) -> dict[str, str]:
         return {
             "APP_ENV": "local",
             "PORTFOLIO_AUTH_MODE": "fixture",
-            # Fixture mode is not anonymous mode.  The exact X-User-Id must be
-            # present and must match the explicit grant below.
-            "PORTFOLIO_AUTH_REQUIRED": "false",
+            # One code-fixed demo user is bound to the explicit PAPER grant.
             "PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON": LOCAL_TRADING_GRANT,
             "LS_ENV": "LIVE",
             "TRADING_BROKER_ADAPTER": "paper",
@@ -256,7 +257,6 @@ def _runtime_settings(runtime: str) -> dict[str, str]:
         return {
             "APP_ENV": "production",
             "PORTFOLIO_AUTH_MODE": "fixture",
-            "PORTFOLIO_AUTH_REQUIRED": "false",
             "PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON": "[]",
             # This deployment owns the LS mock-investment lane end to end.
             # Both account reads and user-directive execution are pinned to
@@ -311,6 +311,9 @@ def _render_env(text: str, settings: Mapping[str, str]) -> str:
         key = match.group("key") if match is not None else None
         if key is None:
             rendered.append(line)
+            continue
+        if key in REMOVED_ENV_KEYS:
+            seen.add(key)
             continue
         if key in seen:
             continue

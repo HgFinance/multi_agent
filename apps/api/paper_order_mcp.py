@@ -9,7 +9,6 @@ initialize database, Kanban, or Trading API clients.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import inspect
 import os
 import sqlite3
@@ -19,6 +18,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation
+
+from apps.security.mcp_bearer_auth import (
+    BearerAuthMiddleware as _SharedBearerAuthMiddleware,
+    MIN_API_KEY_BYTES,
+    is_authorized,
+    validate_api_key as _validate_api_key,
+)
 
 from orchestration.contracts.user_paper_order import (
     CandidateDecision,
@@ -36,19 +42,6 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
 
 MCP_PORT = 8046
 MCP_PATH = "/mcp"
-MIN_API_KEY_BYTES = 32
-_PLACEHOLDER_MARKERS = (
-    "${",
-    "change_me",
-    "changeme",
-    "example",
-    "placeholder",
-    "replace_me",
-    "secret_here",
-    "your_api_key",
-)
-
-
 class UntrustedHermesOrderCandidate(BaseModel):
     """Schema-guided MCP envelope whose values remain fully untrusted.
 
@@ -77,79 +70,23 @@ class UntrustedHermesOrderCandidate(BaseModel):
 
 
 def validate_api_key(value: str | None) -> str:
-    """Return a usable boundary key or fail closed.
+    """Preserve the PAPER boundary's public validation helper."""
 
-    The key is required in every runtime.  In particular, production can never
-    turn an empty environment variable into an unauthenticated MCP surface.
-    """
-
-    raw = str(value or "")
-    token = raw.strip()
-    lowered = token.casefold()
-    if not token:
-        raise RuntimeError("MCP_TRADING_ORDER_API_KEY is required")
-    if token != raw:
-        raise RuntimeError("MCP_TRADING_ORDER_API_KEY must not contain whitespace")
-    if len(token.encode("utf-8")) < MIN_API_KEY_BYTES:
-        raise RuntimeError("MCP_TRADING_ORDER_API_KEY must contain at least 32 bytes")
-    if any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
-        raise RuntimeError("MCP_TRADING_ORDER_API_KEY must not be a placeholder")
-    if len(set(token)) == 1:
-        raise RuntimeError("MCP_TRADING_ORDER_API_KEY must be a generated secret")
-    if any(ord(character) < 33 or ord(character) > 126 for character in token):
-        raise RuntimeError(
-            "MCP_TRADING_ORDER_API_KEY must contain printable ASCII only"
-        )
-    return token
+    return _validate_api_key(
+        value,
+        credential_name="MCP_TRADING_ORDER_API_KEY",
+    )
 
 
-def is_authorized(header: str | None, expected_token: str) -> bool:
-    """Validate one exact Bearer credential in constant time."""
-
-    if not header:
-        return False
-    scheme, separator, supplied = header.partition(" ")
-    if separator != " " or scheme.casefold() != "bearer" or not supplied:
-        return False
-    if supplied != supplied.strip() or " " in supplied or "\t" in supplied:
-        return False
-    return hmac.compare_digest(supplied.encode(), expected_token.encode())
-
-
-class BearerAuthMiddleware:
-    """Small ASGI middleware that protects the complete HTTP surface."""
+class BearerAuthMiddleware(_SharedBearerAuthMiddleware):
+    """PAPER-bound compatibility wrapper around shared MCP authentication."""
 
     def __init__(self, app: Any, *, api_key: str) -> None:
-        self.app = app
-        self.api_key = validate_api_key(api_key)
-
-    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope.get("type") == "http":
-            authorization_headers = [
-                raw_value.decode("latin-1")
-                for raw_name, raw_value in scope.get("headers", ())
-                if raw_name.lower() == b"authorization"
-            ]
-            header = (
-                authorization_headers[0] if len(authorization_headers) == 1 else None
-            )
-            if not is_authorized(header, self.api_key):
-                body = b'{"error":"unauthorized","detail":"Bearer credential required"}'
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": 401,
-                        "headers": [
-                            (b"content-type", b"application/json"),
-                            (b"content-length", str(len(body)).encode("ascii")),
-                            (b"www-authenticate", b"Bearer"),
-                            (b"cache-control", b"no-store"),
-                        ],
-                    }
-                )
-                await send({"type": "http.response.body", "body": body})
-                return
-        await self.app(scope, receive, send)
+        super().__init__(
+            app,
+            api_key=api_key,
+            credential_name="MCP_TRADING_ORDER_API_KEY",
+        )
 
 
 async def _delegate_to_orchestrator(

@@ -10,7 +10,6 @@ import tempfile
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("PORTFOLIO_AUTH_MODE", "fixture")
-os.environ.setdefault("PORTFOLIO_AUTH_REQUIRED", "false")
 os.environ.setdefault("PORTFOLIO_DATA_MODE", "test")
 os.environ.setdefault(
     "PORTFOLIO_RUNTIME_STORE_PATH",

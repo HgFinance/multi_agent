@@ -1,9 +1,9 @@
 /**
- * Authenticated browser client for explicit user-directed PAPER orders.
+ * Fixed-demo browser client for explicit user-directed PAPER orders.
  *
  * This is deliberately separate from `ceoClient`: advisory Hermes chat never
  * infers an order, and only the PAPER-order UI calls this module. The BFF owns
- * deterministic parsing, authorization and the private Trading service proof.
+ * deterministic parsing, governed book access and the private Trading service proof.
  */
 
 import { bffFetch, type BffRequestInit } from "./bffClient";

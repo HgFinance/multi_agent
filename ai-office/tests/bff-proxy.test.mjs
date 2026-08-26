@@ -8,6 +8,7 @@ import {
   proxyBffRequest,
   resolveBffBase,
 } from "../worker/bffProxy.ts";
+import { FIXED_DEMO_USER_ID } from "../app/lib/demoIdentity.ts";
 
 test("proxy prefix matches only the BFF namespace", () => {
   assert.equal(BFF_PROXY_PREFIX, "/bff");
@@ -33,7 +34,7 @@ test("proxy path maps onto the BFF path with its query string", () => {
   assert.equal(bffTargetUrl("http://localhost:3002/bff", "http://127.0.0.1:8001"), "http://127.0.0.1:8001/");
 });
 
-test("proxy forwards identity headers server-side and never a cookie", async () => {
+test("proxy pins the demo identity server-side and never forwards browser credentials", async () => {
   const seen = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -69,7 +70,7 @@ test("proxy forwards identity headers server-side and never a cookie", async () 
     assert.equal(seen.length, 1);
     assert.equal(seen[0].url, "http://127.0.0.1:8001/ui/portfolio/live");
     const forwarded = new Headers(seen[0].init.headers);
-    assert.equal(forwarded.get("x-user-id"), "user-1");
+    assert.equal(forwarded.get("x-user-id"), FIXED_DEMO_USER_ID);
     assert.equal(forwarded.get("idempotency-key"), "key-1");
     assert.equal(forwarded.get("authorization"), null);
     assert.equal(forwarded.get("cookie"), null);

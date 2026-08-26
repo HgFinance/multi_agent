@@ -15,23 +15,40 @@ import redis
 from psycopg2 import sql
 
 
-def main() -> int:
-    dsn = str(os.getenv("CONDITIONAL_RULE_DATABASE_URL") or "").strip()
-    redis_url = str(os.getenv("REDIS_URL") or "").strip()
-    role = str(
-        os.getenv("CONDITIONAL_RULE_WORKER_DATABASE_ROLE")
-        or "svc_conditional_rule_worker"
-    )
-    if not dsn or not redis_url or not re.fullmatch(
-        r"[A-Za-z_][A-Za-z0-9_]*", role
-    ):
-        raise RuntimeError("conditional notification authority is not configured")
+def _probe_database(
+    *,
+    dsn_name: str,
+    role_name: str,
+    default_role: str,
+) -> None:
+    """Prove the configured login can assume its runtime authority."""
 
+    dsn = str(os.getenv(dsn_name) or "").strip()
+    role = str(os.getenv(role_name) or default_role).strip()
+    if not dsn or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", role):
+        raise RuntimeError(f"{dsn_name} authority is not configured")
     with psycopg2.connect(dsn, connect_timeout=3) as connection:
         with connection.cursor() as cursor:
             cursor.execute(sql.SQL("set local role {}").format(sql.Identifier(role)))
             cursor.execute("select 1")
             cursor.fetchone()
+
+
+def main() -> int:
+    redis_url = str(os.getenv("REDIS_URL") or "").strip()
+    if not redis_url:
+        raise RuntimeError("conditional notification authority is not configured")
+
+    _probe_database(
+        dsn_name="CONDITIONAL_RULE_DATABASE_URL",
+        role_name="CONDITIONAL_RULE_WORKER_DATABASE_ROLE",
+        default_role="svc_conditional_rule_worker",
+    )
+    _probe_database(
+        dsn_name="ORDER_ORCHESTRATOR_DATABASE_URL",
+        role_name="ORDER_ORCHESTRATOR_DATABASE_ROLE",
+        default_role="svc_order_orchestrator",
+    )
 
     client = redis.Redis.from_url(
         redis_url,

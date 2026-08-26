@@ -3,12 +3,19 @@
 ## 상태 전이
 
 ```text
-Occurrence
+QA finding
+  -> QA Hermes 검토
+  -> 관리자 1차 승인 + 개선 유형
+  -> baseline reproduction benchmark PASSED
+  -> Occurrence
   -> Candidate (서로 다른 source run ID 3개 이상)
   -> PROPOSED
   -> VALIDATED (결정론적 구조·경계·provenance 검사)
-  -> APPROVED (QA PASS + 이름이 기록된 검토자)
-  -> ACTIVE (정본 소스·registry 동시 등록)
+  -> Discord exact hash 2차 검토
+  -> APPROVED (QA PASS + 이름이 기록된 관리자)
+  -> ACTIVE (비-LLM control worker가 정본 소스·registry 등록)
+  -> ACTIVE_PENDING_FEEDBACK
+  -> VERIFIED_IMPROVED | REGRESSION_CANDIDATE
   -> SUPERSEDED | RETIRED
 ```
 
@@ -31,13 +38,18 @@ QA FAIL은 `REJECTED`다. 모델 생성 실패와 검증 실패는 정본을 변
 
 ## 사건 발생원
 
-- 현재 운영 발생원은 LangSmith feedback bridge다. Research·Quant trace의
-  결정론적 finding만 소유 부서 occurrence로 변환한다.
+- 현재 운영 발생원은 LangSmith feedback bridge다. 8개 부서 trace 중 관리자
+  1차 승인과 baseline benchmark를 모두 통과한 `SKILL_CREATE`/`SKILL_EVOLVE`
+  finding만 소유 부서 occurrence로 변환한다.
 - 새 발생원은 `append_occurrences_to_path()` 또는 `EvolutionSkillStore`를 통해
   같은 원장·중복 제거 계약을 사용해야 한다.
 - 같은 `department + kind + source run ID`는 동시 기록돼도 한 번만 센다.
-- `scripts/evolution_skills.py daemon`이 후보와 제안만 만들며 승인·승격은 하지
-  않는다. 구형 `agents/skill_forge.py` 실행 경로는 사용하지 않는다.
+- `scripts/evolution_skills.py daemon`이 benchmark reconciliation, 후보, Qwen 14B
+  제안, 2차 Discord 카드를 담당하며 승인·승격은 하지 않는다.
+- `control-daemon`은 정확한 content/provenance hash에 2차 승인된 `APPROVED`
+  제안만 승격한다. 이 프로세스에는 모델 자격증명이 없고, 제안 워커에는 정본
+  쓰기 권한이 없다.
+- 구형 `agents/skill_forge.py` 실행 경로는 사용하지 않는다.
 
 ## provenance 필수값
 
@@ -65,11 +77,14 @@ python3 scripts/evolution_skills.py propose --department 01-research --dry-run
 # 현재 소스 분류 감사(삭제하지 않음)
 python3 scripts/evolution_skills.py inventory
 
-# 검토와 활성화
+# 수동 복구용 검토와 활성화(운영은 Discord + control-daemon)
 python3 scripts/evolution_skills.py approve <proposal-id> \
   --approved-by <name> --qa-verdict PASS
 python3 scripts/evolution_skills.py promote <proposal-id>
 python3 scripts/evolution_skills.py validate
+
+# 문제 → 변경 → 검증 → 운영성과 증거
+python3 scripts/evolution_skills.py report <proposal-id>
 
 # 성과 기록
 python3 scripts/evolution_skills.py feedback --slug <slug> --version <n> \
@@ -85,3 +100,8 @@ python3 scripts/evolution_skills.py retire --slug <slug> \
 
 `inventory`의 사용·세션 정보는 품질 신호일 뿐 생존 여부를 결정하지 않는다.
 자동 삭제 명령은 제공하지 않는다.
+
+`ACTIVE`는 배포 성공이지 문제 해결 성공이 아니다. 같은 버전에서 서로 다른 운영
+실행 3건 이상이 모두 0.8 이상일 때만 report가 `VERIFIED_IMPROVED`를 표시한다.
+그 전에는 반드시 `ACTIVE_PENDING_FEEDBACK`이며 Discord 활성화 카드도 해결 완료라고
+표현하지 않는다.

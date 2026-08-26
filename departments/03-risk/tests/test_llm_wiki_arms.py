@@ -8,10 +8,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "ll
 
 from arms import (  # noqa: E402
     _LLM_WIKI_GENERATE_SYSTEM,
+    _LEGAL_VERDICT_SCHEMA,
     PERSONA,
     _generate_verdict,
     build_flat_corpus,
 )
+from departments import worker_model_gateway
 from src.nodes import PERSONA_PROMPTS  # noqa: E402
 
 
@@ -62,3 +64,51 @@ def test_llm_wiki_generate_system_extends_base_prompt_without_mutating_it() -> N
     assert _LLM_WIKI_GENERATE_SYSTEM != base
     assert "ambiguous" in _LLM_WIKI_GENERATE_SYSTEM
     assert PERSONA_PROMPTS[PERSONA]["generate_system"] == base  # 프로덕션 프롬프트 불변
+
+
+def test_generate_verdict_uses_qwen_gateway_without_arithmetic_adapter(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("WORKER_MODEL_BASE_URL", "http://vllm:8000/v1")
+    calls: list[dict] = []
+
+    class Binding:
+        provider = "vllm-openai"
+        model = "qwen2.5-14b-instruct-awq"
+        adapter_id = None
+
+    def fake_worker_llm(system: str, prompt: str, *, json_schema=None) -> str:
+        calls.append(
+            {"system": system, "prompt": prompt, "json_schema": json_schema}
+        )
+        return json.dumps(
+            {
+                "verdict": "no_breach",
+                "cited_documents": ["law:178"],
+                "rationale": "제178조 근거",
+                "confidence": 0.8,
+                "escalate": False,
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(
+        worker_model_gateway,
+        "resolve",
+        lambda worker_id: Binding(),
+    )
+    monkeypatch.setattr(
+        worker_model_gateway,
+        "llm_for_worker",
+        lambda worker_id: (fake_worker_llm, Binding()),
+    )
+    monkeypatch.setattr("arms._CACHE.get", lambda _fingerprint: None)
+    monkeypatch.setattr("arms._CACHE.set", lambda _fingerprint, _value: None)
+
+    result = _generate_verdict("제178조 질의", "제178조 근거 문서")
+
+    assert result["verdict"] == "no_breach"
+    assert result["cited_documents"] == ["law:178"]
+    assert len(calls) == 1
+    assert calls[0]["json_schema"] == _LEGAL_VERDICT_SCHEMA
+    assert Binding.adapter_id is None

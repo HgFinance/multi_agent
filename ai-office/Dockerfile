@@ -5,9 +5,6 @@ FROM node:22-bookworm-slim AS build
 
 WORKDIR /app/ai-office
 
-ARG DISCORD_ACTOR_MAP
-ENV DISCORD_ACTOR_MAP=${DISCORD_ACTOR_MAP}
-
 COPY ai-office/package.json ai-office/package-lock.json ./
 RUN npm ci
 

@@ -101,7 +101,7 @@
 
 ### P1-1. `MODEL-03`·`QA-03`·`OPS-01`
 
-- Hermes Head는 `openai-codex/gpt-5.6-luna`, 직원 Worker 운영 기본은 Worker Model Gateway의 Qwen AWQ, Ollama `qwen3:1.7b`는 local fallback이라는 계층을 Profile·Worker Registry·Checker에서 일치시킨다.
+- Head·Worker·local fallback 계층은 [Worker Model Matrix](../02-engineering/WORKER_MODEL_MATRIX.md)와 Runtime config를 기준으로 Profile·Worker Registry·Checker에서 일치시킨다.
 - QA의 개인 GPU IP/직접 endpoint를 제거하고 승인된 Model Gateway만 사용한다.
 - Risk/QA 운영 Credential, DB RLS, Service Identity, rotation, audit event, 최소 권한을 preflight로 검사한다.
 - preflight 누락은 `READY`가 아니라 `BLOCKED`/`DENY`여야 한다.

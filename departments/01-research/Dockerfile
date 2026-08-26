@@ -41,6 +41,7 @@ COPY collectors/collector_scheduler.py \
      collectors/universe_restriction_collector.py \
      collectors/market_data_steward.py \
      collectors/market_archive_exporter.py \
+     collectors/retention_enforcer.py \
      collectors/ls_realtime_service.py \
      collectors/ls_realtime_worker.py \
      collectors/ls_realtime_adapter.py \
@@ -51,6 +52,10 @@ COPY collectors/collector_scheduler.py \
      collectors/symbol_universe.py \
      collectors/market_observations.py \
      ./collectors/
+# 거래제한 수집기는 이 결정론 모듈의 제한 사유/TR 정의와 pagination 함수만
+# 재사용한다. 전체 agents/ 실행면을 이미지에 되살리지 않고 정확히 한 파일만
+# allowlist에 포함한다.
+COPY agents/universe_manager.py ./agents/universe_manager.py
 COPY contracts ./contracts
 COPY repository ./repository
 COPY api ./api
@@ -60,9 +65,9 @@ COPY factory ./factory
 # evidence/ 는 research-api /evidence/stories 가 story_cluster(결정론 군집)를
 # import 하기 위해 필요하다 - 표준 라이브러리만 써서 의존성은 늘지 않는다
 COPY evidence ./evidence
-# 퇴역한 종목별 Packet 파이프라인(agents/, scripts.py)은 감사 계보로 Git에만
-# 남기고 운영 이미지에는 싣지 않는다. 현재 직원 Worker는 별도 MCP 이미지와
-# 명시적 employee_workers 마운트로만 실행된다.
+# 나머지 퇴역 종목별 Packet 파이프라인(agents/, scripts.py)은 감사 계보로
+# Git에만 남긴다. 현재 직원 Worker는 별도 MCP 이미지와 명시적
+# employee_workers 마운트로만 실행된다.
 
 ENV PYTHONUNBUFFERED=1
 

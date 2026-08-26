@@ -5,6 +5,7 @@ import threading
 
 _SENSITIVE_WORKER_ENV = (
     "MCP_RESEARCH_API_KEY",
+    "MCP_RISK_API_KEY",
     "MCP_TRADING_ORDER_API_KEY",
     "TIMESCALE_DATABASE_URL",
 )
@@ -85,6 +86,9 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
             }),
             "MCP_TRADING_ORDER_API_KEY": frozenset({
                 "trading-department",
+            }),
+            "MCP_RISK_API_KEY": frozenset({
+                "risk-management",
             }),
             "TIMESCALE_DATABASE_URL": frozenset({
                 "quant-backtest-department",

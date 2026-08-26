@@ -39,6 +39,29 @@ x-langsmith-redaction: &langsmith-redaction
   LANGSMITH_HIDE_INPUTS: "true"
   LANGSMITH_HIDE_OUTPUTS: "true"
 
+# Shared only by Risk processes that may execute the conditional compliance
+# worker. Keeping this mapping singular prevents the API and Hermes MCP bridge
+# from silently selecting different Qwen/Ollama coordinates.
+x-risk-worker-model-environment: &risk-worker-model-environment
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-}
+  WORKER_MODEL_EXECUTION_CONTEXT: container
+  WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+  WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+  WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+  WORKER_MODEL_REGISTRY_PATH: ${WORKER_MODEL_REGISTRY_PATH:-/app/departments/01-research/config/worker_model_registry.json}
+  OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
+  OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
+  OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
+
+# PAPER admission/reporting uses one isolated order login.  Keep the DSN in
+# one anchor so the BFF, MCP wrapper, notification consumer, and supervisor
+# cannot drift back to the generic runtime login independently.
+x-order-database-url: &order-database-url "postgresql://hgfinance_order_runtime:${HEDGEFUND_ORDER_DB_PASSWORD:?HEDGEFUND_ORDER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
+
+# Rule creation is a separate authority from deterministic evaluation.
+x-conditional-orchestrator-database-url: &conditional-orchestrator-database-url "postgresql://hgfinance_conditional_orchestrator:${HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_conditional_rule_orchestrator"
+
 # One least-privilege login owns every conditional-worker read model. Keeping
 # the DSN here prevents one consumer from silently falling back to the generic
 # runtime login, which cannot assume svc_conditional_rule_worker.
@@ -93,19 +116,24 @@ services:
       MEMOHARNESS_D5_DATABASE_URL: ${MEMOHARNESS_D5_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
-      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
+      # PAPER admission must use the isolated operational logins. The generic
+      # hgfinance_runtime login cannot SET ROLE to these privileged writers;
+      # falling back to DATABASE_URL makes Discord ingress fail with HTTP 503
+      # before any Kanban card or conditional rule is created.
+      ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
+      ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-orchestrator-database-url
       CONDITIONAL_RULE_DATABASE_ROLE: ${CONDITIONAL_RULE_DATABASE_ROLE:-svc_conditional_rule_orchestrator}
       PORTFOLIO_DATA_MODE: "test"
       # AI Office uses the fixed closed-network demo identity.
       APP_ENV: local
       PORTFOLIO_AUTH_MODE: fixture
-      PORTFOLIO_AUTH_REQUIRED: "false"
       PORTFOLIO_LIVE_MODE: broker
       PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
-      # Local mock-investment UI is read-only. No user-login or paper-order
-      # workflow is enabled in this Compose profile.
-      USER_PAPER_ORDER_WORKFLOW_ENABLED: "false"
-      USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "false"
+      # Closed-network local PAPER runtime. This uses the fixed demo identity
+      # and the isolated order logins above; it does not add user login/Auth.
+      USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
+      USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "true"
       ACCOUNTING_MODE: OFFLINE
       PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
@@ -135,7 +163,7 @@ services:
       # reach a later CEO planning request.
       LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-shadow}
       LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
-      PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
+      PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-true}
       # 기본값이 비어 있으면 온보딩 프록시(/ui/mandates, /ui/mandate-assistant/suggest
       # 등)가 전부 503 governance_api_unavailable 이 된다. governance-api 는 같은
       # compose 에 있으므로 서비스 이름을 기본값으로 준다.
@@ -163,9 +191,13 @@ services:
       # These are the internal read/proxy endpoints used by apps.api.main.
       # The production portfolio BFF stays on the pinned Hermes CLI/local
       # boundary above; it does not gain a Docker-exec transport.
+      ACCOUNTING_API_URL: ${ACCOUNTING_API_URL:-http://accounting-api:8000}
+      RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-2.0}
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
       RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
-      RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
+      # Host-side tools use RISK_API_URL=127.0.0.1:8041.  A container must not
+      # inherit that loopback address because it points back to itself.
+      RISK_API_URL: ${RISK_API_INTERNAL_URL:-http://risk-api:8000}
       # Inside the compose network, loopback points back to portfolio-bff.
       # Keep the host/local override separate so QA observability reaches the
       # canonical audit-api service in production.
@@ -261,7 +293,7 @@ services:
     # 없으면 그 조건이 성립할 수 없어(2026-08-24) ai-office가 FastAPI 앱의
     # DB 연결이 끝나기 전에 붙어 `/bff/*` 프록시 요청이 순간적으로 500을 본다.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -343,9 +375,9 @@ services:
       PORTFOLIO_AUTH_MODE: fixture
       PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
-      ORDER_ORCHESTRATOR_DATABASE_URL: postgresql://hgfinance_order_runtime:${HEDGEFUND_ORDER_DB_PASSWORD:?HEDGEFUND_ORDER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}
+      ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
       ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
-      CONDITIONAL_RULE_DATABASE_URL: postgresql://hgfinance_conditional_orchestrator:${HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_conditional_rule_orchestrator
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-orchestrator-database-url
       CONDITIONAL_RULE_DATABASE_ROLE: ${CONDITIONAL_RULE_DATABASE_ROLE:-svc_conditional_rule_orchestrator}
       TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
       TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
@@ -493,7 +525,7 @@ services:
     environment:
       PYTHONPATH: /app:/app/apps/api
       APP_ENV: ${APP_ENV:-production}
-      ORDER_ORCHESTRATOR_DATABASE_URL: ${ORDER_ORCHESTRATOR_DATABASE_URL:-${DATABASE_URL:-}}
+      ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
       ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
       CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
@@ -629,6 +661,9 @@ services:
       LANGSMITH_FEEDBACK_MAX_CHARS: ${LANGSMITH_FEEDBACK_MAX_CHARS:-1200}
       LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS: ${LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS:-300}
       LANGSMITH_FEEDBACK_METRICS_MAX_RUNS: ${LANGSMITH_FEEDBACK_METRICS_MAX_RUNS:-100}
+      # End-to-end root traces name the timer origin (ceo-ingress), not the
+      # bottleneck. Read durable primary-task timings to attribute QA cards.
+      LANGSMITH_FEEDBACK_KANBAN_DB_PATH: /var/lib/kanban/kanban.db
       # Redacted deterministic Research/Quant findings become durable skill
       # occurrences. The proposal worker shares this host path; canonical
       # skills remain a separate read-only mount.
@@ -648,6 +683,7 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
+      - /home/ubuntu/.hermes/shared-kanban:/var/lib/kanban:ro
       - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
 
   timescaledb:
@@ -657,6 +693,20 @@ services:
     image: timescale/timescaledb-ha@sha256:eaaab826932c579d5d4e3a3479446da931cabb8703cf7caf1038eb14d40754fa
     container_name: hedgefund-timescaledb
     restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb,pg_textsearch,pg_stat_statements
+      - -c
+      - track_io_timing=on
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.max=5000
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - wal_compression=on
     logging:
       driver: "json-file"
       options:
@@ -725,6 +775,10 @@ services:
       # control DB다. 범용 DATABASE_URL이 빈 Supabase DB로 바뀌어도 실시간
       # 수집기를 0종목으로 재시작하지 않도록 전용 URL 경계를 둔다.
       DATABASE_URL: ${REFERENCE_DATABASE_URL:-postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/control}
+      # source_registry가 이 role을 control DATABASE_URL에만 붙인다. 전역
+      # PGOPTIONS를 쓰면 별도 market DB 연결까지 control role로 바뀌어 수집이
+      # 끊기므로 금지한다.
+      RESEARCH_COLLECTOR_DATABASE_ROLE: svc_research_collector
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       # REST 토큰과 WebSocket 모두 같은 LS_ENV를 사용한다.
       LS_ENV: ${LS_ENV:-LIVE}
@@ -1370,22 +1424,12 @@ services:
       redis:
         condition: service_healthy
     environment:
+      <<: [*risk-worker-model-environment, *langsmith-redaction]
       DATABASE_URL: ${DATABASE_URL:-}
       REDIS_URL: redis://redis:6379/0
       RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
       RISK_QA_RUNTIME: ${RISK_QA_RUNTIME:-}
       RISK_QA_PRODUCTION_ENABLED: ${RISK_QA_PRODUCTION_ENABLED:-false}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      # All advisory Worker calls use the same Gateway contract. Empty base URL
-      # intentionally keeps the local Ollama fallback for development only.
-      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-}
-      WORKER_MODEL_EXECUTION_CONTEXT: container
-      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
-      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
-      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
-      WORKER_MODEL_REGISTRY_PATH: ${WORKER_MODEL_REGISTRY_PATH:-/app/departments/01-research/config/worker_model_registry.json}
-      OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
-      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
       # Langfuse(2026-08-20). 본부장이 이 컨테이너 안에서 Worker(MCP 도구 경로 포함)를
       # 직접 돌리는 실행이 있다 - portfolio-bff/worker 계측만으로는 이 경로가 안 잡혀
       # HR 리포트에서 실제로 일한 Worker 가 UNOBSERVED 로 보였다. `.env`는
@@ -1396,13 +1440,11 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       # Risk's independent Qwen compliance worker emits its LangGraph worker
       # trace here; the shared project keeps it attached to the request tree.
-      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
-      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
       RISK_SERVICE_AUTH_SECRET: ${RISK_SERVICE_AUTH_SECRET:-}
       RISK_SERVICE_AUTH_ISSUER: ${RISK_SERVICE_AUTH_ISSUER:-}
       RISK_SERVICE_AUTH_AUDIENCE: ${RISK_SERVICE_AUTH_AUDIENCE:-}
@@ -1414,6 +1456,48 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/risk/v1/observability/runtime', timeout=2)"]
       interval: 10s
       timeout: 3s
+      retries: 5
+      start_period: 10s
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # Narrow read-only bridge from Risk Hermes to the existing legal LLM-Wiki
+  # implementation. It shares the risk-api image and model-coordinate anchor;
+  # no retrieval, routing, or verdict logic is copied into this service.
+  risk-mcp:
+    image: hedgefund-risk-api
+    container_name: hedgefund-risk-mcp
+    restart: unless-stopped
+    depends_on:
+      risk-api:
+        condition: service_healthy
+    working_dir: /app/departments/03-risk
+    command: ["python", "api/mcp_server.py"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      <<: [*risk-worker-model-environment, *langsmith-redaction]
+      MCP_RISK_API_KEY: ${MCP_RISK_API_KEY:?A generated 32-byte Risk legal MCP key is required}
+      REDIS_URL: redis://redis:6379/0
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
+      LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "api/mcp_server.py", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
       retries: 5
       start_period: 10s
     mem_limit: 256m
@@ -1476,10 +1560,12 @@ services:
       QA_SERVICE_AUTH_SECRET: ${QA_SERVICE_AUTH_SECRET:-}
       QA_SERVICE_AUTH_ISSUER: ${QA_SERVICE_AUTH_ISSUER:-}
       QA_SERVICE_AUTH_AUDIENCE: ${QA_SERVICE_AUTH_AUDIENCE:-}
+      EVOLUTION_SKILLS_HOME: /var/lib/evolution-skills
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
+      - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
     ports:
       - "127.0.0.1:8042:8000"   # 로컬 전용 - 외부 노출 금지
     healthcheck:
@@ -1500,10 +1586,6 @@ services:
     build:
       context: .
       dockerfile: ai-office/Dockerfile
-      args:
-        # This is a non-secret Discord→public UUID fixture binding used by the
-        # existing closed-network UI contract; secrets are never build args.
-        DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
     container_name: hedgefund-ai-office
     restart: unless-stopped
     logging:
@@ -1575,6 +1657,9 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-risk-hermes
     restart: unless-stopped
+    depends_on:
+      risk-mcp:
+        condition: service_healthy
     command: ["sleep", "infinity"]
     logging:
       driver: "json-file"
@@ -1598,6 +1683,7 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      MCP_RISK_API_KEY: ${MCP_RISK_API_KEY:?A generated 32-byte Risk legal MCP key is required}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -1631,6 +1717,9 @@ services:
       # handoff. The shared dispatcher selects this wrapper for worker
       # subprocesses and its profile gate keeps other profiles unchanged.
       - ./scripts:/opt/hgfinance/scripts:ro
+      # The QA reviewer reads the exact proposed SKILL/provenance/hash. It has
+      # no write path; only the isolated control worker can activate a skill.
+      - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills:ro
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
@@ -1857,8 +1946,13 @@ services:
       #   유형이라 컨테이너 재생성 후 한참 헤맸다.
       #   값 자체는 프록시가 무시한다(과금 경로는 base_url 의 호스트 프록시다).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-    mem_limit: 1g
-    mem_reservation: 192m
+    # A user workflow may fan out to Research, Quant, Risk and Accounting.
+    # Each Hermes child can carry its own MCP subprocesses, so the previous
+    # 1GiB cgroup killed otherwise healthy workers when several primaries ran
+    # together. Keep the user queue isolated, but size the cgroup for that
+    # reviewed four-department fan-out.
+    mem_limit: 3g
+    mem_reservation: 512m
     cpus: 1.0
     pids_limit: 256
     stop_grace_period: 20s
@@ -1958,8 +2052,12 @@ services:
       # Deferred Research -> Trading PAPER workflows bind the existing order
       # authority from the supervisor before the Trading card is unblocked.
       # Keep the isolated order login explicit; an empty value fails closed.
-      ORDER_ORCHESTRATOR_DATABASE_URL: ${ORDER_ORCHESTRATOR_DATABASE_URL:-}
+      ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
       ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
+      # Risk advisory tasks receive one exact-symbol canonical quote alongside
+      # the Accounting Book snapshot. This is read-only and never submits an order.
+      MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
+      RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-2.0}
       PYTHONPATH: /opt/hgfinance
       # Langfuse(2026-08-20). Discord/웹 사용자 질의는 BFF 가 부서장을 직접 부르지
       # 않고 카드로 넘긴다 - 그 카드가 끝나는 것을 보는 유일한 프로세스가 여기다.
@@ -1991,7 +2089,13 @@ services:
       # The supervisor's legacy generic DB slot is kept for compatibility,
       # but it must point at the same private control database as D5.
       DATABASE_URL: ${CEO_SUPERVISOR_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
-      RISK_QA_DATABASE_URL: ${CEO_SUPERVISOR_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
+      # QA terminal projection writes through the least-privilege audit role.
+      # The generic runtime login is a NOINHERIT member and must SET ROLE for
+      # audit.eval_* access; otherwise completed QA misses the audit ledger.
+      RISK_QA_DATABASE_URL: ${CEO_SUPERVISOR_AUDIT_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_audit_api}
+      # Risk Notion delivery evidence must return to the canonical Risk API;
+      # never inherit the host-only 127.0.0.1 endpoint inside this container.
+      RISK_API_URL: ${RISK_API_INTERNAL_URL:-http://risk-api:8000}
       ACCOUNTING_API_URL: ${ACCOUNTING_API_URL:-http://accounting-api:8000}
       # HR fast-advisory tasks receive one bounded projection from the existing
       # Workforce API, avoiding repeated browser/shell discovery by Hermes.

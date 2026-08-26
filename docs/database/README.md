@@ -123,7 +123,7 @@ Prototype의 OMS·Ledger 기능을 통합 기준으로 옮길 때는 다음을 �
 4. OMS Replay, 이중분개, Posted Journal 불변성과 RLS Runtime Test
 5. `db/` Archive 또는 제거 시점과 이전 CLI 호환 계획
 
-### Supabase
+### Supabase Migration 목록
 
 | 순서 | 파일 | 내용 |
 |---:|---|---|
@@ -138,7 +138,7 @@ Prototype의 OMS·Ledger 기능을 통합 기준으로 옮길 때는 다음을 �
 
 Migration은 파일명 순서대로 한 번만 적용한다. 적용 후 기존 Migration을 수정하지 않고 새 Timestamp Migration을 추가한다.
 
-### TimescaleDB
+### TimescaleDB Migration 목록
 
 `timescaledb/migrations/001_initial_market_data.sql`은 다음을 만든다.
 
@@ -153,7 +153,7 @@ Retention 삭제 정책은 기본적으로 비활성화되어 있다. `archive_e
 
 ## 7. 적용 방법
 
-### Supabase
+### Supabase 적용
 
 Supabase CLI가 연결된 환경에서 저장소 Root 기준으로 실행한다.
 
@@ -169,7 +169,7 @@ supabase db push
 
 현재 `ai-office` Frontend는 로컬 fixture의 고정 데모 ID로 FastAPI BFF가 조합한 `api` Read Model을 조회한다. 외부 사용자 로그인·세션은 구현하지 않는다. Browser에 내부 Domain Schema와 금융 상태 쓰기 권한을 직접 노출하지 않는다. `service_role` Key는 Backend Secret Manager에만 두며 Browser, Agent Prompt, Log와 Dataset에 넣지 않는다. 현재 `ai-office`의 Drizzle/D1 Schema는 금융 Source of Truth가 아니다.
 
-### TimescaleDB
+### TimescaleDB 적용
 
 연결 대상이 별도 TimescaleDB인지 먼저 확인한 뒤 실행한다.
 

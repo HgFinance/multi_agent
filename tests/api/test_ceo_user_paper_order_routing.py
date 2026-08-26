@@ -341,6 +341,63 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     assert stored.trading_task_id == "t_trade1"
 
 
+def test_relative_time_order_activates_existing_conditional_worker_without_hermes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    create = _install_successful_route(
+        monkeypatch, events=events, repository=repository
+    )
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("USER_PAPER_ORDER_WORKFLOW_ENABLED", "true")
+    monkeypatch.setenv("USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "true")
+    raw = (
+        "<@1536991290842030130>   @홍진표 대표 "
+        "삼성전자 이거 4분 뒤에 1주 매수해줘"
+    )
+
+    def process(**kwargs: Any) -> dict[str, Any]:
+        events.append("delayed-rule-process")
+        assert kwargs["root_task_id"] == "t_root1"
+        assert kwargs["trading_task_id"] == "t_trade1"
+        assert kwargs["interpretation_source"] == "DETERMINISTIC"
+        candidate = kwargs["candidate"]
+        assert candidate.symbol == "삼성전자"
+        assert candidate.condition.left.type.value == "TIME"
+        assert candidate.action.sizing.value == 1
+        return {
+            "binding": True,
+            "mode": "PAPER",
+            "rule_active": True,
+            "rule_id": "rule-1",
+            "state": "ACTIVE",
+            "user_message": "PAPER 예약 조건주문이 ACTIVE 전환되었습니다.",
+        }
+
+    monkeypatch.setattr(ceo, "process_user_conditional_paper_rule", process)
+
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query=raw,
+            request_id="request-delayed-100",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert create.call_count == 2
+    _, trading_call = create.call_args_list
+    assert "DETERMINISTIC_RELATIVE_TIME" in trading_call.kwargs["body"]
+    assert "mcp_tool=process_user_conditional_paper_rule" not in trading_call.kwargs["body"]
+    assert "release-t_trade1" not in events
+    assert "delayed-rule-process" in events
+    assert response["conditional_rule"] is True
+    assert response["order_state"] == "COMPLETED"
+    assert response["execution"]["state"] == "ACTIVE"
+
+
 def test_research_then_conditional_creates_analysis_root_without_trading_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

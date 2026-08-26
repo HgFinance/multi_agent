@@ -106,7 +106,6 @@ export GOVERNANCE_API_URL="http://127.0.0.1:$GOV_PORT"
 export PORTFOLIO_API_URL="http://127.0.0.1:$ACC_PORT"
 export APP_ENV="local"
 export PORTFOLIO_AUTH_MODE="fixture"
-export PORTFOLIO_AUTH_REQUIRED="false"
 
 mkdir -p "$LOG_DIR"
 for p in "$BFF_PORT" "$GOV_PORT" "$ACC_PORT"; do stop_port "$p"; done

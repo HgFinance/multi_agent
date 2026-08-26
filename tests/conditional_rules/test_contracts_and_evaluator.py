@@ -154,6 +154,55 @@ def test_evaluation_policy_defaults_to_thirty_second_quote_freshness() -> None:
     assert spec.evaluation.max_data_age_seconds == 30
 
 
+def test_time_condition_uses_authoritative_observation_timestamp() -> None:
+    trigger_at = NOW + timedelta(minutes=4)
+    spec = rule(
+        {
+            "type": "COMPARISON",
+            "operator": "GTE",
+            "left": {
+                "type": "TIME",
+                "field": "OBSERVED_AT_EPOCH_SECONDS",
+            },
+            "right": literal(str(int(trigger_at.timestamp()))),
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+
+    assert validate_rule_spec(spec) is spec
+    before = EvaluationFrame(
+        market={"LAST_PRICE": Decimal("100")},
+        portfolio={},
+        indicators={},
+        observed_at=trigger_at - timedelta(seconds=1),
+    )
+    at_trigger = EvaluationFrame(
+        market=before.market,
+        portfolio=before.portfolio,
+        indicators=before.indicators,
+        observed_at=trigger_at,
+    )
+
+    assert evaluate_condition(spec, EvaluationContext(current=before)) is False
+    assert evaluate_condition(spec, EvaluationContext(current=at_trigger)) is True
+
+
+def test_time_condition_rejects_unknown_clock_field() -> None:
+    spec = rule(
+        {
+            "type": "COMPARISON",
+            "operator": "GTE",
+            "left": {"type": "TIME", "field": "WALL_CLOCK_NOW"},
+            "right": literal(str(int(NOW.timestamp()))),
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+
+    with pytest.raises(RuleSemanticError) as raised:
+        validate_rule_spec(spec)
+    assert raised.value.code == "UNSUPPORTED_TIME_FIELD"
+
+
 def test_quote_clock_rejects_indicator_and_non_last_price_fields() -> None:
     with pytest.raises(RuleSemanticError, match="completed bars"):
         validate_rule_spec(

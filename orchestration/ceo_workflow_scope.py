@@ -793,7 +793,7 @@ def build_root_body(
         # Mandate 블록은 scope 지시문 뒤, 사용자 질의 앞에 온다. `extract_user_query`가
         # `## User request` 뒤만 잘라내므로 이 블록이 질의에 섞이지 않는다.
         f"{_mandate_section(mandate)}"
-        f"{_accounting_snapshot_section(advisory_fund_id)}"
+        f"{_accounting_snapshot_section(advisory_fund_id, advisory_book_id)}"
         "\n## User request\n"
         f"{query}"
     )
@@ -917,7 +917,10 @@ def _mandate_section(mandate: Mapping[str, Any] | None) -> str:
 CEO_ACCOUNTING_SNAPSHOT_MARKER = "hgfinance.accounting-snapshot.v1"
 
 
-def _accounting_snapshot_section(advisory_fund_id: str | None) -> str:
+def _accounting_snapshot_section(
+    advisory_fund_id: str | None,
+    advisory_book_id: str | None,
+) -> str:
     """Confirmed Accounting Engine snapshot, embedded root-side.
 
     The accounting-portfolio-department head agent has no shell/web tool
@@ -928,12 +931,32 @@ def _accounting_snapshot_section(advisory_fund_id: str | None) -> str:
     the department states its own data limitation in that case.
     """
 
+    block = None
+    exact_book_requested = bool(str(advisory_book_id or "").strip())
+    try:
+        # Prefer the canonical Accounting API projection for the exact Book.
+        # The old BFF-wide /ui/snapshot fallback can silently select a demo
+        # book when its DB session has no request-scoped membership context.
+        if advisory_book_id:
+            from orchestration.risk_advisory_context import (
+                fetch_risk_advisory_context,
+            )
+
+            block = fetch_risk_advisory_context(
+                f"advisory_book_id={advisory_book_id}"
+            )
+    except Exception:  # noqa: BLE001 - optional exact-book enrichment.
+        block = None
     try:
         from orchestration.accounting_advisory_context import (
             fetch_accounting_advisory_context,
         )
 
-        block = fetch_accounting_advisory_context(advisory_fund_id)
+        # Never replace a failed exact-Book lookup with the historical global
+        # demo snapshot. Missing evidence is safer than attaching another
+        # account's NAV/positions to this user's workflow.
+        if not block and not exact_book_requested:
+            block = fetch_accounting_advisory_context(advisory_fund_id)
     except Exception:  # noqa: BLE001 - advisory enrichment must never break root creation.
         block = None
     if not block:

@@ -111,7 +111,7 @@ LLM은 관련성·가설·서술을 보조할 뿐이다. PIT cutoff, 데이터 �
 ### P1-1. Quant API/Worker와 Worker Model
 
 - 현재 문서 상태인 Quant API·Worker를 실제 Job/Artifact/Replay 경계로 구현한다.
-- Worker 운영 기본은 Worker Model Gateway의 Qwen AWQ, local fallback은 Ollama `qwen3:1.7b`, Head는 Profile의 `openai-codex/gpt-5.6-luna`라는 계층을 지킨다.
+- Head·Worker·local fallback 계층은 [Worker Model Matrix](../02-engineering/WORKER_MODEL_MATRIX.md)와 Runtime config를 따르고 이 팀 가이드에서 모델값을 복사하지 않는다.
 - 조건부 Worker는 trigger와 Tool Allowlist를 실제 테스트하고, 실패 시 `HOLD_ESCALATE`한다.
 - LLM이 수치 계산·PIT 통과·Release 승인을 직접 결정하지 못하게 한다.
 

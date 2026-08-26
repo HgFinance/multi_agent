@@ -140,7 +140,7 @@ After migrations, the bootstrap idempotently provisions:
 | Item | Value |
 |---|---|
 | Fixed demo subject | `00000000-0000-4000-8000-00000000cec0` |
-| PAPER fund | `5c26db42-ce83-4daf-b1dc-c81680c13a6c` / `ACC01-PAPER` / KRW |
+| PAPER fund | `3838f7d6-0c7c-4e54-85f3-316a451e7eeb` / `ACC01-PAPER` / KRW |
 | PAPER book | `07d913de-9a5b-4cf5-b893-31a625445761` / `MAIN` |
 | Memberships | active `OWNER` and `TRADER` |
 | Initial cash floor | KRW 1,000,000,000 |
@@ -168,3 +168,20 @@ losing today's row.  Instrument and calendar writes are idempotent.
 The reviewed declaration currently ends on 2026-12-31.  A 2027 deployment is
 intentionally blocked until the repository holiday/special-session declaration
 is reviewed and extended; weekdays are never guessed into executable sessions.
+### Trading/BFF readiness-gated deployment
+
+Trading과 BFF는 일반 `docker compose up`으로 직접 교체하지 않는다. 동일 Compose
+정의의 비공개 canary가 `/health/ready`를 통과한 뒤에만 실제 컨테이너를 교체한다.
+
+```bash
+python3 scripts/readiness_gated_compose_deploy.py trading-api
+python3 scripts/readiness_gated_compose_deploy.py portfolio-bff
+```
+
+후보가 readiness를 통과하지 못하면 현재 컨테이너는 그대로 유지되며 명령은 실패한다.
+
+### Single-disk capacity alert
+
+`hgfinance-disk-alert.timer`는 5분마다 읽기 전용 용량 검사를 실행한다.
+20GiB 미만은 WARN, 10GiB 미만은 CRIT로 systemd/journal에 실패 상태를
+남기며 이 timer 자체는 파일이나 DB 데이터를 삭제하지 않는다.

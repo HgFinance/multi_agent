@@ -59,8 +59,8 @@ export function buildBffIdentityHeaders(
 /**
  * 이 요청에 실을 신원 헤더.
  *
- * 브라우저는 고정 데모 계정 ID만 보낸다. 사용자 자격증명이나 세션은 다루지
- * 않는다.
+ * 브라우저는 고정 데모 계정 ID만 보낸다. 로그인·사용자 자격증명·인증 세션은
+ * 존재하지 않는다. 동일 출처 프록시도 이 값을 다시 고정한다.
  */
 function identityHeaders(init: BffRequestInit): Headers {
   return buildBffIdentityHeaders(init.headers, readStoredAccount().userId);

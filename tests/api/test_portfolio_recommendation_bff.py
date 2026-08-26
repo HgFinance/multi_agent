@@ -14,7 +14,6 @@ os.environ["PORTFOLIO_RUNTIME_EMBEDDED_WORKER"] = "true"
 os.environ["PORTFOLIO_WORKER_RUNTIME"] = "deterministic_test"
 os.environ["PORTFOLIO_REQUIRE_MANDATE_BINDING"] = "false"
 os.environ["PORTFOLIO_GOVERNANCE_BINDING_ENABLED"] = "false"
-os.environ["PORTFOLIO_AUTH_REQUIRED"] = "false"
 os.environ["LANGSMITH_TRACING"] = "false"
 
 from fastapi import HTTPException
@@ -27,15 +26,13 @@ from apps.api.portfolio_runtime import PortfolioRuntime
 from apps.api.portfolio_schemas import PortfolioRecommendationResult
 from apps.api.portfolio_universe import enrich_suitability_result
 
-# apps.api.main freezes PORTFOLIO_AUTH_REQUIRED, PORTFOLIO_REQUIRE_MANDATE_BINDING and
+# apps.api.main freezes PORTFOLIO_REQUIRE_MANDATE_BINDING and
 # PORTFOLIO_GOVERNANCE_BINDING_ENABLED into module constants at import time, and the
 # module is cached across test files within one pytest session. The os.environ lines
 # above only take effect if this is the first file to import it; when another test file
 # imports it first, this file's env vars are set too late. Patch the already-imported
 # module's attributes directly so these defaults hold regardless of collection order
-# (per-test `patch("apps.api.main.PORTFOLIO_AUTH_REQUIRED", True)` calls below still
-# override this as expected).
-bff_main.PORTFOLIO_AUTH_REQUIRED = False
+# Per-test patches below override these values when needed.
 bff_main.PORTFOLIO_REQUIRE_MANDATE_BINDING = False
 bff_main.PORTFOLIO_GOVERNANCE_BINDING_ENABLED = False
 
@@ -52,10 +49,23 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
     @patch("apps.api.main._governance_request", new_callable=AsyncMock)
     def test_mandate_version_is_proxied_without_browser_domain_access(self, request: AsyncMock) -> None:
         request.return_value = {"version": 1, "mandate_id": "m1"}
-        response = TestClient(app).post(
-            "/ui/mandates/m1/versions",
-            json={"fund_id": "f1", "policy": {}, "objective_text": "보수적 운용"},
-        )
+        with patch(
+            "apps.api.main.validate_proposed_mandate_limits",
+            new_callable=AsyncMock,
+        ):
+            response = TestClient(app).post(
+                "/ui/mandates/m1/versions",
+                json={
+                    "fund_id": "f1",
+                    "policy": {},
+                    "objective_text": "보수적 운용",
+                    "risk_profile": {
+                        "mindset": "BALANCED",
+                        "experience": "BEGINNER",
+                        "preset_version": "test-v1",
+                    },
+                },
+            )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["version"], 1)
         self.assertEqual(request.await_count, 2)
@@ -98,9 +108,9 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
 
     def test_health_ready_exposes_safe_dependency_projection(self) -> None:
         response = TestClient(app).get("/health/ready")
-        self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
         self.assertIn(payload["status"], {"ready", "degraded"})
+        self.assertEqual(response.status_code, 200 if payload["status"] == "ready" else 503)
         self.assertFalse(payload["external_writes"])
         self.assertNotIn("DATABASE_URL", str(payload))
     def test_domestic_stock_projection_is_backend_owned(self) -> None:
@@ -465,7 +475,7 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
             response = TestClient(app).post("/ui/portfolio-recommendations", json=payload)
         self.assertEqual(response.status_code, 422, response.text)
         self.assertEqual(response.json()["detail"], "mandate_version_binding_required")
-    def test_auth_required_mode_rejects_missing_portfolio_identity(self) -> None:
+    def test_missing_header_does_not_create_a_login_challenge(self) -> None:
         payload = {
             "user_id": "auth-required-owner",
             "mindset": "BALANCED",
@@ -475,12 +485,10 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
             "investment_amount": "1000000",
             "currency": "KRW",
         }
-        with patch("apps.api.main.PORTFOLIO_AUTH_REQUIRED", True):
-            response = TestClient(app).post("/ui/portfolio-recommendations", json=payload)
-        self.assertEqual(response.status_code, 401, response.text)
-        self.assertEqual(response.json()["detail"], "portfolio_authentication_required")
+        response = TestClient(app).post("/ui/portfolio-recommendations", json=payload)
+        self.assertEqual(response.status_code, 202, response.text)
 
-    def test_auth_required_mode_allows_owner_bound_status(self) -> None:
+    def test_explicit_internal_fixture_subject_allows_owner_bound_status(self) -> None:
         client = TestClient(app)
         payload = {
             "user_id": "auth-required-owner",
@@ -491,18 +499,17 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
             "investment_amount": "1000000",
             "currency": "KRW",
         }
-        with patch("apps.api.main.PORTFOLIO_AUTH_REQUIRED", True):
-            response = client.post(
-                "/ui/portfolio-recommendations",
-                json=payload,
-                headers={"X-User-Id": payload["user_id"]},
-            )
-            self.assertEqual(response.status_code, 202, response.text)
-            run_id = response.json()["run_id"]
-            status = client.get(
-                f"/ui/portfolio-recommendations/{run_id}",
-                headers={"X-User-Id": payload["user_id"]},
-            )
+        response = client.post(
+            "/ui/portfolio-recommendations",
+            json=payload,
+            headers={"X-User-Id": payload["user_id"]},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        run_id = response.json()["run_id"]
+        status = client.get(
+            f"/ui/portfolio-recommendations/{run_id}",
+            headers={"X-User-Id": payload["user_id"]},
+        )
         self.assertEqual(status.status_code, 200, status.text)
         self.assertEqual(status.json()["profile_user_id"], payload["user_id"])
         for _ in range(160):

@@ -28,7 +28,9 @@ from orchestration.ceo_workflow_scope import selected_primary_profiles_from_task
 from orchestration.qa_contract import split_planner_selection
 
 logger = logging.getLogger(__name__)
-PROJECTION_MARKER = "hgfinance.qa-audit-projection.v1"
+PROJECTION_VERSION = "v2"
+EVAL_SET_VERSION = 2
+PROJECTION_MARKER = f"hgfinance.qa-audit-projection.{PROJECTION_VERSION}"
 _UUID_NAMESPACE = uuid.UUID("b8a25c03-2d9d-5f4e-b542-9dcb36db3e91")
 _ALLOWED_DECISIONS = {"PASS", "WARN", "FAIL", "CONDITIONAL"}
 
@@ -41,7 +43,7 @@ def _uuid(name: str) -> str:
     return str(uuid.uuid5(_UUID_NAMESPACE, name))
 
 
-_KANBAN_QA_EVAL_SET_ID = _uuid("kanban-qa-eval-set:v1")
+_KANBAN_QA_EVAL_SET_ID = _uuid(f"kanban-qa-eval-set:{PROJECTION_VERSION}")
 
 
 def _sha256(value: Any) -> str:
@@ -50,7 +52,13 @@ def _sha256(value: Any) -> str:
 
 
 def _verdict(metadata: Mapping[str, Any], task: Mapping[str, Any]) -> str:
-    value = metadata.get("verdict") or metadata.get("qa_verdict") or task.get("verdict")
+    value = (
+        metadata.get("verdict")
+        or metadata.get("qa_verdict")
+        or metadata.get("overall")
+        or task.get("verdict")
+        or task.get("overall")
+    )
     return str(value or "UNKNOWN").strip().upper()
 
 
@@ -87,7 +95,10 @@ class QaAuditProjectionRecord:
 
     @property
     def projection_key(self) -> str:
-        return f"kanban-qa:{self.root_task_id}:{self.qa_task_id}"
+        return (
+            f"kanban-qa:{PROJECTION_VERSION}:"
+            f"{self.root_task_id}:{self.qa_task_id}"
+        )
 
 
 class _DefaultAuditRepository:
@@ -122,8 +133,13 @@ class _DefaultAuditRepository:
         eval_set = {
             "eval_set_id": record.eval_set_id,
             "role_code": "kanban-qa-terminal",
-            "version": 1,
-            "content_hash": _sha256({"role_code": "kanban-qa-terminal", "version": 1}),
+            "version": EVAL_SET_VERSION,
+            "content_hash": _sha256(
+                {
+                    "role_code": "kanban-qa-terminal",
+                    "version": EVAL_SET_VERSION,
+                }
+            ),
         }
         self.repo.ensure_eval_set(eval_set)
         created = _now()
@@ -131,8 +147,10 @@ class _DefaultAuditRepository:
             "eval_run_id": record.eval_run_id,
             "eval_set_id": record.eval_set_id,
             "candidate_id": f"kanban-qa:{record.qa_task_id}",
-            "candidate_profile_version": "qa-department:kanban-terminal-projection.v1",
-            "eval_set_version": 1,
+            "candidate_profile_version": (
+                f"qa-department:kanban-terminal-projection.{PROJECTION_VERSION}"
+            ),
+            "eval_set_version": EVAL_SET_VERSION,
             "eval_set_hash": eval_set["content_hash"],
             "champion_ref": None,
             "config": {
@@ -148,7 +166,7 @@ class _DefaultAuditRepository:
             "environment": "SHADOW",
             "mock_tool_manifest": {"source": "kanban", "worker_session_id": record.worker_session_id},
             "model_version": "hermes-qa",
-            "adapter_version": "kanban-qa-terminal-projection.v1",
+            "adapter_version": f"kanban-qa-terminal-projection.{PROJECTION_VERSION}",
             "evidence_hash": _sha256(record.evidence),
             "started_at": created,
             "ended_at": None,
@@ -248,9 +266,13 @@ class QaAuditProjection:
             }
         )
         return QaAuditProjectionRecord(
-            eval_run_id=_uuid(f"kanban-qa:{root_task_id}:{qa_task_id}"),
+            eval_run_id=_uuid(
+                f"kanban-qa:{PROJECTION_VERSION}:{root_task_id}:{qa_task_id}"
+            ),
             eval_set_id=_KANBAN_QA_EVAL_SET_ID,
-            trace_id=_uuid(f"kanban-qa-trace:{root_task_id}:{qa_task_id}"),
+            trace_id=_uuid(
+                f"kanban-qa-trace:{PROJECTION_VERSION}:{root_task_id}:{qa_task_id}"
+            ),
             root_task_id=root_task_id,
             qa_task_id=qa_task_id,
             evaluated_primary_task_ids=tuple(primary),
@@ -337,4 +359,10 @@ class QaAuditProjection:
             }
 
 
-__all__ = ["PROJECTION_MARKER", "QaAuditProjection", "QaAuditProjectionRecord"]
+__all__ = [
+    "PROJECTION_MARKER",
+    "PROJECTION_VERSION",
+    "EVAL_SET_VERSION",
+    "QaAuditProjection",
+    "QaAuditProjectionRecord",
+]

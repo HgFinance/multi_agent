@@ -155,7 +155,7 @@ v2 에서 호가 5단계 깊이 기울기나 동시호가 구간 분리를 쓰�
 > (governance/workforce/reference/research/quant/strategy/execution/risk/
 > accounting/audit/experience) 자체를 Hosted Supabase에서 AWS `control`로 옮기는
 > 별도 1회성 작업은
-> [SUPABASE_TO_AWS_CONTROL_MIGRATION.md](../02-engineering/SUPABASE_TO_AWS_CONTROL_MIGRATION.md)
+> [2026-08-24 Supabase → AWS control 이행 기록](../archive/2026-08-24/SUPABASE_TO_AWS_CONTROL_MIGRATION.md)
 > 참고 — 이 문서의 범위는 아니다.
 
 ## 7. 아직 안 정한 것 (임의로 정하지 않는다)

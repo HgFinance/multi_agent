@@ -276,6 +276,10 @@ _PAPER_ACCOUNT_SCOPE_RE = re.compile(
     r"(?![가-힣A-Za-z0-9])",
     re.IGNORECASE,
 )
+_PAPER_MODE_SCOPE_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:paper|페이퍼|모의\s*투자|모의)(?![가-힣A-Za-z0-9])",
+    re.IGNORECASE,
+)
 _POSITION_SCOPE_RE = re.compile(
     r"(?<![가-힣A-Za-z0-9])(?:내\s*)?(?:계좌에\s*)?"
     r"(?:보유\s*(?:중인|하고\s*있는|한)|가지고\s*있는|갖고\s*있는)"
@@ -291,12 +295,17 @@ _ORDER_SUBMISSION_RE = re.compile(
     r"처리(?:해\s*줘|해줘|해\s*주세요|해주세요)|요청)"
     r"(?![가-힣A-Za-z0-9])"
 )
+_DEICTIC_ORDER_REFERENCE_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])이거(?![가-힣A-Za-z0-9])"
+)
 _PLACE_ORDER_ADORNMENT_PATTERNS = (
     _HOLDINGS_PREFLIGHT_RE,
     _PAPER_ACCOUNT_SCOPE_RE,
+    _PAPER_MODE_SCOPE_RE,
     _POSITION_SCOPE_RE,
     _IMMEDIATE_EXECUTION_RE,
     _ORDER_SUBMISSION_RE,
+    _DEICTIC_ORDER_REFERENCE_RE,
 )
 _EXAMPLE_RE = re.compile(
     r"(?:예시|예를\s*들|라고\s*(?:입력|말|쓰|하면)|문구|무슨\s*뜻|"
@@ -343,7 +352,10 @@ _ALLOWED_RESIDUAL_RE = re.compile(
     r"^(?:(?:을|를|은|는|이|가|에|에서|로|으로|좀|만|내|현재|계좌|"
     r"보유|종목|주식|주문|주세요|줘)\s*)*$"
 )
-_LEADING_DISCORD_MENTION_RE = re.compile(r"^\s*<@!?\d{15,25}>\s*")
+_LEADING_ORDER_ADDRESSEE_RE = re.compile(
+    r"^(?:(?:\s*<@!?\d{15,25}>\s*)|"
+    r"(?:\s*@홍진표[ \t]*대표(?![가-힣A-Za-z0-9])\s*))+"
+)
 _LEADING_DISCORD_MENTION_PARTS_RE = re.compile(
     r"^(?P<leading>\s*)<@!?\d{15,25}>(?P<trailing>\s*)"
 )
@@ -353,6 +365,28 @@ _LEADING_DISCORD_MENTION_PARTS_RE = re.compile(
 class _PriceMatch:
     span: tuple[int, int]
     value: int
+
+
+@dataclass(frozen=True)
+class DelayedPaperOrderPlan:
+    """One strictly parsed relative-time PAPER order.
+
+    ``payload`` is produced by the existing immediate-order grammar after the
+    time phrase is blanked in place.  No second instrument/side/quantity
+    grammar exists for delayed orders.
+    """
+
+    payload: CanonicalPlaceOrderPayload
+    delay_seconds: int
+    trigger_span: tuple[int, int]
+
+
+_RELATIVE_DELAY_RE = re.compile(
+    rf"(?<![가-힣A-Za-z0-9,.])(?P<token>{_INTEGER_TOKEN})\s*"
+    r"(?P<unit>초|분|시간)\s*뒤(?:에)?(?![가-힣A-Za-z0-9])"
+)
+_RELATIVE_DELAY_UNIT_SECONDS = {"초": 1, "분": 60, "시간": 3600}
+MAX_RELATIVE_DELAY_SECONDS = 24 * 60 * 60
 
 
 def raw_text_sha256(raw_text: str) -> str:
@@ -619,11 +653,11 @@ def _residual_supported(raw_text: str, spans: list[tuple[int, int]]) -> bool:
     remaining = list(raw_text)
     for start, end in spans:
         remaining[start:end] = " " * (end - start)
-    # Discord preserves the bot mention in the exact authenticated source
-    # text. It is delivery metadata, not unsupported trading language. Only a
-    # single leading snowflake mention is ignored; mentions elsewhere remain
-    # visible to the strict residual check.
-    leading_mention = _LEADING_DISCORD_MENTION_RE.match(raw_text)
+    # Discord can preserve both the bot snowflake and its rendered CEO display
+    # name when a user addresses the bot twice. They are delivery metadata,
+    # not trading language. Only consecutive, exact leading addressees are
+    # ignored; arbitrary names and mentions elsewhere remain fail-closed.
+    leading_mention = _LEADING_ORDER_ADDRESSEE_RE.match(raw_text)
     if leading_mention:
         remaining[leading_mention.start() : leading_mention.end()] = " " * (
             leading_mention.end() - leading_mention.start()
@@ -973,7 +1007,7 @@ def _deterministic_instrument_span(
     remaining = list(raw_text)
     for start, end in consumed:
         remaining[start:end] = " " * (end - start)
-    mention = _LEADING_DISCORD_MENTION_RE.match(raw_text)
+    mention = _LEADING_ORDER_ADDRESSEE_RE.match(raw_text)
     if mention:
         remaining[mention.start() : mention.end()] = " " * (
             mention.end() - mention.start()
@@ -1024,6 +1058,7 @@ def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
         or len(raw_text) > MAX_TEXT_LENGTH
         or _unsafe_language(raw_text) is not None
         or _LIVE_MODE_RE.search(raw_text)
+        or _RELATIVE_DELAY_RE.search(raw_text)
         or _NOTIONAL_RE.search(raw_text)
         or _APPROXIMATE_RE.search(raw_text)
         or _COMPOUND_RE.search(raw_text)
@@ -1157,10 +1192,55 @@ def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
     )
 
 
+def deterministic_delayed_order_plan(raw_text: str) -> DelayedPaperOrderPlan | None:
+    """Parse exactly one ``N초/분/시간 뒤`` order without LLM arithmetic.
+
+    The delay itself is never treated as an immediate-order adornment.  This
+    keeps :func:`deterministic_order_candidate` fail-closed so a scheduled
+    request cannot accidentally submit now if routing regresses.
+    """
+
+    if not isinstance(raw_text, str) or len(raw_text) > MAX_TEXT_LENGTH:
+        return None
+    matches = list(_RELATIVE_DELAY_RE.finditer(raw_text))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    try:
+        amount = parse_strict_positive_integer(
+            match.group("token"), max_value=MAX_RELATIVE_DELAY_SECONDS
+        )
+    except ValueError:
+        return None
+    delay_seconds = amount * _RELATIVE_DELAY_UNIT_SECONDS[match.group("unit")]
+    if delay_seconds > MAX_RELATIVE_DELAY_SECONDS:
+        return None
+
+    sanitized = (
+        raw_text[: match.start()]
+        + (" " * (match.end() - match.start()))
+        + raw_text[match.end() :]
+    )
+    candidate = deterministic_order_candidate(sanitized)
+    if candidate is None:
+        return None
+    verified = verify_order_candidate(sanitized, candidate)
+    if not isinstance(verified, VerifiedPaperDirective) or verified.payload is None:
+        return None
+    return DelayedPaperOrderPlan(
+        payload=verified.payload,
+        delay_seconds=delay_seconds,
+        trigger_span=match.span(),
+    )
+
+
 __all__ = [
     "MAX_PRICE",
     "MAX_QUANTITY",
     "MAX_TEXT_LENGTH",
+    "MAX_RELATIVE_DELAY_SECONDS",
+    "DelayedPaperOrderPlan",
+    "deterministic_delayed_order_plan",
     "deterministic_order_candidate",
     "is_clearly_non_executable_order_language",
     "looks_like_user_order_request",

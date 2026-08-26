@@ -27,12 +27,12 @@ def test_discovers_complete_unique_canonical_chains() -> None:
     # Keep the lower bound as a regression floor. New additive migrations must
     # not require changing a brittle count assertion on every E2E run.
     assert len(control) >= 102
-    assert len(market) == 8
+    assert len(market) >= 8
     assert control[-1].version == max(migration.version for migration in control)
     assert "20260824001000_conditional_worker_bundle_request_read.sql" in {
         migration.path.name for migration in control
     }
-    assert market[-1].path.name == "008_microstructure_depth_capacity.sql"
+    assert market[-1].version == max(migration.version for migration in market)
     assert len({migration.version for migration in control}) == len(control)
     assert len({migration.version for migration in market}) == len(market)
     assert all(len(migration.checksum) == 64 for migration in (*control, *market))
@@ -87,7 +87,7 @@ def test_main_does_not_render_unexpected_exception_details(
 
 def test_paper_seed_defaults_are_the_approved_scope() -> None:
     assert str(bootstrap.DEFAULT_USER_ID) == "00000000-0000-4000-8000-00000000cec0"
-    assert str(bootstrap.DEFAULT_FUND_ID) == "5c26db42-ce83-4daf-b1dc-c81680c13a6c"
+    assert str(bootstrap.DEFAULT_FUND_ID) == "3838f7d6-0c7c-4e54-85f3-316a451e7eeb"
     assert str(bootstrap.DEFAULT_BOOK_ID) == "07d913de-9a5b-4cf5-b893-31a625445761"
     assert bootstrap.DEFAULT_CASH_KRW == 1_000_000_000
     assert {code for code, _name, _type in bootstrap.ACCOUNT_CHART} >= {

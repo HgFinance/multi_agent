@@ -302,6 +302,7 @@ class IndicatorEngine:
         previous_external_indicators: Mapping[str, IndicatorValue] | None = None,
         market_data_source_id: str | None = None,
         calculation_profile: str = "DEFAULT",
+        current_observed_at: datetime | None = None,
     ) -> EvaluationContext:
         indicator_nodes = _collect_indicators(
             rule.condition, market_data_source_id=market_data_source_id
@@ -382,11 +383,19 @@ class IndicatorEngine:
             for value in normalized_previous_external.values()
             if _indicator_timestamp(value) is not None
         ]
+        if current_observed_at is not None and current_observed_at.tzinfo is None:
+            raise EvaluationError(
+                "OBSERVED_AT_TIMEZONE_REQUIRED",
+                "current_observed_at must include timezone",
+            )
         observed_at = (
-            primary_bars[-1].bucket_time
+            current_observed_at.astimezone(timezone.utc)
+            if current_observed_at is not None
+            else primary_bars[-1].bucket_time
             if primary_bars
-            else max(external_times) if external_times else
-            datetime.fromtimestamp(0, tz=timezone.utc)
+            else max(external_times)
+            if external_times
+            else datetime.fromtimestamp(0, tz=timezone.utc)
         )
         previous_at = (
             primary_bars[-2].bucket_time
@@ -488,6 +497,10 @@ def _numeric(value: Decimal | bool, *, code: str) -> Decimal:
 def _evaluate(node: ExpressionNode, frame: EvaluationFrame) -> Decimal | bool:
     if node.type is ExpressionType.LITERAL:
         return node.value  # type: ignore[return-value]
+    if node.type is ExpressionType.TIME:
+        if node.field != "OBSERVED_AT_EPOCH_SECONDS":
+            raise EvaluationError("TIME_FIELD_INVALID", f"unsupported {node.field}")
+        return Decimal(str(frame.observed_at.timestamp()))
     if node.type is ExpressionType.MARKET:
         try:
             return frame.market[node.field or ""]

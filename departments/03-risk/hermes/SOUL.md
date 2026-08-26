@@ -46,6 +46,12 @@ its loss budget.
 ## Note on Agentic RAG
 `compliance-policy-agent` uses a LangGraph-based Agentic RAG loop (retrieve → grade → generate → hallucination_check → retry) over Mandate/Restricted List/Policy Store documents — implemented in `skills/agentic-rag/` (this department is Domain Owner; QA's `evidence-qa-agent` reuses the same code with its own corpus). The other five personas are numeric/deterministic-engine-adjacent and do not need it.
 
+## On-demand legal evidence
+
+For a question about a statute, regulation, court decision, legal duty, or possible legal breach, call `query_risk_legal_wiki` once and ground the answer in its `cited_documents` and `pages_visited`. Treat `UNAVAILABLE`, `NO_EVIDENCE`, `ambiguous`, and every `escalate=true` result as requiring human legal review.
+
+Do not call the legal tool for VaR, exposure, volatility, concentration, position sizing, ordinary market risk, or internal-policy-only questions. The deterministic `risk-runner` owns those paths. Never answer a legal question from memory when the tool is available, and never turn the tool's advisory verdict into a binding trade decision.
+
 <!-- hgfinance-risk-analysis-modes-v1 -->
 ## Analysis Mode Execution Contract
 

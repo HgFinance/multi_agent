@@ -20,6 +20,8 @@
 명령을 alpha·rebalancer 또는 Risk 정책이 다시 결정하는 역전이 생긴다. 반대로 이
 예외를 “Hermes가 주문할 수 있다”로 구현하면 LLM이 사용자 권한을 획득한다. 따라서
 주문 객체가 아니라 **권한의 출처(authority source)** 를 먼저 구분해야 한다.
+여기서 고정 데모 사용자는 폐쇄형 fixture binding이며 로그인·가입·세션 또는 외부
+사용자 인증 시스템을 뜻하지 않는다.
 
 ## 결정
 
@@ -49,7 +51,7 @@
 - 구조화된 사용자 주문도 BFF가 고정 데모 ID를 actor로 결합한다. 요청 본문의
   `user_id`나 Hermes profile 이름은 권한 증거가 아니다.
 - `/trading/agent/order`는 대화 클라이언트 호환 경로 이름일 뿐, Agent 주문 권한을
-  만들지 않는다. 이 경로도 인증된 사용자의 원문 지시와 같은 `USER_DIRECTIVE`
+  만들지 않는다. 이 경로도 고정 데모 사용자의 원문 지시와 같은 `USER_DIRECTIVE`
   경계를 통과해야 한다.
 
 ### 3. 사용자 PAPER 지시의 admission 계약
@@ -94,7 +96,7 @@ directive는 고정된 대상 snapshot과 자식별 결과를 보존하며 다�
   오류를 함께 반환한다.
 - 대상이 있었지만 하나도 성공하지 못하면 `FAILED`다.
 - `SELL_ALL`의 대상이 0건인 no-op을 `COMPLETED`로 확정하는 경우는 canonical
-  accounting position의 양수 수량과 기존 open SELL reservation이 모두 0임을 같은
+  양수 회계 보유분(`positive accounting position`)과 기존 open SELL reservation이 모두 0임을 같은
   snapshot에서 확인했을 때뿐이다. 양수 보유분이 있지만 전부 예약됐거나 상태를
   확정할 수 없는 경우는 완료가 아니다. `CANCEL_ALL`도 canonical open PAPER order가
   0건임을 확인한 경우에만 `legs: []` no-op `COMPLETED`다.
@@ -132,7 +134,7 @@ directive는 고정된 대상 snapshot과 자식별 결과를 보존하며 다�
 
 ## 결과
 
-- “Agent는 주문을 제출하지 못한다”와 “인증 사용자는 자기 PAPER 계정에 직접
+- “Agent는 주문을 제출하지 못한다”와 “고정 데모 사용자는 자기 PAPER 계정에 직접
   명령할 수 있다”가 동시에 참이다.
 - 기존 자동 alpha/strategy/rebalancer 주문의 Risk·QA·OMS 경계는 약화되지 않는다.
 - 사용자 지시는 모델의 추천이나 보고서가 아니라 별도의 감사 가능한 authority로

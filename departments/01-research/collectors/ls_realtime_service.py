@@ -88,6 +88,7 @@ DEFAULT_OPEN = time(9, 0)
 DEFAULT_CLOSE = time(15, 30)
 CLOSING_CALL_AUCTION_START = time(15, 20)
 SESSION_RETRY_BACKOFF = 30.0
+DEFAULT_WS_CONNECT_STAGGER_SECONDS = 1.0
 IDLE_RECHECK_SECONDS = 4 * 3600.0  # 휴장일에 세션 판정을 다시 하는 주기
 DEFAULT_HEALTH_MAX_DATA_AGE_SECONDS = 180.0
 
@@ -496,6 +497,54 @@ def _fetch_market_session(trade_date: date):
         ref.close()
 
 
+async def _run_worker_after_delay(worker, *, max_seconds: float, delay_seconds: float):
+    """여러 LS socket handshake가 동시에 몰리지 않게 shard 시작을 분산한다."""
+    if delay_seconds > 0:
+        await asyncio.sleep(delay_seconds)
+    return await worker.run(max_seconds=max(max_seconds - delay_seconds, 0.0))
+
+
+async def _run_worker_resilient(
+    worker,
+    *,
+    max_seconds: float,
+    delay_seconds: float,
+    stop: asyncio.Event,
+    shard_index: int,
+    retry_backoff: float = SESSION_RETRY_BACKOFF,
+    log=print,
+):
+    """한 shard의 handshake 실패가 정상 시세 socket까지 끊지 않게 격리한다."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    first_attempt = True
+    while not stop.is_set():
+        elapsed = loop.time() - started
+        remaining = max_seconds - elapsed
+        if remaining <= 0:
+            return worker.stats
+        try:
+            if first_attempt:
+                first_attempt = False
+                return await _run_worker_after_delay(
+                    worker, max_seconds=remaining, delay_seconds=delay_seconds
+                )
+            return await worker.run(max_seconds=remaining)
+        except LsRealtimeError as exc:
+            log(
+                f"  ⚠ 소켓{shard_index} 수집 오류: {exc} - "
+                f"{retry_backoff:.0f}초 후 해당 소켓만 재시작"
+            )
+            try:
+                await asyncio.wait_for(
+                    stop.wait(), timeout=min(retry_backoff, max(remaining, 0.0))
+                )
+                return worker.stats
+            except asyncio.TimeoutError:
+                pass
+    return worker.stats
+
+
 async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asyncio.Event) -> None:
     """세션 창 하나를 수집한다. 창이 끝나거나 stop 이 설 때까지."""
     from market_repository import TimescaleMarketRepository
@@ -517,6 +566,10 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
           f"(소켓당 최대 {SUBSCRIPTIONS_PER_SOCKET}) {mode} {ws_url}", flush=True)
 
     heartbeat_seconds = max(float(env.get("LS_HEARTBEAT_SECONDS") or 60), 5.0)
+    connect_stagger_seconds = max(
+        float(env.get("LS_WS_CONNECT_STAGGER_SECONDS") or DEFAULT_WS_CONNECT_STAGGER_SECONDS),
+        0.0,
+    )
 
     # 토큰도 같은 환경에서 받는다 - 모의 토큰으로 실전 소켓에 붙으면
     # 접속은 되고 데이터만 안 온다(티가 안 나는 실패다).
@@ -546,7 +599,16 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
                 for shard, sink in zip(shards, sinks)
             ]
             run_tasks = [
-                asyncio.create_task(w.run(max_seconds=remaining)) for w in workers
+                asyncio.create_task(
+                    _run_worker_resilient(
+                        worker,
+                        max_seconds=remaining,
+                        delay_seconds=index * connect_stagger_seconds,
+                        stop=stop,
+                        shard_index=index,
+                    )
+                )
+                for index, worker in enumerate(workers)
             ]
             stop_task = asyncio.create_task(stop.wait())
             # 적재가 로그에서 보이게 - 60초마다 증분을 찍는다 (재일님 지적 2026-07-31
@@ -555,8 +617,9 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
             hb_task = asyncio.create_task(
                 _heartbeat(sinks, stop, interval_seconds=heartbeat_seconds)
             )
-            # 소켓 하나가 죽으면(재접속 소진) 전체를 세우고 함께 재구축한다 -
-            # 부분 생존을 허용하면 "절반만 수집되는" 상태가 조용히 지속된다.
+            # shard 장애는 _run_worker_resilient 안에서 해당 소켓만 재접속한다.
+            # 한 handshake 실패로 정상 소켓까지 취소하면 전 종목 시세가 주기적으로
+            # 비어 주문 검증도 함께 중단되므로, 정상 수집은 유지하고 오류를 드러낸다.
             done, pending = await asyncio.wait(
                 {*run_tasks, stop_task, hb_task}, return_when=asyncio.FIRST_COMPLETED
             )

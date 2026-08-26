@@ -48,6 +48,7 @@ from fastapi import (
     Header,
     HTTPException,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -111,6 +112,7 @@ try:
         authorized_fund_memberships,
         authorized_trading_books,
         current_user,
+        FIXED_DEMO_USER_ID,
         require_any_fund_membership,
         require_fund_membership,
         require_owner,
@@ -122,6 +124,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py``
         authorized_fund_memberships,
         authorized_trading_books,
         current_user,
+        FIXED_DEMO_USER_ID,
         require_any_fund_membership,
         require_fund_membership,
         require_owner,
@@ -466,9 +469,7 @@ PORTFOLIO_GOVERNANCE_BINDING_PATH = (
     ).strip()
     or "/governance/v1/mandates/{mandate_id}/current"
 )
-# Local mock runs do not require a browser identity. A caller may still provide
-# the fixed X-User-Id demo header when a seeded trading book is needed.
-PORTFOLIO_AUTH_REQUIRED = os.getenv("PORTFOLIO_AUTH_REQUIRED", "false").casefold() in {"1", "true", "yes", "on"}
+# Local mock runs use one fixed demo identity and have no browser login switch.
 PORTFOLIO_REQUIRE_MANDATE_BINDING = os.getenv("PORTFOLIO_REQUIRE_MANDATE_BINDING", "true").casefold() in {
     "1",
     "true",
@@ -560,9 +561,7 @@ def _require_portfolio_owner(owner_id: str | None, expected_user_id: str | None 
     이 래퍼는 기존 호출부(3곳)를 그대로 두기 위해 남긴 얇은 껍데기다.
     """
 
-    # 플래그를 명시적으로 넘긴다 - 이 모듈 상수는 테스트가 patch하는 지점이라
-    # `require_owner`가 환경변수만 읽으면 그 patch가 무력화된다.
-    require_owner(owner_id, expected_user_id, required=PORTFOLIO_AUTH_REQUIRED)
+    require_owner(owner_id, expected_user_id, required=False)
 
 
 _CALLER_IDENTITY_BODY_FIELDS = frozenset(
@@ -884,7 +883,7 @@ async def ui_create_investor_profile(
     """
 
     bound = _identity_bound_body(body, owner_id, inject=("user_id",))
-    require_owner(owner_id, str(bound.get("user_id") or ""), required=PORTFOLIO_AUTH_REQUIRED)
+    _require_portfolio_owner(owner_id, str(bound.get("user_id") or ""))
     await _require_fund_access(owner_id, bound.get("fund_id"))
     return await _portfolio_request("POST", "/portfolio/v1/investor-profiles", body=bound)
 
@@ -897,7 +896,7 @@ async def ui_get_current_investor_profile(
 ) -> object:
     """현재 version 하나. 없으면 상류 404를 그대로 통과시킨다."""
 
-    require_owner(owner_id, user_id, required=PORTFOLIO_AUTH_REQUIRED)
+    _require_portfolio_owner(owner_id, user_id)
     await _require_fund_access(owner_id, fund_id)
     return await _portfolio_request(
         "GET",
@@ -1041,10 +1040,8 @@ def _integration_status() -> dict[str, dict[str, object]]:
 def ui_current_user(
     owner_id: str | None = Depends(current_user),
 ) -> dict[str, object]:
-    """Return the verified subject and currently effective fund grants only."""
-
-    if owner_id is None:
-        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    """Return the fixed demo subject and currently effective fund grants."""
+    owner_id = owner_id or FIXED_DEMO_USER_ID
     if auth_mode() == "fixture":
         profile = {"display_name": owner_id, "status": "ACTIVE"}
         memberships: list[dict[str, object]] = []
@@ -1395,7 +1392,7 @@ def _model_plane_readiness() -> dict[str, object]:
 
 
 @app.get("/health/ready")
-def health_ready() -> dict[str, object]:
+def health_ready(response: Response) -> dict[str, object]:
     """Expose dependency readiness without secrets or claiming operational durability."""
 
     model_plane = _model_plane_readiness()
@@ -1440,7 +1437,17 @@ def health_ready() -> dict[str, object]:
         },
     }
     status = "ready" if all(item["status"] == "READY" for item in dependencies.values()) else "degraded"
-    return {"status": status, "dependencies": dependencies, "external_writes": False}
+    payload = {
+        "status": status,
+        "dependencies": dependencies,
+        "external_writes": False,
+    }
+    # Readiness is a traffic-admission contract.  A standard HTTP probe must
+    # reject a degraded candidate without parsing this service-specific body;
+    # liveness remains the separate always-200 ``/health`` endpoint.
+    if status != "ready":
+        response.status_code = 503
+    return payload
 
 
 @lru_cache(maxsize=1)

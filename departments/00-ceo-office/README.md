@@ -1,7 +1,7 @@
 # CEO Office
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-현재 Head 런타임은 Hermes Profile `ceo-agent` + `openai-codex/gpt-5.6-luna`이며, 승인된 Claude Code를 대체 런타임으로 사용할 수 있다. CEO의 직원은 독립 LangGraph `executive-briefing-worker` + 임시 테스트용 Ollama `qwen3:1.7b`다. `Modelfile`의 `agent-ceo` alias는 Hermes Head와 분리된 로컬 Worker 호환 실행용이다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+현재 활성 역할은 Hermes Head `ceo-agent`, LLM `executive-briefing-worker`, 결정론 `ceo-runner`다. 모델·fallback은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md), 역할·권한은 [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md)가 소유하며 이 README에 버전값을 복사하지 않는다.
 현재 실행 상태와 영주님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#44-영주님-ceo-office와-agent-workforce-인사팀)을 따른다.
 
 ## Mission

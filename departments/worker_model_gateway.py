@@ -60,6 +60,10 @@ DEFAULT_VLLM_TIMEOUT = 120.0
 DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434/v1"
 DEFAULT_OLLAMA_MODEL = "qwen3:1.7b"
 DEFAULT_OLLAMA_TIMEOUT = 8.0
+DEFAULT_STRUCTURED_MAX_TOKENS = 256
+DEFAULT_TEXT_MAX_TOKENS = 768
+DEFAULT_REPAIR_MAX_TOKENS = 192
+DEFAULT_STOP_SEQUENCES = ("<|im_end|>", "<|endoftext|>")
 
 WorkerLLM = Callable[..., str]
 
@@ -175,6 +179,14 @@ def _float_env(raw: str | None, default: float) -> float:
         return default
 
 
+def _bounded_int(value: object, default: int, low: int, high: int) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(parsed, high))
+
+
 def resolve(worker_id: str | None = None, *,
             env: Mapping[str, str] | None = None,
             registry_path: str | None = None) -> ModelBinding:
@@ -266,11 +278,28 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
 
     def call(system: str, prompt: str, *,
              json_schema: Mapping | None = None) -> str:
-        from departments.qwen_hybrid_runtime import (
-            prepare_request,
-            semantic_repair_prompt,
-            validate_structured_output,
-        )
+        try:
+            from departments.qwen_hybrid_runtime import (
+                prepare_request,
+                semantic_repair_prompt,
+                validate_financial_semantics,
+                validate_prompt_financial_alignment,
+                validate_structured_output,
+            )
+        except ModuleNotFoundError as exc:
+            # ``python departments/worker_model_gateway.py`` is the documented
+            # offline self-check and does not put the repository root on
+            # sys.path.  Only fall back for that exact package-resolution case;
+            # dependency errors inside the runtime module must still surface.
+            if exc.name != "departments":
+                raise
+            from qwen_hybrid_runtime import (  # type: ignore[no-redef]
+                prepare_request,
+                semantic_repair_prompt,
+                validate_financial_semantics,
+                validate_prompt_financial_alignment,
+                validate_structured_output,
+            )
 
         prepared = prepare_request(
             system=system,
@@ -282,6 +311,19 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
         payload = {
             "model": prepared.model,
             "temperature": 0,
+            "max_tokens": _bounded_int(
+                (binding.hybrid_config or {}).get(
+                    "structured_output_max_tokens"
+                    if json_schema is not None
+                    else "text_output_max_tokens"
+                ),
+                DEFAULT_STRUCTURED_MAX_TOKENS
+                if json_schema is not None
+                else DEFAULT_TEXT_MAX_TOKENS,
+                32,
+                2048,
+            ),
+            "stop": list(DEFAULT_STOP_SEQUENCES),
             "messages": [{"role": "system", "content": prepared.system},
                          {"role": "user", "content": prepared.prompt}],
         }
@@ -306,16 +348,46 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
 
         try:
             out = request(payload)
-            content = str(out["choices"][0]["message"]["content"] or "")
+            choice = out["choices"][0]
+            finish_reason = str(choice.get("finish_reason") or "").lower()
+            content = str(choice["message"]["content"] or "")
+            if finish_reason == "length":
+                raise HybridStructuredOutputError(
+                    "model output hit max_tokens; no repair retry was attempted"
+                )
             # vLLM guided decoding handles syntax.  This second boundary catches
             # schema/finite-number drift and gives the model one repair turn.
             # It never calculates or supplies a replacement domain answer.
             if json_schema is not None:
                 validation_error = validate_structured_output(content, json_schema)
+                if not validation_error and prepared.unit_scale_applied:
+                    validation_error = validate_financial_semantics(content)
+                if not validation_error and prepared.unit_scale_applied:
+                    validation_error = validate_prompt_financial_alignment(
+                        prepared.prompt, content
+                    )
                 if validation_error:
                     repair_payload = dict(payload)
+                    # If the arithmetic LoRA produced a self-consistent but
+                    # source-misaligned result, asking the same adapter again
+                    # deterministically repeats the defect.  Use the already
+                    # served Qwen 14B base for the single permitted repair turn;
+                    # this is model fallback, never an answer fallback.
+                    if prepared.model != binding.base_model:
+                        repair_payload["model"] = binding.base_model
+                    repair_payload["max_tokens"] = _bounded_int(
+                        (binding.hybrid_config or {}).get("semantic_repair_max_tokens"),
+                        DEFAULT_REPAIR_MAX_TOKENS,
+                        32,
+                        payload["max_tokens"],
+                    )
                     repair_payload["messages"] = [
-                        {"role": "system", "content": prepared.system},
+                        {
+                            "role": "system",
+                            "content": system
+                            + "\n\nPreserve source price and quantity exactly, then "
+                            "calculate dependent fields.",
+                        },
                         {
                             "role": "user",
                             "content": semantic_repair_prompt(
@@ -324,8 +396,22 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
                         },
                     ]
                     out = request(repair_payload)
-                    content = str(out["choices"][0]["message"]["content"] or "")
+                    repaired_choice = out["choices"][0]
+                    repaired_finish = str(
+                        repaired_choice.get("finish_reason") or ""
+                    ).lower()
+                    if repaired_finish == "length":
+                        raise HybridStructuredOutputError(
+                            "guided JSON repair hit max_tokens"
+                        )
+                    content = str(repaired_choice["message"]["content"] or "")
                     final_error = validate_structured_output(content, json_schema)
+                    if not final_error and prepared.unit_scale_applied:
+                        final_error = validate_financial_semantics(content)
+                    if not final_error and prepared.unit_scale_applied:
+                        final_error = validate_prompt_financial_alignment(
+                            prepared.prompt, content
+                        )
                     if final_error:
                         raise HybridStructuredOutputError(
                             "guided JSON repair failed closed: " + final_error
@@ -507,6 +593,8 @@ def _check_payload_shape():
     b = seen["body"]
     assert b["model"] == "qwen2.5-14b-instruct-awq"
     assert b["temperature"] == 0, "Worker 는 재현성이 우선이다 - temperature 0"
+    assert b["max_tokens"] == DEFAULT_STRUCTURED_MAX_TOKENS
+    assert b["stop"] == list(DEFAULT_STOP_SEQUENCES)
     assert [m["role"] for m in b["messages"]] == ["system", "user"]
     assert b["response_format"] == {
         "type": "json_schema",

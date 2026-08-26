@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import json
 
-from departments.qwen_hybrid_runtime import prepare_request
-from departments.worker_model_gateway import ModelBinding, worker_llm
+from departments.qwen_hybrid_runtime import (
+    prepare_request,
+    validate_financial_semantics,
+    validate_prompt_financial_alignment,
+)
+from departments.worker_model_gateway import (
+    HybridStructuredOutputError,
+    ModelBinding,
+    worker_llm,
+)
 
 HYBRID = {
     "version": "awq-hybrid-upgrade-v1",
@@ -95,4 +103,138 @@ def test_guided_json_is_repaired_once_without_answer_fallback(monkeypatch):
     assert len(calls) == 2
     assert calls[0]["model"] == "hgfinance-awq-arithmetic-2epoch"
     assert calls[0]["response_format"]["type"] == "json_schema"
+    assert calls[0]["max_tokens"] == 256
+    assert calls[0]["stop"] == ["<|im_end|>", "<|endoftext|>"]
+    assert calls[1]["max_tokens"] == 192
+    assert calls[1]["model"] == "qwen2.5-14b-instruct-awq"
     assert "failed the application contract" in calls[1]["messages"][1]["content"]
+
+
+def test_length_termination_fails_without_expensive_repair(monkeypatch):
+    calls: list[dict] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {"content": '{"value":'},
+                        }
+                    ]
+                }
+            ).encode()
+
+    def fake_urlopen(request, timeout):
+        calls.append(json.loads(request.data))
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    schema = {"type": "object", "properties": {"value": {"type": "number"}}}
+    try:
+        worker_llm(_binding())("system", "15% 계산", json_schema=schema)
+    except HybridStructuredOutputError as exc:
+        assert "hit max_tokens" in str(exc)
+    else:
+        raise AssertionError("length 종료는 실패 폐쇄되어야 한다")
+    assert len(calls) == 1
+
+
+def test_financial_semantic_mismatch_is_repaired_once(monkeypatch):
+    calls: list[dict] = []
+    responses = iter(
+        [
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": '{"price":100,"quantity":2,"notional":300}'
+                        },
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": '{"price":100,"quantity":2,"notional":200}'
+                        },
+                    }
+                ]
+            },
+        ]
+    )
+
+    class Response:
+        def __init__(self, value):
+            self.value = value
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.value).encode()
+
+    def fake_urlopen(request, timeout):
+        calls.append(json.loads(request.data))
+        return Response(next(responses))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    schema = {
+        "type": "object",
+        "properties": {
+            "price": {"type": "number"},
+            "quantity": {"type": "number"},
+            "notional": {"type": "number"},
+        },
+        "required": ["price", "quantity", "notional"],
+    }
+    result = worker_llm(_binding())(
+        "Return JSON.", "100원 자산 2주의 notional을 계산하세요.", json_schema=schema
+    )
+    assert json.loads(result)["notional"] == 200
+    assert len(calls) == 2
+    assert calls[1]["model"] == "qwen2.5-14b-instruct-awq"
+    assert "financial semantic mismatch" in calls[1]["messages"][1]["content"]
+
+
+def test_financial_semantic_validator_never_supplies_an_answer():
+    assert validate_financial_semantics(
+        '{"entry_price":100,"stop_price":90,"quantity":3,'
+        '"position_risk_amount":30}'
+    ) is None
+    error = validate_financial_semantics(
+        '{"entry_price":100,"stop_price":90,"quantity":3,'
+        '"position_risk_amount":300}'
+    )
+    assert error is not None
+    assert "position_risk_amount" in error
+
+
+def test_prompt_alignment_rejects_only_unambiguous_source_drift():
+    prompt = "1603000원 주식을 2주 매수할 때 JSON으로 답하세요."
+    assert validate_prompt_financial_alignment(
+        prompt, '{"price":1603000,"quantity":2,"notional":3206000}'
+    ) is None
+    assert validate_prompt_financial_alignment(
+        prompt, '{"price":801500,"quantity":2,"notional":1603000}'
+    ) == "financial source alignment mismatch: price"
+
+    # Buy/sell legs expose multiple prices, so a generic gateway must not guess
+    # which one a caller's ``price`` field represents.
+    ambiguous = "Bought 2 shares at KRW 48000 and sold 2 shares at KRW 51500."
+    assert validate_prompt_financial_alignment(
+        ambiguous, '{"price":51500,"quantity":2}'
+    ) is None

@@ -84,13 +84,30 @@ def query_legal_wiki(
 
     answer = result.get("answer") or {}
     pages = list(result.get("pages_visited") or [])
+    verdict = answer.get("verdict")
+    cited_documents = list(answer.get("cited_documents") or [])
+    try:
+        confidence = float(answer["confidence"])
+    except (KeyError, TypeError, ValueError):
+        confidence = None
+
+    # Guided JSON guarantees shape and primitive types, not cross-field legal
+    # semantics.  Only a well-supported, sufficiently confident no-breach
+    # result may suppress escalation; every other state fails closed.
+    supported_no_breach = (
+        verdict == "no_breach"
+        and confidence is not None
+        and 0.6 <= confidence <= 1.0
+        and bool(cited_documents)
+        and bool(pages)
+    )
     return LegalWikiQueryOutput(
         status="OK" if pages else "NO_EVIDENCE",
-        verdict=answer.get("verdict"),
+        verdict=verdict,
         rationale=answer.get("rationale"),
-        cited_documents=list(answer.get("cited_documents") or []),
-        confidence=answer.get("confidence"),
-        escalate=bool(answer.get("escalate", True)),
+        cited_documents=cited_documents,
+        confidence=confidence,
+        escalate=bool(answer.get("escalate", True)) or not supported_no_breach,
         pages_visited=pages,
         context_chars=int(result.get("context_chars", 0)),
         retrieved_at=datetime.now(timezone.utc),
@@ -129,7 +146,7 @@ if __name__ == "__main__":
     )
     assert ok.status == "OK"
     assert ok.verdict == "breach"
-    assert ok.escalate is False
+    assert ok.escalate is True
 
     def _boom(query: str, as_of: str, mandate: str) -> dict[str, Any]:
         raise RuntimeError("openai unavailable")

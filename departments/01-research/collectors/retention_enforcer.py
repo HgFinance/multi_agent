@@ -66,11 +66,15 @@ select c.chunk_schema || '.' || c.chunk_name,
 # 그 구간이 verified Archive 로 남아 있는가. **구간이 청크를 덮어야** 한다 -
 # 청크 일부만 아카이브된 상태로 지우면 나머지가 사라진다.
 _SQL_ARCHIVED = """
-select count(*)
+select coalesce(
+         range_agg(tstzrange(partition_start, partition_end, '[)'))
+           @> tstzrange(%s, %s, '[)'),
+         false
+       )
   from market.archive_exports
  where source_table in (%s, %s)
    and verified
-   and partition_start <= %s and partition_end >= %s
+   and partition_end > %s and partition_start < %s
 """
 
 
@@ -120,11 +124,12 @@ def plan(conn, *, now: datetime | None = None) -> list[Candidate]:
                 # **그 구간이 파일로 남아 있다는 사실**이 조건이다.
                 short = table.split(".")[-1].replace("market_", "")
                 cur.execute(_SQL_ARCHIVED,
-                            (table, f"external:public.{short}", start, end))
-                n = cur.fetchone()[0]
+                            (start, end, table, f"external:public.{short}",
+                             start, end))
+                covered = bool(cur.fetchone()[0])
                 out.append(Candidate(
-                    table, chunk, start, end, n > 0,
-                    "verified Archive 있음" if n > 0
+                    table, chunk, start, end, covered,
+                    "verified Archive 연속 커버리지 있음" if covered
                     else "**Archive 없음 - 지우지 않는다**"))
     return out
 
@@ -171,7 +176,7 @@ class _Cur:
             self._rows = [(ch, st, en) for (tbl, ch, st, en) in self.c
                           if tbl == params[0] and en <= params[1]]
         elif "archive_exports" in s:
-            self._rows = [(1 if (params[0] in self.a or params[1] in self.a) else 0,)]
+            self._rows = [(params[2] in self.a or params[3] in self.a,)]
         elif "drop_chunks" in s:
             self.dropped.append(params)
             self._rows = []

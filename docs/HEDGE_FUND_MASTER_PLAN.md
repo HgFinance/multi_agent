@@ -1,22 +1,12 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
-> **TARGET STATE / LONG-TERM PLAN:** 이 문서는 장기 목표와 설계 원칙을
-> 담는다. 현재 구현·worker registry·serving 상태는
-> [CURRENT_PROJECT_ARCHITECTURE.md](CURRENT_PROJECT_ARCHITECTURE.md)를
-> 기준으로 확인한다.
-
-> **Current snapshot pointer:** 이 문서의 날짜가 붙은 runtime count와 목표
-> architecture는 historical/plan 문맥이다. 현재 구현 상태·worker registry·model
-> serving은 [CURRENT_PROJECT_ARCHITECTURE.md](CURRENT_PROJECT_ARCHITECTURE.md)를
-> 우선한다. 기존 snapshot 수치를 현재 runtime으로 재사용하지 않는다.
-
-> **Local Compose runtime baseline:** 현재 로컬 통합 실행 기준은 루트 [`docker-compose.yml`](../docker-compose.yml)과 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)이다. 서비스 수는 Compose가 소유하며 문서 본문에 중복 고정하지 않는다. `docker compose config --services`로 확인한 선언 수와 실제 컨테이너 실행 상태를 혼동하지 않는다.
-
-> **Current runtime override (2026-08-24, workforce.agent_profiles 전수조사로 갱신)**: 현재 실행 계층은 8개 Hermes Head, 10개 LLM Worker, 5개 결정론 runner(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`, `ceo-runner`)로 구성된 총 23명이다. 도현님 담당 부서는 Trading 1명(LLM 0 + `desk-runner`), Accounting/Portfolio 2명(LLM 1 + `back-office-runner`)이다. 2026-08-07의 "29명" 스냅샷은 이후 여러 차례의 tool 강등(Research 6→2, Quant 7→2, Trading Bull/Bear 제거, Risk·QA·Accounting 강등, HR 5→1 통합)을 반영하지 못한 값이라 폐기한다. 상세 역할 경계·감축 이력은 [WORKER_ROLE_BOUNDARIES.md](02-engineering/WORKER_ROLE_BOUNDARIES.md)가 우선하며, 이 문서의 목표 아키텍처·과거 구현 스냅샷은 현재 Runtime과 섞어 해석하지 않는다.
-
-> 전사 Worker Graph 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다. 8개 부서장은 Hermes Agent와 Codex/Claude Code 연결 모델이고, LLM 직원은 직원별 독립 LangGraph Worker Graph와 운영 Qwen AWQ v1을 사용한다. 로컬 Ollama `qwen3:1.7b`는 개발 fallback이다. 결정론 runner는 별도 Python 실행 경로로 Trading·Risk·QA·Accounting의 계산·검증을 담당하며 LLM Registry와 구분한다. Worker context는 비바인딩이며 결정론적 Gate가 판정을 소유한다.
-
-> Risk는 2명(LLM 1 + `risk-runner`), AI QA/감사는 3명(LLM 2 + `qa-runner`)으로 운영하며 나머지 부서도 동일한 독립 Worker 계층으로 운영한다. 직원 모델 교체는 [Worker 모델 배치 기준](02-engineering/WORKER_MODEL_MATRIX.md)에 따라 `ollama list` 확인과 benchmark·HR·QA 승인 후에만 허용한다.
+> **현재 구현 안내:** 이 문서의 날짜별 인원·서비스·모델 표는 목표 또는 당시
+> snapshot이다. 현재 구조와 편제는 [Current Architecture](CURRENT_PROJECT_ARCHITECTURE.md),
+> 준비 상태는 [Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md), Worker 권한은
+> [Worker Role Boundaries](02-engineering/WORKER_ROLE_BOUNDARIES.md), 모델은
+> [Worker Model Matrix](02-engineering/WORKER_MODEL_MATRIX.md), 로컬 서비스는
+> [Local Compose Runtime Baseline](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)이
+> 각각 소유한다. 이 문서에서 현재 숫자와 모델값을 다시 고정하지 않는다.
 
 > 문서 상태: Production Plan v3.3
 > 문서 역할: `docs/` 전체의 최상위 기준 문서이며, 하위 문서는 본 계획의 범위와 통제 원칙을 구체화한다.  
@@ -75,7 +65,7 @@
 2. 모든 종목의 실시간 특징과 신호를 지속적으로 계산한다.
 3. 이벤트 중요도, 불확실성, 유동성, 포트폴리오 영향을 기준으로 분석 우선순위를 정한다.
 4. 중요한 종목에만 멀티 에이전트 투자위원회를 동적으로 실행한다.
-5. 모든 Agent·alpha·자동 전략 주문 후보를 결정론적 Risk Engine으로 검증한다. 인증 사용자의 명시적 PAPER 주문은 ADR-0007의 별도 authority와 기계적 admission으로 검증한다.
+5. 모든 Agent·alpha·자동 전략 주문 후보를 결정론적 Risk Engine으로 검증한다. 로컬 고정 fixture 사용자의 명시적 PAPER 주문은 ADR-0007의 별도 authority와 기계적 admission으로 검증한다.
 6. Risk 승인된 자동 주문 또는 admission을 통과한 사용자 PAPER directive만 OMS로 전송하며, LIVE Broker/FCM Routing은 별도 승인 전 활성화하지 않는다.
 7. 데이터, 근거, 판단, 주문, 체결 및 사후 성과를 재현 가능한 형태로 기록한다.
 8. 축적된 데이터를 이용해 신규 전략과 모델을 연구하고 Shadow 및 Paper 환경에 자동 배포한다.
@@ -287,7 +277,7 @@ TradingAgents의 역할 분리와 토론 구조를 참고한 금융 도메인 �
 
 Hermes 내부 구현에 금융 상태를 모두 결합하지 않고 독립 서비스 또는 명확한 모듈 경계로 유지한다.
 
-실제 헤지펀드 운영을 모방하기 위해 투자위원회가 모든 주문을 승인하지는 않는다. 투자위원회는 Strategy Mandate, 자본 배분, Risk Budget 및 예외 상황을 심의한다. 일상적인 자동 주문은 승인된 Mandate 안에서 트레이딩본부의 PM Pod 또는 전략 실행기가 만들고 리스크본부의 Risk/Compliance Gate를 통과해 집행한다. 인증 사용자의 직접 PAPER 명령은 이 자동 주문 레인이 아니라 ADR-0007의 `USER_DIRECTIVE` 레인으로 집행한다. 대규모 포지션, Mandate 변경, 손실 한도 변경 및 신규 전략 승격만 CEO 에이전트 또는 Cross-Department 위원회로 Escalation한다.
+실제 헤지펀드 운영을 모방하기 위해 투자위원회가 모든 주문을 승인하지는 않는다. 투자위원회는 Strategy Mandate, 자본 배분, Risk Budget 및 예외 상황을 심의한다. 일상적인 자동 주문은 승인된 Mandate 안에서 트레이딩본부의 PM Pod 또는 전략 실행기가 만들고 리스크본부의 Risk/Compliance Gate를 통과해 집행한다. 로컬 고정 fixture 사용자의 직접 PAPER 명령은 이 자동 주문 레인이 아니라 ADR-0007의 `USER_DIRECTIVE` 레인으로 집행한다. 대규모 포지션, Mandate 변경, 손실 한도 변경 및 신규 전략 승격만 CEO 에이전트 또는 Cross-Department 위원회로 Escalation한다.
 
 ### 5.3 Risk Engine과 OMS
 
@@ -440,7 +430,7 @@ flowchart TB
 - Work Queue, Case Orchestration, Entitlement, Audit와 Observability
 - Secret 관리, Disaster Recovery, Model Serving과 CI/CD
 
-외부 시장·공시·뉴스·거시 Source는 중앙 Data Platform이 한 번만 수집한다. 트레이딩·리스크·퀀트·회계·QA·인사팀은 부서별 Domain API로 이를 참조하고, 주문·위험·실험·원장·감사·Agent Lifecycle처럼 자기 업무에서 발생한 데이터만 공식 System of Record에 생성한다. 본부별 입력 Data Product, 출력 계약, Library와 Raw DB 접근 제한은 [전사 데이터 소스 및 부서별 라이브러리 설계서](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)의 6장을 따른다.
+시장 시계열은 중앙 Data Platform이 한 번만 수집한다. 현재 공시·뉴스·재무·거시는 요청형 MCP로 조회하며 상주 적재하지 않는다. 트레이딩·리스크·퀀트·회계·QA·인사팀은 부서별 Domain API로 이를 참조하고, 주문·위험·실험·원장·감사·Agent Lifecycle처럼 자기 업무에서 발생한 데이터만 공식 System of Record에 생성한다. 본부별 입력 Data Product, 출력 계약, Library와 Raw DB 접근 제한은 [전사 데이터 소스 및 부서별 라이브러리 설계서](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)의 6장을 따른다.
 
 초기에는 한 개 PM Pod와 한 개 Fund를 구현하되 모든 데이터 모델은 다중 Fund, 다중 Book, 다중 Strategy를 지원하도록 설계한다.
 
@@ -861,17 +851,16 @@ priority =
 
 아래 표는 확정된 `CEO 에이전트 + CEO 직속 Agent Workforce 인사팀 + 6개 본부`를 논리적 역할 수준으로 분해한 것이다. 인사팀은 투자 본부가 아닌 Shared Service이며, 위원회는 별도 상설 본부가 아니라 여러 본부의 Agent가 동일한 Case와 Evidence를 검토하는 승인 Workflow다. 현재 실행 Worker는 아래의 논리적 역할을 그대로 1명씩 실행한다는 뜻이 아니며, 최신 실행 구성은 [WORKER_ROLE_BOUNDARIES.md](02-engineering/WORKER_ROLE_BOUNDARIES.md)와 각 Profile을 따른다.
 
-#### 도현님 담당 부서의 현재 실행 Worker
+#### 도현님 담당 부서의 현재 실행 경계
 
 | 부서 | 현재 Worker | 실행 방식 | 역할 |
 |---|---|---|---|
-| Trading | `bull-thesis-worker` | LLM, 항상 실행 | Research Packet에 포함된 근거만 사용해 상승 논리·촉매·기대수익 가설을 독립적으로 작성 |
-| Trading | `bear-thesis-worker` | LLM, 항상 실행 | 같은 Packet의 근거만 사용해 반증·하락 위험·논리 취약점을 독립적으로 작성 |
+| Trading | 전략별 임시 Worker | 결정론, 요청 단위 | 승인된 immutable Quant Strategy Bundle을 PAPER 시장 이벤트에 실행. 전략 수정·자기 승격 권한 없음 |
 | Trading | `desk-runner` | 결정론, 항상 실행 | OrderIntent 정규화, 계약 상태 전이, 실행 가능성·비용·파생 Certification을 계산·조회. 주문 Submit 권한 없음 |
 | Accounting/Portfolio | `exception-investigation-worker` | LLM, 항상 실행 | Reconciliation Break, 미설명 PnL, 마감 준비 상태의 원인 후보를 근거와 함께 조사. 공식 수치·NAV 확정 권한 없음 |
 | Accounting/Portfolio | `back-office-runner` | 결정론, 항상 실행 | Position·Cash·PnL·Report·Valuation·Corporate Action·Fee/Tax 조회와 Projection을 결정론 모듈에서 수행. LLM을 호출하지 않음 |
 
-Trading의 기존 Trader/PM·Execution·Venue Cost·Derivatives 역할과 Accounting의 기존 도메인별 역할은 현재 별도 직원이 아니라 `desk-runner` 또는 `back-office-runner`/`exception-investigation-worker`가 흡수한 감사용 Alias다.
+Trading의 기존 Bull/Bear·Trader/PM·Execution·Venue Cost·Derivatives 역할과 Accounting의 기존 도메인별 역할은 현재 별도 직원이 아니라 전략 Factory, `desk-runner` 또는 `back-office-runner`/`exception-investigation-worker`가 흡수한 감사용 Alias다. 아래 조직표의 Bull/Bear는 장기 논리 역할이며 현행 고정 Worker ID가 아니다.
 
 | 조직 | 에이전트 | 주요 책임 | 기본 실행 시점 |
 |---|---|---|---|
@@ -1134,7 +1123,7 @@ CREATED | ACKNOWLEDGED -> EXPIRED
 BROKER_STATE_AMBIGUOUS -> UNKNOWN
 ```
 
-`RISK_APPROVED`는 Broker Order 상태가 아니라 Agent·alpha·자동 전략 OrderIntent의 유효한 `risk_decision_id` 제출 전제조건이다. 사용자 승인이 필요한 Mandate는 해당 자동 OrderIntent 승인 흐름에만 `USER_PENDING -> USER_APPROVED`를 추가한다. 인증된 사용자가 자기 Fund/Book에 명시한 PAPER 주문은 [ADR-0007](02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 별도 `USER_DIRECTIVE` authority와 기계적 admission 계약을 따르며, Hermes/LLM이 그 권한을 소유하지 않는다. `UNKNOWN` 상태에서는 신규 주문을 차단하고 Broker Reconciliation으로만 상태를 확정한다.
+`RISK_APPROVED`는 Broker Order 상태가 아니라 Agent·alpha·자동 전략 OrderIntent의 유효한 `risk_decision_id` 제출 전제조건이다. 사용자 승인이 필요한 Mandate는 해당 자동 OrderIntent 승인 흐름에만 `USER_PENDING -> USER_APPROVED`를 추가한다. BFF가 로컬 고정 fixture로 선택한 사용자·Fund/Book의 PAPER 주문은 [ADR-0007](02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 별도 `USER_DIRECTIVE` authority와 기계적 admission 계약을 따르며, Hermes/LLM이 그 권한을 소유하지 않는다. `UNKNOWN` 상태에서는 신규 주문을 차단하고 Broker Reconciliation으로만 상태를 확정한다.
 
 ### 12.2 필수 기능
 
@@ -3559,7 +3548,7 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - 이벤트별로 필요한 에이전트만 호출한다.
 - 에이전트 결정이 구조화 스키마를 통과한다.
 - 모든 결정에 Feature Snapshot과 Evidence ID가 존재한다.
-- Risk Engine이 모든 Agent·alpha·자동 전략 주문 후보를 검증한다. 인증 사용자의 명시적 PAPER `USER_DIRECTIVE`는 ADR-0007의 auth·Fund/Book·account mechanics·멱등·PAPER-only admission을 별도로 통과한다.
+- Risk Engine이 모든 Agent·alpha·자동 전략 주문 후보를 검증한다. 로컬 고정 fixture 사용자의 명시적 PAPER `USER_DIRECTIVE`는 fixture actor map·Fund/Book·account mechanics·멱등·PAPER-only admission을 별도로 통과한다.
 - Paper OMS가 주문 상태와 포지션을 일관되게 관리한다.
 - 데이터 단절, 위험 한도 초과 및 상태 불일치 시 신규 주문을 차단한다.
 - 장중 세션을 Replay하여 데이터와 판단 과정을 조사할 수 있다.

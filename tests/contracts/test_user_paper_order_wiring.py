@@ -23,8 +23,15 @@ def test_local_bff_separates_paper_orders_from_read_only_broker_projection() -> 
     assert "TRADING_SERVICE_AUTH_SECRET" in bff
     assert bff["TRADING_SERVICE_AUTH_ISSUER"] == "${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}"
     assert bff["TRADING_SERVICE_AUTH_AUDIENCE"] == "${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}"
-    assert bff["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "false"
-    assert bff["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "false"
+    assert bff["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
+    assert bff["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
+    assert "postgresql://hgfinance_order_runtime:" in bff[
+        "ORDER_ORCHESTRATOR_DATABASE_URL"
+    ]
+    assert bff["ORDER_ORCHESTRATOR_DATABASE_ROLE"] == "${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}"
+    assert "postgresql://hgfinance_conditional_orchestrator:" in bff[
+        "CONDITIONAL_RULE_DATABASE_URL"
+    ]
     assert bff["ENABLE_LS_ORDER_EVENTS"] == "true"
     assert bff["ENABLE_BROKER_SNAPSHOT"] == "true"
     assert bff["BROKER_SNAPSHOT_CACHE_SECONDS"] == "${BROKER_SNAPSHOT_CACHE_SECONDS:-10}"
@@ -34,6 +41,49 @@ def test_local_bff_separates_paper_orders_from_read_only_broker_projection() -> 
     assert bff["PORTFOLIO_LIVE_MODE"] == "broker"
     assert "LS_MARKET_ENV" not in bff
     assert "LS_ACCOUNT_NO_PAPER" in bff
+
+
+def test_local_order_consumers_share_the_isolated_order_login() -> None:
+    root = _compose("docker-compose.yml")
+    expected = _environment(root, "portfolio-bff")[
+        "ORDER_ORCHESTRATOR_DATABASE_URL"
+    ]
+    assert "postgresql://hgfinance_order_runtime:" in expected
+    for service in (
+        "paper-order-orchestrator-mcp",
+        "conditional-rule-notification-consumer",
+        "ceo-kanban-supervisor",
+    ):
+        environment = _environment(root, service)
+        assert environment["ORDER_ORCHESTRATOR_DATABASE_URL"] == expected
+        assert environment["ORDER_ORCHESTRATOR_DATABASE_ROLE"] == (
+            "${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}"
+        )
+
+
+def test_trading_readiness_rejects_a_stale_conditional_rule_contract() -> None:
+    fragment = _compose("departments/02-trading/compose.yaml")
+    trading = fragment["services"]["trading-api"]
+    command = " ".join(str(item) for item in trading["healthcheck"]["test"])
+    assert "ExpressionType.TIME" in command
+    assert "/health/ready" in command
+
+
+def test_local_trading_services_use_their_isolated_runtime_roles() -> None:
+    services = _compose("departments/02-trading/compose.yaml")["services"]
+    api = services["trading-api"]["environment"]
+    worker = services["trading-directive-worker"]["environment"]
+    relay = services["trading-outbox-relay"]["environment"]
+
+    assert "postgresql://hgfinance_trading_runtime:" in api["DATABASE_URL"]
+    assert "role%3Dsvc_trading_api" in api["DATABASE_URL"]
+    assert "role%3Dsvc_strategy_paper_executor" in api[
+        "TRADING_OMS_DATABASE_URL"
+    ]
+    assert worker["DATABASE_URL"] == api["DATABASE_URL"]
+    assert "role%3Dsvc_trading_outbox_relay" in relay[
+        "TRADING_OUTBOX_DATABASE_URL"
+    ]
 
 
 def test_eb_keeps_broker_projection_out_of_strict_paper_trading_api() -> None:

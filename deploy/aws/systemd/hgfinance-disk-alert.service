@@ -1,0 +1,9 @@
+[Unit]
+Description=HgFinance single-disk capacity alert
+After=local-fs.target docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hgfinance
+ExecStart=/usr/bin/python3 /home/ubuntu/hgfinance/departments/01-research/bench/disk_guard.py --alert-check

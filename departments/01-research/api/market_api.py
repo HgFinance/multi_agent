@@ -238,15 +238,41 @@ def bars(
         "15M": "15 minutes",
         "1H": "1 hour",
     }
-    if interval in derived_intervals and source in {None, "derived", "derived_1m"}:
+    # 장중 프레임(1M 과 파생 5M/15M/1H)의 canonical source 는 실시간 틱에서
+    # 거래소를 통합한 market.bars_1m_consolidated 다.
+    #
+    # 2026-08-26 이전에는 market.market_bars(interval_code='1M', source='ls_chart')
+    # 를 읽었다. 그 행을 채우는 chart-minute-universe 잡이 배포된 이미지의 스케줄러
+    # 에 등록돼 있지 않아 전 종목 1M 이 **영구 0행**이었다(실측 381행/1종목/이틀
+    # 지연). 그래서 /bars?interval=1M 이 언제나 [] 를 돌려줬고, 조건주문 워커는
+    # INSUFFICIENT_HISTORY 로 backoff 만 반복했다 - 그 경로는 평가 행을 쓰지 않아
+    # DB 만 봐서는 원인이 보이지 않는다.
+    #
+    # ls_chart 백필은 20:30 야간 잡이라 원리상 당일 장중 규칙을 만족시킬 수 없다.
+    # 과거 백필을 명시적으로 원하는 호출자(source=ls_chart)는 아래 기존 경로로 간다.
+    realtime_intraday = source in {None, "consolidated", "derived", "derived_1m"}
+    if interval == "1M" and realtime_intraday:
+        cond, params = "", [iid]
+        if to is not None:
+            if to.tzinfo is None:
+                raise HTTPException(422, "to must include a timezone")
+            cond = " and bucket_time <= %s"
+            params.append(to)
+        params.append(limit)
+        return _query(f"""
+            select bucket_time, open, high, low, close, volume, notional,
+                   'consolidated_1m'::text as source,
+                   (bucket_time + interval '1 minute' <= now()) as is_final
+              from market.bars_1m_consolidated
+             where instrument_id = %s{cond}
+             order by bucket_time desc limit %s
+        """, tuple(params))
+    if interval in derived_intervals and realtime_intraday:
         # Higher intraday frames have one canonical implementation: aggregate
         # final 1M candles in Timescale. Rule/agent callers must not invent
         # their own candle alignment or partial-bar policy.
-        base_source = os.environ.get("MARKET_BAR_BASE_SOURCE", "ls_chart").strip()
-        if not base_source:
-            raise HTTPException(503, "MARKET_BAR_BASE_SOURCE is not configured")
         interval_literal = derived_intervals[interval]
-        cond, params = "", [iid, base_source]
+        cond, params = "", [iid]
         if to is not None:
             if to.tzinfo is None:
                 raise HTTPException(422, "to must include a timezone")
@@ -262,16 +288,15 @@ def bars(
                    last(close, bucket_time) as close,
                    sum(volume) as volume,
                    sum(notional) as notional,
-                   'derived_1m'::text as source,
-                   bool_and(is_final)
+                   'consolidated_1m'::text as source,
+                   bool_and(bucket_time + interval '1 minute' <= now())
                      and count(*) = count(distinct bucket_time)
                      and count(*) =
                          floor(extract(epoch from (max(bucket_time) - min(bucket_time))) / 60)::bigint + 1
                      and time_bucket(interval '{interval_literal}', bucket_time)
                          + interval '{interval_literal}' <= now() as is_final
-              from market.market_bars
-             where instrument_id = %s and interval_code = '1M'
-               and source = %s{cond}
+              from market.bars_1m_consolidated
+             where instrument_id = %s{cond}
              group by time_bucket(interval '{interval_literal}', bucket_time)
              order by bucket_time desc limit %s
         """, tuple(params))

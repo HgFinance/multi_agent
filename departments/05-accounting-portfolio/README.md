@@ -1,9 +1,9 @@
 # 회계/포트폴리오본부 (Accounting & Portfolio)
 
-> 현재 LLM 직원 런타임은 독립 LangGraph Worker + Ollama `qwen3:1.7b`이고, `back-office-runner`는 모델을 호출하지 않는 결정론 실행기다. 이 기준이 아래의 과거 Modelfile 설명보다 우선한다.
+> 현재 활성 역할과 권한은 [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md), 모델·fallback은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md)가 소유한다.
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-현재 Head 런타임은 Hermes Profile `accounting-portfolio-department` + `openai-codex/gpt-5.6-luna`이며, 승인된 Claude Code를 대체 런타임으로 사용할 수 있다. 직원은 2명으로 개편됐다: `exception-investigation-worker`는 Ollama LLM, `back-office-runner`는 LLM 없는 결정론 Runner다. `Modelfile`의 `qwen3:14b`/`agent-accounting` alias와 구 8개 역할명은 로컬·역사적 호환용이며 현재 Worker 기준이 아니다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+Hermes Profile은 `accounting-portfolio-department`다. 직원은 LLM `exception-investigation-worker`와 결정론 `back-office-runner`이며, 구 Modelfile alias와 구 8개 역할명은 현재 Worker 수의 기준이 아니다.
 현재 실행 상태와 도현님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#42-도현님-트레이딩본부-회계포트폴리오본부와-공통-platform)을 따른다.
 
 ## Mission

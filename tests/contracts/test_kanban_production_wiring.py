@@ -40,6 +40,20 @@ def test_dispatcher_routes_workers_through_qa_terminal_boundary() -> None:
 
     assert "HERMES_BIN: /app/repo/scripts/qa_hermes_worker.py" in dispatcher
     assert "- .:/app/repo:ro" in dispatcher
+    assert "mem_limit: 3g" in dispatcher
+    assert "mem_reservation: 512m" in dispatcher
+
+
+def test_supervisor_qa_projection_uses_audit_runtime_role() -> None:
+    root = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    supervisor = _service_block(root, "ceo-kanban-supervisor")
+    assert "role%3Dsvc_audit_api" in supervisor
+
+    overlay = (ROOT / "deploy/aws/docker-compose.paper-order.yml").read_text(
+        encoding="utf-8"
+    )
+    overlay_supervisor = _service_block(overlay, "ceo-kanban-supervisor")
+    assert "RISK_QA_DATABASE_URL: *audit-api-database-url" in overlay_supervisor
 
 
 def test_retention_worker_is_separate_and_uses_shared_lock_and_audit_lane() -> None:

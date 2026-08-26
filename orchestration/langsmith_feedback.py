@@ -21,12 +21,11 @@ import sqlite3
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 LOGGER = logging.getLogger(__name__)
@@ -35,6 +34,27 @@ WORKFLOW_PROJECT_DEFAULT = "First"
 EVALS_PROJECT_DEFAULT = "HgFinance-Evals"
 FEEDBACK_SCHEMA = "hgfinance.observability.feedback.v1"
 FEEDBACK_MODES = frozenset({"off", "shadow", "active"})
+IMPROVEMENT_TYPES = frozenset(
+    {
+        "SKILL_CREATE",
+        "SKILL_EVOLVE",
+        "CODE_FIX",
+        "PROMPT_POLICY",
+        "RUNTIME_CONFIG",
+        "DATA_QUALITY",
+        "NO_ACTION",
+    }
+)
+_ACTIONABLE_FEEDBACK_CODES = frozenset(
+    {
+        "WORKER_OR_WORKFLOW_DEGRADED",
+        "LATENCY_ABOVE_THRESHOLD",
+        "STRUCTURED_EVAL_SCORE_LOW",
+        "SEMANTIC_QA_FAILED",
+        "SEMANTIC_QA_SCORE_LOW",
+        "PRIVACY_PAYLOAD_PRESENT",
+    }
+)
 TERMINAL_STATUSES = frozenset({"success", "completed", "complete", "error", "failed", "blocked", "degraded"})
 ERROR_STATUSES = frozenset({"error", "failed", "blocked", "degraded", "gave_up", "timed_out"})
 _DEPARTMENT_CANONICAL = {
@@ -56,6 +76,8 @@ _DEPARTMENT_CANONICAL = {
     "accounting-portfolio-department": "accounting-portfolio",
     "ceo": "ceo",
     "ceo-agent": "ceo",
+    "ceo-workflow": "ceo",
+    "ceo-ingress": "ceo",
     "ceo-terminal": "ceo",
     "hr": "hr",
     "hr-department": "hr",
@@ -86,6 +108,12 @@ _SAFE_METADATA_KEYS = frozenset(
         "p95_latency_ms",
         "trace_kind",
         "latency_scope",
+        "observation_point",
+        "primary_bottleneck_department",
+        "primary_bottleneck_duration_ms",
+        "joint_improvement_targets",
+        "latency_attribution_status",
+        "latency_attribution_method",
         "trace_id",
         "semantic_qa_version",
         "semantic_qa_evaluator",
@@ -127,6 +155,19 @@ def _feedback_semantic_key(
     """Identify one actionable finding without conflating unrelated traces."""
 
     request_id = _bounded_text(metadata.get("request_id"), 160)
+    if not request_id and metadata.get("source") == "metrics-window":
+        try:
+            window_start = datetime.fromisoformat(
+                str(metadata.get("window_start") or "").replace("Z", "+00:00")
+            )
+            six_hour_bucket = int(window_start.timestamp()) // (6 * 60 * 60)
+            request_id = (
+                "metrics-incident:"
+                f"{_bounded_text(metadata.get('source_project'), 80)}:"
+                f"{six_hour_bucket}"
+            )
+        except (TypeError, ValueError):
+            request_id = ""
     findings = sorted(
         {
             _bounded_text(code, 96).upper()
@@ -190,6 +231,7 @@ class FeedbackConfig:
     max_feedback_chars: int
     metrics_window_seconds: int
     metrics_max_runs: int
+    kanban_db_path: str | None = None
 
     @classmethod
     def from_env(cls) -> "FeedbackConfig":
@@ -230,6 +272,8 @@ class FeedbackConfig:
             # tuning value cannot turn the background, fail-open poller into
             # a repeated 400 loop.
             metrics_max_runs=_int("LANGSMITH_FEEDBACK_METRICS_MAX_RUNS", 100, 1, 100),
+            kanban_db_path=os.getenv("LANGSMITH_FEEDBACK_KANBAN_DB_PATH", "").strip()
+            or None,
         )
 
 
@@ -275,9 +319,9 @@ def observation_from_run(run: Any) -> TraceObservation:
         if key not in raw_metadata:
             continue
         value = raw_metadata[key]
-        if key in {"request_id", "root_id", "task_id", "trace_id", "workflow_mode", "workflow_role", "department", "stage", "worker_id", "role", "status", "error_class", "provider", "model_name", "source", "trace_kind", "latency_scope", "semantic_qa_version", "semantic_qa_evaluator", "semantic_qa_verdict", "semantic_qa_finding_codes"}:
+        if key in {"request_id", "root_id", "task_id", "trace_id", "workflow_mode", "workflow_role", "department", "stage", "worker_id", "role", "status", "error_class", "provider", "model_name", "source", "trace_kind", "latency_scope", "observation_point", "primary_bottleneck_department", "joint_improvement_targets", "latency_attribution_status", "latency_attribution_method", "semantic_qa_version", "semantic_qa_evaluator", "semantic_qa_verdict", "semantic_qa_finding_codes"}:
             metadata[key] = _bounded_text(value, 160)
-        elif key in {"error_count", "latency_ms", "metric_count", "p95_latency_ms", "semantic_qa_finding_count"}:
+        elif key in {"error_count", "latency_ms", "metric_count", "p95_latency_ms", "primary_bottleneck_duration_ms", "semantic_qa_finding_count"}:
             metadata[key] = _bounded_int(value)
         elif key in {"window_start", "window_end"}:
             metadata[key] = _bounded_text(value, 64)
@@ -306,6 +350,98 @@ def observation_from_run(run: Any) -> TraceObservation:
         ended_at=end_time.isoformat() if end_time else None,
         metadata=metadata,
     )
+
+
+def attribute_workflow_bottleneck(
+    observation: TraceObservation,
+    *,
+    kanban_db_path: str | None,
+) -> TraceObservation:
+    """Attribute root latency from durable Kanban timings, never trace labels.
+
+    ``ceo-ingress`` is where the end-to-end timer starts. It is not evidence
+    that ingress caused the delay. For a completed workflow root, the longest
+    measured primary department task is the bounded bottleneck attribution.
+    If the Kanban evidence is unavailable, the observation remains unchanged
+    rather than inventing an owner.
+    """
+
+    metadata = dict(observation.metadata)
+    if (
+        _bounded_text(metadata.get("trace_kind"), 40).lower() != "workflow_root"
+        or _bounded_text(metadata.get("latency_scope"), 40).lower() != "end_to_end"
+    ):
+        return observation
+    request_id = _bounded_text(metadata.get("request_id"), 160)
+    path = Path(str(kanban_db_path or ""))
+    if not request_id or not kanban_db_path or not path.is_file():
+        return observation
+
+    try:
+        with sqlite3.connect(
+            f"file:{path}?mode=ro",
+            uri=True,
+            timeout=0.25,
+        ) as database:
+            database.execute("PRAGMA query_only=ON")
+            root = database.execute(
+                """
+                SELECT id
+                FROM tasks
+                WHERE idempotency_key = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (request_id,),
+            ).fetchone()
+            if root is None:
+                return observation
+            root_id = _bounded_text(root[0], 80)
+            marker = f"%workflow_root_task_id={root_id}%"
+            rows = database.execute(
+                """
+                SELECT assignee, started_at, completed_at
+                FROM tasks
+                WHERE body LIKE ?
+                  AND body LIKE '%workflow_role=primary%'
+                  AND started_at IS NOT NULL
+                  AND completed_at IS NOT NULL
+                """,
+                (marker,),
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        LOGGER.warning(
+            "langsmith_feedback_latency_attribution_unavailable request_id=%s",
+            request_id,
+        )
+        return observation
+
+    measured: list[tuple[int, str]] = []
+    for assignee, started_at, completed_at in rows:
+        duration_ms = _bounded_int(
+            (int(completed_at) - int(started_at)) * 1_000,
+            maximum=3_600_000,
+        )
+        department = _bounded_text(assignee, 64).lower()
+        if department and duration_ms > 0:
+            measured.append((duration_ms, department))
+    if not measured:
+        return observation
+
+    duration_ms, department = max(measured, key=lambda item: item[0])
+    metadata.update(
+        {
+            "root_id": metadata.get("root_id") or root_id,
+            "department": department,
+            "observation_point": metadata.get("observation_point") or "ceo-ingress",
+            "primary_bottleneck_department": department,
+            "primary_bottleneck_duration_ms": duration_ms,
+            "joint_improvement_targets": "ceo-workflow / observability",
+            "latency_attribution_status": "MEASURED",
+            "latency_attribution_method": "kanban-primary-duration-v1",
+        }
+    )
+    return replace(observation, metadata=metadata)
 
 
 def evaluate_observation(
@@ -381,6 +517,15 @@ def evaluate_observation(
         "status": status,
         "trace_kind": metadata.get("trace_kind"),
         "latency_scope": metadata.get("latency_scope"),
+        "observation_point": metadata.get("observation_point"),
+        "primary_bottleneck_department": metadata.get("primary_bottleneck_department"),
+        "primary_bottleneck_duration_ms": _bounded_int(
+            metadata.get("primary_bottleneck_duration_ms")
+        )
+        or None,
+        "joint_improvement_targets": metadata.get("joint_improvement_targets"),
+        "latency_attribution_status": metadata.get("latency_attribution_status"),
+        "latency_attribution_method": metadata.get("latency_attribution_method"),
         "latency_ms": latency_ms or None,
         "latency_threshold_ms": max(0, int(latency_warn_ms)),
         "p95_latency_ms": _bounded_int(metadata.get("p95_latency_ms")) or None,
@@ -471,6 +616,8 @@ class FeedbackLedger:
                     decision TEXT NOT NULL CHECK(decision IN ('APPROVED', 'REJECTED')),
                     approved_by TEXT NOT NULL,
                     reason TEXT NOT NULL,
+                    improvement_type TEXT NOT NULL DEFAULT 'NO_ACTION',
+                    target_skill_slug TEXT,
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS langsmith_feedback_benchmarks (
@@ -515,6 +662,22 @@ class FeedbackLedger:
             if "department_key" not in artifact_columns:
                 db.execute(
                     "ALTER TABLE langsmith_feedback_artifacts ADD COLUMN department_key TEXT NOT NULL DEFAULT ''"
+                )
+            decision_columns = {
+                str(row["name"])
+                for row in db.execute(
+                    "PRAGMA table_info(langsmith_feedback_decisions)"
+                ).fetchall()
+            }
+            if "improvement_type" not in decision_columns:
+                db.execute(
+                    "ALTER TABLE langsmith_feedback_decisions ADD COLUMN "
+                    "improvement_type TEXT NOT NULL DEFAULT 'NO_ACTION'"
+                )
+            if "target_skill_slug" not in decision_columns:
+                db.execute(
+                    "ALTER TABLE langsmith_feedback_decisions ADD COLUMN "
+                    "target_skill_slug TEXT"
                 )
             for row in db.execute(
                 "SELECT artifact_id, department FROM langsmith_feedback_artifacts WHERE department_key=''"
@@ -740,7 +903,9 @@ class FeedbackLedger:
         limit = max(1, min(int(limit), 100))
         with self._connect() as db:
             rows = db.execute(
-                """SELECT a.*, d.decision AS approval_decision, d.approved_by, d.reason AS approval_reason
+                """SELECT a.*, d.decision AS approval_decision, d.approved_by,
+                    d.reason AS approval_reason, d.improvement_type,
+                    d.target_skill_slug
                 FROM langsmith_feedback_artifacts a
                 LEFT JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
                 WHERE d.artifact_id IS NULL ORDER BY a.created_at LIMIT ?""",
@@ -748,21 +913,59 @@ class FeedbackLedger:
             ).fetchall()
         return [self._artifact(row) for row in rows]
 
-    def approve(self, artifact_id: str, decision: str, approved_by: str, reason: str) -> bool:
+    def approve(
+        self,
+        artifact_id: str,
+        decision: str,
+        approved_by: str,
+        reason: str,
+        *,
+        improvement_type: str = "NO_ACTION",
+        target_skill_slug: str = "",
+    ) -> bool:
         if decision not in {"APPROVED", "REJECTED"}:
             return False
+        normalized_type = _bounded_text(improvement_type, 32).upper()
+        if normalized_type not in IMPROVEMENT_TYPES:
+            return False
+        if decision == "APPROVED" and normalized_type == "NO_ACTION":
+            return False
+        normalized_slug = _bounded_text(target_skill_slug, 64).lower()
+        if normalized_type == "SKILL_EVOLVE" and not normalized_slug:
+            return False
+        if normalized_type != "SKILL_EVOLVE":
+            normalized_slug = ""
         try:
             with self._connect() as db:
                 artifact = db.execute(
-                    "SELECT artifact_id FROM langsmith_feedback_artifacts WHERE artifact_id=?",
+                    """SELECT artifact_id, decision, finding_codes
+                    FROM langsmith_feedback_artifacts WHERE artifact_id=?""",
                     (artifact_id,),
                 ).fetchone()
                 if artifact is None:
                     return False
+                if decision == "APPROVED":
+                    finding_codes = set(json.loads(artifact["finding_codes"]))
+                    if (
+                        artifact["decision"] == "OBSERVED_PASS"
+                        or not _ACTIONABLE_FEEDBACK_CODES.intersection(finding_codes)
+                    ):
+                        return False
                 now = _now()
                 cursor = db.execute(
-                    "INSERT OR IGNORE INTO langsmith_feedback_decisions (artifact_id, decision, approved_by, reason, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (artifact_id, decision, _bounded_text(approved_by, 128), _bounded_text(reason, 240), now),
+                    """INSERT OR IGNORE INTO langsmith_feedback_decisions
+                    (artifact_id, decision, approved_by, reason, improvement_type,
+                     target_skill_slug, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        artifact_id,
+                        decision,
+                        _bounded_text(approved_by, 128),
+                        _bounded_text(reason, 240),
+                        normalized_type,
+                        normalized_slug or None,
+                        now,
+                    ),
                 )
                 if cursor.rowcount == 1 and decision == "APPROVED":
                     db.execute(
@@ -832,9 +1035,12 @@ class FeedbackLedger:
                     FROM langsmith_feedback_artifacts a
                     JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
                     JOIN langsmith_feedback_benchmarks b ON b.artifact_id=a.artifact_id
-                    WHERE d.decision='APPROVED' AND b.status='PASSED' AND a.department=?
+                    WHERE d.decision='APPROVED' AND b.status='PASSED'
+                      AND d.improvement_type != 'NO_ACTION'
+                      AND a.decision != 'OBSERVED_PASS'
+                      AND a.department_key=?
                     ORDER BY a.created_at DESC LIMIT ?""",
-                    (_bounded_text(department, 64).lower(), limit),
+                    (canonical_department(department), limit),
                 ).fetchall()
             else:
                 rows = db.execute(
@@ -843,6 +1049,8 @@ class FeedbackLedger:
                     JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
                     JOIN langsmith_feedback_benchmarks b ON b.artifact_id=a.artifact_id
                     WHERE d.decision='APPROVED' AND b.status='PASSED'
+                      AND d.improvement_type != 'NO_ACTION'
+                      AND a.decision != 'OBSERVED_PASS'
                     ORDER BY a.created_at DESC LIMIT ?""",
                     (limit,),
                 ).fetchall()
@@ -851,7 +1059,7 @@ class FeedbackLedger:
         items: list[dict[str, Any]] = []
         for row in rows:
             item = {
-                "department": row["department"],
+                "department": canonical_department(row["department"]),
                 "decision": row["decision"],
                 "finding_codes": json.loads(row["finding_codes"]),
                 "summaries": json.loads(row["summaries"]),
@@ -872,6 +1080,7 @@ class FeedbackLedger:
             rows = db.execute(
                 """SELECT a.*, d.decision AS approval_decision,
                     d.approved_by, d.reason AS approval_reason,
+                    d.improvement_type, d.target_skill_slug,
                     b.status AS benchmark_status, b.benchmark_id,
                     b.score AS benchmark_score, b.report_ref,
                     b.result_summary AS benchmark_result_summary
@@ -879,11 +1088,78 @@ class FeedbackLedger:
                 JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
                 LEFT JOIN langsmith_feedback_benchmarks b ON b.artifact_id=a.artifact_id
                 WHERE d.decision='APPROVED'
+                  AND d.improvement_type != 'NO_ACTION'
+                  AND a.decision != 'OBSERVED_PASS'
                   AND (b.status IS NULL OR b.status IN ('PENDING', 'FAILED'))
                 ORDER BY a.created_at LIMIT ?""",
                 (limit,),
             ).fetchall()
         return [self._artifact(row) for row in rows]
+
+    def evolution_benchmark_candidates(
+        self, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return first-approved skill findings awaiting admission benchmark."""
+
+        limit = max(1, min(int(limit), 500))
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT a.*, d.decision AS approval_decision,
+                    d.approved_by, d.reason AS approval_reason,
+                    d.improvement_type, d.target_skill_slug,
+                    b.status AS benchmark_status, b.benchmark_id,
+                    b.score AS benchmark_score, b.report_ref,
+                    b.result_summary AS benchmark_result_summary
+                FROM langsmith_feedback_artifacts a
+                JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
+                JOIN langsmith_feedback_benchmarks b ON b.artifact_id=a.artifact_id
+                WHERE d.decision='APPROVED' AND b.status='PENDING'
+                  AND d.improvement_type IN ('SKILL_CREATE', 'SKILL_EVOLVE')
+                ORDER BY b.updated_at LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            items = [self._artifact(row) for row in rows]
+            self._attach_source_runs(db, items)
+        return items
+
+    def evolution_ready(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Return benchmark-passed skill findings for idempotent reconciliation."""
+
+        limit = max(1, min(int(limit), 1_000))
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT a.*, d.decision AS approval_decision,
+                    d.approved_by, d.reason AS approval_reason,
+                    d.improvement_type, d.target_skill_slug,
+                    b.status AS benchmark_status, b.benchmark_id,
+                    b.score AS benchmark_score, b.report_ref,
+                    b.result_summary AS benchmark_result_summary
+                FROM langsmith_feedback_artifacts a
+                JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
+                JOIN langsmith_feedback_benchmarks b ON b.artifact_id=a.artifact_id
+                WHERE d.decision='APPROVED' AND b.status='PASSED'
+                  AND d.improvement_type IN ('SKILL_CREATE', 'SKILL_EVOLVE')
+                ORDER BY b.updated_at LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            items = [self._artifact(row) for row in rows]
+            self._attach_source_runs(db, items)
+        return items
+
+    @staticmethod
+    def _attach_source_runs(
+        db: sqlite3.Connection, items: list[dict[str, Any]]
+    ) -> None:
+        for item in items:
+            item["source_run_ids"] = [
+                str(row["source_run_id"])
+                for row in db.execute(
+                    """SELECT source_run_id
+                    FROM langsmith_feedback_artifact_sources
+                    WHERE artifact_id=? ORDER BY source_run_id""",
+                    (item["artifact_id"],),
+                ).fetchall()
+            ]
 
     def update_benchmark(
         self,
@@ -955,6 +1231,7 @@ class FeedbackLedger:
 
     @staticmethod
     def _artifact(row: sqlite3.Row) -> dict[str, Any]:
+        keys = set(row.keys())
         return {
             "artifact_id": row["artifact_id"],
             "source_run_id": row["source_run_id"],
@@ -967,15 +1244,29 @@ class FeedbackLedger:
             "metadata": json.loads(row["metadata"]),
             "created_at": row["created_at"],
             "approval_decision": row["approval_decision"],
-            "approved_by": row["approved_by"] if "approved_by" in row.keys() else None,
-            "approval_reason": row["approval_reason"] if "approval_reason" in row.keys() else None,
-            "benchmark_status": row["benchmark_status"] if "benchmark_status" in row.keys() else None,
-            "benchmark_id": row["benchmark_id"] if "benchmark_id" in row.keys() else None,
-            "benchmark_score": row["benchmark_score"] if "benchmark_score" in row.keys() else None,
-            "benchmark_report_ref": row["report_ref"] if "report_ref" in row.keys() else None,
+            "approved_by": row["approved_by"] if "approved_by" in keys else None,
+            "approval_reason": (
+                row["approval_reason"] if "approval_reason" in keys else None
+            ),
+            "improvement_type": (
+                row["improvement_type"] if "improvement_type" in keys else None
+            ),
+            "target_skill_slug": (
+                row["target_skill_slug"] if "target_skill_slug" in keys else None
+            ),
+            "benchmark_status": (
+                row["benchmark_status"] if "benchmark_status" in keys else None
+            ),
+            "benchmark_id": row["benchmark_id"] if "benchmark_id" in keys else None,
+            "benchmark_score": (
+                row["benchmark_score"] if "benchmark_score" in keys else None
+            ),
+            "benchmark_report_ref": (
+                row["report_ref"] if "report_ref" in keys else None
+            ),
             "benchmark_result_summary": (
                 row["benchmark_result_summary"]
-                if "benchmark_result_summary" in row.keys()
+                if "benchmark_result_summary" in keys
                 else None
             ),
         }
@@ -1149,6 +1440,7 @@ def _publish_qa_discord_request(
     from orchestration.qa_discord_feedback import (
         format_qa_feedback_request,
         is_actionable_feedback,
+        post_qa_discord_message,
         qa_feedback_channel_id,
     )
 
@@ -1168,27 +1460,10 @@ def _publish_qa_discord_request(
         summaries=result.summaries,
         metadata=result.metadata,
     )
-    request = Request(
-        f"https://discord.com/api/v10/channels/{channel_id}/messages",
-        data=json.dumps(
-            {"content": content, "allowed_mentions": {"parse": []}},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8"),
-        headers={
-            "Authorization": f"Bot {token}",
-            "Content-Type": "application/json",
-            "User-Agent": "HgFinance-QA-Feedback/1.0",
-        },
-        method="POST",
-    )
     try:
-        with urlopen(request, timeout=8.0) as response:
-            raw = response.read().decode("utf-8")
-        payload = json.loads(raw) if raw else {}
-        message_id = str(payload.get("id") or "") if isinstance(payload, Mapping) else ""
-        if not message_id:
-            raise RuntimeError("discord_message_id_missing")
+        message_id = post_qa_discord_message(
+            content, token=token, channel_id=channel_id
+        )
         ledger.finish_discord_delivery(
             artifact_id,
             delivered=True,
@@ -1285,6 +1560,10 @@ class LangSmithFeedbackService:
                 )
             for run in root_runs:
                 observation = observation_from_run(run)
+                observation = attribute_workflow_bottleneck(
+                    observation,
+                    kanban_db_path=self.config.kanban_db_path,
+                )
                 if not observation.source_run_id or not observation.ended_at:
                     continue
                 if observation.status not in TERMINAL_STATUSES:
@@ -1352,32 +1631,6 @@ class LangSmithFeedbackService:
                         latency_warn_ms=self.config.latency_warn_ms,
                         source_project=str(job["project_name"] or self.config.workflow_project),
                     )
-                    # Deterministic, redacted failure codes are the operational
-                    # occurrence source for Evolution Skills. This is advisory
-                    # and fail-open: it never blocks trace evaluation.
-                    try:
-                        from orchestration.evolution_skills import (
-                            EvolutionSkillStore,
-                            record_trace_occurrences,
-                        )
-
-                        record_trace_occurrences(
-                            EvolutionSkillStore(
-                                Path(
-                                    os.getenv(
-                                        "EVOLUTION_SKILLS_HOME",
-                                        "/var/lib/evolution-skills",
-                                    )
-                                )
-                            ),
-                            department=result.department,
-                            run_id=result.source_run_id,
-                            finding_codes=result.finding_codes,
-                            detail="; ".join(result.summaries),
-                            at=observation.ended_at or "",
-                        )
-                    except Exception:  # noqa: BLE001 - advisory learning path
-                        LOGGER.exception("evolution_skill_occurrence_write_failed")
                     eval_run_id = publish_evaluation(result, self.config.evals_project)
                     if not eval_run_id:
                         raise RuntimeError("eval_publish_unavailable")

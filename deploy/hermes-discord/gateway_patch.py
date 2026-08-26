@@ -27,11 +27,14 @@ from orchestration.discord_idempotency import (
 )
 from orchestration.qa_discord_feedback import (
     QA_FEEDBACK_MARKER,
+    SKILL_PROPOSAL_MARKER,
     QaFeedbackCommand,
     artifact_id_from_text,
     parse_qa_feedback_command,
+    proposal_id_from_text,
     qa_feedback_channel_id,
     submit_qa_feedback_decision,
+    submit_skill_proposal_decision,
 )
 
 logger = logging.getLogger(__name__)
@@ -411,41 +414,68 @@ async def _qa_reply(message: Any, content: str) -> None:
         await send(str(content)[:1900])
 
 
-async def _artifact_from_reply(message: Any) -> str | None:
+async def _review_ids_from_reply(
+    message: Any,
+) -> tuple[str | None, str | None]:
     reference = getattr(message, "reference", None)
     resolved = getattr(reference, "resolved", None)
-    artifact_id = artifact_id_from_text(getattr(resolved, "content", ""))
-    if artifact_id:
-        return artifact_id
+    resolved_content = getattr(resolved, "content", "")
+    artifact_id = artifact_id_from_text(resolved_content)
+    proposal_id = proposal_id_from_text(resolved_content)
+    if artifact_id or proposal_id:
+        return artifact_id, proposal_id
     referenced_id = str(getattr(reference, "message_id", "") or "")
     fetch_message = getattr(getattr(message, "channel", None), "fetch_message", None)
     if referenced_id and callable(fetch_message):
         try:
             referenced = await fetch_message(int(referenced_id))
-            return artifact_id_from_text(getattr(referenced, "content", ""))
+            referenced_content = getattr(referenced, "content", "")
+            return (
+                artifact_id_from_text(referenced_content),
+                proposal_id_from_text(referenced_content),
+            )
         except Exception:
             logger.info(
                 "qa-discord-feedback status=reference_unavailable message_id=%s",
                 str(getattr(message, "id", "") or "unknown"),
             )
-    return None
+    return None, None
 
 
 async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool | None:
     """Own QA review cards and approval commands before normal chat admission."""
 
-    if _profile_name() != "qa-department" or not _qa_channel_matches(message):
+    if not _qa_channel_matches(message):
         return None
     content = str(getattr(message, "content", "") or "")
     author = getattr(message, "author", None)
     client_user = getattr(getattr(adapter, "_client", None), "user", None)
     message_id = str(getattr(message, "id", "") or "")
+    command = parse_qa_feedback_command(content)
+
+    # Every department bot can observe the dedicated QA room. A human QA
+    # decision must have exactly one owner: non-QA profiles consume it as a
+    # no-op before normal chat admission, while qa-department records it in
+    # the deterministic ledger below. This prevents an approval command from
+    # becoming a long-running CEO user workflow.
+    if _profile_name() != "qa-department":
+        if command is not None:
+            logger.info(
+                "qa-discord-feedback status=ignored_non_owner profile=%s message_id=%s",
+                _profile_name(),
+                message_id or "unknown",
+            )
+            return True
+        return None
 
     # The background evaluator publishes through this same existing QA bot.
     # The exact marker and self identity are both required before bypassing the
     # upstream self-message rejection and invoking the QA Hermes Agent once.
     if author is not None and client_user is not None and author == client_user:
-        if QA_FEEDBACK_MARKER not in content:
+        if not (
+            {QA_FEEDBACK_MARKER, SKILL_PROPOSAL_MARKER}
+            & {line.strip() for line in content.splitlines()}
+        ):
             return None
         try:
             dedup_key, _context, claim = _claim_inbound(
@@ -470,9 +500,14 @@ async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool 
 
     if bool(getattr(author, "bot", True)):
         return None
-    command = parse_qa_feedback_command(content)
     if command is None:
         return None
+    logger.info(
+        "qa-discord-feedback status=decision_detected decision=%s artifact_id=%s message_id=%s",
+        command.decision,
+        command.artifact_id or "NONE",
+        message_id or "unknown",
+    )
     try:
         dedup_key, _context, claim = _claim_inbound(
             adapter,
@@ -489,13 +524,84 @@ async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool 
         _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
         await _qa_reply(message, "이 채널의 QA 승인 권한이 없습니다.")
         return True
-    artifact_id = command.artifact_id or await _artifact_from_reply(message)
+    artifact_id = command.artifact_id
+    proposal_id = command.proposal_id
+    reply_artifact_id, reply_proposal_id = await _review_ids_from_reply(message)
+    if not artifact_id and not proposal_id:
+        artifact_id, proposal_id = reply_artifact_id, reply_proposal_id
+    if proposal_id:
+        if reply_proposal_id != proposal_id:
+            _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+            await _qa_reply(
+                message,
+                "Skill 2차 승인은 해당 제안 검토 메시지에 Reply해야 합니다.",
+            )
+            return True
+        if not command.reason:
+            _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+            await _qa_reply(message, "스킬 제안 결정 사유가 필요합니다.")
+            return True
+        resolved_proposal = QaFeedbackCommand(
+            decision=command.decision,
+            artifact_id=None,
+            proposal_id=proposal_id,
+            reason=command.reason,
+        )
+        try:
+            status, body = await asyncio.to_thread(
+                submit_skill_proposal_decision,
+                resolved_proposal,
+                actor_id=str(getattr(author, "id", "") or "unknown"),
+                message_id=message_id,
+            )
+        except Exception as exc:
+            _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+            logger.warning(
+                "skill-evolution-review status=failed_closed error_type=%s message_id=%s",
+                type(exc).__name__,
+                message_id,
+            )
+            await _qa_reply(message, "Evolution 승인 원장 연결에 실패했습니다.")
+            return True
+        if status in {200, 201, 202}:
+            _store(adapter).mark_inbound(dedup_key, "COMPLETED", _profile_name())
+            await _qa_reply(
+                message,
+                "## 🧬 Skill 제안 관리자 결정\n"
+                f"- **Proposal:** `{proposal_id}`\n"
+                f"- **결정:** `{body.get('status', command.decision)}`\n"
+                f"- **SKILL hash:** `{body.get('content_hash') or 'UNKNOWN'}`\n"
+                f"- **다음 단계:** `{body.get('next_step') or 'CLOSED'}`\n"
+                "- 승인 전 내용과 hash가 달라지면 승격은 차단됩니다.",
+            )
+        elif status == 409:
+            _store(adapter).mark_inbound(dedup_key, "COMPLETED", _profile_name())
+            await _qa_reply(message, f"{proposal_id}: 이미 결정됐거나 상태가 변경된 제안입니다.")
+        else:
+            _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+            await _qa_reply(message, f"{proposal_id}: Evolution 원장이 HTTP {status}로 거부했습니다.")
+        return True
     if not artifact_id:
         _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
         await _qa_reply(
             message,
             "artifact를 찾지 못했습니다. QA 응답에 Reply하거나 `승인 feedback-... 사유` 형식으로 입력해 주세요.",
         )
+        return True
+    if command.decision == "APPROVED" and not command.improvement_type:
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(
+            message,
+            "1차 승인에는 `유형=SKILL_CREATE` 같은 개선 유형이 필요합니다.",
+        )
+        return True
+    if (
+        command.decision == "APPROVED"
+        and command.improvement_type == "SKILL_EVOLVE"
+        and not command.target_skill_slug
+    ):
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(message, "SKILL_EVOLVE에는 `스킬=<slug>`가 필요합니다.")
         return True
     if not command.reason:
         _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
@@ -509,6 +615,8 @@ async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool 
         decision=command.decision,
         artifact_id=artifact_id,
         reason=command.reason,
+        improvement_type=command.improvement_type,
+        target_skill_slug=command.target_skill_slug,
     )
     try:
         status, _body = await asyncio.to_thread(
@@ -690,6 +798,9 @@ INGRESS_TIMEOUT_ENV = "HGFINANCE_DISCORD_INGRESS_TIMEOUT_SECONDS"
 INGRESS_SECRET_ENV = "CEO_DISCORD_INGRESS_API_KEY"
 INGRESS_PROFILES = frozenset({"ceo-agent", "trading-department"})
 _INGRESS_RETRY_DELAYS_SECONDS = (0.25, 0.75, 1.5)
+_INGRESS_DEFAULT_TIMEOUT_SECONDS = 5.0
+_THREAD_CONTEXT_FETCH_TIMEOUT_SECONDS = 2.0
+_RESOLVED_THREAD_CONTEXT_MARKER = "[hgfinance resolved discord thread context]"
 _INGRESS_FAILURE_ATTRIBUTE = "_hgfinance_ingress_failure"
 _INGRESS_FAILURE_MESSAGE = (
     "⚠️ 요청 접수 결과를 확인하지 못했습니다. 중복 주문 방지를 위해 자동으로 "
@@ -700,6 +811,28 @@ _INGRESS_FAILURE_MESSAGE = (
 
 def _ingress_url() -> str:
     return os.getenv(INGRESS_URL_ENV, "").strip()
+
+
+def _ingress_timeout_seconds() -> float:
+    """Return one bounded internal-ingress attempt timeout.
+
+    The Discord event loop is already isolated through ``to_thread``.  This
+    bound limits total worker occupancy when the same-host BFF is unavailable,
+    while preserving the existing idempotent retry contract.
+    """
+
+    try:
+        configured = float(
+            os.getenv(
+                INGRESS_TIMEOUT_ENV,
+                str(_INGRESS_DEFAULT_TIMEOUT_SECONDS),
+            )
+        )
+    except (TypeError, ValueError):
+        return _INGRESS_DEFAULT_TIMEOUT_SECONDS
+    if configured != configured:  # NaN must not reach urllib's socket timeout.
+        return _INGRESS_DEFAULT_TIMEOUT_SECONDS
+    return max(1.0, min(configured, 30.0))
 
 
 def _ingress_secret() -> str | None:
@@ -885,7 +1018,7 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
         },
         method="POST",
     )
-    timeout = float(os.getenv(INGRESS_TIMEOUT_ENV, "30"))
+    timeout = _ingress_timeout_seconds()
     retryable_http = frozenset({429, 500, 502, 503, 504})
     for attempt in range(len(_INGRESS_RETRY_DELAYS_SECONDS) + 1):
         try:
@@ -989,6 +1122,90 @@ async def _fetch_discord_message(
     if not callable(fetch_message):
         return None
     return await fetch_message(int(message_id))
+
+
+def _is_referential_followup(content: str) -> bool:
+    """Recognize only explicit references to an earlier question."""
+
+    normalized = re.sub(r"\s+", " ", str(content or "")).strip().casefold()
+    if not normalized:
+        return False
+    return any(
+        reference in normalized
+        for reference in ("위 질문", "이전 질문", "앞 질문", "방금 질문", "원 질문")
+    )
+
+
+async def _resolve_thread_followup_context(adapter: Any, message: Any) -> Any:
+    """Freeze a Discord request-thread starter into an explicit follow-up.
+
+    Resolution is deliberately bounded to the current request thread.  It
+    never searches channel history or Kanban, so a missing starter cannot turn
+    into a guessed security/market subject.
+    """
+
+    if _profile_name() != "ceo-agent" or _author_is_bot(message):
+        return message
+    content = str(getattr(message, "content", "") or "").strip()
+    if (
+        not _is_referential_followup(content)
+        or _RESOLVED_THREAD_CONTEXT_MARKER in content
+    ):
+        return message
+
+    channel = getattr(message, "channel", None)
+    parent_id = str(getattr(channel, "parent_id", "") or "")
+    thread_id = str(getattr(channel, "id", "") or "")
+    message_id = str(getattr(message, "id", "") or "")
+    if not parent_id or not thread_id or thread_id == message_id:
+        return message
+
+    try:
+        starter = await asyncio.wait_for(
+            _fetch_discord_message(
+                adapter,
+                message,
+                channel_id=parent_id,
+                message_id=thread_id,
+            ),
+            timeout=_THREAD_CONTEXT_FETCH_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001 - supplementary bounded lookup.
+        logger.warning(
+            "discord-thread-context status=unavailable thread_id=%s error_type=%s",
+            thread_id,
+            type(exc).__name__,
+        )
+        return message
+
+    original = str(getattr(starter, "content", "") or "").strip()
+    starter_id = str(getattr(starter, "id", "") or thread_id)
+    if not original or starter_id == message_id or _author_is_bot(starter):
+        return message
+
+    try:
+        resolved = copy.copy(message)
+        resolved.content = (
+            f"{_RESOLVED_THREAD_CONTEXT_MARKER}\n"
+            "original_request:\n"
+            f"{original[:1600]}\n\n"
+            "follow_up_request:\n"
+            f"{content[:1600]}\n\n"
+            "Use original_request as the exact subject of this follow-up. "
+            "If required target context is still absent, request input; never "
+            "infer it from another Kanban task. Do not quote this context block "
+            "in the user-facing response."
+        )
+    except (AttributeError, TypeError, ValueError):
+        return message
+
+    logger.info(
+        "discord-thread-context status=resolved thread_id=%s starter_id=%s message_id=%s",
+        thread_id,
+        starter_id,
+        message_id,
+    )
+    return resolved
 
 
 async def _maybe_handle_ceo_repeat_message(adapter: Any, message: Any) -> bool:
@@ -1279,21 +1496,25 @@ def _wrap_handle_message(cls: type[Any]) -> None:
         # direct Hermes fallback.  Both paths therefore share one correlation.
         # Upstream Hermes auto-threading remains disabled.
         routed_message = await _ensure_request_thread(self, message)
+        resolved_message = await _resolve_thread_followup_context(
+            self,
+            routed_message,
+        )
 
         # BFF ingress is the canonical path when configured. Forward the
         # routed message so the BFF receives both the parent channel and the
         # actual request-thread id. Once selected, this boundary owns the
         # message even when the outcome is ambiguous; replaying through direct
         # Hermes could create a second workflow after the BFF committed.
-        if await _forward_to_ingress_async(routed_message, self):
-            if getattr(routed_message, _INGRESS_FAILURE_ATTRIBUTE, None):
-                await _notify_ingress_failure(routed_message)
+        if await _forward_to_ingress_async(resolved_message, self):
+            if getattr(resolved_message, _INGRESS_FAILURE_ATTRIBUTE, None):
+                await _notify_ingress_failure(resolved_message)
             return True
 
         try:
             result = await original(
                 self,
-                with_routing_context(routed_message, self),
+                with_routing_context(resolved_message, self),
                 *args,
                 **kwargs,
             )

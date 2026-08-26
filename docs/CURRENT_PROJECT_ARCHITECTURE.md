@@ -1,12 +1,13 @@
 # HgFinance Current Architecture
 
-> **Status:** CANONICAL CURRENT · **reviewed:** 2026-08-25 UTC
+> **Status:** CANONICAL CURRENT · **reviewed:** 2026-08-26 UTC
 >
-> **Source audit:** current checkout is `main` rooted at `5357d41`; at review
-> time it is 11 commits ahead and 0 behind `origin/main` (`1b9e58c`). Current
-> claims below were checked against this working tree's executable code,
-> Compose, registry and tests. Uncommitted files are repository evidence, not
-> proof of a running AWS process.
+> **Source audit:** current claims were checked against the executable code,
+> Compose, registry and tests in the working tree on the review date. A mutable
+> `HEAD` hash and ahead/behind count are intentionally not copied into this
+> canonical document; deployment revision belongs with environment-specific
+> runtime evidence. Uncommitted files are repository evidence, not proof of a
+> running AWS process.
 >
 > This document is an implementation audit, not a target-state specification. The
 > repository, its contracts, tests, and tracked configuration are the source of
@@ -36,10 +37,14 @@ The repository currently verifies the following shape:
 - The Operator BFF contains a narrow local-fixture `USER_DIRECTIVE` PAPER lane.
   It does not create a LIVE lane or give Hermes/agents order authority; see
   [ADR-0007](02-engineering/adr/0007-authenticated-user-paper-directive-authority.md).
-- The current checkout configures the promoted **Qwen2.5-14B-Instruct-AWQ**
-  worker model, served as `qwen2.5-14b-instruct-awq`, with 4096/0.85 defaults and FP8 KV
-  cache. FP8/16384/0.90 is retained only where historical benchmark or
-  runbook material explicitly describes the former baseline.
+- This local fixture boundary is intentionally **not a login system**. The
+  `X-User-Id`/actor mapping identifies the one closed test scope, while
+  service-to-service proofs constrain internal Trading calls. No browser login,
+  session, signup, or external-user authentication is in scope.
+- The current checkout configures the promoted **Qwen AWQ** worker path. Exact
+  model, context, memory, KV cache, LoRA and fallback values belong to the
+  [Worker Model Matrix](02-engineering/WORKER_MODEL_MATRIX.md); historical FP8
+  benchmark values do not override it.
 - The serving image is pinned by digest and the only supported vLLM entrypoint
   is `scripts/model_plane/vllm_runtime.sh`. Its guard rejects non-Compose
   ownership, duplicate Qwen/vLLM containers, network drift, and image drift.
@@ -64,6 +69,22 @@ The repository still describes the system as research/development and does not
 authorize real-money execution by merely having an order or broker prototype.
 
 ## 3. System Architecture
+
+The repository contains five distinct execution flows. They share data and
+governance components but must not be collapsed into one claimed E2E pipeline:
+
+| Flow | Current boundary |
+|---|---|
+| General CEO request | mirror/dedup → one `/ui/ceo/ask` implementation → root Kanban card → selected departments → topology-specific QA → CEO synthesis |
+| Portfolio advisory | profile validation → Research → Quant → Trading → Risk → QA → Accounting → CEO; all order/risk outputs remain non-binding and default to HOLD/manual review |
+| Research–Quant strategy factory | lead → proposal → Gate 0 → PIT experiment → release decision → lesson feedback; SUPPORTED is not automatic promotion or execution |
+| Automated strategy execution | StrategySignal → OrderIntent → deterministic Risk → OMS is implemented in parts; a continuously operated end-to-end lifecycle is not established |
+| Explicit user PAPER directive | exact local-fixture user instruction → deterministic verification → Trading directive service → LS PAPER adapter → durable status/reconciliation; no LIVE route and no login |
+
+The market data plane is shared infrastructure: price/market-state collectors
+write the market stores, while news, disclosure, financial, macro and web
+evidence are obtained through request-time Research MCP providers. Request-time
+qualitative evidence is not a historical backtest input.
 
 ```mermaid
 flowchart LR
@@ -108,9 +129,9 @@ the corresponding `employee_workers.py` implementation.
 This is **10 LLM workers + 5 deterministic runners**. The department-head
 profiles are a separate layer: current profile configuration selects
 `openai-codex` with `gpt-5.6-luna` where the head runtime is declared. Employee
-runtime configuration selects the Qwen AWQ v1 Worker Model Gateway in the
-production model overlay, with local Ollama `qwen3:1.7b` retained only as an
-explicit development fallback. This distinction is enforced by
+runtime configuration selects the Worker Model Gateway path in the production
+model overlay. Exact fallback values stay in the
+[Worker Model Matrix](02-engineering/WORKER_MODEL_MATRIX.md). This distinction is enforced by
 `tests/test_worker_architecture.py` and
 `docs/02-engineering/WORKER_ROLE_BOUNDARIES.md`.
 
@@ -166,27 +187,15 @@ flowchart LR
 ```
 
 The automated lane still requires Risk and agents cannot submit orders. The
-`USER_DIRECTIVE` lane carries the user's own explicit PAPER decision with
-`USER_DIRECTIVE_HIGHEST` priority, so alpha, rebalancer, and Risk do not apply
-an economic veto or resize. It still fails closed on authentication, active
-Fund/Book membership, exact-text deterministic verification, canonical cash/position and
-reservation checks, lot/tick/TTL, idempotency, or durable-store readiness.
-Trading Hermes may propose a structure for varied natural language, but its
-candidate is explicitly non-binding: it cannot invent authority fields,
-resolve a symbol, submit directly, or mark an order complete.
-
-`SELL_ALL` and `CANCEL_ALL` expand from a canonical account snapshot and retain
-per-leg results. Their directive states are `RECEIVED`, `RUNNING`,
-`IN_PROGRESS`, `PARTIAL`, `COMPLETED`, `FAILED`, or `UNKNOWN`; any failed leg
-prevents `COMPLETED`. A zero-leg `SELL_ALL` is complete only when the same
-snapshot proves both zero positive accounting position and zero open SELL
-reservation. The canonical economic account for the deployed direct-user lane
-is the LS Securities mock-investment (`LS PAPER`) account. The local durable
-directive/leg/reservation/fill store remains the restart-safe audit and
-accounting projection, and a content-addressed reconciliation journal aligns
-it to broker cash and positions. Only the Trading service receives PAPER order
-authority. LS LIVE supplies read-only market observations and has no
-LIVE-order path here.
+`USER_DIRECTIVE` lane carries the fixed local-fixture user's exact PAPER
+decision; Hermes interpretation remains non-binding and the deterministic BFF
+verifier plus Trading Domain own admission and execution. Missing fixture
+binding, internal proof, Fund/Book membership, account mechanics, idempotency
+or durable state fails closed. LS LIVE remains read-only and only the LS PAPER
+adapter can execute this lane. Detailed command states, batch semantics and
+reconciliation invariants belong to
+[ADR-0007](02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)
+and the [Unified Domain API Specification](02-engineering/UNIFIED_DOMAIN_API_SPEC.md).
 
 ## 6. Request Lifecycle
 
@@ -249,18 +258,11 @@ flowchart LR
 The model plane is defined by `docker-compose.model.yml`,
 `departments/worker_model_gateway.py`, and
 `departments/01-research/config/worker_model_registry.json`. LoRA serving uses
-`max-loras=4`, `max-lora-rank=32`, and `max-cpu-loras=8`.
-
-| Setting | Current checkout value | Evidence/status |
-|---|---|---|
-| base model directory | `Qwen2.5-14B-Instruct-AWQ` | Compose + registry |
-| served model name | `qwen2.5-14b-instruct-awq` | Compose + registry |
-| max model length | `4096` | default; environment may explicitly override |
-| GPU memory utilization | `0.85` | default |
-| KV cache dtype | `fp8` | default |
-| LoRA | enabled; 4/32/8 limits | serving plumbing implemented |
-| Hybrid policy | `awq-hybrid-upgrade-v1`, selective per request | registry + gateway; FinanceBench remains HOLD |
-| actual AWS process health | not established by this document | `RUNTIME_VERIFIED` unavailable |
+an explicitly selected registry adapter; the base path does not silently become
+Hybrid. Exact model name, context, memory, KV cache, LoRA limits and fallback are
+owned by [Worker Model Matrix](02-engineering/WORKER_MODEL_MATRIX.md) and are not
+copied here. This architecture document does not establish actual AWS process
+health.
 
 ## 8. FP8 → AWQ Optimization
 
@@ -268,7 +270,7 @@ The model plane is defined by `docker-compose.model.yml`,
 
 Commit `b3fb8c5` introduced the AWQ model plane. FP8 and 8K/16K measurements are
 historical comparison or rollback evidence; they do not override the current
-4K Compose default. Model-load, KV-cache, throughput, latency and quality must
+checkout defaults in the Worker Model Matrix. Model-load, KV-cache, throughput, latency and quality must
 be read from the provenance-bearing benchmark run that measured them and must
 not be combined across unrelated runs.
 
@@ -435,7 +437,7 @@ run, and `RUNTIME_VERIFIED` requires an actual API/DB/process observation.
 ## 15. Next Milestones
 
 1. Reconcile the tracked model-plane source of truth with the actual AWS
-   runtime: record the AWQ model digest, served name, effective 4096/0.85 settings, LoRA
+   runtime: record the AWQ model digest, served name, effective model settings, LoRA
    limits, startup/restart behavior, and VRAM from the target environment.
 2. Add immutable, hashed infrastructure benchmark manifests for FP8, AWQ,
    and AWQ+LoRA. Keep External-50, Internal-50 v1, and Internal-50 v2 held out
@@ -451,59 +453,13 @@ run, and `RUNTIME_VERIFIED` requires an actual API/DB/process observation.
    preserve historical snapshots separately rather than presenting them as
    current state.
 
-## 16. Documentation Ownership
+## 16. Documentation lifecycle
 
-| Path | Role | Audit classification | Overlap/authority |
-|---|---|---|---|
-| `docs/README.md` | documentation portal | CURRENT | links only; does not own detailed current-state facts |
-| `docs/CURRENT_PROJECT_ARCHITECTURE.md` | canonical current architecture | CANONICAL CURRENT | owns current architecture summary and source audit |
-| `docs/PROJECT_IMPLEMENTATION_STATUS.md` | implementation/readiness board | CURRENT + HISTORICAL snapshots | owns status vocabulary and dated evidence; links here for architecture |
-| `docs/02-engineering/FINAL_RUNTIME_ARCHITECTURE.md` | detailed runtime contracts | CURRENT detail / PARTIAL implementation | owns execution boundaries, retries, adapters, and gate topology |
-| `docs/02-engineering/RISK_QA_DOCKER_RUNBOOK.md` | Risk/QA container and preflight procedure | RUNBOOK | operational runbook; does not replace this architecture or status board |
-| `docs/02-engineering/WORKER_ROLE_BOUNDARIES.md` | worker permissions and roles | CURRENT reference | owns detailed role/authority matrix |
-| `docs/HEDGE_FUND_MASTER_PLAN.md` | target state and long-term plan | TARGET STATE / HISTORICAL snapshots | does not override current implementation evidence |
-| `docs/02-engineering/CEO_CONVERSATIONAL_ROUTING_SPEC.md` | routing design and implementation notes | PARTIAL | department-local routing detail; current topology is cross-checked here |
-| `docs/02-engineering/WORKER_MODEL_MATRIX.md` | model compatibility index | CURRENT REFERENCE | does not override registry or serving config |
-| `docs/02-engineering/RESEARCH_WORKER_AWS_RUNBOOK.md` | Research worker AWS procedure | RUNBOOK / needs AWQ review | current model source remains Compose/gateway/registry |
-| `docs/02-engineering/SYSTEM_WIRING_MAP.md` | dated wiring snapshot | HISTORICAL / PARTIAL | useful audit snapshot; not a live topology source |
-| `docs/06-integrations/*` and generated provider references | provider/API reference | INTEGRATION REFERENCE | excluded from architecture consolidation |
+이 문서는 현재 아키텍처 요약과 그 근거가 된 source audit만 소유한다. 구현 준비
+상태, 상세 Runtime 계약, Worker 권한, 모델값과 장기 목표는 각 절에서 연결한 정본이
+소유하며 여기서 표로 다시 복사하지 않는다. 구체적인 문서 우선순위·archive·생성
+참조 제외 규칙은 [Documentation Governance](DOCUMENTATION_GOVERNANCE.md)를 따른다.
 
-The 2026-08-17 AS-IS blueprints are retained under `docs/archive/2026-08-17/`.
-Documentation lifecycle and generated-reference exclusions are defined in
-`docs/DOCUMENTATION_GOVERNANCE.md`.
-
-## 17. Evidence Index
-
-- `CLAUDE.md`
-- `docs/PROJECT_IMPLEMENTATION_STATUS.md`
-- `docs/02-engineering/WORKER_ROLE_BOUNDARIES.md`
-- `docs/02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md`
-- `docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md`
-- `docs/02-engineering/FINAL_RUNTIME_ARCHITECTURE.md`
-- `docs/02-engineering/SYSTEM_WIRING_MAP.md`
-- `docs/02-engineering/adr/0007-authenticated-user-paper-directive-authority.md`
-- `departments/*/hermes/config.yaml`
-- `departments/*/employee_workers.py` and `departments/03-risk/risk_employee_workers.py`
-- `departments/06-ai-qa-audit/qa_employee_workers.py`
-- `departments/06-ai-qa-audit/qa_events/worker.py`
-- `departments/06-ai-qa-audit/qa_events/reproduction_worker.py`
-- `departments/02-trading/contracts/contracts.py`
-- `departments/03-risk/engine/risk_engine.py`
-- `departments/04-quant-backtest/pipeline/pit_dataset.py`
-- `departments/04-quant-backtest/pipeline/strategy_lifecycle.py`
-- `departments/04-quant-backtest/pipeline/intraday_experiment_runner.py`
-- `departments/04-quant-backtest/pipeline/intraday_trial_ledger.py`
-- `departments/04-quant-backtest/pipeline/intraday_candidate.py`
-- `departments/05-accounting-portfolio/ledger/ledger.py`
-- `departments/06-ai-qa-audit/evidence/evidence_qa_engine.py`
-- `departments/06-ai-qa-audit/model_risk.py`
-- `departments/06-ai-qa-audit/eval_runner.py`
-- `orchestration/workflows/runner.py`
-- `orchestration/adapters/ceo_supervisor.py`
-- `docker-compose.model.yml`
-- `docker-compose.yml` (`qa-reproduction-worker`, role-scoped QA/Quant services)
-- `departments/worker_model_gateway.py`
-- `departments/01-research/config/worker_model_registry.json`
-- `scripts/model_plane/fetch_base_model.sh`
-- `scripts/model_plane/quantize_fp8.py`
-- `tests/test_worker_architecture.py`
+날짜·commit에 고정된 구조와 실행 기록은 [archive](archive/README.md)에 보존한다.
+각 현재 사실의 실행 근거는 해당 절 가까이에 둔 코드·Compose·registry·test 링크를
+사용하고, 별도의 전역 Evidence 목록은 유지하지 않는다.

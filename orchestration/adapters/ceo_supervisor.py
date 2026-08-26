@@ -496,6 +496,10 @@ class ChildTaskState:
 class SupervisorState:
     parent_task_id: str
     children: tuple[ChildTaskState, ...]
+    # CEO planning roots normally become terminal immediately after durable
+    # child creation. The supervisor must not try to move that already-done
+    # planning record back to BLOCKED when a later child fails.
+    parent_status: str = ""
     wakeups: int = 0
     replan_count: int = 0
     max_retries: int = 2
@@ -810,6 +814,26 @@ _FAST_ADVISORY_EXECUTION_GUIDANCE = (
     "- Return a concise Korean user-ready final_answer; do not return an operational progress report.\n"
     "- When calling kanban_complete, put the complete user-facing answer in result (the canonical downstream answer body). Keep summary to a brief handoff; do not leave the answer only in summary or metadata."
 )
+_SCOPED_REQUEST_CONTEXT_GUARD = (
+    "Scoped request context guardrails:\n"
+    "- Use only this task and its workflow root as request context.\n"
+    "- When root request context is needed, read only the task named by this "
+    "card's workflow_root_task_id.\n"
+    "- Never search unrelated Kanban tasks or recent work to infer a missing "
+    "security, ticker, account, or user intent.\n"
+    "- If the required target is absent, call kanban_block with needs_input "
+    "instead of guessing."
+)
+_STARTUP_ROOT_RECOVERY_WINDOW_SECONDS = 10 * 60
+
+
+def _is_planning_root_body(body: str) -> bool:
+    """Recognize current and legacy planning roots through one predicate."""
+
+    return workflow_role_from_body(body) == "root" or (
+        "root_task_role=scope_and_planning" in body
+        and "planning_terminal_state=done_after_child_creation" in body
+    )
 
 
 def _analysis_execution_mode_from_root_body(body: str) -> str | None:
@@ -997,6 +1021,7 @@ def _initial_primary_materialization_decisions(
                     f"producer=ceo-supervisor-materializer\n"
                     f"analysis_mode={analysis_mode}\n"
                     f"{execution_guidance}\n\n"
+                    f"{_SCOPED_REQUEST_CONTEXT_GUARD}\n\n"
                     f"{plan[profile]}\n\n"
                     f"{feedback_guidance}"
                 ),
@@ -1148,11 +1173,10 @@ def _single_primary_passthrough_child(
     - a dedicated user-ready final_answer exists
     - final Discord delivery is configured
 
-    Ordinary analysis may pass through as before. Binding may pass through
-    only for the isolated user PAPER-order lane, where QA is explicitly
-    asynchronous/non-blocking and the trusted Trading result is already the
-    final receipt. Rewriting that receipt with a second CEO LLM adds latency
-    and can only weaken its temporal wording.
+    Ordinary analysis may pass through as before. Binding PAPER results use
+    the deterministic structured-primary synthesis identity instead. That
+    path preserves the trusted Trading result verbatim while ensuring Discord
+    receives exactly one canonical final response.
 
     Multi-primary, blocked/failed, QA-gated binding, legacy, or incomplete work
     keeps the existing CEO synthesis path.
@@ -1162,7 +1186,7 @@ def _single_primary_passthrough_child(
         return None
     if not state.root_is_user_query:
         return None
-    if state.workflow_mode not in {"analysis", "binding"}:
+    if state.workflow_mode != "analysis":
         return None
     if len(state.selected_primary_profiles) != 1:
         return None
@@ -1184,14 +1208,6 @@ def _single_primary_passthrough_child(
         return None
     if not child.final_answer.strip():
         return None
-
-    if state.workflow_mode == "binding":
-        if state.qa_enabled or state.qa_blocks_response:
-            return None
-        if child.profile != canonical_profile_for_department("trading"):
-            return None
-        if "hgfinance.user-paper-order-request.v1" not in child.body:
-            return None
 
     return child
 
@@ -1322,10 +1338,115 @@ def _analysis_synthesis_decision(
     )
 
 
+def _binding_partial_defer_result(
+    state: SupervisorState,
+    *,
+    reason: str,
+) -> str:
+    """Build a bounded fail-closed response from persisted department state."""
+
+    completed: list[str] = []
+    unavailable: list[str] = []
+    for child in state.analysis_children:
+        _, label = DEPARTMENT_DISCORD_LABELS.get(
+            child.profile,
+            ("🏢", child.profile),
+        )
+        if child.done:
+            result = " ".join(
+                (child.final_answer or child.result or child.summary or "결과 본문 없음")
+                .strip()
+                .split()
+            )
+            if len(result) > 420:
+                result = result[:417].rstrip() + "..."
+            completed.append(f"- **{label}:** {result}")
+            continue
+        category = _failure_category_for_department_card(
+            child.summary,
+            child.error,
+            child.block_reason,
+        )
+        unavailable.append(
+            f"- **{label}:** `{child.status or child.outcome or 'unavailable'}` — "
+            f"{_safe_failure_reason(category)}"
+        )
+
+    qa_lines: list[str] = []
+    for child in state.qa_children:
+        qa_result = " ".join(
+            (child.final_answer or child.result or child.summary).strip().split()
+        )
+        if len(qa_result) > 300:
+            qa_result = qa_result[:297].rstrip() + "..."
+        qa_lines.append(
+            f"- `{child.status or child.outcome or 'unknown'}`"
+            + (f": {qa_result}" if qa_result else "")
+        )
+
+    return "\n".join(
+        (
+            "🧠 **CEO 종합**",
+            "",
+            "**결론: DEFER**",
+            "필수 부서 또는 QA 결과가 완전하지 않아 투자 판단과 추가 실행을 "
+            "승인하지 않습니다. 확인된 부분 결과와 실패 범위를 그대로 전달합니다.",
+            "",
+            "### 확보된 부분 결과",
+            *(completed or ["- 없음"]),
+            "",
+            "### 실패·미확보 부서",
+            *(unavailable or ["- 없음"]),
+            "",
+            "### QA 상태",
+            *(qa_lines or ["- 완료된 QA 결과 없음"]),
+            "",
+            f"- **Fail-closed 사유:** `{reason}`",
+            "- **권한 상태:** 이 응답은 새 주문·승격·원장 변경을 승인하지 않습니다.",
+        )
+    )
+
+
+def _binding_partial_defer_decision(
+    state: SupervisorState,
+    *,
+    reason: str,
+) -> SupervisorDecision | None:
+    """Return one deterministic response card for a degraded binding flow."""
+
+    if state.has_action(SupervisorAction.SYNTHESIZE):
+        return None
+    return SupervisorDecision(
+        SupervisorAction.SYNTHESIZE,
+        state.parent_task_id,
+        assignee=canonical_profile_for_department("ceo"),
+        title="CEO partial result (DEFER)",
+        body=(
+            f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
+            "workflow_plane=response\n"
+            "workflow_mode=binding\n"
+            "synthesis_mode=deterministic_partial_defer\n"
+            f"defer_reason={reason}\n"
+            "The control plane completes this response from persisted terminal "
+            "state; no model may reinterpret it."
+        ),
+        parent_task_ids=tuple(
+            child.task_id for child in state.qa_children if child.done
+        ),
+        reason="binding_partial_defer_template",
+        initial_status="blocked",
+    )
+
+
 def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
     """Choose one bounded action, or ``None`` while another child is running."""
 
     if state.wakeups >= state.max_wakeups:
+        if state.workflow_mode == "binding" and state.root_is_user_query:
+            return _binding_partial_defer_decision(
+                state,
+                reason="supervisor_wakeup_limit_reached",
+            )
         return SupervisorDecision(
             SupervisorAction.BLOCK_ABORT,
             state.parent_task_id,
@@ -1378,10 +1499,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
         # state by the stable create key in the CEO producer contract.
         return None
 
-    policy_children = state.analysis_children
-    if state.workflow_mode == "binding":
-        policy_children = policy_children + state.qa_children
-    for child in policy_children:
+    for child in state.analysis_children:
         if not child.terminal:
             continue
         if child.blocked:
@@ -1390,7 +1508,18 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                 # Preserve its block_reason in the synthesis payload instead of
                 # waiting forever or turning an advisory workflow into a gate.
                 continue
-            return _blocked_decision(state, child)
+            blocked_decision = _blocked_decision(state, child)
+            if (
+                state.workflow_mode == "binding"
+                and state.root_is_user_query
+                and blocked_decision is not None
+                and blocked_decision.action == SupervisorAction.BLOCK_ABORT
+            ):
+                # The failed primary remains in the QA/synthesis payload. A
+                # successful sibling is useful evidence, but never enough to
+                # turn the binding decision into APPROVE.
+                continue
+            return blocked_decision
         if child.failed:
             if child.retry_count < state.max_retries:
                 return SupervisorDecision(
@@ -1400,12 +1529,15 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                     retry_count=child.retry_count,
                     reason="failed_child_retry",
                 )
-            return SupervisorDecision(
-                SupervisorAction.BLOCK_ABORT,
-                state.parent_task_id,
-                target_task_id=child.task_id,
-                reason="failed_retry_limit_reached",
-            )
+            if not (
+                state.workflow_mode == "binding" and state.root_is_user_query
+            ):
+                return SupervisorDecision(
+                    SupervisorAction.BLOCK_ABORT,
+                    state.parent_task_id,
+                    target_task_id=child.task_id,
+                    reason="failed_retry_limit_reached",
+                )
 
     if any(not child.terminal for child in state.analysis_children):
         return None
@@ -1466,7 +1598,6 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
     # Binding/high-risk workflows retain the existing fail-closed QA path.
     if state.qa_blocks_response:
         if not state.qa_children:
-            parent_ids = tuple(child.task_id for child in state.analysis_children)
             return SupervisorDecision(
                 SupervisorAction.RUN_QA,
                 state.parent_task_id,
@@ -1478,21 +1609,23 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                     " reject unsupported claims, and report blocked findings.\n"
                     + json.dumps(
                         [
-                            child_handoff_payload(child)
+                            child_handoff_payload(
+                                child,
+                                profile=child.profile,
+                                status=child.status,
+                            )
                             for child in state.analysis_children
                         ],
                         ensure_ascii=False,
                     )
                 ),
-                parent_task_ids=parent_ids,
+                parent_task_ids=primary_ids,
                 reason="primary_analysis_terminal",
             )
         if any(not child.terminal for child in state.qa_children):
             return None
         for child in state.qa_children:
             if child.blocked or child.failed:
-                if child.blocked:
-                    return _blocked_decision(state, child)
                 if child.retry_count < state.max_retries:
                     return SupervisorDecision(
                         SupervisorAction.RETRY_TASK,
@@ -1501,21 +1634,25 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                         retry_count=child.retry_count,
                         reason="qa_failed_retry",
                     )
-                return SupervisorDecision(
-                    SupervisorAction.BLOCK_ABORT,
-                    state.parent_task_id,
-                    target_task_id=child.task_id,
+                return _binding_partial_defer_decision(
+                    state,
                     reason="qa_retry_limit_reached",
                 )
         if not all(child.done for child in state.qa_children):
-            return SupervisorDecision(
-                SupervisorAction.BLOCK_ABORT,
-                state.parent_task_id,
+            return _binding_partial_defer_decision(
+                state,
                 reason="qa_terminal_without_success",
             )
 
     if state.has_action(SupervisorAction.SYNTHESIZE):
         return None
+    if any(
+        child.blocked or child.failed for child in state.analysis_children
+    ):
+        return _binding_partial_defer_decision(
+            state,
+            reason="primary_department_partial_failure",
+        )
     template_child = _binding_paper_template_child(state)
     if template_child is not None:
         return SupervisorDecision(
@@ -4697,13 +4834,7 @@ class CeoSupervisorService:
                         or now - completed_at > done_recovery_window_seconds
                     )
                 )
-                or (
-                    workflow_role_from_body(body) != "root"
-                    and not (
-                        "root_task_role=scope_and_planning" in body
-                        and "planning_terminal_state=done_after_child_creation" in body
-                    )
-                )
+                or not _is_planning_root_body(body)
                 or not is_user_query_body(body)
                 or workflow_mode_from_body(body) != "analysis"
                 or task_id in handled_empty_primary_roots
@@ -4746,14 +4877,7 @@ class CeoSupervisorService:
                 root_body = str(root_payload.get("body") or "")
 
                 if (
-                    (
-                        workflow_role_from_body(root_body) != "root"
-                        and not (
-                            "root_task_role=scope_and_planning" in root_body
-                            and "planning_terminal_state=done_after_child_creation"
-                            in root_body
-                        )
-                    )
+                    not _is_planning_root_body(root_body)
                     or not is_user_query_body(root_body)
                     or workflow_mode_from_body(root_body) != "analysis"
                 ):
@@ -4795,6 +4919,7 @@ class CeoSupervisorService:
                 state = SupervisorState(
                     parent_task_id=root_id,
                     children=children,
+                    parent_status=str(root_payload.get("status") or ""),
                     wakeups=0,
                     replan_count=0,
                     max_retries=self.max_retries,
@@ -4935,35 +5060,56 @@ class CeoSupervisorService:
         if not callable(list_tasks) or not callable(show):
             return ()
 
-        roots: dict[str, Mapping[str, Any]] = {}
-        _record_full_board_fallback(
-            lane=current_cli_lane(),
-            reason="startup-reconciliation",
-            root_id="",
-        )
-        for row in list_tasks():
+        candidate_rows: Sequence[Mapping[str, Any]] | None = None
+        recovery_candidates = getattr(self.client, "recovery_candidate_rows", None)
+        if callable(recovery_candidates):
+            try:
+                candidate_rows = recovery_candidates()
+            except RootScopedIndexUnavailable:
+                candidate_rows = None
+        if candidate_rows is None:
+            _record_full_board_fallback(
+                lane=current_cli_lane(),
+                reason="startup-reconciliation",
+                root_id="",
+            )
+            candidate_rows = list_tasks()
+
+        now = int(time.time())
+        roots: dict[str, tuple[int, Mapping[str, Any]]] = {}
+        for row in candidate_rows:
             task_id = str(row.get("id") or row.get("task_id") or "")
             body = str(row.get("body") or "")
-            role = terminal_workflow_role(row) or ""
-            explicit_legacy_planning_root = (
-                role in {"planning", "scope_and_planning"}
-                and "root_task_role=scope_and_planning" in body
-                and "planning_terminal_state=done_after_child_creation" in body
-            )
+            status = str(row.get("status") or "").casefold()
+            completed_at = int(row.get("completed_at") or 0)
+            created_at = int(row.get("created_at") or 0)
+            recovery_timestamp = completed_at or created_at
             if (
                 not task_id
-                or CEO_WORKFLOW_SCOPE_MARKER not in body
-                or not explicit_legacy_planning_root
+                or status not in {"done", "completed", "archived"}
+                or not _is_planning_root_body(body)
+                or (
+                    recovery_timestamp > 0
+                    and now - recovery_timestamp
+                    > _STARTUP_ROOT_RECOVERY_WINDOW_SECONDS
+                )
             ):
                 continue
-            roots[task_id] = row
+            roots[task_id] = (recovery_timestamp, row)
 
         decisions: list[SupervisorDecision] = []
-        for root_id in sorted(roots):
+        ordered_root_ids = sorted(
+            roots,
+            key=lambda root_id: (roots[root_id][0], root_id),
+            reverse=True,
+        )
+        for root_id in ordered_root_ids:
             root_payload = show(root_id)
             self._remember_workflow_root(root_id, root_id, (root_payload,))
             root_status = str(root_payload.get("status") or "").casefold()
             if root_status not in {"done", "completed", "archived"}:
+                continue
+            if not _is_planning_root_body(str(root_payload.get("body") or "")):
                 continue
             if not selected_primary_profiles_from_task(root_payload):
                 continue
@@ -4985,15 +5131,25 @@ class CeoSupervisorService:
                 continue
 
             wake_child = next(
-                (child for child in terminal_primary if child.done),
+                (
+                    child
+                    for child in terminal_primary
+                    if child.blocked or child.failed
+                ),
                 terminal_primary[0],
             )
+            if wake_child.blocked:
+                event_kind = "blocked"
+            elif wake_child.failed:
+                event_kind = wake_child.status
+            else:
+                event_kind = "completed"
             event = {
                 "event_id": (
                     f"reconcile:{root_id}:{wake_child.task_id}:{wake_child.status}"
                 ),
                 "task_id": wake_child.task_id,
-                "kind": "blocked" if wake_child.blocked else "completed",
+                "kind": event_kind,
             }
             decision = self.handle_terminal_event(event)
             if decision is not None:
@@ -5183,16 +5339,8 @@ class CeoSupervisorService:
         root_payload = show(task_id)
         root_body = str(root_payload.get("body") or "")
 
-        is_planning_root = (
-            workflow_role_from_body(root_body) == "root"
-            or (
-                "root_task_role=scope_and_planning" in root_body
-                and "planning_terminal_state=done_after_child_creation" in root_body
-            )
-        )
-
         if (
-            not is_planning_root
+            not _is_planning_root_body(root_body)
             or not is_user_query_body(root_body)
             or workflow_mode_from_body(root_body) != "analysis"
         ):
@@ -5250,6 +5398,7 @@ class CeoSupervisorService:
         state = SupervisorState(
             parent_task_id=task_id,
             children=(),
+            parent_status=str(root_payload.get("status") or ""),
             wakeups=0,
             replan_count=0,
             max_retries=self.max_retries,
@@ -5836,11 +5985,7 @@ class CeoSupervisorService:
                 # wake-up boundary.
                 root_body = str(root_payload.get("body") or "")
                 if root_id == task_id and kind in {"done", "completed"}:
-                    legacy_planning_root = (
-                        "root_task_role=scope_and_planning" in root_body
-                        and "planning_terminal_state=done_after_child_creation" in root_body
-                    )
-                    if legacy_planning_root:
+                    if _is_planning_root_body(root_body):
                         # Root completion remains a planning boundary, never a
                         # synthesis-ready signal.  Project only the CEO-authored
                         # durable outcome into the already-existing Discord thread.
@@ -6112,6 +6257,7 @@ class CeoSupervisorService:
                 state = SupervisorState(
                     parent_task_id=root_id,
                     children=children,
+                    parent_status=str(root_payload.get("status") or ""),
                     # Evaluate ordinary workflow phase transitions without
                     # spending the safety budget.  If the candidate action is
                     # a retry/replan/abort, the bounded second evaluation
@@ -6619,7 +6765,27 @@ class CeoSupervisorService:
             self.client.unblock_task(decision.target_task_id)
             return
         if decision.action == SupervisorAction.BLOCK_ABORT:
-            self.client.block_task(decision.parent_task_id, decision.reason or "supervisor aborted")
+            if state.parent_status.casefold() in TERMINAL_STATUSES:
+                comment_task = getattr(self.client, "comment_task", None)
+                if callable(comment_task):
+                    comment_task(
+                        decision.parent_task_id,
+                        f"{SUPERVISOR_MARKER} action=BLOCK/ABORT "
+                        f"state=recorded_without_root_mutation reason="
+                        f"{decision.reason or 'supervisor_aborted'}",
+                    )
+                logger.warning(
+                    "supervisor-abort-recorded root=%s parent_status=%s "
+                    "root_mutation=skipped reason=%s",
+                    decision.parent_task_id,
+                    state.parent_status,
+                    decision.reason or "supervisor_aborted",
+                )
+                return
+            self.client.block_task(
+                decision.parent_task_id,
+                decision.reason or "supervisor aborted",
+            )
             return
         if decision.action == SupervisorAction.REQUEST_USER_INPUT:
             self.client.create_task(
@@ -6822,6 +6988,44 @@ class CeoSupervisorService:
                     # Keep one synthesis identity. Releasing this same blocked
                     # card restores the existing CEO LLM behavior.
                     self.client.unblock_task(synthesis_task_id)
+            if decision.reason == "binding_partial_defer_template":
+                created_task = (
+                    created.get("task", created)
+                    if isinstance(created, Mapping)
+                    else {}
+                )
+                synthesis_task_id = (
+                    str(created_task.get("id") or created_task.get("task_id") or "")
+                    if isinstance(created_task, Mapping)
+                    else ""
+                )
+                if not synthesis_task_id:
+                    raise SupervisorValidationError(
+                        "partial DEFER synthesis task identity is missing"
+                    )
+                final_answer = _binding_partial_defer_result(
+                    state,
+                    reason=read_marker(task_body, "defer_reason")
+                    or "binding_partial_failure",
+                )
+                self.client.complete_task(
+                    synthesis_task_id,
+                    result=final_answer,
+                    summary="일부 부서 실패로 확인된 결과만 전달하고 DEFER했습니다.",
+                    metadata={
+                        "workflow_root_task_id": state.parent_task_id,
+                        "workflow_mode": "binding",
+                        "synthesis_mode": "deterministic_partial_defer",
+                        "decision": "DEFER",
+                        "orders_authorized": False,
+                        "final_answer": final_answer,
+                    },
+                )
+                logger.info(
+                    "binding-partial-defer-complete root=%s task=%s",
+                    state.parent_task_id,
+                    synthesis_task_id,
+                )
             if decision.reason == "deferred_conditional_after_research":
                 order_request_id = read_marker(
                     task_body,

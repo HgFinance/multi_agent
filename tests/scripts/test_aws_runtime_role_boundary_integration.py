@@ -83,7 +83,7 @@ def test_fresh_aws_runtime_roles_support_bff_and_isolate_paper_mutations() -> No
                 """,
                 (
                     "00000000-0000-4000-8000-00000000cec0",
-                    "5c26db42-ce83-4daf-b1dc-c81680c13a6c",
+                    "3838f7d6-0c7c-4e54-85f3-316a451e7eeb",
                     "07d913de-9a5b-4cf5-b893-31a625445761",
                 ),
             )
@@ -124,7 +124,7 @@ def test_fresh_aws_runtime_roles_support_bff_and_isolate_paper_mutations() -> No
                 """,
                 (
                     "00000000-0000-4000-8000-00000000cec0",
-                    "5c26db42-ce83-4daf-b1dc-c81680c13a6c",
+                    "3838f7d6-0c7c-4e54-85f3-316a451e7eeb",
                     "07d913de-9a5b-4cf5-b893-31a625445761",
                     f"integration-{uuid4().hex}",
                     "삼성전자 10주 시장가 매수",

@@ -522,7 +522,7 @@ Agent 권한 부여 완료
 **A.** 아니다. 채점은 결정론적이다. Agent의 응답을 기준(expected_output)과 비교하고, Tool Call 기록과 텍스트를 규칙으로 검증한다. 혹시 "평가 재시도"가 필요하면 그건 다른 LLM(hallucination_critic_worker)이 담당한다.
 
 ### Q. Adversarial Case는 누가 만드나?
-**A.** `profile-architecture-worker` (인사팀의 1명 LLM 직원)가 만든다. "이 Agent가 거부해야 할 요청"을 창작적으로 설계해야 하므로 LLM이 필요하다. 하지만 **현재는 HR Worker 0이므로 이 단계도 없다.** Eval Runner를 먼저 만들고, HR Worker 부활 논의는 그 이후.
+**A.** HR Registry의 조건부 `profile-architecture-worker` 1명이 제안한다. "이 Agent가 거부해야 할 요청"처럼 역할별 창작이 필요한 부분만 비바인딩으로 만들고, Eval 실행과 판정은 구현된 QA Eval Runner가 소유한다. 남은 공백은 HR이 새 후보 Runner를 QA 프로세스에 등록하는 교차 프로세스 경로와 실제 채용 cycle 종단 검증이다.
 
 ### Q. 실패한 Eval은 어떻게 되나?
 **A.** Candidate는 EVALUATING 상태에서 벗어나지 못한다. HR이 오류를 수정한 뒤 다시 요청해야 한다. 오류 메시지(error_code + evidence)는 HR에 자동 보고.

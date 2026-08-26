@@ -106,6 +106,9 @@ MAX_EVENTS = int(os.getenv("LS_ORDER_EVENTS_MAX", "200"))
 LEDGER_DAYS = int(os.getenv("ACCOUNTING_LEDGER_DAYS", "30"))
 LEDGER_CACHE_SECONDS = int(os.getenv("ACCOUNTING_LEDGER_CACHE_SECONDS", "60"))
 ORDER_HISTORY_CACHE_SECONDS = int(os.getenv("LS_ORDER_HISTORY_CACHE_SECONDS", "3"))
+ACCOUNT_PROJECTION_RESYNC_SECONDS = max(
+    float(os.getenv("LS_ACCOUNT_PROJECTION_RESYNC_SECONDS", "30")), 5.0
+)
 MARKET_RANKING_CACHE_SECONDS = int(os.getenv("LS_MARKET_RANKING_CACHE_SECONDS", "15"))
 MARKET_RANKING_LIMIT = 5
 
@@ -1324,9 +1327,9 @@ async def _issue_token(config: Any) -> tuple[str, float]:
     최초 발급 시각 기준이라 `now + expires_in`으로 계산하면 경과한 만큼 만료를
     넘겨 잡는다 - 토큰이 싣고 온 `exp`를 그대로 쓴다.
     """
-    import httpx
+    from ls_http import ls_async_client  # type: ignore[import-not-found]
 
-    async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
+    async with ls_async_client(timeout=config.timeout_seconds) as client:
         response = await client.post(
             config.base_url + "/oauth2/token",
             data={
@@ -1389,9 +1392,11 @@ async def _post_tr(
     payload: dict[str, Any],
     path: str = "/stock/accno",
 ) -> dict[str, Any]:
-    import httpx
+    # 일반 httpx 클라이언트가 아니다 - LS는 `tr_cont_key`를 NUL로 패딩해 돌려주고
+    # h11은 그런 헤더를 가진 응답을 통째로 버린다. 근거는 `ls_http` docstring.
+    from ls_http import ls_async_client  # type: ignore[import-not-found]
 
-    async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
+    async with ls_async_client(timeout=config.timeout_seconds) as client:
         response = await client.post(
             config.base_url + path,
             json=payload,
@@ -1587,9 +1592,15 @@ async def _resync_today_activity(config: Any, token: str) -> None:
         FEED.today_activity_error = None
 
 
-async def _run_feed() -> None:
+def _connect_order_stream(ws_url: str) -> Any:
     import websockets
 
+    # LS realtime does not answer WebSocket protocol ping frames. Disabling the
+    # client keepalive prevents a healthy idle stream from being closed locally.
+    return websockets.connect(ws_url, ping_interval=None)
+
+
+async def _run_feed() -> None:
     backoff = 1.0
     while True:
         try:
@@ -1608,8 +1619,21 @@ async def _run_feed() -> None:
                 else:
                     FEED.account_error = None
 
+            # 잔고와 당일 거래는 REST 조회다. WebSocket opening handshake가
+            # 지연되거나 실패해도 대시보드의 계좌 Projection까지 비우지 않는다.
+            await _resync(config, token)
+            await _resync_today_activity(config, token)
+
             # 계좌등록 (tr_type = 1)
-            async with websockets.connect(ws_url, ping_interval=30) as socket:
+            #
+            # LS 게이트웨이는 WebSocket protocol ping에 pong을 돌려주지 않는다.
+            # websockets의 client keepalive를 켜면 30초 뒤 ping을 보내고 기본
+            # ping_timeout(20초)이 지난 약 50초 시점에 정상 연결을 스스로
+            # 끊는다. 게이트웨이는 방금 끊긴 세션을 바로 정리하지 않아 이어지는
+            # opening handshake도 timeout이 나므로 대시보드에는 연결 오류가
+            # 계속 남았다. LS 주문 push 자체가 연결의 liveness 원천이므로 protocol
+            # keepalive는 끄고, 실제 close/EOF가 왔을 때 아래 재연결 루프를 탄다.
+            async with _connect_order_stream(ws_url) as socket:
                 for tr_cd in _TR_TO_KIND:
                     await socket.send(
                         json.dumps(
@@ -1623,11 +1647,17 @@ async def _run_feed() -> None:
                 FEED.error = None
                 FEED.connected_at = datetime.now(timezone.utc).isoformat()
                 backoff = 1.0
-                # 체결이 없어도 잔고는 보여야 한다. 붙자마자 한 번 맞춘다.
-                await _resync(config, token)
-                await _resync_today_activity(config, token)
-
-                async for raw in socket:
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(
+                            socket.recv(), timeout=ACCOUNT_PROJECTION_RESYNC_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        # 주문 push가 누락되거나 조용한 장에서도 브로커 잔고가
+                        # 최초 접속 시각에 고정되지 않게 REST 정본을 주기 갱신한다.
+                        await _resync(config, token)
+                        await _resync_today_activity(config, token)
+                        continue
                     try:
                         message = json.loads(raw)
                     except (ValueError, TypeError):

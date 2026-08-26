@@ -92,7 +92,7 @@ class NoAnalysisChildrenOriginGuardTest(unittest.TestCase):
         self.assertEqual(decision.action, SupervisorAction.REQUEST_USER_INPUT)
 
 
-class UserPaperPrimaryPassthroughTest(unittest.TestCase):
+class UserPaperCanonicalSynthesisTest(unittest.TestCase):
     def _state(self, *, qa_enabled: bool = False) -> SupervisorState:
         primary = ChildTaskState(
             task_id="trading",
@@ -115,16 +115,17 @@ class UserPaperPrimaryPassthroughTest(unittest.TestCase):
             selected_primary_profiles=("trading-department",),
             root_is_user_query=True,
             allow_primary_passthrough=True,
+            paper_order=True,
         )
 
-    def test_non_gated_user_paper_receipt_skips_redundant_ceo_llm(self) -> None:
+    def test_non_gated_user_paper_receipt_uses_one_canonical_synthesis(self) -> None:
         state = self._state()
 
-        self.assertEqual(
-            _single_primary_passthrough_child(state).task_id,
-            "trading",
-        )
-        self.assertIsNone(decide_supervisor(state))
+        self.assertIsNone(_single_primary_passthrough_child(state))
+        decision = decide_supervisor(state)
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.reason, "binding_paper_structured_template")
 
     def test_qa_gated_binding_still_requires_normal_synthesis(self) -> None:
         state = self._state(qa_enabled=True)
@@ -591,6 +592,103 @@ class SupervisorPolicyTest(unittest.TestCase):
             )
         )
         self.assertEqual(wakeup_limit.action, SupervisorAction.BLOCK_ABORT)
+
+    def test_binding_partial_primary_runs_qa_with_successful_dependencies(self) -> None:
+        state = SupervisorState(
+            "root",
+            (
+                child(
+                    "research",
+                    "research-department",
+                    "done",
+                    result="authoritative partial result",
+                ),
+                child(
+                    "accounting",
+                    "accounting-portfolio-department",
+                    "blocked",
+                    block_reason="worker cgroup exhausted",
+                    retry_count=2,
+                ),
+            ),
+            replan_count=2,
+            workflow_mode="binding",
+            root_is_user_query=True,
+            selected_primary_profiles=(
+                "research-department",
+                "accounting-portfolio-department",
+            ),
+        )
+
+        decision = decide_supervisor(state)
+
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.parent_task_ids, ("research",))
+        self.assertIn('"status": "blocked"', decision.body)
+
+    def test_binding_partial_primary_becomes_deterministic_defer_after_qa(self) -> None:
+        state = SupervisorState(
+            "root",
+            (
+                child(
+                    "research",
+                    "research-department",
+                    "done",
+                    result="SK하이닉스 시장 자료는 확인됨",
+                ),
+                child(
+                    "accounting",
+                    "accounting-portfolio-department",
+                    "blocked",
+                    block_reason="worker cgroup exhausted",
+                    retry_count=2,
+                ),
+                child(
+                    "qa",
+                    "qa-department",
+                    "done",
+                    result="부분 결과와 실패 범위를 검증함",
+                ),
+            ),
+            replan_count=2,
+            workflow_mode="binding",
+            root_is_user_query=True,
+            selected_primary_profiles=(
+                "research-department",
+                "accounting-portfolio-department",
+            ),
+        )
+
+        decision = decide_supervisor(state)
+
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.reason, "binding_partial_defer_template")
+        self.assertEqual(decision.parent_task_ids, ("qa",))
+        self.assertEqual(decision.initial_status, "blocked")
+
+    def test_binding_qa_failure_still_returns_fail_closed_defer(self) -> None:
+        state = SupervisorState(
+            "root",
+            (
+                child("research", "research-department", "done", result="result"),
+                child(
+                    "qa",
+                    "qa-department",
+                    "failed",
+                    retry_count=2,
+                    block_reason="worker terminated",
+                ),
+            ),
+            workflow_mode="binding",
+            root_is_user_query=True,
+            selected_primary_profiles=("research-department",),
+        )
+
+        decision = decide_supervisor(state)
+
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.reason, "binding_partial_defer_template")
+        self.assertEqual(decision.parent_task_ids, ())
 
     def test_qa_done_triggers_final_synthesis(self) -> None:
         decision = decide_supervisor(
@@ -1357,6 +1455,65 @@ class WorkforceAdvisoryAttachmentTest(unittest.TestCase):
         self.assertIn("Do not repeat browser, terminal, file", body)
 
 
+class BindingPartialDeferExecutionTest(unittest.TestCase):
+    def test_partial_defer_is_completed_without_an_llm_worker(self) -> None:
+        client = FakeClient()
+        service = CeoSupervisorService(client)
+        state = SupervisorState(
+            "root",
+            (
+                child(
+                    "research",
+                    "research-department",
+                    "done",
+                    result="시장 snapshot은 확인했으나 mandate는 unversioned",
+                ),
+                child(
+                    "accounting",
+                    "accounting-portfolio-department",
+                    "blocked",
+                    block_reason="worker cgroup exhausted",
+                    retry_count=2,
+                ),
+                child("qa", "qa-department", "done", result="QA 검토 완료"),
+            ),
+            replan_count=2,
+            workflow_mode="binding",
+            root_is_user_query=True,
+            selected_primary_profiles=(
+                "research-department",
+                "accounting-portfolio-department",
+            ),
+        )
+        decision = decide_supervisor(state)
+
+        service._execute(decision, state)
+
+        self.assertEqual(client.created[0]["initial_status"], "blocked")
+        self.assertEqual(len(client.completed), 1)
+        completed = client.completed[0]
+        self.assertIn("**결론: DEFER**", completed["result"])
+        self.assertIn("Research 부서", completed["result"])
+        self.assertIn("Accounting / Portfolio 부서", completed["result"])
+        self.assertFalse(completed["metadata"]["orders_authorized"])
+
+    def test_abort_does_not_mutate_an_already_completed_planning_root(self) -> None:
+        client = FakeClient()
+        service = CeoSupervisorService(client)
+        state = SupervisorState("root", (), parent_status="done")
+        decision = SupervisorDecision(
+            SupervisorAction.BLOCK_ABORT,
+            "root",
+            reason="retry_limit_reached",
+        )
+
+        service._execute(decision, state)
+
+        self.assertEqual(client.blocked, [])
+        self.assertEqual(len(client.comments), 1)
+        self.assertIn("recorded_without_root_mutation", client.comments[0]["body"])
+
+
 class SynthesisTimingInstrumentationTest(unittest.TestCase):
     def test_synthesis_timing_logs_create_boundary_without_payload(self) -> None:
         client = FakeClient()
@@ -1814,6 +1971,129 @@ class SupervisorWakeupTest(unittest.TestCase):
                 "risk-management-task",
             },
         )
+
+    def test_startup_reconciliation_recovers_modern_root_from_blocked_primary(self) -> None:
+        now = int(time.time())
+
+        class ModernRootClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.root_body = build_root_body(
+                    "삼성전자 분석",
+                    "discord:followup-101",
+                ) + (
+                    "\nanalysis_mode=fast_advisory\n"
+                    "selected_primary_profiles="
+                    "research-department,quant-backtest-department\n"
+                    "delegation_instruction.research-department=Research Samsung.\n"
+                    "delegation_instruction.quant-backtest-department=Quant Samsung."
+                )
+                self.payloads = [
+                    {
+                        "id": "research-task",
+                        "assignee": "research-department",
+                        "status": "done",
+                        "body": (
+                            "workflow_root_task_id=root\n"
+                            "workflow_role=primary\n"
+                            "workflow_mode=analysis"
+                        ),
+                    },
+                    {
+                        "id": "quant-task",
+                        "assignee": "quant-backtest-department",
+                        "status": "blocked",
+                        "block_kind": "needs_input",
+                        "block_reason": "target context missing",
+                        "body": (
+                            "workflow_root_task_id=root\n"
+                            "workflow_role=primary\n"
+                            "workflow_mode=analysis"
+                        ),
+                    },
+                ]
+                self.candidate_calls = 0
+                self.list_calls = 0
+
+            def recovery_candidate_rows(self):
+                self.candidate_calls += 1
+                return (
+                    {
+                        "id": "root",
+                        "status": "done",
+                        "created_at": now - 180,
+                        "completed_at": now - 150,
+                        "body": self.root_body,
+                    },
+                )
+
+            def list_tasks(self):
+                self.list_calls += 1
+                return ()
+
+            def show(self, task_id: str):
+                if task_id == "root":
+                    return {
+                        "id": "root",
+                        "status": "done",
+                        "created_at": now - 180,
+                        "completed_at": now - 150,
+                        "body": self.root_body,
+                    }
+                return super().show(task_id)
+
+        client = ModernRootClient()
+        service = CeoSupervisorService(client)
+        seen: list[dict[str, object]] = []
+
+        def record(event):
+            seen.append(dict(event))
+            return SupervisorDecision(
+                SupervisorAction.REQUEST_USER_INPUT,
+                "root",
+                target_task_id="quant-task",
+            )
+
+        service.handle_terminal_event = record
+
+        decisions = service.reconcile_existing_workflows()
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(seen[0]["task_id"], "quant-task")
+        self.assertEqual(seen[0]["kind"], "blocked")
+        self.assertEqual(client.candidate_calls, 1)
+        self.assertEqual(client.list_calls, 0)
+
+    def test_startup_reconciliation_ignores_old_completed_roots(self) -> None:
+        now = int(time.time())
+
+        class OldRootClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.root_body = build_root_body("old", "old-request")
+                self.show_calls = 0
+
+            def list_tasks(self):
+                return (
+                    {
+                        "id": "root",
+                        "status": "done",
+                        "created_at": now - 1200,
+                        "completed_at": now - 601,
+                        "body": self.root_body,
+                    },
+                )
+
+            def show(self, task_id: str):
+                self.show_calls += 1
+                return super().show(task_id)
+
+        client = OldRootClient()
+
+        decisions = CeoSupervisorService(client).reconcile_existing_workflows()
+
+        self.assertEqual(decisions, ())
+        self.assertEqual(client.show_calls, 0)
 
     def test_completed_synthesis_reconciliation_replays_missed_terminal_event(self) -> None:
         class CompletedSynthesisClient(FakeClient):
@@ -3291,6 +3571,13 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
         self.assertTrue(
             all(
                 "analysis_mode=fast_advisory" in decision.body
+                for decision in decisions
+            )
+        )
+        self.assertTrue(
+            all(
+                "Never search unrelated Kanban tasks" in decision.body
+                and "kanban_block with needs_input" in decision.body
                 for decision in decisions
             )
         )

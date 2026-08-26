@@ -104,6 +104,96 @@ def _cli(*args: str) -> list[str]:
 
 
 # ── 다음 질문 고르기 ────────────────────────────────────────────────────────
+_TOKEN_RE = re.compile(r"[^0-9A-Za-z가-힣]+")
+
+
+def _tokens(q: str) -> set:
+    """비교용 토큰. 한 글자는 버린다 - 조사·기호가 유사도를 흐린다."""
+    return {t for t in _TOKEN_RE.sub(" ", str(q).lower()).split() if len(t) > 1}
+
+
+def _similar(a: str, b: str) -> float:
+    """자카드 유사도. **정확일치 검사는 말바꿈에 무력하다**(실측 0.92)."""
+    ta, tb = _tokens(a), _tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+DUP_THRESHOLD = float(os.getenv("RESEARCH_DUP_THRESHOLD", "0.65"))
+
+
+def _closed_topics() -> list:
+    """대장에서 차단 규칙만 뽑는다. 못 읽으면 빈 목록(연구를 세우지 않는다)."""
+    try:
+        items = json.loads((rlog.ROOT / "closed_lines.json")
+                           .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for it in items:
+        terms = [str(t).lower() for t in (it.get("block_terms") or [])]
+        if terms:
+            out.append((it.get("line", ""), terms,
+                        int(it.get("min_hits") or 2)))
+    return out
+
+
+def _is_closed_topic(q: str) -> str:
+    """닫힌 주제면 그 줄기 이름을 준다. 아니면 빈 문자열.
+
+    **대장을 글로만 두면 안 막힌다** - 에이전트가 읽고도 같은 질문을 50번
+    냈다(2026-08-26 실측). 뽑기 단계에서 코드로 버린다.
+    """
+    low = str(q).lower()
+    for line, terms, need in _closed_topics():
+        if sum(1 for t in terms if t in low) >= need:
+            return line
+    return ""
+
+
+def _rejected(q: str, why: str) -> None:
+    """왜 버렸는지 남긴다. 조용히 버리면 '질문이 없다' 로 보여 진단이 막힌다."""
+    print(f"  질문 버림({why}): {str(q)[:60]}", flush=True)
+
+
+def _closed_by_ancestry(entry, by_id: dict) -> bool:
+    """조상 중 하나라도 닫힌 주제면 참.
+
+    **표현으로는 못 잡는다.** 부모도 말이 바뀌어 있어서 용어 검사를 빠져나간다
+    (2026-08-26 실측). 계보는 못 속이므로 부모 링크를 따라 올라간다.
+    방문 집합은 손상된 로그의 순환 참조 대비다.
+    """
+    seen = set()
+    cur = entry
+    while cur is not None:
+        cid = getattr(cur, "id", "")
+        if not cid or cid in seen:
+            return False
+        seen.add(cid)
+        if _is_closed_topic(getattr(cur, "question", "")):
+            return True
+        cur = by_id.get(getattr(cur, "parent", "") or "")
+    return False
+
+
+def _open_findings(limit: int = 8) -> list:
+    """닫힌 주제의 발견을 **계보째로** 제외한 최근 발견.
+
+    부모가 막다른 길이면 그 자식 질문도 막다른 길이다. 용어로 자식만 막으면
+    형제가 계속 나온다 - 2026-08-26 에 용어를 25개까지 늘려도 못 막았다.
+    """
+    by_id = rlog.latest_by_id()
+    out = []
+    for e in rlog.recent_findings(limit=limit * 8):
+        if _closed_by_ancestry(e, by_id):
+            continue
+        out.append(e)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def pick_question() -> tuple[str, str, str, str]:
     """(질문, 출처, 부모, 종류) - **직전 발견이 낳은 질문이 자기개선의 엔진이다.**
 
@@ -115,6 +205,21 @@ def pick_question() -> tuple[str, str, str, str]:
     """
     asked = {e.question.strip() for e in rlog.read_log()}
 
+    def usable(q: str) -> bool:
+        """뽑기 전 마지막 관문. **정확일치·닫힌주제·말바꿈** 셋을 본다."""
+        q = str(q).strip()
+        if not q or q in asked:
+            return False
+        line = _is_closed_topic(q)
+        if line:
+            _rejected(q, f"닫힌 줄기 - {line[:30]}")
+            return False
+        for prev in asked:
+            if _similar(q, prev) >= DUP_THRESHOLD:
+                _rejected(q, f"이미 물어본 질문과 유사({DUP_THRESHOLD})")
+                return False
+        return True
+
     # ⓪ **확증이 무엇보다 먼저다.** 후보를 지목해 놓고 탐색을 계속하면
     #   홀드아웃 판정이 계속 미뤄지고, 그 사이 탐색이 홀드아웃을 오염시킬
     #   위험만 쌓인다. 지목됐으면 즉시 확증한다.
@@ -122,12 +227,12 @@ def pick_question() -> tuple[str, str, str, str]:
         cand = cand_entry.candidate or {}
         q = (f"[확증] {cand.get('name') or cand_entry.id}: "
              f"{cand.get('claim') or ''}").strip()
-        if q not in asked:
+        if q and q not in asked:
             return q, "auto", cand_entry.id, "confirm"
 
     for idea in rlog.pending_ideas():                  # ① 사람 개입이 최우선
         q = str(idea.get("question") or "").strip()
-        if q and q not in asked:
+        if usable(q):
             # 사람이 종류를 지정했으면 그대로 쓴다. 문헌 질문을 측정
             # 카드로 내보내면 DB 도구로 웹 질문에 답하려 든다(실측).
             k = str(idea.get("kind") or "measure")
@@ -138,7 +243,7 @@ def pick_question() -> tuple[str, str, str, str]:
     #   문헌은 또 문헌 질문을 낳는다. 문헌이 측정보다 우선이므로 이걸 막지
     #   않으면 읽기가 큐를 영원히 앞지른다(2026-08-25 문헌 3연속 실측).
     #   금지가 아니라 순서다 - 읽은 다음엔 그걸 재본다.
-    _recent = rlog.recent_findings(limit=8)
+    _recent = _open_findings(8)
     # **직전** 판정은 ts 정렬이 아니라 **기록 순서**로 한다. ts 는 초
     # 단위라 같은 초에 닫힌 항목들의 정렬이 불안정하다(자체점검이 잡음).
     # 로그는 append-only 라 마지막 DONE 줄이 곧 직전에 닫힌 항목이다.
@@ -150,13 +255,13 @@ def pick_question() -> tuple[str, str, str, str]:
         for found in _recent:
             for q in getattr(found, "lit_questions", []) or []:
                 q = str(q).strip()
-                if q and q not in asked:
+                if usable(q):
                     return q, "auto", found.id, "literature"
 
-    for found in rlog.recent_findings(limit=8):        # ③ 자기개선(측정)
+    for found in _open_findings(8):                    # ③ 자기개선(측정)
         for q in found.next_questions:
             q = str(q).strip()
-            if q and q not in asked:
+            if usable(q):
                 return q, "auto", found.id, "measure"
 
     # ③-b 잴 것이 하나도 없으면 그때는 읽는 게 맞다. 위에서 직전이 문헌이라
@@ -169,9 +274,11 @@ def pick_question() -> tuple[str, str, str, str]:
                     return q, "auto", found.id, "literature"
 
     for q in SEED_QUESTIONS:                           # ④ 씨앗
-        if q not in asked:
+        if usable(q):
             return q, "seed", "", "measure"
 
+    print("  질문 고갈 - 닫힌 줄기를 빼고 나면 뽑을 질문이 없다. "
+          "사람이 새 축을 던져야 한다(--idea).", flush=True)
     return "", "", "", ""
 
 
@@ -252,6 +359,29 @@ def dev_session_count() -> tuple:
         return (0, 0, "", "")
 
 
+def daily_bar_coverage() -> tuple:
+    """(행수, 종목수, 시작, 끝) - 일봉 축.
+
+    **장중과 일봉은 완전히 다른 표본이다.** 장중만 알려주면 일봉 전략도
+    장중 세션 수로 판단한다(2026-08-26 실측: SMA60 을 "검증 불능" 으로
+    잘못 배제했다).
+    """
+    sql = ("select count(*), count(distinct instrument_id), "
+           "min(bucket_time)::date, max(bucket_time)::date "
+           "from market.market_bars where interval_code='1D'")
+    rc, out = _run(["docker", "exec", DB_CONTAINER, "psql", "-U", "postgres",
+                    "-d", "market", "-tAc", sql], timeout=60)
+    if rc != 0 or not out.strip():
+        return (0, 0, "", "")
+    parts = out.strip().splitlines()[-1].split("|")
+    if len(parts) != 4:
+        return (0, 0, "", "")
+    try:
+        return (int(parts[0]), int(parts[1]), parts[2], parts[3])
+    except ValueError:
+        return (0, 0, "", "")
+
+
 def sample_budget_block() -> str:
     """표본 하한을 카드에 명시한다.
 
@@ -260,8 +390,19 @@ def sample_budget_block() -> str:
     실험이 4세션만 쓴 것이 그 결과다.
     """
     dev, total, lo, hi = dev_session_count()
-    if not total:
+    rows, syms, dlo, dhi = daily_bar_coverage()
+    if not total and not rows:
         return ""
+    daily = [
+        "",
+        f"  **일봉 축은 완전히 다른 표본이다.** market.market_bars "
+        f"(interval_code='1D')에 **{rows:,}행 · 종목 {syms:,}개** "
+        f"({dlo} ~ {dhi})가 있다.",
+        "",
+        "  질문이 일봉이면 위 장중 세션 수는 **아무 상관이 없다.** 장중 "
+        "표본을 근거로 일봉 파라미터를 배제하지 마라 - 실제로 그런 일이 "
+        "있었다(SMA60 을 장중 54세션 기준으로 '검증 불능' 처리).",
+    ] if rows else []
     return _NL.join([
         "## 쓸 수 있는 표본 - **이만큼 있다**",
         "",
@@ -279,8 +420,7 @@ def sample_budget_block() -> str:
         "",
         f"  발견에 **몇 세션 중 몇 세션을 썼는지 반드시 적어라.** "
         f"`4/{dev}` 와 `{dev}/{dev}` 는 완전히 다른 문장이다.",
-        "",
-    ])
+    ] + daily + [""])
 
 
 def agent_powers_block() -> str:
@@ -368,6 +508,99 @@ def workspace_block() -> str:
     ])
 
 
+def loop_history_block(limit: int = 12) -> str:
+    """**이 루프가 지금까지 한 일을 보여준다.**
+
+    카드는 일회성이라 에이전트는 자기 이전 화신이 무엇을 물었는지 모른다.
+    그래서 같은 질문을 12번 하고도 매번 합리적인 후속이라고 믿었다
+    (2026-08-26 실측: 78건 중 50건이 한 주제).
+
+    **직전 질문과의 유사도를 같이 싣는다.** 숫자 유무는 신호가 아니었다 -
+    정체 구간도 매번 19~23개씩 냈다. 안 움직이는 건 질문 쪽이었다.
+    """
+    entries = [e for e in rlog.read_log() if e.status in ("DONE", "FAILED")]
+    seen, uniq = set(), []
+    for e in entries:
+        if e.id in seen:
+            continue
+        seen.add(e.id)
+        uniq.append(e)
+    if not uniq:
+        return ""
+    tail = uniq[-limit:]
+    lines = [f"## 이 루프가 지금까지 한 일 (최근 {len(tail)}건)", ""]
+    sims = []
+    for i, e in enumerate(tail):
+        # **직전 하나가 아니라 이전 전체**와 비교한다. 말바꿈이 번갈아 나오면
+        # 직전 비교로는 놓친다(실측: 0.03·0.08 로 찍혔지만 같은 주제였다).
+        sim = max([_similar(e.question, o.question) for o in tail[:i]] or [0.0])
+        sims.append(sim)
+        mark = " ← 앞서 물어본 것과 거의 같음" if sim >= 0.6 else ""
+        cand = "후보O" if e.candidate else "후보-"
+        lines.append(f"  {e.id}  {str(e.kind or ''):10} 유사도 {sim:.2f}  "
+                     f"{cand}  {str(e.question)[:46]}{mark}")
+    lines.append("")
+
+    hot = [x for x in sims[1:] if x >= 0.45]
+    if len(hot) >= max(3, len(sims) // 3):
+        lines += [
+            f"  ⚠ **최근 {len(sims)}건 중 {len(hot)}건이 앞서 물어본 질문과 "
+            "유사도 0.45 이상이다.** 같은 자리를 파고 있다는 뜻이다. "
+            "숫자가 나온다고 "
+            "진전은 아니다 - 매번 같은 숫자가 나오고 있다면 질문이 틀린 것이다.",
+            "",
+        ]
+
+    n_all = len(uniq)
+    n_cand = sum(1 for e in uniq if e.candidate)
+    n_pass = sum(1 for e in uniq
+                 if (e.confirm_result or {}).get("pass") is True)
+    lines += [f"  누적: 실험 {n_all}건 · 후보 지목 {n_cand}건 · "
+              f"확증 통과 {n_pass}건", ""]
+    return _NL.join(lines)
+
+
+def goal_block() -> str:
+    """**목표를 명시하고 방향을 바꿀 권한을 준다.**
+
+    지금까지 카드는 "이걸 재라" 였다. 질문이 목표를 못 섬겨도 그렇게 말할
+    자리가 없었다. 수단이 목표를 못 섬기면 수단을 바꾸는 게 맞다.
+    """
+    return _NL.join([
+        "## 목표 - **질문은 수단이다**",
+        "",
+        "  이 루프의 목표는 하나다: **비용을 뺀 뒤에도 남는, 실제로 체결 "
+        "가능한 엣지를 찾는 것.** 위 질문은 그 수단으로 배정된 것이지 "
+        "그 자체가 목적이 아니다.",
+        "",
+        "  **질문이 목표를 못 섬긴다고 판단하면 바꿔라.** 다음 셋 중 하나라도 "
+        "해당하면 그렇게 하는 것이 맞다:",
+        "",
+        "  - 이 질문은 **가진 데이터로 답할 수 없다**(없는 데이터를 전제한다)",
+        "  - 이미 여러 번 물었고 **매번 같은 숫자**가 나온다",
+        "  - 답이 나와도 **체결 가능한 엣지에 가까워지지 않는다**",
+        "",
+        "  바꿀 때는 `--finding` 에 **왜 바꿨는지 먼저 적고**, `--next` 로 "
+        "네가 생각하는 더 나은 질문을 내라. 배정된 질문을 억지로 답하는 것보다 "
+        "**틀린 질문이라고 말하는 편이 훨씬 낫다.** 그게 루프를 살린다.",
+        "",
+        "  막다른 줄기라고 판단하면 **직접 닫아라.** 근거가 있어야 닫힌다:",
+        "",
+        "```",
+        "quant-py /app/repo/departments/01-research/bench/research_log.py "
+        "close-line \\",
+        "  --line '무엇을 닫는가' \\",
+        "  --evidence '무엇이 이걸 확정했나 - 숫자로' \\",
+        "  --closed-by <네 실험번호>",
+        "```",
+        "",
+        "  닫은 줄기는 이후 모든 카드에 실려 다시 안 열린다. **영구 금지가 "
+        "아니라 이미 답이 나온 곳을 또 파지 말라는 뜻**이니, 새 증거가 있으면 "
+        "다시 여는 것도 네 판단이다.",
+        "",
+    ])
+
+
 def closed_lines_block() -> str:
     """닫힌 줄기를 카드 머리에 싣는다.
 
@@ -419,11 +652,11 @@ factory_assignee={BENCH_ASSIGNEE}
 research_entry_id={entry_id}
 research_parent={parent or '(없음)'}
 
-{closed_lines_block()}{workspace_block()}{sample_budget_block()}{agent_powers_block()}## 이번 질문
+{closed_lines_block()}{loop_history_block()}{workspace_block()}{sample_budget_block()}{agent_powers_block()}## 이번 질문
 
 {question}
 
-**너는 측정을 직접 설계한다.** 정해진 문법도, 사전등록도, 시도 예산도 없다.
+{goal_block()}**너는 측정을 직접 설계한다.** 정해진 문법도, 사전등록도, 시도 예산도 없다.
 `ml_pipeline/audit_*.py` 를 쓰던 방식 그대로다 - 어떻게 재야 이 질문에 답이
 나오는지 네가 정하고, 스크립트를 쓰고, 돌리고, 숫자를 보고, 해석해라.
 {prior}
@@ -841,6 +1074,25 @@ def _stamp_detects_change() -> bool:
     return all(len(x) == 3 for x in a) and len(a) >= 2
 
 
+def _stall_guard_works() -> bool:
+    """실제 정체 구간의 질문 쌍으로 차단기를 검증한다.
+
+    아래 두 문장은 2026-08-26 로그에서 가져온 실물이다(유사도 0.89).
+    """
+    a = ("실제 운영 경로에 supplier schema/version 문서와 order-level "
+         "ack 필드가 존재하는지 확인한다")
+    b = ("사람 운영 경로에 실제 supplier schema/version 문서와 order-level "
+         "ack 필드가 존재하는지 재확인한다")
+    c = "급등 다음날 시가 진입으로 순엣지가 남는가"
+    if _similar(a, b) < DUP_THRESHOLD:
+        return False                       # 말바꿈을 못 잡으면 실패
+    if _similar(a, c) >= DUP_THRESHOLD:
+        return False                       # 딴 질문을 잡으면 과차단
+    if _tokens("") or _similar("", a):
+        return False                       # 빈 문자열에 안전해야 한다
+    return True
+
+
 def _selfcheck() -> int:
     import tempfile
     fails = 0
@@ -949,6 +1201,13 @@ def _selfcheck() -> int:
            isinstance(sample_budget_block(), str))
         ok("세션 수를 못 세도 0 튜플로 살아난다",
            len(dev_session_count()) == 4)
+        ok("말바꿈 재질문을 잡아낸다", _stall_guard_works())
+        ok("카드가 루프 이력을 싣는다",
+           "이 루프가 지금까지 한 일" in body)
+        ok("카드가 목표를 밝힌다", "질문은 수단이다" in body)
+        ok("카드가 방향 전환을 허용한다",
+           "틀린 질문이라고 말하는 편이 훨씬 낫다" in body)
+        ok("카드가 줄기 닫기 권한을 준다", "close-line" in body)
         ok("카드가 작업실이 남는다고 알린다",
            "카드가 끝나도 남는다" in body)
         ok("카드가 lib 를 먼저 보라고 한다",

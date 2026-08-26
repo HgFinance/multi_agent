@@ -320,6 +320,32 @@ class ForwardToIngressTests(unittest.TestCase):
         with patch.dict("os.environ", self._env(**{gateway_patch.INGRESS_URL_ENV: ""})):
             self.assertFalse(gateway_patch._forward_to_ingress(self._message(), None))
 
+    def test_ingress_timeout_is_bounded_and_invalid_values_use_default(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {gateway_patch.INGRESS_TIMEOUT_ENV: "invalid"},
+            clear=False,
+        ):
+            self.assertEqual(gateway_patch._ingress_timeout_seconds(), 5.0)
+        with patch.dict(
+            "os.environ",
+            {gateway_patch.INGRESS_TIMEOUT_ENV: "nan"},
+            clear=False,
+        ):
+            self.assertEqual(gateway_patch._ingress_timeout_seconds(), 5.0)
+        with patch.dict(
+            "os.environ",
+            {gateway_patch.INGRESS_TIMEOUT_ENV: "0.1"},
+            clear=False,
+        ):
+            self.assertEqual(gateway_patch._ingress_timeout_seconds(), 1.0)
+        with patch.dict(
+            "os.environ",
+            {gateway_patch.INGRESS_TIMEOUT_ENV: "90"},
+            clear=False,
+        ):
+            self.assertEqual(gateway_patch._ingress_timeout_seconds(), 30.0)
+
     def test_enabled_url_without_private_credential_fails_closed(self) -> None:
         with patch.dict(
             "os.environ",
@@ -566,6 +592,107 @@ class ForwardToIngressTests(unittest.TestCase):
 
 
 class AsyncForwardToIngressTests(unittest.IsolatedAsyncioTestCase):
+    class _Author:
+        bot = False
+
+    class _Starter:
+        id = "100"
+        content = "삼성전자 이거 4분 뒤에 1주 매수해줘"
+        author = None
+
+        def __init__(self) -> None:
+            self.author = AsyncForwardToIngressTests._Author()
+
+    class _ParentChannel:
+        id = "parent-10"
+
+        def __init__(self) -> None:
+            self.fetch_count = 0
+
+        async def fetch_message(self, message_id: int):
+            self.fetch_count += 1
+            self.requested_id = message_id
+            return AsyncForwardToIngressTests._Starter()
+
+    class _ThreadChannel:
+        id = "100"
+        parent_id = "10"
+
+    class _Message:
+        id = "101"
+        content = "지금 위 질문 다시 분석해줘"
+        channel = None
+        author = None
+
+        def __init__(self) -> None:
+            self.channel = AsyncForwardToIngressTests._ThreadChannel()
+            self.author = AsyncForwardToIngressTests._Author()
+
+    class _Client:
+        def __init__(self, parent: object) -> None:
+            self.parent = parent
+
+        def get_channel(self, channel_id: int):
+            return self.parent if channel_id == 10 else None
+
+    class _Adapter:
+        def __init__(self, parent: object) -> None:
+            self._client = AsyncForwardToIngressTests._Client(parent)
+
+    async def test_referential_followup_freezes_exact_thread_starter(self) -> None:
+        parent = self._ParentChannel()
+        message = self._Message()
+        adapter = self._Adapter(parent)
+
+        with patch.dict("os.environ", {"HERMES_PROFILE": "ceo-agent"}):
+            resolved = await gateway_patch._resolve_thread_followup_context(
+                adapter,
+                message,
+            )
+
+        self.assertIsNot(resolved, message)
+        self.assertEqual(message.content, "지금 위 질문 다시 분석해줘")
+        self.assertIn("삼성전자 이거 4분 뒤에 1주 매수해줘", resolved.content)
+        self.assertIn("지금 위 질문 다시 분석해줘", resolved.content)
+        self.assertIn("never infer it from another Kanban task", resolved.content)
+        self.assertEqual(parent.fetch_count, 1)
+        self.assertEqual(parent.requested_id, 100)
+
+    async def test_ordinary_thread_message_skips_context_fetch(self) -> None:
+        parent = self._ParentChannel()
+        message = self._Message()
+        message.content = "삼성전자 밸류에이션도 확인해줘"
+
+        with patch.dict("os.environ", {"HERMES_PROFILE": "ceo-agent"}):
+            resolved = await gateway_patch._resolve_thread_followup_context(
+                self._Adapter(parent),
+                message,
+            )
+
+        self.assertIs(resolved, message)
+        self.assertEqual(parent.fetch_count, 0)
+
+    async def test_thread_context_timeout_preserves_current_request(self) -> None:
+        class SlowParent:
+            async def fetch_message(self, message_id: int):  # noqa: ARG002
+                await asyncio.sleep(1)
+
+        message = self._Message()
+        with patch.dict(
+            "os.environ",
+            {"HERMES_PROFILE": "ceo-agent"},
+        ), patch.object(
+            gateway_patch,
+            "_THREAD_CONTEXT_FETCH_TIMEOUT_SECONDS",
+            0.01,
+        ):
+            resolved = await gateway_patch._resolve_thread_followup_context(
+                self._Adapter(SlowParent()),
+                message,
+            )
+
+        self.assertIs(resolved, message)
+
     async def test_slow_ingress_does_not_block_discord_event_loop(self) -> None:
         release = threading.Event()
 

@@ -69,6 +69,27 @@ def _pg_keepalives(dsn: str) -> str:
             + "&keepalives_interval=10&keepalives_count=3")
 
 
+def _pg_runtime_role(dsn: str, role: str) -> str:
+    """Attach one reviewed SET ROLE option to a PostgreSQL URI.
+
+    The batch collector has two databases.  A process-wide ``PGOPTIONS`` would
+    also force the market connection into the control-only role, so the role
+    is attached only to ``DATABASE_URL`` at the shared loader boundary.
+    """
+
+    normalized = str(role or "").strip()
+    if not normalized:
+        return dsn
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", normalized):
+        raise ValueError("RESEARCH_COLLECTOR_DATABASE_ROLE has an invalid role name")
+    if not dsn.startswith(("postgres://", "postgresql://")):
+        raise ValueError("RESEARCH_COLLECTOR_DATABASE_ROLE requires a PostgreSQL URI")
+    if re.search(r"(?:^|[?&])options=", dsn):
+        raise ValueError("DATABASE_URL already owns a PostgreSQL options parameter")
+    sep = "&" if "?" in dsn else "?"
+    return f"{dsn}{sep}options=-c%20role%3D{normalized}"
+
+
 def load_project_env(repo_root: Path | None = None) -> dict[str, str]:
     """저장소 .env 와 프로세스 환경변수를 합친다. 환경변수가 우선이다.
 
@@ -102,6 +123,11 @@ def load_project_env(repo_root: Path | None = None) -> dict[str, str]:
     for k, v in os.environ.items():
         if v.strip():
             merged[k] = v
+    collector_role = merged.get("RESEARCH_COLLECTOR_DATABASE_ROLE", "")
+    if merged.get("DATABASE_URL") and collector_role:
+        merged["DATABASE_URL"] = _pg_runtime_role(
+            merged["DATABASE_URL"], collector_role
+        )
     # 모든 소비자가 이 로더를 거치므로 keepalive 는 여기가 정본이다.
     for key in ("DATABASE_URL", "TIMESCALE_DATABASE_URL"):
         if merged.get(key):

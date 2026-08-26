@@ -9,23 +9,20 @@
 # 하나의 병합된 모델을 공유하므로 redis 같은 공통 Platform Container를 서비스 이름으로
 # 참조할 수 있다(계획서 5절 - 공통 인프라는 루트가 소유한다).
 #
-# ▶ 계획서 6.3의 broker-adapter는 아직 없다 - 코드가 없다. 코드 없는 역할을 컨테이너부터
-#   만들지 않는다(departments/03-risk/Dockerfile 상단 주석과 같은 원칙).
-#   trading-api는 2026-08-03에 api/app.py가, trading-outbox-relay는 2026-08-10에
-#   oms/relay.py가 생기면서 추가했다.
+# The local PAPER stack uses the same isolated operational logins as the AWS
+# overlay.  Keeping these aliases in this fragment prevents a generic runtime
+# DATABASE_URL from silently bypassing the Trading roles after recreation.
+x-trading-database-url: &trading-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_trading_api"
+x-trading-oms-database-url: &trading-oms-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_strategy_paper_executor"
+x-trading-outbox-database-url: &trading-outbox-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_trading_outbox_relay"
+
 services:
   # trading-api: OrderIntent 심사, Broker Order 상태 머신, Paper 체결의 조회·명령면.
   # 계약은 docs/02-engineering/TRADING_DOMAIN_API_SPEC.md.
   #
-  # ▶ DATABASE_URL을 주지 않는다. 빠뜨린 게 아니라 **아직 안 쓰기 때문**이다 -
-  #   OrderStore가 프로세스 메모리라 재시작하면 주문이 사라진다(설계서 4절).
-  #   execution.* 테이블은 Supabase에 이미 있고 행이 0이며, psycopg OrderStore는
-  #   팀장 확인 대기 항목이다. 그때 여기에 DATABASE_URL을 추가한다.
-  #   자격증명을 "언젠가 쓸 것"이라고 미리 주입하지 않는다 - 안 쓰는 자격이 퍼지는
-  #   것 자체가 위험이다(01-research의 research-mcp에서 LS 자격을 뺀 것과 같은 이유).
-  #
-  # ▶ 상태가 프로세스 메모리라 **복제하면 안 된다.** 지금 replica를 늘리면 주문이
-  #   컨테이너별로 갈라진다. DB store가 들어오기 전까지 단일 인스턴스로 둔다.
+  # Durable PAPER state is stored in the private control PostgreSQL database.
+  # Direct-user admission and strategy OMS remain separate least-privilege
+  # roles even though one API process exposes both boundaries.
   trading-api:
     build:
       context: ../..
@@ -38,12 +35,11 @@ services:
         max-size: "10m"
         max-file: "3"
     environment:
-      # Paper 주문도 accounting-api와 같은 Supabase execution.*를 보도록
-      # durable 모드를 기본값으로 켠다. 명시적으로 PAPER_DB=false를 주면
-      # 로컬 오프라인/테스트 모드를 선택할 수 있다.
+      # Durable mode is mandatory in the local PAPER stack. Explicitly setting
+      # PAPER_DB=false remains available only for isolated unit tests.
       PAPER_DB: ${PAPER_DB:-true}
-      DATABASE_URL: ${DATABASE_URL:-}
-      TRADING_OMS_DATABASE_URL: ${TRADING_OMS_DATABASE_URL:-}
+      DATABASE_URL: *trading-database-url
+      TRADING_OMS_DATABASE_URL: *trading-oms-database-url
       APP_ENV: ${APP_ENV:-development}
       TRADING_EXECUTION_MODE: PAPER
       TRADING_BROKER_ADAPTER: paper
@@ -69,7 +65,10 @@ services:
     ports:
       - "127.0.0.1:8045:8000"   # 로컬 전용 - 외부 노출 금지 (risk-api 8041 이하 같은 정책)
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      # Readiness also pins the shared conditional-rule contract. Recreating a
+      # stale Trading image without TIME support must fail before the BFF can
+      # accept delayed orders that Trading cannot later validate.
+      test: ["CMD", "python", "-c", "from orchestration.conditional_rules import ExpressionType; assert ExpressionType.TIME.value == 'TIME'; import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -86,7 +85,7 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "directives.worker"]
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: *trading-database-url
       APP_ENV: ${APP_ENV:-development}
       TRADING_EXECUTION_MODE: PAPER
       TRADING_BROKER_ADAPTER: paper
@@ -132,10 +131,10 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: *trading-database-url
       # Dedicated SELECT/UPDATE-only relay role. The legacy OMS variable is a
       # compatibility fallback in code, not the production authority.
-      TRADING_OUTBOX_DATABASE_URL: ${TRADING_OUTBOX_DATABASE_URL:-}
+      TRADING_OUTBOX_DATABASE_URL: *trading-outbox-database-url
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RELAY_POLL_SECONDS: ${RELAY_POLL_SECONDS:-1.0}
       RELAY_MAX_ATTEMPTS: ${RELAY_MAX_ATTEMPTS:-12}

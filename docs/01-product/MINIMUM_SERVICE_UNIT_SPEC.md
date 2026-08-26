@@ -138,7 +138,10 @@ Risk 결과: REJECT
 
 ### 4. 사용자 승인
 
-초기 Core에서는 모든 Paper 주문에 사용자 승인을 요구한다.
+초기 Core의 자동 전략 Paper 주문에는 사용자 승인을 요구한다. 로컬 고정 fixture
+사용자의 명시적 `USER_DIRECTIVE`는 그 지시 자체가 별도 authority이며
+[ADR-0007](../02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의
+기계적 admission을 따른다.
 
 승인 화면에는 최소 다음 항목을 표시한다.
 
@@ -301,7 +304,7 @@ Hermes의 대화는 Case를 새로 해석하는 별도 기록이 아니다. 화�
 |---|---|---|
 | `OBSERVE` | Event 탐지와 Case 생성 | 분석 시작 |
 | `RESEARCH` | Event 탐지, RAG와 Agent 분석 | Strategy 적용 |
-| `ADVISORY` | 분석, Strategy와 Risk 검사 | 모든 Paper 주문 |
+| `ADVISORY` | 분석, Strategy와 Risk 검사 | 모든 자동 전략 Paper 주문 |
 | `PAPER_AUTO` | Risk 승인된 Paper 주문 | 예외와 한도 변경 |
 | `LIVE_LIMITED` | 승인 정책 안의 제한된 실거래 | 고위험·예외 주문 |
 

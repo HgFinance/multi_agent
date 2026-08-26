@@ -84,7 +84,7 @@ hermes --profile qa-department auth status openai-codex
 
 아래 Docker Image·Portal OAuth·Laguna 명령은 분리 저장소를 검증하던 Historical snapshot이다. 현재 모델·인증 상태로 해석하거나 운영 완료의 증거로 사용하지 않는다.
 
-## 2. 처음 붙일 때 (팀원 각자 1회, 로컬 개발용 — AWS는 이미 8개 컨테이너가 떠 있다)
+## 2. 처음 붙일 때 (과거 로컬 연결 절차)
 
 ```bash
 # 1) 이미지 (4GB, 부서별 컨테이너가 레이어를 공유하므로 1회면 된다)

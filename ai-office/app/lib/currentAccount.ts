@@ -5,7 +5,7 @@
  * 있으므로 공개 배포의 사용자 식별 수단으로 사용하지 않는다. 폐쇄망 데모와
  * 결정론 테스트 전제다.
  *
- * 실제 Fund 데이터가 있으면 `/ui/me`와 `PortfolioSessionProvider`가 보강한다.
+ * 실제 Fund·Book 데이터는 `/ui/me`가 보강한다.
  *
  * ## 왜 계정이 하나로 고정됐나 (2026-08-19)
  *
@@ -16,9 +16,11 @@
  * 전형적인 패턴 - React 공식 문서가 hydration mismatch 사례로 꼽는 것과 같다).
  *
  * 계정 전환 계획이 없어졌으므로 그 저장·구독 배선을 통째로 없앤다. 이제
- * `readStoredAccount()`는 배포 시 주입된 같은 binding만 돌려준다 - 서버와
- * 클라이언트가 다를 수 있는 브라우저 상태가 없으니 mismatch가 구조적으로 생기지 않는다.
+ * `readStoredAccount()`는 코드에 고정된 같은 fixture만 돌려준다. 빌드 환경이나
+ * 브라우저 상태로 사용자를 교체하는 경로는 없다.
  */
+
+import { FIXED_DEMO_FUND_ID, FIXED_DEMO_USER_ID } from "./demoIdentity";
 
 export interface TestAccount {
   /** `governance.user_profiles.user_id`. 실 DB에 이미 있는 값이다. */
@@ -38,50 +40,15 @@ export interface TestAccount {
   colorClass: string;
 }
 
-/**
- * `DISCORD_ACTOR_MAP`의 첫 유효한 3칸 binding을 프론트 fixture 계정으로 쓴다.
- *
- * Vite는 저장소 루트의 이 변수만 클라이언트 번들에 주입한다(`vite.config.ts`).
- * Discord ID와 UUID는 fixture 식별자라 비밀값이 아니지만, 실제 인증 정보는
- * 절대 이 경로로 노출하지 않는다.
- */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const DISCORD_ID_RE = /^\d{15,25}$/;
-
-const LOCAL_DEMO_ACCOUNT: TestAccount = {
-  userId: "00000000-0000-4000-8000-00000000cec0",
+export const DEFAULT_ACCOUNT: TestAccount = {
+  userId: FIXED_DEMO_USER_ID,
   label: "Fund Owner",
-  fundId: "5c26db42-ce83-4daf-b1dc-c81680c13a6c",
+  fundId: FIXED_DEMO_FUND_ID,
   colorClass: "bg-primary",
 };
 
-// Keep the local mock usable even when DISCORD_ACTOR_MAP is not provided.
-// This is a fixture identity, not a login or a public-service credential.
-const UNCONFIGURED_ACCOUNT: TestAccount = LOCAL_DEMO_ACCOUNT;
-
-export function accountFromDiscordActorMap(raw: string | undefined): TestAccount {
-  for (const entry of (raw ?? "").split(/[\s,]+/)) {
-    const [discordId, userId, fundId] = entry.split(":").map((value) => value.trim());
-    if (
-      DISCORD_ID_RE.test(discordId ?? "")
-      && UUID_RE.test(userId ?? "")
-      && UUID_RE.test(fundId ?? "")
-    ) {
-      return {
-        userId,
-        label: "Fund Owner",
-        fundId,
-        colorClass: "bg-primary",
-      };
-    }
-  }
-  return UNCONFIGURED_ACCOUNT;
-}
-
-export const DEFAULT_ACCOUNT = accountFromDiscordActorMap(process.env.DISCORD_ACTOR_MAP);
-
 /**
- * 계정을 항상 환경에서 정한 고정값으로 준다. 인자는 시그니처 호환용으로만 남아 있다
+ * 계정을 항상 코드에 고정한 값으로 준다. 인자는 시그니처 호환용으로만 남아 있다
  * (`PortfolioSessionProvider.tsx`가 여전히 값을 넘겨 부른다) - 계정이 하나뿐이므로
  * "찾는다"는 개념 자체가 없다. 호출부가 전달하는 값과 무관하게 고정 계정을
  * 반환한다.

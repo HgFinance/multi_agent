@@ -1,5 +1,5 @@
 import vinext from "vinext";
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json";
 import { sites } from "./build/sites-vite-plugin";
 
@@ -34,9 +34,7 @@ const localBindingConfig = {
 };
 
 export default defineConfig(async ({ mode }) => {
-  // 서버·클라이언트가 같은 데모 계정 binding을 사용하도록 여기서 한 번만 주입한다.
-  const env = loadEnv(mode, "..", "");
-  const discordActorMap = env.DISCORD_ACTOR_MAP ?? process.env.DISCORD_ACTOR_MAP ?? "";
+  void mode;
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";
@@ -47,9 +45,6 @@ export default defineConfig(async ({ mode }) => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
-    define: {
-      "process.env.DISCORD_ACTOR_MAP": JSON.stringify(discordActorMap),
-    },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,

@@ -2,11 +2,11 @@
 
 > Override v2.0 · 기준일 2026-08-05
 >
-> This dated worker roster is a historical team snapshot. Current worker IDs, counts, and authority boundaries are defined by the department registries and [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md).
+> 날짜별 상태 판정은 historical snapshot이다. 현재 Worker ID·개수·권한은 부서 Registry와 [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)가 소유한다.
 > 이 문서는 이전 Trading/Accounting 팀 가이드의 운영 기준을 덮어쓴다. Trading의 Paper 구현과 Accounting의 API 주입 Fill 검증을 Production E2E로 해석하지 않는다. 최상위 기준은 [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md), [PROJECT_IMPLEMENTATION_STATUS.md](../PROJECT_IMPLEMENTATION_STATUS.md), [UNIFIED_DOMAIN_API_SPEC.md](../02-engineering/UNIFIED_DOMAIN_API_SPEC.md)다.
 
 > **2026-08-18 권한 보정:** 아래의 “Risk 승인 없는 Submit 차단”과 “BFF
-> read-only” 문장은 Agent·alpha·자동 전략 레인에 적용된다. 인증된 사용자가 자기
+> read-only” 문장은 Agent·alpha·자동 전략 레인에 적용된다. BFF가 로컬 고정 fixture로 선택한 사용자·
 > Fund/Book에 명시한 PAPER 주문은 [ADR-0007](../02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 별도 `USER_DIRECTIVE` authority다. Hermes는 대화 transport일 뿐이며, 결정론 parser/BFF와 Trading의 durable admission ledger + LS PAPER adapter만 mechanical admission·실행을 담당한다. LS LIVE는 market read-only이고 LIVE 주문은 없다.
 
 ## 0. 상태 판정 규칙
@@ -23,18 +23,16 @@ Paper Fixture나 Frontend Demo는 실제 Broker·공식 원장·운영 NAV를 �
 
 ## 0.1 현재 직원 구성과 역할
 
-구조조정 이후 이 팀의 실행 직원은 Trading 3명, Accounting/Portfolio 2명이다. 아래 표의 LLM Worker는
-비바인딩 Context와 예외 설명을 만들고, 결정론 Runner는 계약·수치·상태를 계산하거나 조회한다.
+현재 Trading은 고정 LLM 직원 없이 `desk-runner`와 승인된 Quant 전략마다 생성되는 요청 단위 임시 Worker를 사용한다. Accounting/Portfolio는 상시 LLM Worker 1명과 결정론 Runner 1명을 사용한다.
 
 | 부서 | Worker | 방식 | 현재 역할 | 권한 경계 |
 |---|---|---|---|---|
-| Trading | `bull-thesis-worker` | LLM | Research Packet 근거만 사용해 Bull thesis, 촉매와 기대수익 가설 작성 | 주문·수량 확정 금지, Bear 출력 미참조 |
-| Trading | `bear-thesis-worker` | LLM | Research Packet 근거만 사용해 Bear thesis, 반증과 하락 위험 작성 | 주문·수량 확정 금지, Bull 출력 미참조 |
-| Trading | `desk-runner` | 결정론 | Intent Builder, 계약 상태 전이, 실행 가능성·Venue Cost·파생 Certification 처리 | Risk 승인 대체·Broker Submit 금지 |
+| Trading | 전략별 임시 Worker | 결정론·요청 단위 | 하나의 immutable Quant Strategy Bundle을 PAPER 시장 이벤트에 실행 | 전략 수정·자기 선정·자기 승격·주문 권한 획득 금지 |
+| Trading | `desk-runner` | 결정론 | Intent Builder, 계약 상태 전이, 실행 가능성·Venue Cost·파생 Certification 처리 | 자동 전략 Risk 승인 대체·Broker Submit 금지 |
 | Accounting/Portfolio | `exception-investigation-worker` | LLM | Reconciliation Break, 미설명 PnL, 마감 준비 예외의 원인 후보 조사와 근거 연결 | 수치 계산·수정, Break 종결, Official NAV 확정 금지 |
 | Accounting/Portfolio | `back-office-runner` | 결정론 | Position·Cash·PnL·Reporting·Valuation·Corporate Action·Fee/Tax 결과 조회·투영 | LLM 호출, 공식 수치 임의 작성·수정 금지 |
 
-기존 `trader-pm-agent`, `execution-agent`, `portfolio-controller`, `reconciliation-agent` 등은 현재 추가 실행
+기존 Bull/Bear, `trader-pm-agent`, `execution-agent`, `portfolio-controller`, `reconciliation-agent` 등은 현재 추가 실행
 직원이 아니라 Profile·DB·감사 추적용 호환 Alias 또는 결정론 Domain 기능이다. 실제 Worker 수와 trigger는 각 부서
 `hermes/config.yaml`, `employee_workers.py`, [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md)를 따른다.
 
@@ -45,7 +43,7 @@ Paper Fixture나 Frontend Demo는 실제 Broker·공식 원장·운영 NAV를 �
 - Research Packet과 Mandate를 바탕으로 `OrderIntent`를 제안한다.
 - Risk 승인 없는 Submit을 만들지 않으며, `trader-pm-agent`는 Broker에 직접 주문하지 않는다.
 - OMS가 Intent 상태와 Broker Order 상태를 분리하고, 모호한 Broker 응답은 `BROKER_STATE_AMBIGUOUS`/`FAILED_SAFE`로 보낸다.
-- Paper Broker는 테스트 전용이다. 실제 Broker Credential·Live Order는 이 가이드의 범위가 아니다.
+- 명시적 `USER_DIRECTIVE`의 LS PAPER adapter는 별도 admission 계약으로 존재하지만 기본 로컬 Compose에서는 비활성이다. LIVE 주문은 이 가이드의 범위가 아니다.
 
 ### 회계/포트폴리오본부
 
@@ -126,7 +124,7 @@ Paper Fixture나 Frontend Demo는 실제 Broker·공식 원장·운영 NAV를 �
 
 ### P1-2. UI와 Kanban Projection
 
-- `ai-office`는 Read-only Projection만 제공한다. `apps/api`도 기본은 Projection이며, 유일한 쓰기 예외는 ADR-0007의 인증 사용자 PAPER Command BFF다. 이 예외는 OMS·Broker·원장 권한을 BFF로 옮기지 않는다.
+- `ai-office`는 Read-only Projection만 제공한다. `apps/api`도 기본은 Projection이며, 유일한 쓰기 예외는 ADR-0007의 고정 fixture PAPER Command BFF다. 이 예외는 OMS·Broker·원장 권한을 BFF로 옮기지 않는다.
 - `DEMO/PAPER/LIVE`, 연결 상태, 마지막 갱신 시각을 명확히 표시하고 Scripted Data를 실시간 금융 상태처럼 표시하지 않는다.
 - ADR-0001의 `agent.status.v1` Bridge·Projector·BFF/WebSocket을 구현하되, Kanban 상태가 Risk·OMS·Ledger를 변경하지 못하게 한다.
 - Frontend dependency High 취약점, clean install/build/test, secret leakage를 별도 Gate로 처리한다.

@@ -16,6 +16,7 @@ if str(COLLECTORS) not in sys.path:
 
 import full_universe_builder
 import ls_realtime_service
+import ls_realtime_worker
 
 
 def _row(
@@ -210,6 +211,84 @@ def test_full_universe_builder_query_is_current_ls_krx_stock_only():
     assert "upper(i.status) = 'active'" in source
     assert "upper(i.venue) in ('kospi', 'kosdaq')" in source
     assert "metadata->>'is_spac'" in source
+
+
+def test_market_workers_stagger_connection_handshakes(monkeypatch):
+    sleeps = []
+    run_max_seconds = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    class Worker:
+        async def run(self, *, max_seconds):
+            run_max_seconds.append(max_seconds)
+            return "done"
+
+    monkeypatch.setattr(ls_realtime_service.asyncio, "sleep", fake_sleep)
+
+    result = ls_realtime_service.asyncio.run(
+        ls_realtime_service._run_worker_after_delay(
+            Worker(), max_seconds=10.0, delay_seconds=1.5
+        )
+    )
+
+    assert result == "done"
+    assert sleeps == [1.5]
+    assert run_max_seconds == [8.5]
+
+
+def test_market_worker_failure_restarts_only_that_shard():
+    calls = []
+    lines = []
+
+    class Worker:
+        stats = object()
+
+        async def run(self, *, max_seconds):
+            calls.append(max_seconds)
+            if len(calls) == 1:
+                raise ls_realtime_service.LsRealtimeError("handshake failed")
+            return "recovered"
+
+    result = ls_realtime_service.asyncio.run(
+        ls_realtime_service._run_worker_resilient(
+            Worker(),
+            max_seconds=10.0,
+            delay_seconds=0.0,
+            stop=ls_realtime_service.asyncio.Event(),
+            shard_index=7,
+            retry_backoff=0.0,
+            log=lines.append,
+        )
+    )
+
+    assert result == "recovered"
+    assert len(calls) == 2
+    assert any("소켓7" in line and "해당 소켓만 재시작" in line for line in lines)
+
+
+def test_market_stream_disables_protocol_ping(monkeypatch):
+    calls = []
+    sentinel = object()
+    module = types.ModuleType("websockets")
+
+    def connect(url, **kwargs):
+        calls.append((url, kwargs))
+        return sentinel
+
+    module.connect = connect
+    monkeypatch.setitem(sys.modules, "websockets", module)
+
+    result = ls_realtime_worker._connect_market_stream("wss://example.test/websocket")
+
+    assert result is sentinel
+    assert calls == [
+        (
+            "wss://example.test/websocket",
+            {"open_timeout": 20, "ping_interval": None},
+        )
+    ]
 
 
 def test_realtime_shards_share_one_timescale_repository_connection():

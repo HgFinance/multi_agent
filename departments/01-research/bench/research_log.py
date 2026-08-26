@@ -215,6 +215,46 @@ def recent_findings(limit: int = 5) -> list[Entry]:
     return done[:limit]
 
 
+
+CLOSED_LINES = ROOT / "closed_lines.json"
+
+
+def close_line(line: str, *, closed_by: str, evidence: str,
+               why_not_reopen: str = "") -> int:
+    """**막다른 줄기를 에이전트가 직접 닫는다.**
+
+    지금까지 이건 사람만 할 수 있었다. 그래서 에이전트는 막다른 길인 줄
+    알아도 계속 그 길로 질문을 냈다 - 다른 길로 갈 권한이 없었다.
+
+    닫으려면 **근거를 대야 한다**(`evidence`). 근거 없는 금지는 다음 사람이
+    정당하게 다시 열어야 할 때 판단할 수가 없다. 그리고 영구 금지가 아니다 -
+    새 증거가 나오면 다시 연다.
+    """
+    line = str(line).strip()
+    evidence = str(evidence).strip()
+    if not line:
+        raise ValueError("무엇을 닫는지 적어야 한다")
+    if not evidence:
+        raise ValueError("근거 없이 줄기를 닫을 수 없다 - 무엇이 이걸 확정했나")
+    _ensure_dirs()
+    try:
+        items = json.loads(CLOSED_LINES.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        items = []
+    if any(str(it.get("line", "")).strip() == line for it in items):
+        return len(items)                  # 이미 닫혀 있다
+    items.append({
+        "line": line,
+        "closed_by": str(closed_by).strip() or "agent",
+        "evidence": evidence,
+        "why_not_reopen": str(why_not_reopen).strip()
+                          or "새 증거가 나오면 다시 연다.",
+    })
+    CLOSED_LINES.write_text(
+        json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    return len(items)
+
+
 def prereg_fingerprint(candidate: dict) -> str:
     """후보 사양의 지문. **홀드아웃을 보기 전에** 박는다.
 
@@ -389,6 +429,13 @@ def _cli(argv: list[str]) -> int:
     c.add_argument("--error", default="")
 
     sub.add_parser("show", help="로그를 사람이 읽게 출력")
+    cl = sub.add_parser("close-line",
+                        help="막다른 줄기를 닫는다(근거 필수)")
+    cl.add_argument("--line", required=True, help="무엇을 닫는가")
+    cl.add_argument("--evidence", required=True, help="무엇이 이걸 확정했나")
+    cl.add_argument("--closed-by", default="agent")
+    cl.add_argument("--why-not-reopen", default="")
+
     i = sub.add_parser("idea", help="아이디어를 큐에 넣는다")
     i.add_argument("question")
     i.add_argument("--kind", default="measure",
@@ -396,6 +443,12 @@ def _cli(argv: list[str]) -> int:
 
     a = p.parse_args(argv)
 
+    if a.cmd == "close-line":
+        n = close_line(a.line, closed_by=a.closed_by,
+                       evidence=a.evidence,
+                       why_not_reopen=a.why_not_reopen)
+        print(f"줄기 닫음. 현재 {n}건")
+        return 0
     if a.cmd == "idea":
         add_idea(a.question, kind=a.kind)
         print(f"아이디어 접수({a.kind})")

@@ -441,6 +441,14 @@
           "path": "/qa/v1/evidence/corpus/status"
         },
         {
+          "method": "GET",
+          "path": "/qa/v1/evolution/proposals/{proposal_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/evolution/proposals/{proposal_id}/decision"
+        },
+        {
           "method": "POST",
           "path": "/qa/v1/incidents/{incident_id}/events"
         },

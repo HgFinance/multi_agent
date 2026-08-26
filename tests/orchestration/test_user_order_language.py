@@ -17,6 +17,7 @@ from orchestration.contracts.user_paper_order import (
 )
 from orchestration.user_order_language import (
     MAX_PRICE,
+    deterministic_delayed_order_plan,
     deterministic_order_candidate,
     is_clearly_non_executable_order_language,
     looks_like_user_order_request,
@@ -24,6 +25,52 @@ from orchestration.user_order_language import (
     raw_text_sha256,
     verify_order_candidate,
 )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "<@1536991290842030130> 삼성전자 이거 4분 뒤에 1주 매수해줘",
+        "<@1536991290842030130>   <@1536991290842030130> 삼성전자 이거 4분 뒤에 1주 매수해줘",
+        "<@1536991290842030130>   @홍진표 대표 삼성전자 이거 4분 뒤에 1주 매수해줘",
+        "삼성전자 이거 4분 뒤에 1주 PAPER 매수해줘",
+    ],
+)
+def test_relative_time_order_reuses_exact_order_grammar_without_immediate_execution(
+    raw: str,
+) -> None:
+
+    assert deterministic_order_candidate(raw) is None
+    plan = deterministic_delayed_order_plan(raw)
+
+    assert plan is not None
+    assert plan.delay_seconds == 240
+    assert raw[plan.trigger_span[0] : plan.trigger_span[1]] == "4분 뒤에"
+    assert plan.payload.instrument_mention == "삼성전자"
+    assert plan.payload.side is OrderSide.BUY
+    assert plan.payload.quantity == "1"
+    assert plan.payload.order_type is OrderType.MARKET
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "삼성전자 대충 4분 뒤 1주 매수",
+        "삼성전자 4분 뒤 5분 뒤 1주 매수",
+        "삼성전자 25시간 뒤 1주 매수",
+    ],
+)
+def test_relative_time_order_rejects_ambiguous_or_unbounded_delay(raw: str) -> None:
+    assert deterministic_delayed_order_plan(raw) is None
+
+
+def test_relative_time_order_does_not_ignore_non_ceo_or_embedded_mentions() -> None:
+    assert deterministic_delayed_order_plan(
+        "<@1536991290842030130> @김동규 삼성전자 4분 뒤 1주 매수"
+    ) is None
+    assert deterministic_delayed_order_plan(
+        "삼성전자 @홍진표 대표 4분 뒤 1주 매수"
+    ) is None
 
 
 @pytest.mark.parametrize(

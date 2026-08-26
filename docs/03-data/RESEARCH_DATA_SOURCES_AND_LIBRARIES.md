@@ -1,12 +1,18 @@
 # 헤지펀드 전사 데이터 소스 및 부서별 라이브러리 설계서
 
-> 문서 상태: Company Data Stack v1.2  
+> 문서 상태: TARGET DATA SOURCE CATALOG / 설계 참고 v1.2
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 조사 기준일: 2026-07-29  
 > 적용 대상: CEO, Agent Workforce 인사팀, 6개 본부와 공통 Data Platform  
 > 확정 사항: 전사 업무 DB는 Supabase, 국내 가격·체결·호가는 LS증권 Open API, 리서치·퀀트 시장 시계열은 별도 TimescaleDB 사용  
 > 기준 구현: [traderjaeil-lgtm/krx-tick-collector](https://github.com/traderjaeil-lgtm/krx-tick-collector)  
 > 상세 기준: [DATA_GOVERNANCE_GUIDE.md](DATA_GOVERNANCE_GUIDE.md), [TECH_STACK_DECISIONS.md](../02-engineering/TECH_STACK_DECISIONS.md)
+
+> **현재 Runtime 보정(2026-08-26):** 상주 적재는 시세·가격·거래가능성·시장
+> Calendar·시장 DQ로 제한한다. 뉴스·공시·재무·거시는 요청형 MCP로 조회하며
+> 장기 적재하지 않는다. 현재 LS PAPER 주문 adapter는 Trading의 별도 로컬
+> `USER_DIRECTIVE` 레인에 구현돼 있다. 아래 수집기·Vendor·실거래 Broker 서술은
+> 목표 카탈로그이며 현재 서비스 존재를 뜻하지 않는다.
 
 ---
 
@@ -37,7 +43,7 @@
 - [SerpApi Search Engine APIs](../06-integrations/serpapi/README.md)는 뉴스·웹·검색 관심도·학술·특허·영상의 Discovery 계층 후보로 사용한다. 검색 결과와 AI 검색 답변은 원출처 Evidence가 아니며 LS 가격·DART 공시·KRX 통계를 대체하지 않는다.
 - 무료 뉴스 API와 Website Scraping은 서비스 단계에서 그대로 사용할 수 있다고 가정하지 않는다. 본문 저장, RAG, 재배포와 모델 입력 권한을 계약별로 확인한다.
 - 컨센서스·추정치·정제 재무·산업 분류는 무료 Source의 공백이 크므로 P1 이후 별도 Vendor 계약 후보로 관리한다.
-- 외부 시장·공시·뉴스·거시 데이터는 중앙 Data Plane이 한 번만 수집하고, 각 본부 Agent는 승인된 Domain API로 참조한다.
+- 시장 시계열은 중앙 Data Plane이 한 번만 수집한다. 공시·뉴스·재무·거시는 현재 요청형 MCP로 조회하며, 향후 적재형 Source를 도입하더라도 각 본부가 중복 수집하지 않고 승인된 Domain API를 사용한다.
 - 트레이딩은 주문·체결, 리스크는 Risk Decision·Breach, 퀀트는 Dataset·Experiment, 회계는 Ledger·NAV, QA는 Trace·Finding, 인사팀은 Agent Profile·Eval의 데이터 Owner다.
 - CEO와 본부장 Hermes는 원시 DB에 직접 연결하지 않는다. 본부별 Read Model과 구조화된 Artifact만 읽는다.
 
@@ -577,7 +583,7 @@ CEO가 생성하는 `MandateDecision`과 `CapitalAllocationDecision`은 설명�
 
 ### 6.5 리서치본부
 
-**수집 여부:** 전사 외부 투자 데이터의 업무 Owner다. 수집기는 Agent가 아니라 `market-collector`, `disclosure-collector`, `news-collector`, `macro-collector` 같은 Worker로 구현한다.
+**수집 여부:** 전사 외부 투자 데이터의 업무 Owner다. 현재 상주 Worker는 시장 데이터 수집기로 제한한다. `disclosure-collector`, `news-collector`, `macro-collector`는 과거/목표 명칭이며 현행 Runtime은 요청형 MCP를 사용한다.
 
 | Agent | 반드시 필요한 데이터 | 있으면 좋은 데이터 | 공식 Output |
 |---|---|---|---|
@@ -607,7 +613,7 @@ CEO가 생성하는 `MandateDecision`과 `CapitalAllocationDecision`은 설명�
 
 ### 6.6 트레이딩본부
 
-**수집 여부:** 뉴스·공시·가격을 중복 수집하지 않는다. 주문을 실행하는 Broker가 확정되면 Broker Adapter가 주문 접수, 정정·취소, 거부, 체결과 세션 상태를 수집한다. 가격 Source가 LS로 확정된 것과 실거래 Broker 선정은 별도 결정이다.
+**수집 여부:** 뉴스·공시·가격을 중복 수집하지 않는다. 현재 로컬 PAPER 경로에는 `LSPaperBroker` adapter가 있으며 주문 접수·상태·체결을 PAPER 전용으로 처리한다. 실거래 Broker와 LS LIVE 주문 adapter는 미선정·미구현이고, LS LIVE 연동은 시장 데이터 읽기 전용이다.
 
 | 필요한 데이터 | 참조 Source | 사용 목적 | 생성 데이터 |
 |---|---|---|---|
@@ -1328,4 +1334,4 @@ Collector가 이미 사용 중인 실제 Package와 Version은 Repository Lockfi
 
 ## 17. 최종 권장안
 
-> 전사 업무 데이터의 기본 System of Record는 Supabase PostgreSQL이다. 가격 Plane만 현재 구현된 LS Open API 기반 Collector와 별도 TimescaleDB를 사용하고 Parquet 장기 Archive, Instrument Master, Data Quality와 `market-api` Feature Endpoint를 보강한다. TimescaleDB는 리서치·퀀트 서비스만 소유하며 다른 본부는 `market-api`를 사용한다. 리서치 Data Platform은 Open DART, KRX, 뉴스, ECOS/KOSIS/FRED와 기업 IR을 한 번만 수집한다. 각 본부는 Order/Fill, Risk Decision, Dataset/Experiment, Ledger/NAV, Trace/Finding, Agent Profile/Eval을 자기 Supabase Schema에 공식 데이터로 생성한다.
+> 전사 업무 데이터의 기본 System of Record는 Supabase PostgreSQL이다. 가격 Plane만 현재 구현된 LS Open API 기반 Collector와 별도 TimescaleDB를 사용하고 Parquet 장기 Archive, Instrument Master, Data Quality와 `market-api` Feature Endpoint를 보강한다. TimescaleDB는 리서치·퀀트 서비스만 소유하며 다른 본부는 `market-api`를 사용한다. 현재 OpenDART·뉴스·거시·재무는 요청형 MCP로 조회한다. 향후 적재를 승인하더라도 리서치 Data Platform이 한 번만 수집하고 각 본부는 Domain API를 사용한다. 각 본부는 Order/Fill, Risk Decision, Dataset/Experiment, Ledger/NAV, Trace/Finding, Agent Profile/Eval을 자기 Supabase Schema에 공식 데이터로 생성한다.

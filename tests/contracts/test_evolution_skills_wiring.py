@@ -23,14 +23,32 @@ def test_model_overlay_runs_14b_proposal_worker_with_read_only_canonical_skills(
         service["environment"]["WORKER_MODEL_NAME"]
         == "${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}"
     )
-    assert command.count("--department") == 2
-    assert "01-research" in command and "04-quant-backtest" in command
+    assert command.count("--department") == 8
+    for department in (
+        "00-ceo-office",
+        "01-research",
+        "02-trading",
+        "03-risk",
+        "04-quant-backtest",
+        "05-accounting-portfolio",
+        "06-ai-qa-audit",
+        "07-agent-workforce",
+    ):
+        assert department in command
     assert "http://vllm:8000/v1" in command
+    assert "/var/lib/portfolio/langsmith-feedback.sqlite3" in command
     assert "./skills:/opt/shared-skills:ro" in service["volumes"]
     assert any(
         "evolution-skills" in volume and not volume.endswith(":ro")
         for volume in service["volumes"]
     )
+
+    control = overlay["services"]["skill-evolution-control-worker"]
+    control_command = [str(value) for value in control["command"]]
+    assert "control-daemon" in control_command
+    assert "--repository-root" in control_command
+    assert "./skills:/workspace/skills:rw" in control["volumes"]
+    assert "./skills:/opt/shared-skills:ro" not in control["volumes"]
 
 
 def test_feedback_producer_and_worker_share_persistent_occurrence_path() -> None:
@@ -41,13 +59,33 @@ def test_feedback_producer_and_worker_share_persistent_occurrence_path() -> None
     assert any(
         volume.endswith(":/var/lib/evolution-skills") for volume in worker["volumes"]
     )
+    audit = compose["services"]["audit-api"]
+    qa_hermes = compose["services"]["qa-hermes"]
+    assert audit["environment"]["EVOLUTION_SKILLS_HOME"] == "/var/lib/evolution-skills"
+    assert any(
+        volume.endswith(":/var/lib/evolution-skills") for volume in audit["volumes"]
+    )
+    assert any(
+        volume.endswith(":/var/lib/evolution-skills:ro")
+        for volume in qa_hermes["volumes"]
+    )
 
 
 def test_factory_image_contains_generator_entrypoint_and_model_gateway() -> None:
     dockerfile = (ROOT / "Dockerfile.factory").read_text(encoding="utf-8")
     assert "COPY scripts/evolution_skills.py" in dockerfile
     assert "COPY departments/worker_model_gateway.py" in dockerfile
+    assert "COPY departments/01-research/config/worker_model_registry.json" in dockerfile
     assert "PyYAML==6.0.2" in dockerfile
+    entrypoint = (ROOT / "scripts/evolution_skills.py").read_text(encoding="utf-8")
+    assert '"skill-evolution-proposal-worker", env=env' in entrypoint
+    registry = yaml.safe_load(
+        (ROOT / "departments/01-research/config/worker_model_registry.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert registry["hybrid_runtime"]["version"] == "awq-hybrid-upgrade-v1"
+    assert registry["hybrid_runtime"]["status"] == "enabled"
 
 
 def test_legacy_skill_forge_entrypoint_is_not_reintroduced() -> None:

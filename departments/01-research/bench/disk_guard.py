@@ -385,6 +385,7 @@ def main(argv=None) -> int:
     m = p.add_mutually_exclusive_group(required=True)
     m.add_argument("--self-check", action="store_true")
     m.add_argument("--check", action="store_true")
+    m.add_argument("--alert-check", action="store_true")
     m.add_argument("--once", action="store_true")
     m.add_argument("--loop", action="store_true")
     p.add_argument("--dry-run", action="store_true")
@@ -398,6 +399,15 @@ def main(argv=None) -> int:
         print(f"여유 {f:.1f}GB [{level(f)}]  "
               f"(SAFE>={SAFE_GB} WARN<{WARN_GB} CRIT<{CRIT_GB})")
         return 0
+    if a.alert_check:
+        f = free_gb()
+        current = level(f)
+        print(f"disk_guard free={f:.1f}GB level={current} "
+              f"warn_below={WARN_GB}GB critical_below={CRIT_GB}GB")
+        # A non-zero systemd result is the alert signal.  This mode never
+        # reclaims or deletes anything; operators can inspect the journal and
+        # explicitly run --once after identifying the growth source.
+        return 2 if current == "CRIT" else 1 if current == "WARN" else 0
     if a.once:
         run_once(dry_run=a.dry_run)
         return 0

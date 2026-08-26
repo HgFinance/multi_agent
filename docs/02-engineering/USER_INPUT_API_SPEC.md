@@ -360,7 +360,7 @@ approval_rules.*, base_capital, currency
 > - **§6.1 #2 BFF 프록시** ✅ — `by-fund`·`mandate-assistant`·`investor-profiles`(2개)에 더해 **Mandate 부모 행 생성**(`POST /ui/mandates`)과 현재 metadata 교체(`PUT /ui/mandates/{id}`)까지 연결했다. 기존 `versions` 프록시는 레거시 승인 워크플로 호환용이다. Registry 등재 완료.
 > - **새로 발견해 메운 공백**: `governance.mandates` INSERT가 `change_workflow.py` 자체 점검 코드 안에만 있어 **최초 Mandate를 만들 API가 없었다** — Version 제안 경로는 전부 `mandate_id`를 path로 받으므로 온보딩 첫 사용자는 시작할 수 없었다. `POST /governance/v1/mandates` 신설(DRAFT/v0 반환, `unique(fund_id,name)` 충돌은 409 + 기존 id).
 > - **§3.2 프리셋 9칸** — 수치는 여전히 동규님 확정 대기다. 구조와 검증만 `ai-office/app/lib/mandatePresets.ts`에 `PROVISIONAL`로 표시해 두었다(제약 검증 함수 포함). 잠정값은 스펙에 이미 있는 `min(mindset, experience)` 규칙에서만 끌어내 새 위험 판단을 만들지 않았고, **그 결과 9칸이 3등급으로 수렴한다** — 경험·성향이 `min()` 말고 다른 방식으로도 한도에 영향을 줘야 하는지가 동규님께 드리는 질문이다.
-> - **요청자 판정** — `apps/api/current_user.py`로 모았다. `X-User-Id`는 인증이 아니며(서명·만료 없음) 공개 배포 전 교체 대상이다.
+> - **요청자 판정** — `apps/api/current_user.py`로 모았다. `X-User-Id`는 인증이 아니며 로그인·세션으로 확장하지 않는다. 로컬에서는 서버가 선택한 고정 fixture actor 경계로만 사용한다.
 
 ### 6.1 반드시 선행돼야 하는 것
 

@@ -24,8 +24,11 @@ Token 발급 주체가 아직 미정이라(스펙 6절) 여기서 검증하지 �
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sys
+import time
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -702,7 +705,124 @@ def assess_mandate_for_risk_head(mandate_id: str, body: RiskMandateAssessmentReq
                 "body_mandate_id": body.mandate_id,
             },
         )
-    return assess_mandate(body)
+    started = time.perf_counter()
+    outcome = "ERROR"
+    fallback_count = 0
+    repository = _risk_control_repository()
+    body_payload = body.model_dump(mode="json")
+    inputs_hash = hashlib.sha256(
+        json.dumps(
+            body_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    trace_id = str(body.trace_id or body.event_id or inputs_hash[:16])
+    run_id = f"risk-mandate:{trace_id}"
+    if repository is not None:
+        try:
+            repository.record_run_event(
+                idempotency_key=f"{run_id}:InputSnapshot:risk-head:{inputs_hash}",
+                run_id=run_id,
+                trace_id=trace_id,
+                employee_profile="risk-head",
+                event_type="InputSnapshot",
+                inputs_hash=inputs_hash,
+                summary="Risk mandate assessment input accepted",
+                as_of=body.as_of,
+                schema_id="risk.mandate-assessment-request.v1",
+                schema_valid=True,
+                status="RUNNING",
+                raw={"mandate_id": mandate_id, "query_mode": body.query_mode},
+            )
+        except RiskControlPersistenceError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_code": "RISK_RUNTIME_EVENT_PERSISTENCE_FAILED",
+                    "reason": str(exc),
+                },
+            ) from exc
+    try:
+        result = assess_mandate(body)
+        outcome = str(result.get("pipeline_status") or "UNKNOWN")
+        fallback_count = 1 if outcome == "DEGRADED" else 0
+        if repository is not None:
+            output_hash = hashlib.sha256(
+                json.dumps(
+                    jsonable_encoder(result),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            employees = result.get("employees") or {}
+            for worker_id in ("risk-runner", "compliance-policy-worker"):
+                report = employees.get(worker_id) or {}
+                worker_status = str(report.get("status") or "UNKNOWN")
+                repository.record_run_event(
+                    idempotency_key=(
+                        f"{run_id}:AgentOutput:{worker_id}:{output_hash}"
+                    ),
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    employee_profile=worker_id,
+                    event_type="AgentOutput",
+                    inputs_hash=inputs_hash,
+                    output_hash=output_hash,
+                    summary=f"{worker_id} completed with {worker_status}",
+                    as_of=body.as_of,
+                    schema_id="risk.employee-output.v1",
+                    schema_valid=True,
+                    domain_valid=worker_status != "ERROR",
+                    fallback_reason=(
+                        "EMPLOYEE_RUNTIME_DEGRADED"
+                        if worker_status == "DEGRADED"
+                        else None
+                    ),
+                    status=worker_status,
+                    raw={"worker_id": worker_id, "status": worker_status},
+                )
+            repository.record_run_event(
+                idempotency_key=f"{run_id}:Decision:risk-head:{output_hash}",
+                run_id=run_id,
+                trace_id=trace_id,
+                employee_profile="risk-head",
+                event_type="Decision",
+                inputs_hash=inputs_hash,
+                output_hash=output_hash,
+                summary=f"Risk Head decision: {result.get('decision', 'HOLD')}",
+                as_of=body.as_of,
+                schema_id="risk-assessment.v1",
+                schema_valid=True,
+                domain_valid=outcome == "COMPLETED",
+                fallback_reason=(
+                    "RISK_PIPELINE_DEGRADED" if outcome == "DEGRADED" else None
+                ),
+                status=outcome,
+                raw={
+                    "pipeline_status": outcome,
+                    "decision": result.get("decision"),
+                    "duration_seconds": round(time.perf_counter() - started, 6),
+                },
+            )
+        return result
+    except RiskControlPersistenceError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "RISK_RUNTIME_EVENT_PERSISTENCE_FAILED",
+                "reason": str(exc),
+            },
+        ) from exc
+    finally:
+        RISK_TELEMETRY.record_pipeline(
+            stage="mandate-assessment",
+            outcome=outcome,
+            duration_seconds=time.perf_counter() - started,
+            fallback_count=fallback_count,
+        )
 
 
 @app.get("/risk/v1/mandate-presets")
@@ -851,26 +971,39 @@ def calculate_position_risk_plan(body: PositionRiskPlanRequest):
         "algorithm_version": "dynamic-position-risk-planner.v1",
         "status": "running",
     }
-    with risk_span(
-        "risk.advisory",
-        root_metadata,
-    ) as advisory_span:
-        result = plan_position_risk(normalized)
-        if advisory_span is not None:
-            advisory_span.metadata["status"] = result.action
-        repository = _risk_control_repository()
-        if repository is not None and result.action == "PROPOSE":
-            try:
-                repository.save_plan(result)
-            except RiskControlPersistenceError as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "error_code": "POSITION_RISK_PLAN_PERSISTENCE_FAILED",
-                        "reason": str(exc),
-                    },
-                ) from exc
-        return result
+    started = time.perf_counter()
+    outcome = "ERROR"
+    fallback_count = 0
+    try:
+        with risk_span(
+            "risk.advisory",
+            root_metadata,
+        ) as advisory_span:
+            result = plan_position_risk(normalized)
+            outcome = str(result.action)
+            fallback_count = 1 if outcome != "PROPOSE" else 0
+            if advisory_span is not None:
+                advisory_span.metadata["status"] = result.action
+            repository = _risk_control_repository()
+            if repository is not None and result.action == "PROPOSE":
+                try:
+                    repository.save_plan(result)
+                except RiskControlPersistenceError as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "error_code": "POSITION_RISK_PLAN_PERSISTENCE_FAILED",
+                            "reason": str(exc),
+                        },
+                    ) from exc
+            return result
+    finally:
+        RISK_TELEMETRY.record_pipeline(
+            stage="position-risk-plan",
+            outcome=outcome,
+            duration_seconds=time.perf_counter() - started,
+            fallback_count=fallback_count,
+        )
 
 
 @app.post("/risk/v1/position-risk-plans/transitions/validate")
@@ -996,7 +1129,40 @@ def health_ready() -> dict:
 
 @app.get("/risk/v1/observability/runtime")
 def runtime_observability():
-    return RISK_TELEMETRY.snapshot()
+    snapshot = RISK_TELEMETRY.snapshot()
+    snapshot["process_pipeline_count"] = snapshot["pipeline_count"]
+    snapshot["process_fallback_count"] = snapshot["fallback_count"]
+    snapshot["process_p50_seconds"] = snapshot["p50_seconds"]
+    snapshot["process_p99_seconds"] = snapshot["p99_seconds"]
+    snapshot["canonical_store"] = "NOT_CONFIGURED"
+    repository = _risk_control_repository()
+    if repository is None:
+        return snapshot
+    try:
+        durable = repository.runtime_observability()
+    except RiskControlPersistenceError as exc:
+        snapshot["canonical_store"] = "UNAVAILABLE"
+        snapshot["canonical_error"] = type(exc).__name__
+        return snapshot
+    snapshot["canonical_store"] = "READY"
+    snapshot["durable"] = durable
+    snapshot["durable_pipeline_count"] = durable["pipeline_count"]
+    snapshot["durable_fallback_count"] = durable["fallback_count"]
+    snapshot["pipeline_count"] = max(
+        snapshot["pipeline_count"], durable["pipeline_count"]
+    )
+    snapshot["fallback_count"] = max(
+        snapshot["fallback_count"], durable["fallback_count"]
+    )
+    snapshot["fallback_rate"] = (
+        snapshot["fallback_count"] / snapshot["pipeline_count"]
+        if snapshot["pipeline_count"]
+        else 0.0
+    )
+    if durable["pipeline_count"]:
+        snapshot["p50_seconds"] = durable["p50_seconds"]
+        snapshot["p99_seconds"] = durable["p99_seconds"]
+    return snapshot
 
 
 @app.get("/metrics", include_in_schema=False)

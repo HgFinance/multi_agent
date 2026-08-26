@@ -65,6 +65,38 @@ def test_config_requires_and_normalizes_paper_mac(monkeypatch) -> None:
     assert LSPaperBrokerConfig.from_env().mac_address == "001122AABBCC"
 
 
+def test_get_quote_uses_read_only_t1101_contract() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token"})
+        assert request.url.path == "/stock/market-data"
+        assert request.headers["tr_cd"] == "t1101"
+        assert __import__("json").loads(request.content) == {
+            "t1101InBlock": {"shcode": "005930"}
+        }
+        return httpx.Response(
+            200,
+            json={
+                "rsp_cd": "00000",
+                "t1101OutBlock": {
+                    "bidho1": "256000",
+                    "offerho1": "256500",
+                    "bidrem1": "100",
+                    "offerrem1": "120",
+                },
+            },
+        )
+
+    quote = _broker(handler).get_quote("005930")
+
+    assert quote["symbol"] == "005930"
+    assert quote["bid"] == Decimal("256000")
+    assert quote["ask"] == Decimal("256500")
+    assert quote["bid_size"] == Decimal("100")
+    assert quote["ask_size"] == Decimal("120")
+    assert quote["observed_at"].tzinfo is not None
+
+
 def test_place_market_buy_uses_paper_cash_order_contract() -> None:
     requests: list[httpx.Request] = []
 

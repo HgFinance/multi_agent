@@ -10,6 +10,7 @@
 x-admin-control-database-url: &admin-control-database-url "postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
 x-admin-market-database-url: &admin-market-database-url "postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}@timescaledb:5432/market"
 x-control-database-url: &control-database-url "postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
+x-audit-api-database-url: &audit-api-database-url "postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_audit_api"
 x-market-database-url: &market-database-url "postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/market"
 x-order-database-url: &order-database-url "postgresql://hgfinance_order_runtime:${HEDGEFUND_ORDER_DB_PASSWORD:?HEDGEFUND_ORDER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
 x-trading-database-url: &trading-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_trading_api"
@@ -67,7 +68,7 @@ services:
       HGFINANCE_MIGRATION_TIMEOUT_SECONDS: ${HGFINANCE_MIGRATION_TIMEOUT_SECONDS:-1800}
       HGFINANCE_MIGRATION_LOCK_TIMEOUT_SECONDS: ${HGFINANCE_MIGRATION_LOCK_TIMEOUT_SECONDS:-120}
       PAPER_SEED_USER_ID: ${PAPER_SEED_USER_ID:-00000000-0000-4000-8000-00000000cec0}
-      PAPER_SEED_FUND_ID: ${PAPER_SEED_FUND_ID:-5c26db42-ce83-4daf-b1dc-c81680c13a6c}
+      PAPER_SEED_FUND_ID: ${PAPER_SEED_FUND_ID:-3838f7d6-0c7c-4e54-85f3-316a451e7eeb}
       PAPER_SEED_BOOK_ID: ${PAPER_SEED_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
       PAPER_SEED_CASH_KRW: ${PAPER_SEED_CASH_KRW:-1000000000}
     mem_limit: 1g
@@ -91,7 +92,7 @@ services:
       MARKET_DATABASE_URL: *admin-market-database-url
       HEDGEFUND_CONTROL_DB_NAME: ${HEDGEFUND_CONTROL_DB_NAME:-control}
       PAPER_SEED_USER_ID: ${PAPER_SEED_USER_ID:-00000000-0000-4000-8000-00000000cec0}
-      PAPER_SEED_FUND_ID: ${PAPER_SEED_FUND_ID:-5c26db42-ce83-4daf-b1dc-c81680c13a6c}
+      PAPER_SEED_FUND_ID: ${PAPER_SEED_FUND_ID:-3838f7d6-0c7c-4e54-85f3-316a451e7eeb}
       PAPER_SEED_BOOK_ID: ${PAPER_SEED_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
       AWS_REFERENCE_MIN_ACTIVE_KRX_STOCKS: ${AWS_REFERENCE_MIN_ACTIVE_KRX_STOCKS:-1000}
       # Instrument master/calendar lookup is market-data-only.  LIVE here does
@@ -123,7 +124,6 @@ services:
       PORTFOLIO_DATA_MODE: production
       PORTFOLIO_AUTH_MODE: fixture
       PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:?An explicit PAPER trading-book fixture grant is required}
-      PORTFOLIO_AUTH_REQUIRED: "false"
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
       USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "true"
       WORKER_MODEL_EXECUTION_CONTEXT: container
@@ -265,7 +265,9 @@ services:
     environment: *control-and-market-environment
 
   batch-collectors:
-    environment: *control-and-market-environment
+    environment:
+      <<: *control-and-market-environment
+      RESEARCH_COLLECTOR_DATABASE_ROLE: svc_research_collector
 
   qa-reproduction-worker:
     environment:
@@ -363,7 +365,7 @@ services:
       <<: *control-environment
       MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-active}
       MEMOHARNESS_D5_DATABASE_URL: *control-database-url
-      RISK_QA_DATABASE_URL: *control-database-url
+      RISK_QA_DATABASE_URL: *audit-api-database-url
       # The supervisor binds the already-admitted PAPER request before it
       # releases the deferred Trading card. Use the isolated order role.
       ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url

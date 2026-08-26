@@ -49,6 +49,11 @@ from orchestration.conditional_rules import (
     evaluate_condition,
     guard_rule_execution,
 )
+from orchestration.conditional_rules.bar_data import (
+    BarResolver,
+    BarResolverError,
+    LSChartBarResolver,
+)
 from orchestration.conditional_rules.indicators import DEFAULT_REGISTRY
 from orchestration.conditional_rules.market_data import (
     LSPaperMarketPriceResolver,
@@ -372,6 +377,7 @@ class HttpRuntimeClient:
         market_api_url: str,
         timeout_seconds: float = 8.0,
         price_resolver: MarketPriceResolver | None = None,
+        bar_resolver: BarResolver | None = None,
     ) -> None:
         if not trading_api_url.strip() or not market_api_url.strip():
             raise RuntimeDataError(
@@ -383,9 +389,11 @@ class HttpRuntimeClient:
         self.market_api_url = market_api_url.rstrip("/")
         self.timeout_seconds = max(1.0, min(float(timeout_seconds), 30.0))
         self._price_resolver = price_resolver
+        self._bar_resolver = bar_resolver
         self._cycle_prices: dict[str, tuple[Decimal, datetime, dict[str, Any]]] = {}
         self._cycle_prices_lock = threading.Lock()
         self._price_resolver_lock = threading.Lock()
+        self._bar_resolver_lock = threading.Lock()
 
     def begin_cycle(self) -> None:
         """Drop the bounded per-cycle quote snapshot before polling again."""
@@ -539,28 +547,33 @@ class HttpRuntimeClient:
             return result
 
     def _bars(self, symbol: str, timeframe: Timeframe, limit: int) -> list[Candle]:
-        query = urllib.parse.urlencode({"interval": timeframe.value, "limit": limit})
-        value = self._json(f"{self.market_api_url}/bars/{symbol}?{query}")
-        if not isinstance(value, list):
-            raise RuntimeDataError("MARKET_BARS_INVALID", "Market bars response is invalid")
+        """확정봉을 LS 통합차트에서 직접 받는다 - market_bars 는 읽지 않는다.
+
+        예전에는 market-api 의 ``/bars?interval=...`` 을 호출했고, 그 뒤에는
+        야간 백필이 채우는 ``market.market_bars`` 가 있었다. 그 잡이 배포
+        이미지의 스케줄러에 등록돼 있지 않아 1M 이 영구 0행이었고, 응답이
+        HTTP 200 + ``[]`` 라 실패가 정상 응답으로 위장됐다(2026-08-26 실측).
+        야간 백필은 원리상 당일 장중 규칙을 만족시킬 수 없으므로, 실시간
+        평가는 조달처를 브로커 차트로 옮긴다. market_bars 는 백테스트·PIT
+        재현용 아카이브로 그대로 둔다(개발원칙 5).
+        """
+
+        resolver = self._bar_resolver
+        if resolver is None:
+            with self._bar_resolver_lock:
+                resolver = self._bar_resolver
+                if resolver is None:
+                    try:
+                        resolver = LSChartBarResolver.from_env()
+                    except BarResolverError as exc:
+                        raise RuntimeDataError(
+                            exc.code, str(exc), retryable=exc.retryable
+                        ) from exc
+                    self._bar_resolver = resolver
         try:
-            candles = [
-                Candle.model_validate(
-                    {
-                        "bucket_time": item["bucket_time"],
-                        "open": item["open"],
-                        "high": item["high"],
-                        "low": item["low"],
-                        "close": item["close"],
-                        "volume": item["volume"],
-                        "is_final": item.get("is_final") is True,
-                    }
-                )
-                for item in value
-                if isinstance(item, dict)
-            ]
-        except (KeyError, ValueError) as exc:
-            raise RuntimeDataError("MARKET_BARS_INVALID", "Market bars contain invalid data") from exc
+            candles = resolver.bars(symbol, timeframe, limit)
+        except BarResolverError as exc:
+            raise RuntimeDataError(exc.code, str(exc), retryable=exc.retryable) from exc
         return sorted(candles, key=lambda item: item.bucket_time)
 
     def load_inputs(self, rule: ActiveRule) -> RuntimeInputs:
@@ -700,6 +713,11 @@ class HttpRuntimeClient:
             previous_external_indicators=_normalized_indicator_values(context.get("previous_indicator_values"), field="previous_indicator_values"),
             market_data_source_id=str(context["market_data_source_id"]) if context.get("market_data_source_id") is not None else None,
             calculation_profile=str(context.get("calculation_profile", "DEFAULT")),
+            current_observed_at=(
+                quote_at
+                if rule.spec.evaluation.clock is EvaluationClock.QUOTE
+                else None
+            ),
         )
         watermark = (
             evaluation_context.current.observed_at

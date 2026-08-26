@@ -51,7 +51,6 @@ services:
       # This bundle is retained only as a legacy compose shape. User login is
       # not implemented; the supported mock stack is local fixture-only.
       PORTFOLIO_AUTH_MODE: fixture
-      PORTFOLIO_AUTH_REQUIRED: "false"
       # This legacy bundle intentionally excludes shared Kanban, dispatcher,
       # Trading Hermes and its MCP bridge. Fail before creating an orphan card;
       # deterministic authenticated PAPER API endpoints remain available.
