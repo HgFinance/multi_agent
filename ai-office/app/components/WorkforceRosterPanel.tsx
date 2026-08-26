@@ -24,6 +24,16 @@ const POLL_MS = 120_000;
  * RETIRED(퇴사)는 기본 목록에서 숨긴다. 필터를 끄면 전체 상태를 보여준다. */
 const CURRENTLY_WORKING_STATUSES: ReadonlySet<EmploymentStatus> = new Set(["ACTIVE", "PROBATION"]);
 
+/** 목록과 상태 요약 타일이 같은 고용 상태 우선순위를 사용한다. */
+const EMPLOYMENT_STATUS_ORDER: readonly EmploymentStatus[] = [
+  "ACTIVE",
+  "PROBATION",
+  "CANDIDATE",
+  "SUSPENDED",
+  "RETIRED",
+];
+const EMPLOYMENT_STATUS_RANK = new Map(EMPLOYMENT_STATUS_ORDER.map((status, index) => [status, index]));
+
 const EMPLOYMENT_VIEW: Record<EmploymentStatus, { label: string; tone: string; icon: string }> = {
   CANDIDATE: {
     label: "CANDIDATE",
@@ -62,6 +72,19 @@ function employmentView(status: string) {
   );
 }
 
+function compareRosterAgents(left: RosterAgent, right: RosterAgent) {
+  const leftStatusRank = EMPLOYMENT_STATUS_RANK.get(left.employment_status) ?? EMPLOYMENT_STATUS_ORDER.length;
+  const rightStatusRank = EMPLOYMENT_STATUS_RANK.get(right.employment_status) ?? EMPLOYMENT_STATUS_ORDER.length;
+  if (leftStatusRank !== rightStatusRank) return leftStatusRank - rightStatusRank;
+
+  const departmentOrder = left.department_code.localeCompare(right.department_code);
+  if (departmentOrder !== 0) return departmentOrder;
+
+  const displayNameOrder = left.display_name.localeCompare(right.display_name);
+  if (displayNameOrder !== 0) return displayNameOrder;
+  return left.employee_code.localeCompare(right.employee_code);
+}
+
 function WorkforceRosterArtifactHeader({ visible, total }: { visible?: number; total?: number }) {
   return (
     <div className="flex items-center justify-between gap-3 border-b border-outline-variant bg-surface-container-low px-4 py-2.5">
@@ -88,7 +111,7 @@ function WorkforceRosterArtifactHeader({ visible, total }: { visible?: number; t
 function EmploymentCountTiles({ agents }: { agents: RosterAgent[] }) {
   const counts = new Map<string, number>();
   for (const agent of agents) counts.set(agent.employment_status, (counts.get(agent.employment_status) ?? 0) + 1);
-  const statuses: EmploymentStatus[] = ["ACTIVE", "PROBATION", "CANDIDATE", "SUSPENDED", "RETIRED"];
+  const statuses = EMPLOYMENT_STATUS_ORDER;
   const present = statuses.filter((status) => (counts.get(status) ?? 0) > 0);
 
   return (
@@ -245,9 +268,10 @@ export default function WorkforceRosterPanel() {
   const error = query.error ?? null;
   const loading = query.isPending;
   const agents = data?.agents ?? [];
+  const sortedAgents = [...agents].sort(compareRosterAgents);
   const visibleAgents = showAllStatuses
-    ? agents
-    : agents.filter((agent) => CURRENTLY_WORKING_STATUSES.has(agent.employment_status as EmploymentStatus));
+    ? sortedAgents
+    : sortedAgents.filter((agent) => CURRENTLY_WORKING_STATUSES.has(agent.employment_status as EmploymentStatus));
   const hiddenCount = agents.length - visibleAgents.length;
 
   return (
@@ -318,9 +342,9 @@ export default function WorkforceRosterPanel() {
           <>
             <EmploymentCountTiles agents={agents} />
 
-            <div className="overflow-x-auto rounded-lg border border-outline-variant">
+            <div className="max-h-[26rem] overflow-auto rounded-lg border border-outline-variant">
               <table className="w-full min-w-[640px] text-left text-xs">
-                <thead className="bg-surface-container text-label-md text-on-surface-variant">
+                <thead className="sticky top-0 z-10 bg-surface-container text-label-md text-on-surface-variant shadow-[0_1px_0_var(--color-outline-variant)]">
                   <tr>
                     <th className="px-2.5 py-1.5 font-semibold">부서</th>
                     <th className="px-2.5 py-1.5 font-semibold">Agent</th>
