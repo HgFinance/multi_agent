@@ -132,6 +132,45 @@ class PostgresScorecardRepository:
         finally:
             self._pool.putconn(conn)
 
+    def get_agent_cost_subject(self, employee_code: str) -> tuple[str, str] | None:
+        """Worker 하나를 cost_snapshots 가 요구하는 (agent_id, profile_version_id) 로 푼다.
+
+        ▶ 왜 이 조회가 필요한가 (2026-08-27): workforce.cost_snapshots 는 agent_id
+          와 profile_version_id 가 **둘 다 NOT NULL** 이다. 즉 부서 단위로는 한 줄도
+          못 적는다. Langfuse 관측은 (부서, worker_id) 단위라, 그 둘을 잇는 이
+          조회가 없으면 관측값이 DB Scorecard 로 넘어갈 방법 자체가 없다.
+
+        ▶ worker_id 가 곧 employee_code 다(20260824000100 roster reconcile 이
+          'competing-explanation-worker' 같은 값을 그대로 employee_code 로 넣는다).
+          이름 규칙으로 변환하지 않는다 - 규칙을 만들면 한 명이 어긋났을 때
+          조용히 다른 Agent 의 비용으로 적힌다.
+
+        ▶ 살아 있는 버전이 없으면 **None 을 돌려준다**(임의로 RETIRED 버전을
+          고르지 않는다). 비용을 은퇴한 버전에 붙이면 그 버전의 예산 판정이
+          사후에 바뀐다. 여러 개면 가장 최근 effective_from 하나.
+        """
+
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select p.agent_id, v.profile_version_id
+                      from workforce.agent_profiles p
+                      join workforce.agent_profile_versions v on v.agent_id = p.agent_id
+                     where p.employee_code = %s
+                       and v.status not in ('RETIRED')
+                     order by v.effective_from desc
+                     limit 1
+                    """,
+                    (employee_code,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return (str(row[0]), str(row[1])) if row else None
+        finally:
+            self._pool.putconn(conn)
+
     def append_cost_snapshot(self, snapshot: CostSnapshot) -> tuple[str, bool]:
         """플랫폼이 보고한 비용 계측 1건을 적는다. (snapshot_id, 새로 만들었는가) 반환.
 

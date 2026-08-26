@@ -1182,6 +1182,157 @@ def check_department_llm_usage(
     ]
 
 
+# ── Worker 단위 사용량 ────────────────────────────────────────────────────────
+#
+# check_department_llm_usage 와 **같은 이벤트를 같은 캐시에서** 읽고 집계 축만
+# 바꾼다(부서 합산 -> Worker 개별). 그래서 Langfuse 왕복이 늘지 않는다 -
+# WindowedActivityReader 가 (event_name, 창) 단위로 이미 페이지를 들고 있다.
+#
+# 왜 Worker 단위가 따로 필요한가: workforce.cost_snapshots 는 agent_id 가 NOT NULL
+# 이다(부서 단위로 적을 수 없다). 부서 합산만 있으면 그 테이블을 채울 수 없어서,
+# Langfuse 관측과 DB Scorecard 가 영원히 이어지지 않는다.
+
+
+class WorkerUsageObservationStatus(str, Enum):
+    MEASURED = "MEASURED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+@dataclass(frozen=True)
+class WorkerUsageReport:
+    """Worker 한 명의 실행 건수·토큰·모델 관측 한 건.
+
+    model_names 는 **비용 산정의 근거**다. 이 창에서 실제로 관측된 모델 이름만
+    담는다 - 비어 있으면 모델을 못 읽은 것이지 "모델을 안 썼다"가 아니다.
+    같은 Worker 가 창 안에서 모델을 갈아탈 수 있어(운영 AWQ / 개발 fallback)
+    단수가 아니라 목록이다.
+
+    prompt_tokens/completion_tokens/llm_calls 는 begin_worker_metric() 컨텍스트가
+    열려 있었던 실행에서만 나온다 - arrivals > 0 이어도 None 일 수 있고, 그건
+    "0 토큰"이 아니라 "그 창의 실행이 전부 계측 컨텍스트 밖이었다"는 뜻이다
+    (cost.py 불변식 3).
+    """
+
+    department: str
+    worker_id: str
+    window_start: datetime
+    window_end: datetime
+    status: WorkerUsageObservationStatus
+    arrivals: int | None
+    llm_calls: int | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    model_names: tuple[str, ...]
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_reason(self.status, WorkerUsageObservationStatus.UNAVAILABLE, self.reason)
+        if self.status is WorkerUsageObservationStatus.UNAVAILABLE and self.model_names:
+            raise ValueError("UNAVAILABLE 인데 모델 이름이 관측됐다 - 모순")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "department": self.department,
+            "worker_id": self.worker_id,
+            "window_start": self.window_start.isoformat(),
+            "window_end": self.window_end.isoformat(),
+            "status": self.status.value,
+            "arrivals": self.arrivals,
+            "llm_calls": self.llm_calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "model_names": list(self.model_names),
+            "reason": self.reason,
+        }
+
+
+def compute_worker_usage(
+    *, department: str, stage: str, spec: Any, reader: LangfuseTraceReader | None,
+    since: datetime, now: datetime, reader_unavailable_reason: str | None = None,
+) -> WorkerUsageReport:
+    """Worker 한 명의 실행 이벤트를 토큰·모델 축으로 합친다."""
+
+    def _unavailable(reason: str) -> WorkerUsageReport:
+        return WorkerUsageReport(
+            department=department, worker_id=spec.worker_id,
+            window_start=since, window_end=now,
+            status=WorkerUsageObservationStatus.UNAVAILABLE,
+            arrivals=None, llm_calls=None, prompt_tokens=None, completion_tokens=None,
+            model_names=(), reason=reason,
+        )
+
+    if reader is None:
+        return _unavailable(reader_unavailable_reason or _READER_UNAVAILABLE_REASON)
+
+    event_name = langfuse_worker_event_name(stage=stage, worker_id=spec.worker_id)
+    try:
+        records = reader.list_worker_activity(event_name=event_name, since=since)
+    except LangfuseQueryError as exc:
+        return _unavailable(str(exc))
+
+    llm_calls = [r.llm_calls for r in records if r.llm_calls is not None]
+    prompt_tokens = [r.prompt_tokens for r in records if r.prompt_tokens is not None]
+    completion_tokens = [r.completion_tokens for r in records if r.completion_tokens is not None]
+    # 이름 순 고정 - 같은 창을 다시 읽었을 때 목록 순서가 흔들리면 재보고가 변경으로
+    # 보인다(멱등 재보고가 이 값을 metadata 로 싣는다).
+    models = tuple(sorted({r.model_name for r in records if r.model_name}))
+
+    return WorkerUsageReport(
+        department=department, worker_id=spec.worker_id,
+        window_start=since, window_end=now,
+        status=WorkerUsageObservationStatus.MEASURED,
+        arrivals=len(records),
+        llm_calls=sum(llm_calls) if llm_calls else None,
+        prompt_tokens=sum(prompt_tokens) if prompt_tokens else None,
+        completion_tokens=sum(completion_tokens) if completion_tokens else None,
+        model_names=models,
+    )
+
+
+def check_worker_usage(
+    *,
+    reader: LangfuseTraceReader | None = None,
+    departments: tuple[str, ...] = tuple(INVESTMENT_DEPARTMENT_STAGE),
+    lookback_hours: float = 24.0,
+    now: datetime | None = None,
+    repo_root: Path = ROOT,
+    reader_unavailable_reason: str | None = None,
+) -> list[WorkerUsageReport]:
+    """6개 투자본부(기본값) 등록 Worker 전원의 토큰·모델 사용량을 개별로 돌려준다."""
+
+    if lookback_hours <= 0:
+        raise ValueError("lookback_hours 는 양수여야 한다")
+    for department in departments:
+        if department not in INVESTMENT_DEPARTMENT_STAGE:
+            raise ValueError(f"unknown_investment_department:{department}")
+    if load_worker_registry is None or workers_for_department is None:
+        raise WorkerRegistryUnavailable(
+            f"worker_registry_unavailable:{_WORKER_REGISTRY_IMPORT_ERROR}"
+        )
+    try:
+        registry = load_worker_registry(repo_root)
+    except WorkerRegistryError as exc:
+        raise WorkerRegistryUnavailable(f"worker_registry_unavailable:{exc}") from exc
+
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(hours=lookback_hours)
+    reader, resolved_reason = _resolve_reader(reader)
+    reader_unavailable_reason = reader_unavailable_reason or resolved_reason
+
+    reports: list[WorkerUsageReport] = []
+    for department in departments:
+        stage = INVESTMENT_DEPARTMENT_STAGE[department]
+        for spec in workers_for_department(registry, department):
+            reports.append(
+                compute_worker_usage(
+                    department=department, stage=stage, spec=spec, reader=reader,
+                    since=since, now=now,
+                    reader_unavailable_reason=reader_unavailable_reason,
+                )
+            )
+    return reports
+
+
 # ── 발화율(fire rate) ─────────────────────────────────────────────────────────
 #
 # check_idle_agents()에 합치지 않는 이유: idle-agents 는 "가장 최근 실행이
@@ -1338,6 +1489,10 @@ class WorkforceObservability:
     idle_agents: tuple[WorkerIdleReport, ...]
     capacity: tuple[DepartmentCapacityReport, ...]
     llm_usage: tuple[DepartmentLlmUsageReport, ...]
+    # Worker 개별 토큰·모델. 부서 합산(llm_usage)과 같은 이벤트를 같은 캐시에서
+    # 읽으므로 왕복이 늘지 않는다 - workforce.cost_snapshots 가 agent_id 를
+    # NOT NULL 로 요구해서 부서 합산만으로는 그 테이블을 채울 수 없다.
+    worker_usage: tuple[WorkerUsageReport, ...]
     trigger_rates: tuple[WorkerTriggerRateReport, ...]
     # 부서장 신원만 못 읽은 경우의 사유(Worker 판정은 정상) - 조용히 빼면 부서장이
     # "전부 정상"으로 읽힌다(list_idle_agents 머리말과 같은 이유).
@@ -1353,6 +1508,7 @@ class WorkforceObservability:
             "idle_agents": [r.as_dict() for r in self.idle_agents],
             "capacity": [r.as_dict() for r in self.capacity],
             "llm_usage": [r.as_dict() for r in self.llm_usage],
+            "worker_usage": [r.as_dict() for r in self.worker_usage],
             "trigger_rates": [r.as_dict() for r in self.trigger_rates],
             "langfuse_queries": self.langfuse_queries,
         }
@@ -1421,6 +1577,7 @@ def collect_workforce_observability(
 
     capacity = check_department_capacity(**common)
     llm_usage = check_department_llm_usage(**common)
+    worker_usage = check_worker_usage(**common)
     trigger_rates = check_worker_trigger_rates(**common)
 
     return WorkforceObservability(
@@ -1429,6 +1586,7 @@ def collect_workforce_observability(
         idle_agents=tuple(idle),
         capacity=tuple(capacity),
         llm_usage=tuple(llm_usage),
+        worker_usage=tuple(worker_usage),
         trigger_rates=tuple(trigger_rates),
         head_profiles_unavailable=head_profiles_unavailable,
         langfuse_queries=shared.queries if isinstance(shared, WindowedActivityReader) else 0,

@@ -119,12 +119,37 @@ export type WorkerTriggerRateReport = {
   reason: string | null;
 };
 
+/**
+ * Worker 개별 토큰·모델. `llm_usage`(부서 합산)와 **같은 Langfuse 이벤트를 같은
+ * 캐시에서** 읽고 집계 축만 바꾼 값이라 왕복이 늘지 않는다.
+ *
+ * 화면은 아직 이 목록을 그리지 않는다 — `workforce.cost_snapshots`가 agent_id를
+ * NOT NULL로 요구해서, 관측을 DB Scorecard로 옮기는 writer가 이 축을 필요로 한다
+ * (departments/07-agent-workforce/scorecard/snapshot_writer.py).
+ *
+ * model_names가 비어 있으면 "모델을 안 썼다"가 아니라 "모델을 못 읽었다"다.
+ */
+export type WorkerUsageReport = {
+  department: string;
+  worker_id: string;
+  window_start: string;
+  window_end: string;
+  status: "MEASURED" | "UNAVAILABLE" | string;
+  arrivals: number | null;
+  llm_calls: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  model_names: string[];
+  reason: string | null;
+};
+
 export type WorkforceObservability = {
   window_start: string;
   window_end: string;
   idle_agents: WorkerIdleReport[];
   capacity: DepartmentCapacityReport[];
   llm_usage: DepartmentLlmUsageReport[];
+  worker_usage: WorkerUsageReport[];
   trigger_rates: WorkerTriggerRateReport[];
   /** 이 호출이 Langfuse에 실제로 낸 논리 질의 수 — 중복 제거가 풀리면 먼저 는다. */
   langfuse_queries: number;
