@@ -482,6 +482,10 @@
         },
         {
           "method": "GET",
+          "path": "/qa/v1/d5/improvement/regression-candidates"
+        },
+        {
+          "method": "GET",
           "path": "/qa/v1/observability/feedback/pending"
         },
         {
@@ -1023,6 +1027,34 @@
         {
           "method": "GET",
           "path": "/ui/strategy-research/requests/{request_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/strategy-research/requests/{request_id}/deploy"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/strategy-research/requests/{request_id}/deployments"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/strategy-research/requests/{request_id}/deployments/{deployment_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/strategy-research/requests/{request_id}/deployments/{deployment_id}/approve"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/strategy-research/requests/{request_id}/deployments/{deployment_id}/power"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/strategy-research/requests/{request_id}/deployments/{deployment_id}/remove"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/strategy-research/requests/{request_id}/promote"
         },
         {
           "method": "POST",

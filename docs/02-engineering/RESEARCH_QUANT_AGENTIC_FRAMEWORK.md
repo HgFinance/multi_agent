@@ -103,15 +103,14 @@ Universe 검사
 현재 Quant는 하나의 통합 Graph가 아니라 다음 독립 스크립트로 구성된다.
 
 ```text
-strategy_hypothesis_agent.py
 pit_dataset.py
 backtest_runner.py
 walk_forward.py
 experiment_orchestrator.py
 ```
 
-- 가설 Agent는 현재 `market-api /regime/daily`로 계산한 제한된 시장 단면을 주 근거로 쓴다.
-- Research Packet의 Claim과 Evidence가 Hypothesis에 직접 연결되는 표준 계약은 아직 없다.
+- 가설 생성은 Research가 소유하며, Quant는 등록된 가설·불변 결과만 검증한다.
+- Quant가 받은 Research Packet의 Claim과 Evidence가 Hypothesis에 연결되는 표준 계약은 별도 handoff로 유지한다.
 - Dataset Hash, t-1 Signal, 비용, 실패 기록 같은 좋은 결정론적 기반은 존재한다.
 - Quant Hermes Profile과 직원 Persona는 있지만, 이들을 작업 상태와 승인 경계가 있는
   LangGraph/Worker Runtime으로 연결하는 작업은 남아 있다.
@@ -679,37 +678,11 @@ notes: 자유 서술은 이 한 필드에만 격리한다(Gate 0 대조에 사�
 3. **교훈은 통제 어휘다.** 자유 서술 교훈은 다음 기획안과 기계 대조가 안 된다 — 대조가
    안 되는 교훈은 Gate 0에서 아무것도 막지 못하고, 회사는 같은 실험을 두 번 산다.
 
-### 7.7 Investment Doctrine Model Factory
+### 7.7 Doctrine Model 경로의 현재 상태
 
-투자자 Persona는 이름과 문체를 흉내 내는 의사결정자가 아니라, 검증 가능한 투자 원칙을 적용하는
-`Strategy Reviewer` 또는 `Research Lens`로 사용한다. 조건부 직원 `QNT-08 Investment Doctrine &
-Model Engineer`가 Source에서 원칙을 추출해 `InvestmentDoctrineV1`과 학습 Dataset을 만들고,
-Prompt/RAG Baseline이 고정 Eval을 반복 실패할 때만 Fine-tuning Candidate를 제출한다.
-
-```text
-Verified Source Corpus
-  -> InvestmentDoctrineV1
-  -> Prompt/RAG Baseline
-  -> Fine-tuning Need Gate
-  -> PIT Dataset + Frozen Test
-  -> Isolated SFT/LoRA Worker
-  -> DoctrineModelCandidateV1
-  -> Independent QNT-04 + AI QA Evaluation
-  -> Shadow Doctrine Reviewer
-  -> DoctrineReviewV1
-  -> QNT-01 Hypothesis Seed
-```
-
-- QNT-08은 Training Plan을 만들지만 GPU Worker를 임의 실행하거나 자기 Candidate를 승인하지 않는다.
-- 실제 학습, Metric과 Artifact Hash는 격리된 결정론적 Worker가 생성한다.
-- `DoctrineReviewV1`은 주문 방향·수량·목표 비중이 아니라 평가 기준별 Claim과 Evidence, 반론,
-  미확인 질문과 가설 후보만 반환한다.
-- 여러 Doctrine은 서로의 답을 보지 않고 독립 Review를 제출하며, 충돌을 다수결로 지우지 않는다.
-- Persona 이름의 유명세가 아니라 Frozen Eval, Citation, Calibration과 Shadow 결과로 유지·중단한다.
-- Source Retraction은 Dataset, Adapter, Review, Hypothesis와 Strategy Candidate까지 전파한다.
-
-상세 계약, Fine-tuning 기술 경로, 평가와 도입 Trigger는
-[Investment Doctrine Model Factory](INVESTMENT_DOCTRINE_MODEL_FACTORY.md)를 따른다.
+Doctrine Model·Persona Fine-tuning은 현재 활성 Quant Worker나 운영 경로가 아니다. 별도 Dataset,
+Frozen Eval, 독립 QA와 승인 경로가 구현되기 전까지는 제안 단계로 보류하며, 현재 Quant 런타임은
+Research Evidence를 읽고 검증 결과를 반환하는 두 Worker만 운영한다.
 
 ## 8. 두 본부를 잇는 Calibration과 자기 개선
 

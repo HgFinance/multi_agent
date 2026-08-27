@@ -44,6 +44,17 @@ def test_intake_is_idempotent_and_rejects_rebinding(tmp_path: Path) -> None:
         intake.submit(_payload() | {"goal": "A different research objective"})
 
 
+def test_tracking_root_update_keeps_shared_manifest_readable(tmp_path: Path) -> None:
+    intake = ResearchIntake(tmp_path / "research")
+    intake.submit(_payload())
+
+    intake.bind_kanban_root("research-01", "t_strategy_root")
+
+    manifest = intake.intake_dir / "research-01.json"
+    assert stat.S_IMODE(manifest.stat().st_mode) == 0o644
+    assert intake._read_json(manifest)["kanban_root_task_id"] == "t_strategy_root"
+
+
 def test_materialize_creates_an_isolated_persistent_lab(tmp_path: Path) -> None:
     intake = ResearchIntake(tmp_path / "research")
     intake.submit(_payload())
@@ -54,6 +65,7 @@ def test_materialize_creates_an_isolated_persistent_lab(tmp_path: Path) -> None:
     assert lab_path == tmp_path / "research" / "labs" / "research-01"
     assert (lab_path / "objective.json").exists()
     assert (lab_path / "request.json").exists()
+    assert stat.S_IMODE((lab_path / "request.json").stat().st_mode) == 0o644
     assert (lab_path / "RESOURCE_MAP.md").exists()
     assert not (tmp_path / "research" / "intake" / "research-01.json").exists()
     assert status is not None
@@ -106,6 +118,15 @@ def test_worker_error_is_visible_until_the_next_successful_materialization(tmp_p
     assert intake.status("research-01")["error"] is None
 
 
+def test_shared_worker_error_is_readable_by_the_status_consumer(tmp_path: Path) -> None:
+    intake = ResearchIntake(tmp_path / "research")
+    intake.submit(_payload())
+    intake.record_error("research-01", phase="MATERIALIZE", error="temporary repository error")
+
+    error_path = intake.errors_dir / "research-01.json"
+    assert stat.S_IMODE(error_path.stat().st_mode) == 0o644
+
+
 def test_blocked_result_is_visible_as_blocked_without_worker_error(tmp_path: Path) -> None:
     intake = ResearchIntake(tmp_path / "research")
     intake.submit(_payload("research-04"))
@@ -121,6 +142,21 @@ def test_blocked_result_is_visible_as_blocked_without_worker_error(tmp_path: Pat
     assert status is not None
     assert status["status"] == "BLOCKED"
     assert status["error"] == "insufficient daily history"
+
+
+def test_completed_result_is_visible_as_completed_without_replaying_work(tmp_path: Path) -> None:
+    intake = ResearchIntake(tmp_path / "research")
+    intake.submit(_payload("research-completed"))
+    lab_path = intake.materialize("research-completed", repo_root=tmp_path)
+    (lab_path / "results" / "plan-1.json").write_text(
+        '{"status":"COMPLETED","plan_id":"plan-1"}',
+        encoding="utf-8",
+    )
+
+    status = intake.status("research-completed")
+
+    assert status is not None
+    assert status["status"] == "COMPLETED"
 
 
 def test_strategy_backtest_only_query_routes_to_strategy_research() -> None:

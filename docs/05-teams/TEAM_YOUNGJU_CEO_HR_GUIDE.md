@@ -123,7 +123,7 @@ not_started — `committee.close_session()`의 `CommitteeDecisionRecord`로 대�
 - Provisioning 성공을 API flag만으로 간주하지 말고 실제 권한 조회로 확인한다.
 - Quality Snapshot과 Workforce Plan을 실제 데이터에서 집계·저장한다. 빈 집계를 정상 운영 상태로 표시하지 않는다.
 - Cost Snapshot은 인사팀이 집계하지 않는다. 플랫폼 과금 계측의 보고를 `POST /workforce/v1/agents/{agent_id}/cost-snapshots`로 받아 적고, `recorded_by`로 보고자를 남긴다(2026-08-25). 같은 창 재보고는 행을 늘리지 않고 갱신한다 — Scorecard reader가 창 안을 합산하므로 중복 행은 곧 사용량 2배다.
-- Capacity Snapshot도 같은 계약이다(2026-08-25). `POST /workforce/v1/capacity-snapshots`로 받아 적고 `recorded_by`를 남긴다. `department_id`/`agent_id`는 하나만 있어도 되므로(둘 다 없으면 거부) unique key가 `nulls not distinct`다. 같은 창 재보고는 갱신 — reader가 창 안에서 최신 1건을 고르므로 중복 행은 재보고 이력만 늘린다. Langfuse 직접 집계(`GET /workforce/v1/departments/observability`의 `capacity` 필드)는 우회 경로로 그대로 남아 있다 — DB Snapshot 쪽에 실제로 보고를 넣는 호출자가 아직 없어서다.
+- Capacity Snapshot도 같은 계약이다(2026-08-25). `POST /workforce/v1/capacity-snapshots`로 받아 적고 `recorded_by`를 남긴다. `department_id`/`agent_id`는 하나만 있어도 되므로(둘 다 없으면 거부) unique key가 `nulls not distinct`다. 같은 창 재보고는 갱신 — reader가 창 안에서 최신 1건을 고르므로 중복 행은 재보고 이력만 늘린다. Langfuse 직접 집계(`GET /workforce/v1/departments/observability`의 `capacity` 필드)는 최신 진단용으로 남아 있고, Scorecard는 10분 주기 snapshot writer가 채운 DB Snapshot을 사용한다.
 - Budget/Scorecard의 추천은 승인 명령이 아니라 설명·권고다.
 
 ### P1-3. 공통 CI·Frontend 경계
@@ -153,11 +153,11 @@ python -m unittest discover -s tests/schema -p 'test_*.py' -v
 docker compose config --quiet
 ```
 
-Ollama가 준비된 경우에만 CEO/HR self-check를 별도로 실행한다.
+Ollama가 준비된 경우 CEO의 local fallback self-check만 별도로 실행한다. HR은 더 이상
+전용 Ollama alias를 운영하지 않으며, dispatcher가 공용 PAPER/read-only E2E helper를 실행한다.
 
 ```bash
 python departments/00-ceo-office/scripts/test_ceo_ollama_agent.py
-python departments/07-agent-workforce/scripts/test_hr_ollama_agent.py
 ```
 
 외부 DB를 사용하는 경우 실제 운영 테이블을 오염시키지 않도록 transaction rollback 또는 전용 test fund/profile을 사용하고, 테스트 Actor·Secret을 로그에 출력하지 않는다.

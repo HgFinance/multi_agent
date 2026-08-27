@@ -530,6 +530,10 @@ def test_trading_profile_and_prompts_pin_the_one_shot_paper_lane() -> None:
     ):
         assert rejected in trading
     assert "normal\nstrategy OrderIntent still requires" in trading
+    assert "Mandatory terminal persistence for primary analysis" in trading
+    assert "`result`: the complete Korean user-ready answer" in trading
+    assert "`metadata.final_answer`: the same complete answer" in trading
+    assert "A summary-only completion is invalid" in trading
 
 
 def test_operator_docs_explain_the_internal_paper_only_boundary() -> None:

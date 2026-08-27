@@ -4,8 +4,10 @@ from orchestration.adapters.department_notion_projection import (
     DepartmentNotionProjection,
     DepartmentNotionProjectionError,
     _body_markdown,
+    _humanize_accounting_result,
     _humanize_risk_result,
     _NotionTransport,
+    _risk_projection_properties,
     _task_title,
 )
 from orchestration.adapters.terminal_projection_utils import (
@@ -77,6 +79,31 @@ def test_notion_transport_replaces_existing_body_without_recreating_page():
         ("PATCH", "blocks/old-2", {"in_trash": True}),
         ("PATCH", "blocks/page-1/children", {"children": children}),
     ]
+
+
+def test_accounting_manager_text_is_korean_and_hides_runtime_field_names():
+    result = _humanize_accounting_result(
+        "Accounting Engine NAV=1, NAVER=2, PnL=3 cash_orderable=4 "
+        "instrument_id=abc mark_as_of=now quality_status=WARN "
+        "PAPER Strategy Fund Book weight broker evidence NEEDS_PARAMETERS "
+        "OPEN BREAKS PRELIMINARY cost-basis gross exposure"
+    )
+
+    assert "회계 시스템" in result
+    assert "순자산 가치" in result
+    assert "손익" in result
+    assert "현금 주문가능액" in result
+    assert "instrument_id" not in result
+    assert "cash_orderable" not in result
+    assert "quality_status" not in result
+    assert "broker evidence" not in result
+    assert "NEEDS_PARAMETERS" not in result
+    assert "OPEN BREAKS" not in result
+    assert "PRELIMINARY" not in result
+    assert "cost-basis" not in result
+    assert "PAPER" not in result
+    assert "NAVER" in result
+    assert "순자산 가치ER" not in result
 
 
 def test_notion_transport_chunks_page_creation_children_at_api_limit():
@@ -198,7 +225,9 @@ def test_notion_title_lookup_never_uses_a_shared_human_title_as_a_contains_key()
 
     transport = RecordingTransport()
 
-    assert transport.query_title("db", "제목", "사용자 PAPER 조건주문 · 2026-08-27") == ()
+    assert (
+        transport.query_title("db", "제목", "사용자 PAPER 조건주문 · 2026-08-27") == ()
+    )
     assert len(transport.calls) == 1
 
     assert transport.query_title("db", "제목", "t_trade1 · 사용자 PAPER 조건주문") == []
@@ -234,8 +263,115 @@ def test_quant_notion_projection_is_manager_facing_and_hides_runtime_fields():
     assert "Task ID" not in body
     assert "Workflow Root Task ID" not in body
     assert "Terminal Metadata" not in body
+    assert "실행 작업: `t_quant1`" in body
+    assert "워크플로 루트: `t_root1`" in body
     assert "research-liaison-mcp" in body
     assert "확인된 근거 좌표: 1건" in body
+
+
+def test_quant_notion_projection_renders_bounded_record_without_runtime_keys():
+    task = {
+        "id": "t_quant_record",
+        "title": "Quant primary",
+        "assignee": "quant-backtest-department",
+        "status": "done",
+        "completed_at": 1787802033,
+    }
+    result = (
+        "검증 보류: 원본 시계열이 없어 성과지표를 산출하지 않았습니다.\n"
+        "retrieval_attempt:\n"
+        "instrument=069500.KS\n"
+        "requested_window=2026-08-01/2026-08-27\n"
+        "source=ls-securities\n"
+        "tr=UNAVAILABLE\n"
+        "status=UNAVAILABLE\n"
+        "queried_at=2026-08-27T08:00:00Z\n"
+        "extracted_at=2026-08-27T08:00:02Z\n"
+        "snapshot_hash=UNAVAILABLE"
+    )
+
+    body = _body_markdown(
+        task=task,
+        root_task_id="t_root_record",
+        department="quant-backtest",
+        result_text=result,
+    )
+
+    assert "기준 시각: 2026-08-27T08:00:00Z" in body
+    assert "조회 경로: ls-securities" in body
+    assert "조회 TR: 확인 불가" in body
+    assert "스냅샷 해시: 확인 불가" in body
+    assert "retrieval_attempt:" not in body
+    assert "instrument=069500.KS" not in body
+
+
+def test_quant_notion_projection_uses_run_metadata_retrieval_record():
+    task = {
+        "id": "t_quant_metadata_record",
+        "title": "Quant primary",
+        "assignee": "quant-backtest-department",
+        "status": "done",
+        "completed_at": 1787802033,
+        "run_metadata": {
+            "instrument": "005930.KS",
+            "window": "20 trading days",
+            "source": "LS MCP",
+            "tr": "t1717",
+            "status": "AVAILABLE",
+            "queried_at": "2026-08-27T09:15:42Z",
+            "extracted_at": "2026-08-27T09:15:42Z",
+            "snapshot_hash": "84aa0dcf79ac2096",
+        },
+    }
+
+    body = _body_markdown(
+        task=task,
+        root_task_id="t_root_metadata_record",
+        department="quant-backtest",
+        result_text="검증된 수급 결과입니다.",
+    )
+
+    assert "대상: 005930.KS" in body
+    assert "기준 시각: 2026-08-27T09:15:42Z" in body
+    assert "조회 TR: t1717" in body
+    assert "스냅샷 해시: 84aa0dcf79ac2096" in body
+
+
+def test_quant_notion_properties_hide_machine_retrieval_record():
+    transport = FakeTransport(
+        {
+            "전략·백테스트 run": {"type": "title"},
+            "서술": {"type": "rich_text"},
+            "원본 리포트": {"type": "rich_text"},
+        }
+    )
+    task = {
+        "id": "t_quant_property_record",
+        "title": "Quant primary",
+        "assignee": "quant-backtest-department",
+        "status": "done",
+        "completed_at": "2026-08-27T09:15:42Z",
+        "result": (
+            "### 핵심 결론\n자료를 확인했지만 추가 확인이 필요합니다.\n\n"
+            'retrieval_attempt: {"instrument":"005930.KS",'
+            '"requested_window":"20 trading days","source":"LS MCP",'
+            '"tr":"t1717","status":"AVAILABLE",'
+            '"queried_at":"2026-08-27T09:15:42Z",'
+            '"extracted_at":"2026-08-27T09:15:42Z",'
+            '"snapshot_hash":"84aa0dcf79ac2096"}'
+        ),
+    }
+
+    result = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x"}, transport=transport
+    ).project(root_task_id="t_root_property_record", task=task)
+
+    assert result.status == "created"
+    _, props, _ = transport.created[0]
+    for name in ("서술", "원본 리포트"):
+        value = props[name]["rich_text"][0]["text"]["content"]
+        assert "retrieval_attempt:" not in value
+        assert "t1717" not in value
 
 
 def _trading_task():
@@ -283,12 +419,82 @@ def test_trading_projection_uses_existing_schema_without_task_id_abuse():
     _, props, children = transport.created[0]
 
     title = props["제목"]["title"][0]["text"]["content"]
-    assert title.startswith("AAPL execution review · ")
+    assert title.startswith("트레이딩 부서 검토 결과 · ")
     assert "t_trade1" not in title
     assert props["trade_case_id"]["rich_text"][0]["text"]["content"] == "case-77"
     assert "Task ID" not in props
     assert "workflow_root_task_id" not in props
     assert children
+
+
+def test_trading_projection_fills_all_manager_columns_with_safe_defaults():
+    schema = {
+        "거래 사례 번호": {"type": "rich_text"},
+        "검토되지 않은 주장": {"type": "rich_text"},
+        "정보 신선도": {
+            "type": "select",
+            "select": {"options": [{"name": "UNKNOWN"}]},
+        },
+        "근거 확인 결과": {"type": "rich_text"},
+        "요청 식별값": {"type": "rich_text"},
+        "독립성 위반 건수": {"type": "number"},
+        "주요 검토 사항": {"type": "rich_text"},
+        "종목": {"type": "rich_text"},
+        "주문 요청 번호": {"type": "rich_text"},
+        "조건 규칙 상태": {"type": "rich_text"},
+        "결과 요약": {"type": "rich_text"},
+        "계산 기준": {"type": "rich_text"},
+        "요청 내용": {"type": "rich_text"},
+        "추가 검토 필요": {"type": "checkbox"},
+        "처리 모델": {"type": "rich_text"},
+        "생성 시각": {"type": "date"},
+        "검토 결과": {
+            "type": "select",
+            "select": {"options": [{"name": "추가 검토"}]},
+        },
+        "처리 추적 번호": {"type": "rich_text"},
+        "상세 결과": {"type": "rich_text"},
+        "제목": {"type": "title"},
+    }
+    task = _trading_task()
+    task["run_metadata"] = {
+        "final_answer": "삼성전자(005930) PAPER 읽기 전용 검토를 완료했습니다.",
+        "basis": {
+            "accounting_quality": "WARN",
+            "accounting_as_of": "2026-08-27T02:23:48Z",
+        },
+        "instrument": "005930",
+        "checks": {
+            "single_instrument_limit": "within_snapshot_limit",
+            "sector_mapping": "unavailable",
+            "order_intent_candidate": "not_constructible_missing_action_quantity_order_parameters",
+            "execution": "not_performed",
+        },
+    }
+    task["body"] += "\nrequest_id=trading-test-001"
+
+    transport = FakeTransport(schema)
+    result = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x"}, transport=transport
+    ).project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    _, props, _ = transport.created[0]
+    assert set(props) == set(schema)
+    assert props["정보 신선도"]["select"]["name"] == "UNKNOWN"
+    assert props["검토 결과"]["select"]["name"] == "추가 검토"
+    assert props["추가 검토 필요"] == {"checkbox": True}
+    assert props["종목"]["rich_text"][0]["text"]["content"] == "삼성전자(005930)"
+    assert (
+        "2026-08-27T02:23:48Z" in props["계산 기준"]["rich_text"][0]["text"]["content"]
+    )
+    assert (
+        "주문 후보: 생성하지 않음"
+        in props["주요 검토 사항"]["rich_text"][0]["text"]["content"]
+    )
+    assert "workflow_root_task_id" not in str(props)
+    assert "final_answer" not in str(props)
+    assert "OrderIntent" not in str(props)
 
 
 def test_trading_projection_renders_conditional_rule_for_managers():
@@ -341,6 +547,81 @@ def test_trading_projection_renders_conditional_rule_for_managers():
     assert "주문 접수·체결·원장 반영 결과를 의미하지 않습니다." in rendered
     assert "Task ID" not in rendered
     assert "workflow_root_task_id" not in rendered
+
+
+def test_trading_projection_maps_direct_paper_receipt_without_new_execution_path():
+    schema = {
+        "거래 사례 번호": {"type": "rich_text"},
+        "검토되지 않은 주장": {"type": "rich_text"},
+        "정보 신선도": {
+            "type": "select",
+            "select": {"options": [{"name": "확인 불가"}]},
+        },
+        "근거 확인 결과": {"type": "rich_text"},
+        "요청 식별값": {"type": "rich_text"},
+        "독립성 위반 건수": {"type": "number"},
+        "주요 검토 사항": {"type": "rich_text"},
+        "종목": {"type": "rich_text"},
+        "주문 요청 번호": {"type": "rich_text"},
+        "조건 규칙 상태": {"type": "rich_text"},
+        "결과 요약": {"type": "rich_text"},
+        "계산 기준": {"type": "rich_text"},
+        "요청 내용": {"type": "rich_text"},
+        "추가 검토 필요": {"type": "checkbox"},
+        "처리 모델": {"type": "rich_text"},
+        "생성 시각": {"type": "date"},
+        "검토 결과": {
+            "type": "select",
+            "select": {"options": [{"name": "처리 확인"}, {"name": "추가 검토"}]},
+        },
+        "처리 추적 번호": {"type": "rich_text"},
+        "상세 결과": {"type": "rich_text"},
+        "제목": {"type": "title"},
+    }
+    task = _trading_task()
+    task.update(
+        {
+            "id": "t_paper_receipt",
+            "run_metadata": {},
+            "result": (
+                "PAPER 주문 완료: 000500 매수 시장가(가격 미지정) 요청 1주/체결 1주, "
+                "평균 체결가 207,500원 (FILLED, LS 주문번호 31795). "
+                "요청 ID paper-request-1, 지시 ID directive-1."
+            ),
+        }
+    )
+
+    transport = FakeTransport(schema)
+    result = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x"}, transport=transport
+    ).project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    _, props, children = transport.created[0]
+    assert set(props) == set(schema)
+    assert props["종목"]["rich_text"][0]["text"]["content"] == "000500"
+    assert (
+        props["주문 요청 번호"]["rich_text"][0]["text"]["content"] == "paper-request-1"
+    )
+    assert (
+        "PAPER 체결 응답" in props["근거 확인 결과"]["rich_text"][0]["text"]["content"]
+    )
+    assert props["추가 검토 필요"] == {"checkbox": False}
+    assert props["검토 결과"]["select"]["name"] == "처리 확인"
+    rendered = str(children)
+    assert "PAPER 처리 내용" in rendered
+    assert "실계좌 주문·시장 변경: 수행하지 않음" in rendered
+
+
+def test_legacy_second_precision_title_is_checked_before_create():
+    from orchestration.adapters.department_notion_projection import _legacy_task_titles
+
+    task = _trading_task()
+    task["completed_at"] = "2026-08-27T07:06:17Z"
+    titles = _legacy_task_titles(task, "trading")
+
+    assert "AAPL execution review · 2026-08-27 07:06:17" in titles
+    assert "AAPL execution review · 2026-08-27 07:06" in titles
 
 
 def test_duplicate_title_is_idempotent():
@@ -435,7 +716,7 @@ def test_schema_is_reused_by_one_projection_owner():
     assert transport.schema_calls == 1
     # A new human-facing title also checks the former ID-prefixed title once,
     # so existing live cards are migrated in place instead of duplicated.
-    assert transport.query_calls == 6
+    assert transport.query_calls == 8
     assert transport.create_calls == 2
 
 
@@ -455,7 +736,7 @@ def test_cached_schema_mismatch_is_refetched_before_failing_closed():
 
     assert result.status == "created"
     assert transport.schema_calls == 2
-    assert transport.query_calls == 3
+    assert transport.query_calls == 4
     assert transport.create_calls == 1
 
 
@@ -488,7 +769,7 @@ def test_create_schema_error_invalidates_cache_for_next_retry():
 
     assert result.status == "created"
     assert transport.schema_calls == 2
-    assert transport.query_calls == 6
+    assert transport.query_calls == 8
     assert transport.create_calls == 2
 
 
@@ -532,7 +813,139 @@ def test_research_projection_uses_explicit_research_database():
     assert result.status == "created"
     database_id, props, _ = transport.created[0]
     assert database_id == "research-db"
-    assert props["종목"]["title"][0]["text"]["content"].startswith("t_trade1 · ")
+    title = props["종목"]["title"][0]["text"]["content"]
+    assert title.startswith("조사 대상 미지정 · 리서치 결과 · ")
+    assert "t_trade1" not in title
+
+
+def test_research_projection_uses_named_subject_from_user_request_without_ticker():
+    transport = FakeTransport(
+        {
+            "종목": {"type": "title"},
+            "서술": {"type": "rich_text"},
+            "생성 시각": {"type": "date"},
+        }
+    )
+    task = _trading_task()
+    task.update(
+        {
+            "assignee": "research-department",
+            "title": "사용자 질의: Research 부서만 사용해 삼성전자 실적을 검증해줘",
+            "body": (
+                "workflow_root_task_id=t_root1\n"
+                "workflow_role=primary\n"
+                "## User request\n"
+                "Research 부서만 사용해 삼성전자 실적을 검증해줘"
+            ),
+            "run_metadata": {"final_answer": "삼성전자 실적을 확인했습니다."},
+        }
+    )
+
+    result = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x", "NOTION_RESEARCH_DB": "research-db"},
+        transport=transport,
+    ).project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    _, props, children = transport.created[0]
+    assert props["종목"]["title"][0]["text"]["content"].startswith(
+        "삼성전자 · 리서치 결과 · "
+    )
+    assert "조사 대상: 삼성전자" in str(children)
+
+
+def test_research_projection_fills_live_manager_columns_without_internal_body_fields():
+    transport = FakeTransport(
+        {
+            "종목": {"type": "title"},
+            "서술": {"type": "rich_text"},
+            "원본 리포트": {"type": "rich_text"},
+            "생성 시각": {"type": "date"},
+            "분석가 판정 - 감성": {
+                "type": "select",
+                "select": {
+                    "options": [
+                        {"name": value}
+                        for value in ("SCORED", "NO_EVIDENCE", "INCONCLUSIVE")
+                    ]
+                },
+            },
+            "분석가 판정 - 기술": {"type": "rich_text"},
+            "분석가 판정 - 펀더멘털": {"type": "rich_text"},
+            "분석가 판정 - 레짐": {"type": "rich_text"},
+            "분석가 판정 - 지정학": {"type": "rich_text"},
+            "분석가 판정 - 미시구조": {"type": "rich_text"},
+            "수치 재대조": {"type": "checkbox"},
+            "halted": {"type": "rich_text"},
+            "input_hash": {"type": "rich_text"},
+            "calculation_version": {"type": "rich_text"},
+            "evidence_quality": {
+                "type": "select",
+                "select": {
+                    "options": [
+                        {"name": value}
+                        for value in ("sufficient", "partial", "insufficient_evidence")
+                    ]
+                },
+            },
+            "escalate": {"type": "checkbox"},
+            "trade_case_id": {"type": "rich_text"},
+        }
+    )
+    task = _trading_task()
+    task.update(
+        {
+            "id": "t_research1",
+            "assignee": "research-department",
+            "title": "CEO delegated research analysis",
+            "body": "workflow_root_task_id=t_root1\nworkflow_role=primary",
+            "status": "done",
+            "completed_at": 1787800000,
+            "run_metadata": {
+                "final_answer": (
+                    "삼성전자(005930)의 최근 사업 방향을 공식 근거와 뉴스로 확인했습니다. "
+                    "자료 공백이 있어 추가 확인이 필요합니다.\n\n"
+                    "출처: workflow root task t_root1의\n"
+                    "hgfinance.research-snapshot.v1\n"
+                    "(as_of 2026-08-27T08:00:00Z)."
+                )
+            },
+        }
+    )
+
+    result = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x", "NOTION_RESEARCH_DB": "research-db"},
+        transport=transport,
+    ).project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    _, props, children = transport.created[0]
+    assert props["종목"]["title"][0]["text"]["content"].startswith("삼성전자(005930)")
+    assert props["분석가 판정 - 감성"]["select"]["name"] == "INCONCLUSIVE"
+    assert props["수치 재대조"]["checkbox"] is False
+    assert props["evidence_quality"]["select"]["name"] == "partial"
+    for name in (
+        "서술",
+        "원본 리포트",
+        "분석가 판정 - 기술",
+        "분석가 판정 - 펀더멘털",
+        "분석가 판정 - 레짐",
+        "분석가 판정 - 지정학",
+        "분석가 판정 - 미시구조",
+        "halted",
+        "input_hash",
+        "calculation_version",
+        "trade_case_id",
+    ):
+        assert props[name]["rich_text"][0]["text"]["content"]
+    assert props["escalate"]["checkbox"] is False
+    rendered = str(children)
+    assert "Task ID" not in rendered
+    assert "workflow_root_task_id" not in rendered
+    assert "workflow root task" not in rendered
+    assert "hgfinance.research-snapshot.v1" not in rendered
+    assert "실행 연결" not in rendered
+    assert "리서치 부서 업무·성과 요약" in rendered
 
 
 def test_risk_projection_uses_explicit_risk_database():
@@ -750,6 +1163,106 @@ def test_risk_projection_renders_structured_result_and_populates_columns():
     assert "workflow_root_task_id" not in rendered
 
 
+def test_risk_projection_preserves_defer_and_surfaces_missing_canonical_result():
+    schema = {
+        "제목": {"type": "title"},
+        "리스크 판정": {
+            "type": "select",
+            "select": {
+                "options": [
+                    {"name": "approve"},
+                    {"name": "resize"},
+                    {"name": "reject"},
+                    {"name": "defer"},
+                ]
+            },
+        },
+        "거래 가능 상태": {
+            "type": "select",
+            "select": {"options": [{"name": "ENTRY_BLOCKED"}]},
+        },
+        "상위·법무 검토 필요": {"type": "checkbox"},
+        "판정 사유 코드": {
+            "type": "multi_select",
+            "multi_select": {"options": [{"name": "MISSING_FACTS"}]},
+        },
+        "입력 데이터 해시": {"type": "rich_text"},
+        "계산 로직 버전": {"type": "rich_text"},
+        "리스크 검사 결과": {"type": "rich_text"},
+        "리스크 검토 요약": {"type": "rich_text"},
+        "상세 검토 보고서": {"type": "rich_text"},
+    }
+    task = _trading_task()
+    task.update(
+        {
+            "id": "t_defer_risk",
+            "assignee": "risk-management",
+            "result": "",
+            "run_metadata": {
+                "advisory_verdict": "DEFER / REQUIRES_USER_REVIEW",
+                "trading_state": "entry_blocked",
+                "reason_codes": ["MISSING_FACTS"],
+                "data_gaps": ["투자지침 스냅샷이 없습니다."],
+                "input_hash": "sha256:example",
+                "calculation_version": "risk-p0-v1",
+            },
+        }
+    )
+
+    transport = FakeTransport(schema)
+    projection = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x", "NOTION_RISK_DB": "risk-db"},
+        transport=transport,
+    )
+
+    result = projection.project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    _, props, children = transport.created[0]
+    assert props["리스크 판정"]["select"]["name"] == "defer"
+    assert props["거래 가능 상태"]["select"]["name"] == "ENTRY_BLOCKED"
+    assert props["상위·법무 검토 필요"] == {"checkbox": True}
+    checks = props["리스크 검사 결과"]["rich_text"][0]["text"]["content"]
+    assert "투자지침 스냅샷이 없습니다." in checks
+    assert "정본 결과 본문이 저장되지 않아 사람 검토가 필요합니다." in checks
+    assert (
+        props["입력 데이터 해시"]["rich_text"][0]["text"]["content"] == "sha256:example"
+    )
+    assert props["계산 로직 버전"]["rich_text"][0]["text"]["content"] == "risk-p0-v1"
+    rendered = str(children)
+    assert "검토 ID" not in rendered
+    assert "상위 요청 ID" not in rendered
+    assert "t_defer_risk" not in rendered
+    assert "###" not in props["리스크 검토 요약"]["rich_text"][0]["text"]["content"]
+
+
+def test_risk_projection_derives_gate_reason_code_from_entry_blocked_state():
+    schema = {
+        "리스크 판정": {
+            "type": "select",
+            "select": {"options": [{"name": "defer"}]},
+        },
+        "거래 가능 상태": {
+            "type": "select",
+            "select": {"options": [{"name": "ENTRY_BLOCKED"}]},
+        },
+        "판정 사유 코드": {
+            "type": "multi_select",
+            "multi_select": {"options": [{"name": "trading_state_blocked"}]},
+        },
+    }
+
+    props = _risk_projection_properties(
+        schema,
+        metadata={},
+    )
+
+    assert props["거래 가능 상태"] == {"select": {"name": "ENTRY_BLOCKED"}}
+    assert props["판정 사유 코드"] == {
+        "multi_select": [{"name": "trading_state_blocked"}]
+    }
+
+
 def test_risk_humanization_keeps_contextual_terms_grammatical():
     rendered = _humanize_risk_result(
         "Risk PAPER 조회입니다. 스냅샷 범위와 동결 스냅샷상 자료를 확인했습니다. "
@@ -804,7 +1317,10 @@ def test_risk_humanization_translates_veto_status_for_managers():
         "independent risk veto pending deterministic order-time 결정론적 리스크 검증 시스템 checks"
     )
 
-    assert rendered == "독립 리스크 검토가 필요하며 주문 시점의 결정론적 리스크 검증 결과를 확인해야 합니다"
+    assert (
+        rendered
+        == "독립 리스크 검토가 필요하며 주문 시점의 결정론적 리스크 검증 결과를 확인해야 합니다"
+    )
     assert "pending" not in rendered
     assert "checks" not in rendered
 
@@ -916,6 +1432,11 @@ def test_hr_projection_uses_native_database_and_manager_language():
                 },
                 "observability_risk": "UNAVAILABLE",
                 "worker_session_id": "must-not-be-projected",
+                "request_id": "discord:hr-001",
+                "trace_id": "trace-hr-001",
+                "source_run_id": "obs-hr-001",
+                "latency_ms": 1473,
+                "latency_scope": "observability_get",
             },
         }
     )
@@ -944,6 +1465,11 @@ def test_hr_projection_uses_native_database_and_manager_language():
     assert "/opt/data/shared-kanban" not in rendered
     assert "worker_session_id" not in rendered
     assert "structured_summary" not in rendered
+    assert "요청 식별자" in rendered and "discord:hr-001" in rendered
+    assert "Trace" in rendered and "trace-hr-001" in rendered
+    assert "관측 창 ID" in rendered and "obs-hr-001" in rendered
+    assert "관측 지연" in rendered and "1473" in rendered
+    assert "지연 측정 범위" in rendered and "observability_get" in rendered
 
 
 def test_hr_projection_reads_authoritative_api_reads_envelope():
@@ -1022,18 +1548,15 @@ def test_qa_projection_is_korean_and_uses_explicit_qa_database():
             "claim_checks": {"type": "rich_text"},
             "claim_checks 판정": {
                 "type": "multi_select",
-                "multi_select": {
-                    "options": [{"name": "UNSUPPORTED"}]
-                },
+                "multi_select": {"options": [{"name": "UNSUPPORTED"}]},
             },
             "claim_narrative": {"type": "rich_text"},
             "원본 리포트": {"type": "rich_text"},
             "reason_codes": {
                 "type": "multi_select",
-                "multi_select": {
-                    "options": [{"name": "numeric_citation_mismatch"}]
-                },
+                "multi_select": {"options": [{"name": "numeric_citation_mismatch"}]},
             },
+            "trade_case_id": {"type": "rich_text"},
             "input_hash": {"type": "rich_text"},
             "calculation_version": {"type": "rich_text"},
             "escalate": {"type": "checkbox"},
@@ -1044,11 +1567,7 @@ def test_qa_projection_is_korean_and_uses_explicit_qa_database():
     task.update(
         {
             "assignee": "qa-department",
-            "body": (
-                "workflow_root_task_id=t_root1\n"
-                "workflow_role=qa\n"
-                "action=RUN_QA"
-            ),
+            "body": ("workflow_root_task_id=t_root1\nworkflow_role=qa\naction=RUN_QA"),
             "run_metadata": {
                 "overall": "FAIL",
                 "numerical_posture": "DEFER",
@@ -1089,14 +1608,24 @@ def test_qa_projection_is_korean_and_uses_explicit_qa_database():
     assert props["판정"]["select"]["name"] == "FAIL"
     assert props["findings severity"]["select"]["name"] == "HIGH"
     assert "QA-F001" not in props["findings"]["rich_text"][0]["text"]["content"]
-    assert "순자산 대사: 실패" in props["claim_checks"]["rich_text"][0]["text"]["content"]
+    assert (
+        "순자산 대사: 실패" in props["claim_checks"]["rich_text"][0]["text"]["content"]
+    )
     assert props["claim_checks 판정"]["multi_select"][0]["name"] == "UNSUPPORTED"
-    assert props["reason_codes"]["multi_select"][0]["name"] == "numeric_citation_mismatch"
+    assert (
+        props["reason_codes"]["multi_select"][0]["name"] == "numeric_citation_mismatch"
+    )
     assert props["input_hash"]["rich_text"][0]["text"]["content"].startswith("sha256:")
-    assert props["calculation_version"]["rich_text"][0]["text"]["content"] == "qa-checker-v1"
+    assert (
+        props["calculation_version"]["rich_text"][0]["text"]["content"]
+        == "qa-checker-v1"
+    )
     assert props["claim_narrative"]["rich_text"]
+    assert (
+        props["trade_case_id"]["rich_text"][0]["text"]["content"]
+        == "해당 없음 · QA 감사"
+    )
     assert props["escalate"]["checkbox"] is True
-    assert "trade_case_id" not in props
     assert "trace_id" not in props
 
 

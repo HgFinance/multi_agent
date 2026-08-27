@@ -4,8 +4,7 @@
 소유: 영주 (Agent Workforce 인사팀)
 근거: docs/02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F27,
       cost.py의 assess_budget/build_department_scorecard(순수 함수, Snapshot을 인자로 받는다),
-      api/app.py 상단 docstring 5번째 항목("GET .../scorecard가 아니라 POST인 이유 -
-      workforce.cost_snapshots/capacity_snapshots를 조회할 저장소가 아직 없어서").
+      api/app.py의 Snapshot 기록·조회 계약.
 
 이 모듈이 그 격차를 메운다 - cost.py 자체는 여전히 순수 함수로 남긴다(LLM도 DB도
 없다는 CLAUDE.md 원칙, "집계와 초과 판정은 결정론적 코드만 한다"). Repository는 오직
@@ -102,9 +101,9 @@ class PostgresScorecardRepository:
     집계하는 finding_count/rework_rate 뿐").
 
     2026-08-25 이전에는 capacity 에 쓰기가 없었고 observability.py 가 Langfuse 실행
-    이벤트를 직접 집계해 GET .../scorecard 의 capacity 자리를 메웠다. 그 우회
-    경로는 여기서 건드리지 않는다 - append_capacity_snapshot 은 DB Snapshot 이라는
-    두 번째 경로를 추가할 뿐이다."""
+    이벤트를 직접 집계해 GET .../scorecard 의 capacity 자리를 메웠다. 현재는
+    snapshot writer가 DB Snapshot을 채우며, observability.py의 외부 조회는 최신
+    진단용 경로로 유지된다."""
 
     def __init__(self, pool: Any) -> None:
         self._pool = pool
@@ -224,7 +223,7 @@ class PostgresScorecardRepository:
                 snapshot_id, inserted = cur.fetchone()
             conn.commit()
             return str(snapshot_id), bool(inserted)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             conn.rollback()
             # 23503 = foreign_key_violation. 등록되지 않은 agent/profile version 으로
             # 온 보고는 재시도해도 낫지 않는다 - 일시 장애와 같은 예외로 뭉뚱그리면
@@ -354,7 +353,7 @@ class PostgresScorecardRepository:
                 snapshot_id, inserted = cur.fetchone()
             conn.commit()
             return str(snapshot_id), bool(inserted)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             conn.rollback()
             # 23503 = foreign_key_violation. UnknownCostSnapshotSubjectError 와 같은 이유.
             if getattr(exc, "pgcode", None) == "23503":
@@ -448,7 +447,7 @@ class PostgresScorecardRepository:
                 snapshot_id = cur.fetchone()[0]
             conn.commit()
             return str(snapshot_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             conn.rollback()
             raise QualitySnapshotPersistenceError(f"quality_snapshot 기록 실패: {exc}") from exc
         finally:
@@ -486,7 +485,7 @@ class PostgresScorecardRepository:
                 rows = cur.fetchall()
             conn.commit()
             return [self._to_quality_snapshot(r) for r in rows]
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             conn.rollback()
             raise QualitySnapshotPersistenceError(f"quality_snapshot 조회 실패: {exc}") from exc
         finally:
@@ -525,12 +524,13 @@ if __name__ == "__main__":
     _t1 = _t0 + timedelta(hours=1)
 
     def _reject(label: str, **overrides) -> None:
-        base = dict(
-            agent_id="a1", profile_version_id="v1", window_start=_t0, window_end=_t1,
-            input_tokens=10, output_tokens=10, model_cost=Decimal("1"),
-            tool_cost=Decimal("0"), infra_cost=Decimal("0"), case_count=1,
-            recorded_by="platform-metering",
-        )
+        base = {
+            "agent_id": "a1", "profile_version_id": "v1", "window_start": _t0,
+            "window_end": _t1, "input_tokens": 10, "output_tokens": 10,
+            "model_cost": Decimal(1), "tool_cost": Decimal(0),
+            "infra_cost": Decimal(0), "case_count": 1,
+            "recorded_by": "platform-metering",
+        }
         base.update(overrides)
         try:
             _pure.append_cost_snapshot(CostSnapshot(**base))
@@ -547,11 +547,12 @@ if __name__ == "__main__":
     print("ok - append_cost_snapshot 거부 조건 6개 통과")
 
     def _reject_capacity(label: str, **overrides) -> None:
-        base = dict(
-            department_id="d1", agent_id=None, window_start=_t0, window_end=_t1,
-            arrivals=5, queue_p95_ms=None, duration_p95_ms=None, retry_rate=None,
-            error_rate=None, utilization=Decimal("0.5"), recorded_by="platform-metering",
-        )
+        base = {
+            "department_id": "d1", "agent_id": None, "window_start": _t0,
+            "window_end": _t1, "arrivals": 5, "queue_p95_ms": None,
+            "duration_p95_ms": None, "retry_rate": None, "error_rate": None,
+            "utilization": Decimal("0.5"), "recorded_by": "platform-metering",
+        }
         base.update(overrides)
         try:
             _pure.append_capacity_snapshot(CapacitySnapshot(**base))
@@ -609,12 +610,13 @@ if __name__ == "__main__":
         #    2026-08-25 부터 raw INSERT 가 아니라 append_cost_snapshot 을 탄다 -
         #    자체 점검이 실제 writer 경로를 지나야 writer 결함을 잡는다.
         def _self_check_snapshot(**overrides) -> CostSnapshot:
-            base = dict(
-                agent_id=agent_id, profile_version_id=profile_version_id,
-                window_start=t0, window_end=t1, input_tokens=100, output_tokens=100,
-                model_cost=Decimal("1.5"), tool_cost=Decimal("0"), infra_cost=Decimal("0"),
-                case_count=1, recorded_by="self-check",
-            )
+            base = {
+                "agent_id": agent_id, "profile_version_id": profile_version_id,
+                "window_start": t0, "window_end": t1, "input_tokens": 100,
+                "output_tokens": 100, "model_cost": Decimal("1.5"),
+                "tool_cost": Decimal(0), "infra_cost": Decimal(0),
+                "case_count": 1, "recorded_by": "self-check",
+            }
             base.update(overrides)
             return CostSnapshot(**base)
 
@@ -626,11 +628,12 @@ if __name__ == "__main__":
         #      append_capacity_snapshot 을 탄다 - 같은 이유(자체 점검이 실제 writer
         #      경로를 지나야 writer 결함을 잡는다).
         def _self_check_capacity(**overrides) -> CapacitySnapshot:
-            base = dict(
-                department_id=department_id, agent_id=None, window_start=t0, window_end=t1,
-                arrivals=5, queue_p95_ms=None, duration_p95_ms=None, retry_rate=None,
-                error_rate=None, utilization=Decimal("0.5"), recorded_by="self-check",
-            )
+            base = {
+                "department_id": department_id, "agent_id": None, "window_start": t0,
+                "window_end": t1, "arrivals": 5, "queue_p95_ms": None,
+                "duration_p95_ms": None, "retry_rate": None, "error_rate": None,
+                "utilization": Decimal("0.5"), "recorded_by": "self-check",
+            }
             base.update(overrides)
             return CapacitySnapshot(**base)
 

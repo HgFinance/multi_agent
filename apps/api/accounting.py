@@ -71,6 +71,16 @@ def _enqueue_accounting_via_ceo(req: hermes_boundary.AgentAsk) -> dict[str, obje
     except ImportError:  # pragma: no cover - direct apps/api script path
         from ceo import CeoAsk, ceo_query
 
+    try:
+        from orchestration.ceo_query_routing import build_deterministic_bff_plan
+    except ImportError:  # pragma: no cover - direct apps/api script path
+        from ceo_query_routing import build_deterministic_bff_plan
+
+    routing_plan = build_deterministic_bff_plan(
+        req.query,
+        selected_departments=("accounting",),
+    )
+
     return ceo_query(
         CeoAsk(
             query=req.query,
@@ -78,6 +88,7 @@ def _enqueue_accounting_via_ceo(req: hermes_boundary.AgentAsk) -> dict[str, obje
             source="accounting-agent-alias",
         ),
         owner_id=None,
+        deterministic_routing_plan=routing_plan,
     )
 
 

@@ -12,11 +12,11 @@
   전략 없음"으로 보여주는 대신, 실제로 도는 것을 있는 그대로 읽는다.
 
 ▶ 이 모듈이 절대 하지 않는 것
-  임의 컨테이너 조작. `STRATEGY_CONTAINER_NAME` 하나만 허용하고, 호출부가
-  이름을 넘겨받지 않는다(브라우저 입력이 subprocess 인자로 그대로 흘러들면
-  임의 컨테이너를 세우고 내리는 문이 된다). 컨테이너를 새로 만들거나
-  (`docker run`/`rm`) 세션 날짜를 바꾸지도 않는다 - `docker start`/`stop`은
-  이미 있는 컨테이너를 그대로 멈추고 그대로 되살릴 뿐이라 되돌리기 쉽다.
+  임의 컨테이너 조작. 기존 고정 컨테이너는 `STRATEGY_CONTAINER_NAME` 하나만
+  전원 제어하고, 동적 PAPER 배포는 서버가 만든 `deployment-<24 hex>` ID에서
+  계산한 이름만 허용한다. 호출부가 이미지·command·host path·credential을
+  넘길 수 없고, child container에는 Docker socket도 없다. 제거는 해당 PAPER
+  child만 폐기하며 연구 원장과 상태 volume은 보존한다.
 
 ▶ 전원 조작 기본값이 꺼져 있는 이유
   이 BFF가 컨테이너로 배포되면(AWS EB) docker 소켓 자체가 안 보여 이 모듈은
@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -50,6 +51,27 @@ STRATEGY_CONTAINER_CONTROL_ENABLED = os.getenv(
     "ENABLE_STRATEGY_CONTAINER_CONTROL", "false"
 ).casefold() in {"1", "true", "yes", "on"}
 
+# Dynamic release is still an allowlisted operation. The sidecar may launch
+# only the fixed PAPER executor image, on its own compose network, with the
+# research volume read-only. It never accepts an image, command, host path, or
+# broker credential from a browser request.
+STRATEGY_PAPER_IMAGE = os.getenv(
+    "STRATEGY_PAPER_IMAGE", "hedgefund-operations-runtime:latest"
+)
+STRATEGY_RUNTIME_CONTROL_NAME = os.getenv(
+    "STRATEGY_RUNTIME_CONTROL_NAME", "hedgefund-strategy-runtime-control"
+)
+STRATEGY_LAB_VOLUME = os.getenv(
+    "STRATEGY_LAB_VOLUME", "hedgefund_autonomous_research_lab"
+)
+STRATEGY_RUNTIME_STATE_VOLUME = os.getenv(
+    "STRATEGY_RUNTIME_STATE_VOLUME", "hedgefund_strategy_runtime_data"
+)
+STRATEGY_RUNTIME_STATE_ROOT = Path(
+    os.getenv("STRATEGY_RUNTIME_STATE_ROOT", "/var/lib/strategy-runtime")
+)
+_DEPLOYMENT_ID_RE = re.compile(r"^deployment-[0-9a-f]{24}$")
+
 # `docker stop`의 기본 유예시간이 10초다(SIGTERM 후 안 죽으면 SIGKILL). 이보다
 # 짧게 잡으면 컨테이너가 정상적으로 멈추는 중인데도 우리 쪽에서 먼저 타임아웃을
 # 내 "실패"로 보고한다(더미 컨테이너로 실측 - PID 1이 SIGTERM을 무시해 정확히
@@ -61,6 +83,181 @@ PowerAction = Literal["start", "stop"]
 
 class StrategyRuntimeError(RuntimeError):
     """docker CLI에 닿지 못했거나 조작이 거부됐다. 호출부가 503으로 옮긴다."""
+
+
+def _deployment_container_name(deployment_id: str) -> str:
+    if not _DEPLOYMENT_ID_RE.fullmatch(deployment_id):
+        raise StrategyRuntimeError("배포 ID가 허용된 형식이 아닙니다.")
+    return f"strategy-paper-{deployment_id.removeprefix('deployment-')}"
+
+
+def _read_runtime_state(deployment_id: str) -> dict[str, Any] | None:
+    path = STRATEGY_RUNTIME_STATE_ROOT / f"{deployment_id}.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def deploy_paper_bundle(
+    *, deployment_id: str, request_id: str, bundle_path: str, bundle_hash: str | None
+) -> dict[str, Any]:
+    """Launch one immutable, signal-only PAPER strategy container.
+
+    The caller supplies only a path previously written by the BFF. This sidecar
+    revalidates the path and content hash, then constructs every Docker option
+    itself. The resulting container has no Docker socket, broker key, or write
+    access to the research lab.
+    """
+
+    if not STRATEGY_CONTAINER_CONTROL_ENABLED:
+        raise StrategyRuntimeError("전략 컨테이너 배포가 이 환경에서 꺼져 있습니다.")
+    if not request_id or not bundle_path.startswith("/var/lib/autonomous-research/labs/"):
+        raise StrategyRuntimeError("배포 Bundle 경로가 허용된 연구실 경로가 아닙니다.")
+    if Path(bundle_path).name != f"{deployment_id}.json":
+        raise StrategyRuntimeError("배포 Bundle 파일명이 deployment_id와 다릅니다.")
+    if not bundle_hash or not re.fullmatch(r"[0-9a-f]{64}", bundle_hash):
+        raise StrategyRuntimeError("배포 Bundle hash가 없습니다.")
+    container_name = _deployment_container_name(deployment_id)
+
+    existing = container_status(container_name)
+    if existing.get("found"):
+        return {
+            "deployment_id": deployment_id,
+            "request_id": request_id,
+            "container_name": container_name,
+            "container_id": existing.get("container_id"),
+            "runtime_status": "RUNNING" if existing.get("running") else "STOPPED",
+            "container": existing,
+            "execution_status": "SIGNAL_ONLY",
+        }
+
+    image = _docker("image", "inspect", STRATEGY_PAPER_IMAGE)
+    if image.returncode != 0:
+        raise StrategyRuntimeError(
+            f"허용된 전략 실행기 이미지가 없습니다: {STRATEGY_PAPER_IMAGE}"
+        )
+    control = container_status(STRATEGY_RUNTIME_CONTROL_NAME)
+    if not control.get("found"):
+        raise StrategyRuntimeError("strategy-runtime-control 컨테이너가 없습니다.")
+
+    args = [
+        "run",
+        "-d",
+        "--name",
+        container_name,
+        "--restart",
+        "unless-stopped",
+        "--label",
+        "com.hgfinance.strategy-deployment=paper",
+        "--label",
+        f"com.hgfinance.deployment-id={deployment_id}",
+        "--label",
+        f"com.hgfinance.request-id={request_id}",
+        "--network",
+        f"container:{STRATEGY_RUNTIME_CONTROL_NAME}",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--pids-limit",
+        "64",
+        "--memory",
+        "512m",
+        "--cpus",
+        "0.5",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+        "--mount",
+        f"type=volume,source={STRATEGY_LAB_VOLUME},target=/var/lib/autonomous-research,readonly",
+        "--mount",
+        f"type=volume,source={STRATEGY_RUNTIME_STATE_VOLUME},target=/var/lib/strategy-runtime",
+        "--env",
+        "MARKET_API_URL=http://market-api:8036",
+        "--env",
+        f"STRATEGY_PAPER_RUNTIME_STATE_DIR=/var/lib/strategy-runtime",
+        "--env",
+        f"STRATEGY_DEPLOYMENT_ID={deployment_id}",
+        STRATEGY_PAPER_IMAGE,
+        "python",
+        "-m",
+        "apps.api.strategy_paper_executor",
+        "--bundle",
+        bundle_path,
+        "--expected-hash",
+        bundle_hash,
+    ]
+    result = _docker(*args)
+    if result.returncode != 0:
+        raise StrategyRuntimeError((result.stderr or "docker run 실패").strip())
+    status = container_status(container_name)
+    status["container_id"] = (result.stdout or "").strip() or None
+    return {
+        "deployment_id": deployment_id,
+        "request_id": request_id,
+        "container_name": container_name,
+        "container_id": status.get("container_id"),
+        "runtime_status": "RUNNING" if status.get("running") else "STARTED",
+        "container": status,
+        "execution_status": "SIGNAL_ONLY",
+    }
+
+
+def power_paper_deployment(*, deployment_id: str, action: PowerAction) -> dict[str, Any]:
+    """Start or stop only the deterministic container for one deployment."""
+
+    if action not in ("start", "stop"):
+        raise StrategyRuntimeError(f"알 수 없는 PAPER 전략 action: {action!r}")
+    if not STRATEGY_CONTAINER_CONTROL_ENABLED:
+        raise StrategyRuntimeError("전략 컨테이너 전원 조작이 이 배포에서 꺼져 있습니다.")
+    container_name = _deployment_container_name(deployment_id)
+    current = container_status(container_name)
+    if not current.get("found"):
+        raise StrategyRuntimeError("해당 PAPER 전략 컨테이너가 없습니다.")
+    result = _docker(action, container_name)
+    if result.returncode != 0:
+        raise StrategyRuntimeError((result.stderr or f"docker {action} 실패").strip())
+    after = container_status(container_name)
+    return {
+        "deployment_id": deployment_id,
+        "container_name": container_name,
+        "container": after,
+        "runtime_status": "RUNNING" if action == "start" else "STOPPED",
+        "execution_status": "SIGNAL_ONLY",
+    }
+
+
+def remove_paper_deployment(*, deployment_id: str) -> dict[str, Any]:
+    """Remove only the deterministic PAPER container; its state volume remains."""
+
+    if not STRATEGY_CONTAINER_CONTROL_ENABLED:
+        raise StrategyRuntimeError("전략 컨테이너 제거가 이 배포에서 꺼져 있습니다.")
+    container_name = _deployment_container_name(deployment_id)
+    current = container_status(container_name)
+    if current.get("found"):
+        result = _docker("rm", "-f", container_name)
+        if result.returncode != 0 and container_status(container_name).get("found"):
+            raise StrategyRuntimeError((result.stderr or "docker rm 실패").strip())
+    return {
+        "deployment_id": deployment_id,
+        "container_name": container_name,
+        "runtime_status": "REMOVED",
+        "execution_status": "DISABLED",
+    }
+
+
+def paper_deployment_snapshot(deployment_id: str) -> dict[str, Any]:
+    container_name = _deployment_container_name(deployment_id)
+    container = container_status(container_name)
+    return {
+        "deployment_id": deployment_id,
+        "container_name": container_name,
+        "container": container,
+        "runtime": _read_runtime_state(deployment_id),
+        "execution_status": "SIGNAL_ONLY",
+    }
 
 
 def _docker(*args: str) -> subprocess.CompletedProcess[str]:

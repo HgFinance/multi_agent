@@ -16,7 +16,6 @@ from typing import Any
 
 from orchestration.ceo_workflow_scope import selected_primary_profiles_from_body
 
-
 _HR_PROFILE = "hr-department"
 # ▶ 네 목록 모두 `reason` 을 싣는다 (2026-08-27). 이 필드가 없던 동안 HR Agent 는
 #   전원 UNAVAILABLE 인 관측을 받고도 "관측 실패 사유가 이번 핸드오프에 제공되지
@@ -210,7 +209,7 @@ def fetch_workforce_advisory_context(root_body: str) -> str | None:
     observability, observability_error = _get_json(
         base_url,
         "/workforce/v1/departments/observability"
-        "?lookback_hours=24&idle_lookback_hours=24&idle_threshold_hours=4",
+        "?lookback_hours=24&idle_threshold_hours=4",
     )
     improvements, improvements_error = _get_json(base_url, "/workforce/v1/improvements")
     return _compact_context(

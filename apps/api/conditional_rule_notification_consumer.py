@@ -296,6 +296,7 @@ class ConditionalRuleNotificationConsumer:
                 else directive.get("error_code"),
                 event_type="BROKER_EXECUTION_SNAPSHOT",
                 event_payload=correlation,
+                event_id=event_id,
             )
         snapshot = build_conditional_execution_status(
             rule_id=str(context["rule_id"]),

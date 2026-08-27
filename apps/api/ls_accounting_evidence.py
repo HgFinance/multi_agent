@@ -41,6 +41,12 @@ PARAMETERIZED_TR_CODES = {
     "CSPBQ00200": ("side", "symbol", "order_price"),
 }
 
+# These account queries can legitimately contain no rows.  An empty result is
+# still retained in ``coverage``; it must not be promoted to an incomplete
+# evidence exception merely because the request was made after the market
+# closed or on a no-activity day.
+_NO_ACTIVITY_TR_CODES = frozenset({"CSPAQ13700", "t0150", "t0151", "t0425"})
+
 TR_NAMES = {
     "CDPCQ04700": "계좌 거래내역",
     "CSPAQ00600": "계좌별신용한도조회",
@@ -264,6 +270,11 @@ def _positions(body: Mapping[str, Any], row_limit: int) -> list[dict[str, Any]]:
                 "market_code": _text(row.get("RegMktCode")),
                 "security_balance_type": _text(row.get("SecBalPtnNm")),
                 "quantity": _number(row.get("BalQty")),
+                # ``BalQty`` is the D+2 balance view.  t0424 is requested
+                # with ``chegb=2`` (execution-basis balance), so reconciliation
+                # must use this same-basis field instead of comparing unlike
+                # settlement windows.
+                "trade_basis_quantity": _number(row.get("BnsBaseBalQty")),
                 "sellable_quantity": _number(row.get("SellAbleQty")),
                 "unit_cost_bep": _number(row.get("AvrUprc")),
                 "current_price": _number(row.get("NowPrc")),
@@ -316,13 +327,16 @@ def _position_reconciliation(
     secondary = {row.get("symbol"): row for row in checks if row.get("symbol")}
     discrepancies = []
     for symbol in sorted(set(primary) | set(secondary)):
-        left = _decimal((primary.get(symbol) or {}).get("quantity"))
+        left = _decimal((primary.get(symbol) or {}).get("trade_basis_quantity"))
         right = _decimal((secondary.get(symbol) or {}).get("quantity"))
         if left is None or right is None or left != right:
             discrepancies.append(
                 {
                     "symbol": symbol,
                     "cspaq12300_quantity": _number(left),
+                    "cspaq12300_balance_quantity": _number(
+                        (primary.get(symbol) or {}).get("quantity")
+                    ),
                     "t0424_quantity": _number(right),
                     "difference": _number(left - right) if left is not None and right is not None else None,
                 }
@@ -332,6 +346,7 @@ def _position_reconciliation(
         "discrepancies": discrepancies,
         "compared_symbols": len(set(primary) | set(secondary)),
         "source_trs": ["CSPAQ12300", "t0424"],
+        "comparison_basis": "CSPAQ12300.BnsBaseBalQty vs t0424.janqty",
     }
 
 
@@ -607,6 +622,20 @@ def normalize_ls_accounting_evidence(
         bodies[tr_code] = body
         coverage[tr_code] = {"name": TR_NAMES[tr_code], **metadata}
 
+    normalized_environment = str(environment).strip().upper()
+    for tr_code, status in coverage.items():
+        if status["status"] == "EMPTY" and tr_code in _NO_ACTIVITY_TR_CODES:
+            status["expected"] = True
+            status["interpretation"] = "NO_ACTIVITY"
+        elif (
+            normalized_environment == "PAPER"
+            and tr_code == "FOCCQ33600"
+            and status["status"] == "ERROR"
+            and "모의투자에서는" in str(status.get("error") or status.get("rsp_msg") or "")
+        ):
+            status["expected"] = True
+            status["interpretation"] = "UNSUPPORTED_IN_PAPER"
+
     account_candidates = (
         _block(bodies["CSPAQ12300"], "CSPAQ12300OutBlock1").get("AcntNo"),
         _block(bodies["CSPAQ12200"], "CSPAQ12200OutBlock1").get("AcntNo"),
@@ -645,6 +674,7 @@ def normalize_ls_accounting_evidence(
         code
         for code, status in coverage.items()
         if status["status"] in {"ERROR", "UNAVAILABLE", "EMPTY"}
+        and not status.get("expected")
         and code in ACCOUNT_LEVEL_TR_CODES
     ]
     if failed:
@@ -671,7 +701,7 @@ def normalize_ls_accounting_evidence(
     return {
         "schema_version": "accounting.broker-evidence.v1",
         "as_of": observed_at.astimezone(timezone.utc).isoformat(),
-        "environment": str(environment).strip().upper(),
+        "environment": normalized_environment,
         "source": "LS OPEN API /stock/accno",
         "account": {"masked": masked_account},
         "period": {

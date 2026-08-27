@@ -1,6 +1,6 @@
 # AI QA/감사본부 (AI QA & Audit)
 
-활성 역할은 Hermes Head `qa-audit-supervisor`, LLM `hallucination-critic-worker`·`incident-postmortem-worker`, 결정론 `qa-runner`다. 모델·fallback은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md), 권한은 [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md)를 따른다. 바인딩 판정은 결정론적 QA Engine이 소유한다.
+활성 역할은 Hermes Head `qa-audit-supervisor`, LLM `hallucination-critic-worker`·`incident-postmortem-worker`, 결정론 `qa-runner`다. 모델·fallback은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md), 권한은 [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md)를 따른다. 도메인 claim 판정은 결정론 QA Engine이 소유하고, CEO post-response 실행성·연결성 감사는 공통 LangSmith reader와 `QaAuditProjection`이 소유한다.
 
 ## 현재 운영 기준 (2026-08-26)
 
@@ -22,24 +22,6 @@
 evidence가 task에 포함되어야 한다. 해당 근거가 없으면 미연결 부서를 추측하지 않고
 `WARN`으로 남긴다. `qa_phase=post_response`가 있는 사후 QA에만 payload-only 도구 제한을
 적용한다.
-
-## 과거 개발 기록 (2026-08-04; 현재 운영 판정의 근거 아님)
-
-- Evidence QA `qa-check`는 Evidence QA Gate v1로 승인됐고, production은 `QA_CHECK_CONTRACT_APPROVED=true`일 때만 활성화된다.
-- Model Risk/Internal Audit는 governed 입력 신호가 있을 때만 결정론 엔진이 실행되며, 그 결과는
-  `qa-runner`(2026-08-06 tool 강등, 아래 참고)가 옮긴다. PASS가 아니면 에스컬레이션한다.
-- Worker의 ACTIVE Profile·운영 Trace는 migration 적용과 `QA_TRACE_PERSIST=true`가 필요하다. `SAMPLE_PLACEHOLDER` 정책 Corpus는 운영 근거가 아니며 실제 문서·임베딩·pgvector 적재 전에는 ESCALATE한다.
-
-## 과거 P1 개발 기록 (2026-08-03; 현재 운영 판정의 근거 아님)
-
-- `model_risk.py`는 모델·프롬프트·데이터셋 계보와 평가량/Calibration/Drift 지표를 결정론적으로 검사하고, 근거가 없으면 `ESCALATE`한다.
-- `internal_audit.py`와 `/qa/v1/internal-audit/evaluate`는 Trace·권한·ACTIVE Profile·부서 경계·금지 Tool을 검사한다. QA가 Risk/OMS/원장 권한을 스스로 승인하지 않는다.
-- `/qa/v1/model-risk/evaluate`와 `/qa/v1/internal-audit/evaluate`는 설명용 Agent와 분리된 안전한 P1 API다. `qa-check` 상위 계약은 여전히 명시적 승인 전까지 production `503`으로 차단된다.
-- 실제 정책 원문이 없어 `SAMPLE_PLACEHOLDER`는 적재하지 않는다. 실제 Corpus/pgvector, ACTIVE Profile과 운영 `agent_runs/tool_calls`, 상위 계약 승인·E2E가 남은 운영 조건이다.
-- 2026-08-03 감사에서 Self-check 5개가 통과했고 QA Decision 2, Incident Event 2, Corrective Action
-  1건을 확인했다. Compose Service와 `agent_runs`, `tool_calls`, `audit.run_log_events`는 아직 0건이다.
-- 결정론적 Markdown 보고서와 Notion Block Projection을 추가했고 현재 QA 보고서 9개가 있다.
-  Projection 실패는 QA Verdict를 바꾸지 않으며 최신 Reporter·Pipeline 회귀 Test 18개가 통과했다.
 
 현재 실행 상태와 동규님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)을 따른다.
 
@@ -156,16 +138,17 @@ python3 skills/agentic-rag/main.py --persona evidence-qa-agent \
   `scripts.py`의 조건부 노드 `hallucination_review`가 UNSUPPORTED/CONTRADICTED로 이미 플래그된 claim만
   대상으로 호출하며, 판정을 뒤집지 않고 유형 분류·인용 근거만 덧붙인다. 기법 배정 전체 결정(Neo4j/Hypergraph 포함)은 `hermes/config.yaml`의
   `rag_technique_assignment:` 참고.
-- Eval, Model-Risk 모듈은 아직 미구현(P1 tier: model-risk-agent, internal-audit-agent,
-  incident-postmortem-agent) — 코드가 생기면 `evals/`, `model-risk/`에 배치.
+- Eval, Model-Risk, Internal-Audit 모듈은 결정론 baseline/API가 존재하지만 CEO
+  post-response LangSmith-only 경로에는 자동으로 섞지 않는다. 별도 승인된 입력이
+  있을 때만 해당 API와 worker 경계를 사용한다.
 - 미착수(기술적으로 지금 불가능한 것과 범위 밖인 것을 구분해서 기록): 전 본부 Agent/Tool Trace 실제 저장과
   Tool Allowlist 실제 판정(Workforce의 Profile/Version Seed는 있으나 공식 Read API·실제 Permission 할당 없음),
   Sprint K3 나머지·K4, LLM-as-a-Judge(의도적으로 P0 이후 백로그), 실시간
   Telemetry·부하 테스트(관찰·테스트할 실제 서비스가 없어 지금은 불가능). 자세한 진행 상태는
   `hermes/config.yaml`의 `implementation:` 블록 참고.
-- `audit.qa_decisions.calculation_version/input_hash`는
-  `20260731001000_qa_decisions_reproducibility.sql`로 실제 DB 적용까지 확인했다. 다음 단계는 API 판정을
-  해당 Row와 `qa.decision.v1`에 같은 Hash로 기록하는 것이다.
+- CEO post-response QA의 LangSmith 근거와 명시적 `qa_verdict`는
+  `orchestration/adapters/qa_audit_projection.py`가 동일한 bounded evidence로
+  audit/eval projection에 기록한다.
 
 ## 안전한 단독 실행
 

@@ -309,6 +309,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  "20260826000650_remove_external_auth_subject_projection.sql",
                  # 조건주문 bundle 활성화에 필요한 worker UPDATE 권한만 추가한다.
                  "20260827000100_conditional_rule_worker_bundle_activation_grant.sql",
+                 # Redis publish must not hold conditional outbox row locks.
+                 "20260827000200_conditional_rule_outbox_claim_lease.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

@@ -13,6 +13,18 @@ def _reset_trace_state() -> None:
         langsmith_traces._TRACE_INFLIGHT.clear()
 
 
+def test_risk_business_block_is_not_counted_as_execution_error() -> None:
+    assert langsmith_traces._is_error(
+        {"status": "BLOCKED", "department": "risk"}
+    ) is False
+    assert langsmith_traces._is_error(
+        {"status": "BLOCKED", "profile": "risk-management"}
+    ) is False
+    assert langsmith_traces._is_error(
+        {"status": "BLOCKED", "department": "trading"}
+    ) is True
+
+
 def test_first_success_is_live_and_second_success_is_cached(monkeypatch) -> None:
     _reset_trace_state()
     monkeypatch.setenv("LANGSMITH_PROJECT", "First")

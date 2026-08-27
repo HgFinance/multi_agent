@@ -1,15 +1,18 @@
-"""Profile-scoped, durable idempotency for Discord gateway delivery.
+"""Durable idempotency for Discord gateway delivery.
 
 This module deliberately has no Hermes or Discord dependency.  The gateway
 image installs a small adapter shim which calls it at the inbound and
 outbound boundaries.  The existing Discord recovery database is reused, but
-the tables are separate so recovery/backfill semantics are unchanged.
+the tables are separate so recovery/backfill semantics are unchanged. Inbound
+claims are profile-scoped by default and can use a shared namespace when
+deployed with ``DISCORD_IDEMPOTENCY_SCOPE=global``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -24,6 +27,7 @@ _DB_FILENAME = "discord_message_recovery.db"
 _RETENTION = timedelta(days=30)
 _ACTIVE_LEASE = timedelta(minutes=30)
 _INBOUND_TERMINAL_STATES = frozenset({"COMPLETED", "EXPIRED"})
+_GLOBAL_INBOUND_PROFILE = "__global__"
 
 
 def canonical_discord_dedup_key(
@@ -31,7 +35,7 @@ def canonical_discord_dedup_key(
     channel_id: str | int | None,
     message_id: str | int | None,
 ) -> str:
-    """Return the stable per-profile Discord inbound key."""
+    """Return the stable Discord inbound key."""
 
     guild = str(guild_id or "dm")
     channel = str(channel_id or "unknown")
@@ -52,11 +56,13 @@ class IdempotencyStoreUnavailable(RuntimeError):
 
 
 class DiscordIdempotencyStore:
-    """Atomic, profile-local inbound and outbound delivery ledger.
+    """Atomic inbound and outbound delivery ledger.
 
     The database lives under the active Hermes home.  Separate profile
-    containers therefore do not share claims, while two processes using the
-    same profile serialize claims through SQLite's write lock.
+    containers therefore do not share claims by default.  Deployments that
+    mount one shared gateway home can set ``DISCORD_IDEMPOTENCY_SCOPE=global``
+    to use one inbound namespace for every department; two processes using the
+    same database serialize claims through SQLite's write lock.
     """
 
     def __init__(
@@ -75,6 +81,13 @@ class DiscordIdempotencyStore:
         directory = self._hermes_home / "gateway"
         directory.mkdir(parents=True, exist_ok=True)
         return directory / _DB_FILENAME
+
+    @staticmethod
+    def _inbound_profile(profile: str) -> str:
+        """Return the database namespace used for inbound claims."""
+
+        scope = os.getenv("DISCORD_IDEMPOTENCY_SCOPE", "profile").strip().lower()
+        return _GLOBAL_INBOUND_PROFILE if scope == "global" else str(profile)
 
     @staticmethod
     def _now() -> str:
@@ -98,6 +111,26 @@ class DiscordIdempotencyStore:
             # handle and production retries do not accumulate descriptors.
             conn.close()
             raise
+
+    @staticmethod
+    def _add_column_if_missing(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+        columns: set[str],
+    ) -> None:
+        if column in columns:
+            return
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError as exc:
+            # Another first-use connection may have completed the same
+            # idempotent migration between PRAGMA and ALTER TABLE.  Only this
+            # expected DDL race is absorbed; all other schema errors remain
+            # fail-closed through _connect/_run.
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
     def _initialize(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -128,8 +161,12 @@ class DiscordIdempotencyStore:
             ).fetchall()
         }
         if "session_id" not in inbound_columns:
-            conn.execute(
-                "ALTER TABLE discord_idempotency_inbound ADD COLUMN session_id TEXT"
+            self._add_column_if_missing(
+                conn,
+                "discord_idempotency_inbound",
+                "session_id",
+                "TEXT",
+                inbound_columns,
             )
 
         conn.execute(
@@ -154,9 +191,20 @@ class DiscordIdempotencyStore:
             ).fetchall()
         }
         if "source_message_id" not in outbound_columns:
-            conn.execute(
-                "ALTER TABLE discord_idempotency_outbound "
-                "ADD COLUMN source_message_id TEXT"
+            self._add_column_if_missing(
+                conn,
+                "discord_idempotency_outbound",
+                "source_message_id",
+                "TEXT",
+                outbound_columns,
+            )
+        if "content_hash" not in outbound_columns:
+            self._add_column_if_missing(
+                conn,
+                "discord_idempotency_outbound",
+                "content_hash",
+                "TEXT",
+                outbound_columns,
             )
         # Backfill the exact correlation already encoded in every canonical
         # dedup key.  Discord ids contain no colon, so the final segment is
@@ -271,13 +319,14 @@ class DiscordIdempotencyStore:
         """Atomically admit one inbound message, fail-closed on ledger errors."""
 
         now = self._now()
+        inbound_profile = self._inbound_profile(profile)
 
         def operation(conn: sqlite3.Connection) -> ClaimResult:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT state, attempts, updated_at "
                 "FROM discord_idempotency_inbound WHERE profile=? AND dedup_key=?",
-                (profile, dedup_key),
+                (inbound_profile, dedup_key),
             ).fetchone()
             if row is not None:
                 state = str(row[0])
@@ -286,6 +335,32 @@ class DiscordIdempotencyStore:
                         admitted=False,
                         dedup_hit=True,
                         state=state,
+                    )
+                if state == "PROCESSING":
+                    delivery_query = (
+                        "SELECT 1 FROM discord_idempotency_outbound "
+                        "WHERE dedup_key=? AND state='COMPLETED' LIMIT 1"
+                    )
+                    delivery_params: tuple[str, ...] = (dedup_key,)
+                    if inbound_profile != _GLOBAL_INBOUND_PROFILE:
+                        delivery_query = (
+                            "SELECT 1 FROM discord_idempotency_outbound "
+                            "WHERE profile=? AND dedup_key=? AND state='COMPLETED' LIMIT 1"
+                        )
+                        delivery_params = (str(profile), dedup_key)
+                    has_completed_delivery = conn.execute(
+                        delivery_query, delivery_params
+                    ).fetchone()
+                    next_state = "COMPLETED" if has_completed_delivery else "EXPIRED"
+                    conn.execute(
+                        "UPDATE discord_idempotency_inbound SET state=?, updated_at=? "
+                        "WHERE profile=? AND dedup_key=?",
+                        (next_state, now, inbound_profile, dedup_key),
+                    )
+                    return ClaimResult(
+                        admitted=False,
+                        dedup_hit=True,
+                        state=next_state,
                     )
                 # FAILED is retryable, but not unbounded. EXPIRED is handled
                 # by _is_active above and is never replayed: it is reserved
@@ -304,10 +379,10 @@ class DiscordIdempotencyStore:
                         channel_id,
                         thread_id,
                         session_id,
-                        profile,
+                        inbound_profile,
                         handler,
                         now,
-                        profile,
+                        inbound_profile,
                         dedup_key,
                     ),
                 )
@@ -325,7 +400,7 @@ class DiscordIdempotencyStore:
                     channel_id,
                     thread_id,
                     session_id,
-                    profile,
+                    inbound_profile,
                     handler,
                     now,
                 ),
@@ -341,12 +416,13 @@ class DiscordIdempotencyStore:
         if state not in {"RECEIVED", "PROCESSING", "COMPLETED", "FAILED", "EXPIRED"}:
             raise ValueError(f"invalid inbound state: {state}")
         now = self._now()
+        inbound_profile = self._inbound_profile(profile)
 
         def operation(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE discord_idempotency_inbound SET state=?, updated_at=? "
                 "WHERE profile=? AND dedup_key=?",
-                (state, now, profile, dedup_key),
+                (state, now, inbound_profile, dedup_key),
             )
 
         self._run(operation)
@@ -374,6 +450,7 @@ class DiscordIdempotencyStore:
         observed_at = now or datetime.now(timezone.utc)
         if observed_at.tzinfo is None:
             observed_at = observed_at.replace(tzinfo=timezone.utc)
+        inbound_profile = self._inbound_profile(profile) if profile else None
 
         def operation(conn: sqlite3.Connection) -> dict[str, int]:
             query = (
@@ -382,9 +459,9 @@ class DiscordIdempotencyStore:
                 "WHERE state='PROCESSING'"
             )
             parameters: list[str] = []
-            if profile:
+            if inbound_profile:
                 query += " AND profile=?"
-                parameters.append(profile)
+                parameters.append(inbound_profile)
             rows = conn.execute(query, parameters).fetchall()
             result = {"scanned": 0, "completed": 0, "expired": 0, "skipped": 0}
             for row in rows:
@@ -400,11 +477,18 @@ class DiscordIdempotencyStore:
                     continue
 
                 result["scanned"] += 1
-                has_completed_delivery = conn.execute(
-                    "SELECT 1 FROM discord_idempotency_outbound "
-                    "WHERE profile=? AND dedup_key=? AND state='COMPLETED' LIMIT 1",
-                    (str(row[1]), str(row[0])),
-                ).fetchone()
+                if str(row[1]) == _GLOBAL_INBOUND_PROFILE:
+                    has_completed_delivery = conn.execute(
+                        "SELECT 1 FROM discord_idempotency_outbound "
+                        "WHERE dedup_key=? AND state='COMPLETED' LIMIT 1",
+                        (str(row[0]),),
+                    ).fetchone()
+                else:
+                    has_completed_delivery = conn.execute(
+                        "SELECT 1 FROM discord_idempotency_outbound "
+                        "WHERE profile=? AND dedup_key=? AND state='COMPLETED' LIMIT 1",
+                        (str(row[1]), str(row[0])),
+                    ).fetchone()
                 next_state = "COMPLETED" if has_completed_delivery else "EXPIRED"
                 updated = conn.execute(
                     "UPDATE discord_idempotency_inbound SET state=?, updated_at=? "
@@ -429,14 +513,14 @@ class DiscordIdempotencyStore:
             row = conn.execute(
                 "SELECT dedup_key FROM discord_idempotency_inbound "
                 "WHERE profile=? AND message_id=? ORDER BY updated_at DESC LIMIT 1",
-                (profile, str(message_id)),
+                (self._inbound_profile(profile), str(message_id)),
             ).fetchone()
             return str(row[0]) if row else None
 
         return self._run(operation)
 
     def inbound_key_for_session(self, session_id: str, profile: str) -> str | None:
-        """Resolve only an exact profile-local Hermes session correlation."""
+        """Resolve only an exact Hermes session correlation."""
 
         if not session_id:
             return None
@@ -446,7 +530,7 @@ class DiscordIdempotencyStore:
                 "SELECT dedup_key FROM discord_idempotency_inbound "
                 "WHERE profile=? AND session_id=? "
                 "ORDER BY updated_at DESC LIMIT 1",
-                (profile, session_id),
+                (self._inbound_profile(profile), session_id),
             ).fetchone()
             return str(row[0]) if row else None
 
@@ -465,7 +549,7 @@ class DiscordIdempotencyStore:
             conn.execute(
                 "UPDATE discord_idempotency_inbound SET session_id=?, updated_at=? "
                 "WHERE profile=? AND message_id=?",
-                (session_id, now, profile, message_id),
+                (session_id, now, self._inbound_profile(profile), message_id),
             )
 
         self._run(operation)
@@ -486,7 +570,12 @@ class DiscordIdempotencyStore:
                 "UPDATE discord_idempotency_inbound "
                 "SET thread_id=?, updated_at=? "
                 "WHERE profile=? AND message_id=?",
-                (str(thread_id), now, profile, str(message_id)),
+                (
+                    str(thread_id),
+                    now,
+                    self._inbound_profile(profile),
+                    str(message_id),
+                ),
             )
 
         self._run(operation)
@@ -496,7 +585,7 @@ class DiscordIdempotencyStore:
             row = conn.execute(
                 "SELECT guild_id, channel_id, thread_id, message_id, session_id "
                 "FROM discord_idempotency_inbound WHERE profile=? AND dedup_key=?",
-                (profile, dedup_key),
+                (self._inbound_profile(profile), dedup_key),
             ).fetchone()
             if row is None:
                 return {}
@@ -515,7 +604,7 @@ class DiscordIdempotencyStore:
             row = conn.execute(
                 "SELECT state FROM discord_idempotency_inbound "
                 "WHERE profile=? AND dedup_key=?",
-                (profile, dedup_key),
+                (self._inbound_profile(profile), dedup_key),
             ).fetchone()
             return str(row[0]) if row else None
 
@@ -544,6 +633,24 @@ class DiscordIdempotencyStore:
 
         return self._run(operation)
 
+    def outbound_content_hash(
+        self,
+        response_key: str,
+        profile: str,
+    ) -> str | None:
+        """Return the redacted content fingerprint for one outbound card."""
+
+        def operation(conn: sqlite3.Connection) -> str | None:
+            row = conn.execute(
+                "SELECT content_hash FROM discord_idempotency_outbound "
+                "WHERE profile=? AND response_key=? LIMIT 1",
+                (profile, response_key),
+            ).fetchone()
+            value = str(row[0] or "").strip() if row else ""
+            return value or None
+
+        return self._run(operation)
+
     def latest_completed_response(
         self,
         *,
@@ -560,13 +667,15 @@ class DiscordIdempotencyStore:
         """
 
         def operation(conn: sqlite3.Connection) -> tuple[str, str] | None:
+            inbound_profile = self._inbound_profile(profile)
+            join_profile = "i.profile=?" if inbound_profile == _GLOBAL_INBOUND_PROFILE else "i.profile=o.profile"
             row = conn.execute(
                 """
                 SELECT o.response_message_id,
                        COALESCE(i.thread_id, i.channel_id) AS response_channel_id
                   FROM discord_idempotency_outbound o
                   JOIN discord_idempotency_inbound i
-                    ON i.profile=o.profile
+                    ON """ + join_profile + """
                    AND o.source_message_id=i.message_id
                  WHERE o.profile=?
                    AND o.state='COMPLETED'
@@ -582,7 +691,11 @@ class DiscordIdempotencyStore:
                  ORDER BY o.updated_at DESC
                  LIMIT 1
                 """,
-                (profile, guild_id, channel_id, channel_id),
+                (
+                    (inbound_profile, profile, guild_id, channel_id, channel_id)
+                    if inbound_profile == _GLOBAL_INBOUND_PROFILE
+                    else (profile, guild_id, channel_id, channel_id)
+                ),
             ).fetchone()
             if row is None or not row[0] or not row[1]:
                 return None
@@ -640,6 +753,7 @@ class DiscordIdempotencyStore:
         state: str,
         profile: str,
         response_message_id: str | None = None,
+        content_hash: str | None = None,
     ) -> None:
         if state not in {"PROCESSING", "COMPLETED", "FAILED"}:
             raise ValueError(f"invalid outbound state: {state}")
@@ -648,9 +762,17 @@ class DiscordIdempotencyStore:
         def operation(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE discord_idempotency_outbound SET state=?, "
-                "response_message_id=COALESCE(?, response_message_id), updated_at=? "
+                "response_message_id=COALESCE(?, response_message_id), "
+                "content_hash=COALESCE(?, content_hash), updated_at=? "
                 "WHERE profile=? AND response_key=?",
-                (state, response_message_id, now, profile, response_key),
+                (
+                    state,
+                    response_message_id,
+                    content_hash,
+                    now,
+                    profile,
+                    response_key,
+                ),
             )
 
         self._run(operation)

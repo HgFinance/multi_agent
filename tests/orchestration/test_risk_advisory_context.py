@@ -77,6 +77,34 @@ def test_root_body_prefers_exact_book_accounting_snapshot(monkeypatch) -> None:
     assert exact in body
 
 
+def test_accounting_route_puts_accounting_evidence_in_root(monkeypatch) -> None:
+    accounting = '{"contract":"hgfinance.accounting-advisory-portfolio.v1","fees":"12"}'
+
+    monkeypatch.setattr(
+        "orchestration.accounting_advisory_context.fetch_accounting_advisory_context",
+        lambda _fund_id: accounting,
+    )
+    monkeypatch.setattr(
+        "orchestration.risk_advisory_context.fetch_risk_advisory_context",
+        lambda _root_body: (_ for _ in ()).throw(
+            AssertionError("accounting route must not downgrade to risk evidence")
+        ),
+    )
+
+    body = build_root_body(
+        "회계 E2E 검증",
+        "request-accounting-evidence",
+        advisory_fund_id="fund-1",
+        advisory_book_id="book-1",
+        selected_primary_profiles=("accounting-portfolio-department",),
+        delegation_instructions={
+            "accounting-portfolio-department": "read-only accounting review",
+        },
+    )
+
+    assert accounting in body
+
+
 def test_root_body_does_not_fall_back_to_another_book(monkeypatch) -> None:
     monkeypatch.setattr(
         "orchestration.risk_advisory_context.fetch_risk_advisory_context",

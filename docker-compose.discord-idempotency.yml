@@ -1,9 +1,9 @@
-# Optional defense-in-depth override.
+# Historical bulk migration override.
 #
-# The default Docker-only production path intentionally uses the upstream
-# Hermes image from docker-compose.yml.  Apply this file only when a
-# single-owner deployment still demonstrates duplicate delivery after the
-# gateway canary, and keep the same file in every subsequent compose command.
+# The current base Compose explicitly builds the patched image for
+# ceo-hermes, qa-hermes, and workforce-hermes. Use this file only when
+# migrating one of the remaining upstream Gateway profiles; keep the same
+# file in every subsequent compose command for that migration.
 services:
   ceo-hermes:
     build:

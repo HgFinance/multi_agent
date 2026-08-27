@@ -24,7 +24,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 REAL_HERMES = (
@@ -60,8 +60,8 @@ DEFAULT_QA_AUDIT_REASONING = "high"
 QA_AUDIT_TOOLSETS = "kanban"
 QA_PRIMARY_TOOLSETS = "kanban"
 HR_E2E_TOOLSETS = "kanban,terminal"
-DEFAULT_HR_E2E_MAX_TURNS = 6
-MIN_HR_E2E_MAX_TURNS = 4
+DEFAULT_HR_E2E_MAX_TURNS = 8
+MIN_HR_E2E_MAX_TURNS = 6
 MAX_HR_E2E_MAX_TURNS = 12
 DEFAULT_HR_E2E_REASONING = "low"
 _REASONING_LEVELS = frozenset(
@@ -168,10 +168,11 @@ def _task_is_fast_advisory(
     return FAST_ADVISORY_MODE in _task_body(db_path, task_id)
 
 
-def _fast_advisory_max_turns() -> int:
+def _fast_advisory_max_turns(*, env: Mapping[str, str] | None = None) -> int:
     """Return a bounded, operator-tunable fast-advisory turn budget."""
 
-    raw = os.environ.get(
+    runtime_env = os.environ if env is None else env
+    raw = runtime_env.get(
         "HGFINANCE_FAST_ADVISORY_MAX_TURNS",
         str(DEFAULT_FAST_ADVISORY_MAX_TURNS),
     ).strip()
@@ -185,8 +186,9 @@ def _fast_advisory_max_turns() -> int:
     )
 
 
-def _user_response_max_turns() -> int:
-    raw = os.environ.get(
+def _user_response_max_turns(*, env: Mapping[str, str] | None = None) -> int:
+    runtime_env = os.environ if env is None else env
+    raw = runtime_env.get(
         "HGFINANCE_USER_RESPONSE_MAX_TURNS",
         str(DEFAULT_USER_RESPONSE_MAX_TURNS),
     ).strip()
@@ -216,8 +218,9 @@ def _user_response_reasoning() -> str:
     )
 
 
-def _qa_audit_max_turns() -> int:
-    raw = os.environ.get(
+def _qa_audit_max_turns(*, env: Mapping[str, str] | None = None) -> int:
+    runtime_env = os.environ if env is None else env
+    raw = runtime_env.get(
         "HGFINANCE_QA_AUDIT_MAX_TURNS",
         str(DEFAULT_QA_AUDIT_MAX_TURNS),
     ).strip()
@@ -228,8 +231,9 @@ def _qa_audit_max_turns() -> int:
     return min(MAX_QA_AUDIT_MAX_TURNS, max(MIN_QA_AUDIT_MAX_TURNS, configured))
 
 
-def _qa_primary_max_turns() -> int:
-    raw = os.environ.get(
+def _qa_primary_max_turns(*, env: Mapping[str, str] | None = None) -> int:
+    runtime_env = os.environ if env is None else env
+    raw = runtime_env.get(
         "HGFINANCE_QA_PRIMARY_MAX_TURNS",
         str(DEFAULT_QA_PRIMARY_MAX_TURNS),
     ).strip()
@@ -254,10 +258,11 @@ def _qa_audit_reasoning() -> str:
     return configured if configured in _REASONING_LEVELS else DEFAULT_QA_AUDIT_REASONING
 
 
-def _hr_e2e_max_turns() -> int:
+def _hr_e2e_max_turns(*, env: Mapping[str, str] | None = None) -> int:
     """Return a bounded budget for the exact HR read-only E2E contract."""
 
-    raw = os.environ.get(
+    runtime_env = os.environ if env is None else env
+    raw = runtime_env.get(
         "HGFINANCE_HR_E2E_MAX_TURNS",
         str(DEFAULT_HR_E2E_MAX_TURNS),
     ).strip()
@@ -307,21 +312,20 @@ def _response_task_kind(body: str, *, profile: str = "") -> str | None:
         return "risk_user_primary"
 
     if profile == QA_PROFILE and (
+        "workflow_role=qa" in body
+        and "workflow_plane=governance" in body
+    ):
+        return "qa_audit"
+    if profile == QA_PROFILE and (
         "workflow_role=primary" in body
         and "origin=user-query" in body
     ):
         return "qa_primary"
     if profile == QA_PROFILE and (
-        (
-            "workflow_role=qa" in body
-            and "workflow_plane=governance" in body
-        )
-        or (
-            "workflow_role=primary" in body
-            and (
-                "selected_primary_profiles=qa-department" in body
-                or "delegation_instruction.qa-department=" in body
-            )
+        "workflow_role=primary" in body
+        and (
+            "selected_primary_profiles=qa-department" in body
+            or "delegation_instruction.qa-department=" in body
         )
     ):
         return "qa_audit"
@@ -332,6 +336,69 @@ def _response_task_kind(body: str, *, profile: str = "") -> str | None:
     if "workflow_role=synthesis" in body and "workflow_plane=response" in body:
         return "response_synthesis"
     return None
+
+
+_TASK_MARKER_RE = re.compile(
+    r"(?:^|\n)\s*(?P<key>workflow_mode|analysis_mode)="
+    r"(?P<value>[A-Za-z0-9_.-]+)(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def task_execution_metadata(
+    body: str,
+    *,
+    profile: str = "",
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str | int | None]:
+    """Return the same bounded task classification used by worker argv.
+
+    ``0`` means that this task kind has no dispatcher-owned turn cap. It is
+    explicit in the trace so ``configured_max_turns`` is not confused with a
+    missing field.
+    """
+
+    task_kind = _response_task_kind(body, profile=profile)
+    quant_user_primary = (
+        profile in {QUANT_PROFILE, QUANT_LIAISON_PROFILE}
+        and "workflow_role=primary" in body
+        and "origin=user-query" in body
+    )
+    if task_kind is None and quant_user_primary:
+        task_kind = "quant_user_primary"
+
+    markers = {
+        match.group("key").casefold(): match.group("value")
+        for match in _TASK_MARKER_RE.finditer(str(body or ""))
+    }
+    workflow_mode = markers.get("workflow_mode") or "unknown"
+    analysis_mode = markers.get("analysis_mode")
+    if task_kind == "fast_advisory" and not analysis_mode:
+        analysis_mode = "fast_advisory"
+
+    configured_max_turns = 0
+    if task_kind == "fast_advisory":
+        configured_max_turns = _fast_advisory_max_turns(env=env)
+    elif task_kind == "hr_e2e_readonly":
+        configured_max_turns = _hr_e2e_max_turns(env=env)
+    elif task_kind == "qa_primary":
+        configured_max_turns = _qa_primary_max_turns(env=env)
+    elif task_kind == "qa_audit":
+        configured_max_turns = _qa_audit_max_turns(env=env)
+    elif task_kind in {
+        "risk_user_primary",
+        "quant_user_primary",
+        "user_query_planning",
+        "response_synthesis",
+    }:
+        configured_max_turns = _user_response_max_turns(env=env)
+
+    return {
+        "task_kind": task_kind,
+        "workflow_mode": workflow_mode,
+        "analysis_mode": analysis_mode,
+        "configured_max_turns": configured_max_turns,
+    }
 
 
 def _profile_from_argv(argv: Sequence[str]) -> str:
@@ -356,17 +423,8 @@ def _bounded_worker_argv(
 
     args = list(argv)
     body = _task_body(db_path, task_id)
-    task_kind = _response_task_kind(body, profile=profile)
-    # Standard Quant user requests are also on the bounded response plane.
-    # They do not carry the fast-advisory marker, so classify them explicitly;
-    # otherwise the dispatcher falls through with its broad default toolset.
-    quant_user_primary = (
-        profile in {QUANT_PROFILE, QUANT_LIAISON_PROFILE}
-        and "workflow_role=primary" in body
-        and "origin=user-query" in body
-    )
-    if task_kind is None and quant_user_primary:
-        task_kind = "quant_user_primary"
+    execution_metadata = task_execution_metadata(body, profile=profile)
+    task_kind = execution_metadata["task_kind"]
     if task_kind is None:
         return args
     try:
@@ -393,15 +451,7 @@ def _bounded_worker_argv(
             [
                 "--max-turns",
                 str(
-                    _fast_advisory_max_turns()
-                    if task_kind == "fast_advisory"
-                    else _hr_e2e_max_turns()
-                    if task_kind == "hr_e2e_readonly"
-                    else _qa_primary_max_turns()
-                    if task_kind == "qa_primary"
-                    else _qa_audit_max_turns()
-                    if task_kind == "qa_audit"
-                    else _user_response_max_turns()
+                    int(execution_metadata["configured_max_turns"] or 0)
                 ),
             ]
         )
@@ -510,6 +560,8 @@ def _bounded_worker_argv(
     )
     if task_kind == "hr_e2e_readonly":
         return _hr_e2e_worker_argv(bounded)
+    if task_kind == "fast_advisory" and profile == RESEARCH_PROFILE:
+        return _research_fast_advisory_worker_argv(bounded, task_body=body)
     return bounded
 
 
@@ -530,6 +582,64 @@ def _hr_e2e_worker_argv(argv: Sequence[str]) -> list[str]:
         "artifact hash, but never include raw response bodies or secrets. Do not "
         "submit orders, change investments, edit ledgers, change permissions, "
         "write to external systems, or change configuration."
+    )
+    args = list(argv)
+    for index, arg in enumerate(args):
+        if arg in {"-q", "--query"} and index + 1 < len(args):
+            args[index + 1] = prompt
+            return args
+        if arg.startswith("--query="):
+            args[index] = f"--query={prompt}"
+            return args
+    return [*args, "--query", prompt]
+
+
+def _research_fast_advisory_worker_argv(
+    argv: Sequence[str],
+    *,
+    task_body: str,
+) -> list[str]:
+    """Keep Research's bounded evidence pass within one terminal budget.
+
+    The generic Hermes prompt can spend multiple turns rediscovering the root
+    task and describing connectors before it reads evidence. The child body
+    already contains the scoped root ID, so one root read plus the existing
+    read-only Research MCP is sufficient. This reuses the normal Hermes
+    terminal handoff and does not create a second Research execution path.
+    """
+
+    body = str(task_body or "").strip()
+    prompt = (
+        "Perform one bounded Korean Research advisory pass for the exact user "
+        "request in workflow_root_task_id below. Read that root task exactly "
+        "once with kanban_show, and do not inspect unrelated tasks, skills, "
+        "files, browser tools, paper tools, or secondary agents. Use only the "
+        "read-only Research MCP evidence path. Make at most two fresh source "
+        "fetch rounds and make each connector single-attempt; never retry a "
+        "failed or empty connector. Stop once the direction, two positive "
+        "items, two counter-items, observation triggers/invalidation criteria, "
+        "and limitations are supported. The ticker is already supplied: do "
+        "not call dart_resolve_corp, dart_search_disclosures, dart_financials, "
+        "or dart_company in this fast path because those calls may download "
+        "the full DART corp-code index before returning and exceed the latency "
+        "budget. Use news_search to identify candidates, then use the existing "
+        "read_sources tool once when an official URL and a secondary URL are "
+        "available; it reads at most two independent sources concurrently with "
+        "a per-source timeout and no retry. Fall back to a single read_url only "
+        "when there is one source URL; "
+        "if an official DART URL is not already supplied by context, state "
+        "that the DART original was not verified instead of resolving it or "
+        "guessing. Before kanban_complete, put the full "
+        "user-facing answer in both result and final_answer. The answer must "
+        "use these Korean headings: 핵심 판단, 긍정 근거, 반대 근거, "
+        "관찰할 촉매·무효화 조건, 자료 기준과 확인하지 못한 자료. Number "
+        "exactly up to two positive and two counter items when evidence exists; "
+        "include source name, publication date, and URL for each cited source, "
+        "and state any unavailable source or unverified article content. Do not "
+        "recommend an investment or place an order. Call kanban_complete once "
+        "as the final tool call and do not continue after it.\n\n"
+        "SCOPED TASK BODY:\n"
+        + body
     )
     args = list(argv)
     for index, arg in enumerate(args):
@@ -564,7 +674,9 @@ def _qa_audit_worker_argv(
         "do not call kanban_show or kanban_list, do not delegate, and do not use "
         "shell/file tools. After the audit, call kanban_complete with the structured "
         "PASS/WARN/FAIL checks, findings, limitations, and PAPER/read-only safety "
-        "status. The QA result is asynchronous and must not rewrite or delay the "
+        "status. Set the explicit qa_verdict field to exactly PASS, WARN, or FAIL "
+        "and keep it consistent with the structured result. The QA result is "
+        "asynchronous and must not rewrite or delay the "
         "already delivered CEO response.\n\n"
         "TASK PAYLOAD:\n"
         + body

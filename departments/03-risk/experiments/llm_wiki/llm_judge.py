@@ -21,7 +21,7 @@ for path in (_RISK_ROOT, _AGENTIC_RAG_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from src.resilience import CircuitBreaker, RedisJsonCache, emit_metric  # noqa: E402
+from src.resilience import CircuitBreaker, RedisJsonCache, emit_metric
 
 MODEL = os.environ.get("LLM_WIKI_JUDGE_MODEL", "gpt-4o-mini")
 _BREAKER = CircuitBreaker("llm-wiki-judge", failure_threshold=3, recovery_timeout_seconds=30)

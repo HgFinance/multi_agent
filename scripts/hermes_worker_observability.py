@@ -14,6 +14,7 @@ tool results, credentials, and log text never leave this process.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -27,10 +28,16 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 ACCOUNTING_PROFILE = "accounting-portfolio-department"
 QA_PROFILE = "qa-department"
-# Keep one dispatcher-owned registry for every active non-CEO profile.  The
-# CEO root has its own lifecycle trace, while all department workers use the
-# same redacted worker/model/tool publisher below.
+# Keep one dispatcher-owned registry for every active worker profile. The CEO
+# ingress keeps its lifecycle trace, while CEO synthesis and department
+# workers use the same redacted worker/model/tool publisher below; those are
+# separate observation units, not duplicate workflow roots.
 _PROFILE_SPECS = {
+    "ceo-agent": {
+        "department": "ceo",
+        "schema_version": "llm.ceo-worker.v1",
+        "name_prefix": "hgfinance.ceo",
+    },
     ACCOUNTING_PROFILE: {
         "department": "accounting-portfolio",
         "schema_version": "llm.accounting-worker.v1",
@@ -77,6 +84,8 @@ _PROFILE_SPECS = {
         "name_prefix": "hgfinance.hr",
     },
 }
+_LOG = logging.getLogger("hgfinance.hermes_worker_observability")
+_LANGSMITH_USAGE_LIMITED = False
 _PROFILE_RE = re.compile(r"(?:^|\s)-p\s+(?P<profile>[A-Za-z0-9._-]+)")
 _MODEL_RE = re.compile(r"^\s*default:\s*([^#\s]+)", re.MULTILINE)
 _PROVIDER_RE = re.compile(r"^\s*provider:\s*([^#\s]+)", re.MULTILINE)
@@ -97,11 +106,24 @@ _TOOL_SUMMARY_RE = re.compile(r"(?:\(|,|\s)(?P<count>\d+)\s+tool calls?\b", re.I
 _TOOL_ERROR_RE = re.compile(
     r"(?:\bTool\s+[A-Za-z0-9_.-]+\s+returned\s+error\b|"
     r"\breturned_error\s*=|\btool[_\s-]*error\b|"
-    r"\btool[_\s-]*(?:blocked|failed)\b)",
+    r"\btool[_\s-]*(?:blocked|failed)\b|"
+    r"\bError\s+executing\s+tool\b|"
+    r"\bMCP\s+call\s+failed\b)",
     re.IGNORECASE,
 )
 _REASONING_RE = re.compile(r"Reasoning", re.IGNORECASE)
 _ROOT_RE = re.compile(r"(?:workflow_root_task_id|root_task_id)=(?P<id>t_[A-Za-z0-9_-]+)")
+_LANGSMITH_RUN_RE = re.compile(
+    r"(?:^|\s)langsmith_trace_run_id=(?P<id>"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"(?:$|\s)",
+    re.IGNORECASE,
+)
+_LANGSMITH_CONTEXT_RE = re.compile(
+    r"(?:^|\s)langsmith_trace_context=(?P<context>"
+    r"\d{8}T\d{12}Z[0-9a-f-]{36})(?:$|\s)",
+    re.IGNORECASE,
+)
 _REQUEST_RE = re.compile(
     r"(?:^|\n)(?:request_id|discord_request_id)=(?P<id>[^\s\n]+)",
     re.IGNORECASE,
@@ -129,6 +151,36 @@ def _ls_time(epoch_ms: int) -> str:
     return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).strftime(
         "%Y%m%dT%H%M%S%fZ"
     )
+
+
+def department_worker_trace_identity(
+    *, task_id: str, task_body: str, profile: str, run_id: str, started_ms: int
+) -> dict[str, str]:
+    """Return the canonical worker IDs shared by all worker observations.
+
+    The dispatcher worker is the sole trace owner. Other bounded observations
+    (for example the Risk Hermes log profile) must use this identity as a
+    parent instead of creating a second LangSmith root.
+    """
+
+    root_id = _root_id(task_id=task_id, task_body=task_body)
+    base = _safe_id(f"{profile}:{root_id}:{task_id}:{run_id}")
+    parent_run_id, parent_dotted_order = _langsmith_parent(task_body)
+    worker_uuid = _uuid(f"worker:{base}")
+    trace_uuid = parent_run_id or worker_uuid
+    stamp = _ls_time(started_ms)
+    worker_dotted_order = (
+        f"{parent_dotted_order}.{stamp}{worker_uuid}"
+        if parent_dotted_order
+        else f"{stamp}{worker_uuid}"
+    )
+    return {
+        "seed": base,
+        "root_id": root_id,
+        "worker_run_id": str(worker_uuid),
+        "trace_id": str(trace_uuid),
+        "worker_dotted_order": worker_dotted_order,
+    }
 
 
 def _profile_from_argv(argv: Sequence[str]) -> str:
@@ -263,7 +315,7 @@ def worker_log_metrics(
         ).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
-    tool_names, tool_count = _observed_tools(log_text)
+    tool_names, _tool_count = _observed_tools(log_text)
     tool_stats = _observed_tool_stats(log_text)
     tool_duration_total_ms = sum(total for _count, total in tool_stats.values())
     return {
@@ -291,10 +343,36 @@ def _request_id(*, root_id: str, task_body: str) -> str:
     return _safe_id(match.group("id"), limit=160) if match else root_id
 
 
-def _status(*, task_status: str, return_code: int) -> tuple[str, str | None]:
+def _langsmith_parent(task_body: str) -> tuple[UUID | None, str | None]:
+    """Read the BFF root run identity from the bounded task scope marker."""
+
+    body = str(task_body or "")
+    run_match = _LANGSMITH_RUN_RE.search(body)
+    context_match = _LANGSMITH_CONTEXT_RE.search(body)
+    try:
+        run_id = UUID(run_match.group("id")) if run_match else None
+    except (AttributeError, ValueError):
+        run_id = None
+    context = context_match.group("context") if context_match else None
+    if run_id is None and context:
+        try:
+            run_id = UUID(context[-36:])
+        except ValueError:
+            context = None
+    return run_id, context
+
+
+def _status(
+    *, task_status: str, return_code: int, profile: str = ""
+) -> tuple[str, str | None]:
     normalized = str(task_status or "").casefold()
     if normalized in {"done", "completed", "archived"} and return_code == 0:
         return "completed", None
+    if normalized == "blocked" and profile == "risk-management":
+        # A user-input block is a valid business terminal state for Risk. Do
+        # not turn it into a LangSmith execution error; the block kind remains
+        # visible in the task metadata and CEO/Notion projections.
+        return "blocked", None
     if normalized in {"blocked", "gave_up", "timed_out", "crashed", "failed"}:
         return normalized, f"kanban_{normalized}"
     if return_code < 0:
@@ -328,6 +406,9 @@ def _metadata(
     tool_duration_total_ms: int,
     tool_error_count: int,
     tool_latency_available: bool,
+    workflow_mode: str,
+    analysis_mode: str | None,
+    configured_max_turns: int,
 ) -> dict[str, Any]:
     return {
         "schema_version": profile_spec["schema_version"],
@@ -335,6 +416,10 @@ def _metadata(
         "observation_unit": observation_unit,
         "source": "kanban-dispatcher-worker-boundary",
         "department": profile_spec["department"],
+        "stage": profile_spec["department"],
+        "workflow_mode": workflow_mode,
+        "analysis_mode": analysis_mode,
+        "configured_max_turns": max(0, int(configured_max_turns)),
         "profile": profile,
         "task_id": task_id,
         "request_id": request_id,
@@ -352,6 +437,7 @@ def _metadata(
         "tool_duration_total_ms": max(0, int(tool_duration_total_ms)),
         "tool_error_count": max(0, int(tool_error_count)),
         "llm_turn_count_observed": llm_turn_count,
+        "actual_turns": max(0, int(llm_turn_count)),
         "llm_calls": max(0, int(llm_turn_count)),
         "attempts": max(1, int(attempts)),
         "retries": max(0, int(attempts) - 1),
@@ -420,7 +506,8 @@ def _run_payload(
 
 
 def _post_batch(*, env: Mapping[str, str], runs: list[dict[str, Any]]) -> bool:
-    if not runs or not _enabled(env):
+    global _LANGSMITH_USAGE_LIMITED
+    if not runs or not _enabled(env) or _LANGSMITH_USAGE_LIMITED:
         return False
     endpoint = str(env.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")).rstrip("/")
     body = json.dumps({"post": runs, "patch": []}, separators=(",", ":")).encode()
@@ -437,9 +524,28 @@ def _post_batch(*, env: Mapping[str, str], runs: list[dict[str, Any]]) -> bool:
     try:
         with urllib.request.urlopen(request, timeout=3.0) as response:
             return 200 <= int(response.status) < 300
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            try:
+                body = exc.read(512).decode("utf-8", "replace").casefold()
+            except (OSError, UnicodeError):
+                body = ""
+            if "usage limit" in body or "unique traces" in body:
+                _LANGSMITH_USAGE_LIMITED = True
+                _LOG.warning(
+                    "langsmith-worker-trace-write-blocked reason=tenant_usage_limit"
+                )
+        return False
     except (OSError, urllib.error.URLError, ValueError):
         # Observability is fail-open. Never change the worker's business result.
         return False
+
+
+def _tool_trace_mode(env: Mapping[str, str]) -> str:
+    """Return the bounded child-tool trace policy for this worker boundary."""
+
+    mode = str(env.get("LANGSMITH_TOOL_TRACE_MODE", "full")).strip().casefold()
+    return mode if mode in {"full", "aggregate", "sample"} else "full"
 
 
 def publish_department_worker_trace(
@@ -467,7 +573,14 @@ def publish_department_worker_trace(
     if profile_spec is None:
         return False
 
-    root_id = _root_id(task_id=task_id, task_body=task_body)
+    identity = department_worker_trace_identity(
+        task_id=task_id,
+        task_body=task_body,
+        profile=profile,
+        run_id=run_id,
+        started_ms=started_ms,
+    )
+    root_id = identity["root_id"]
     request_id = _request_id(root_id=root_id, task_body=task_body)
     provider, model = _model_info(profile=profile, env=runtime_env, argv=argv)
     try:
@@ -480,26 +593,72 @@ def publish_department_worker_trace(
     tool_duration_total_ms = sum(total for _count, total in tool_stats.values())
     tool_error_count = _observed_tool_error_count(log_text)
     tool_latency_available = tool_duration_total_ms > 0
+    tool_trace_mode = _tool_trace_mode(runtime_env)
+    if tool_trace_mode == "aggregate":
+        published_tool_names: list[str] = []
+    elif tool_trace_mode == "sample":
+        published_tool_names = tool_names[:1]
+    else:
+        published_tool_names = tool_names
     llm_turn_count = len(_REASONING_RE.findall(log_text))
     if llm_turn_count == 0 and return_code == 0:
         # The Hermes log may omit reasoning blocks in quiet mode. One completed
         # worker still proves that at least one model turn was executed.
         llm_turn_count = 1
-    status, error_code = _status(task_status=task_status, return_code=return_code)
-    base = _safe_id(f"{profile}:{root_id}:{task_id}:{run_id}")
-    # This worker trace is intentionally task/attempt scoped. The CEO root
-    # has its own lifecycle metric; the shared Kanban root/task metadata below
-    # is the durable join key between the two planes. Making the worker run
-    # itself the LangSmith trace root keeps dotted_order valid without inventing
-    # a second synthetic root run.
-    worker_uuid = _uuid(f"worker:{base}")
-    trace_uuid = worker_uuid
+    status, error_code = _status(
+        task_status=task_status,
+        return_code=return_code,
+        profile=profile,
+    )
+    if profile == "risk-management":
+        from orchestration.risk_observability import risk_trace_should_publish
+
+        if not risk_trace_should_publish(
+            task_id=task_id,
+            request_id=request_id,
+            status=status,
+            error_code=error_code,
+            return_code=return_code,
+            tool_names=tool_names,
+            tool_error_count=tool_error_count,
+            latency_ms=max(int(ended_ms) - int(started_ms), 0),
+            environment=runtime_env,
+        ):
+            _LOG.info(
+                "langsmith-risk-trace-sampled task=%s sample_rate=%s",
+                _safe_id(task_id),
+                runtime_env.get("LANGSMITH_RISK_TRACE_SAMPLE_RATE", "0.10"),
+            )
+            return False
+    try:
+        try:
+            from qa_hermes_worker import task_execution_metadata
+        except ImportError:
+            from scripts.qa_hermes_worker import task_execution_metadata
+
+        execution_metadata = task_execution_metadata(
+            task_body,
+            profile=profile,
+            env=runtime_env,
+        )
+    except Exception:  # noqa: BLE001 - observability remains fail-open
+        execution_metadata = {
+            "workflow_mode": "unknown",
+            "analysis_mode": None,
+            "configured_max_turns": 0,
+        }
+    workflow_mode = str(execution_metadata.get("workflow_mode") or "unknown")
+    analysis_mode = execution_metadata.get("analysis_mode")
+    analysis_mode = str(analysis_mode) if analysis_mode else None
+    configured_max_turns = max(
+        0, int(execution_metadata.get("configured_max_turns") or 0)
+    )
+    base = identity["seed"]
+    worker_uuid = UUID(identity["worker_run_id"])
+    trace_uuid = UUID(identity["trace_id"])
     model_uuid = _uuid(f"model:{base}")
-    stamp = _ls_time(started_ms)
-    # LangSmith validates that the last dotted-order component equals the
-    # current run ID. The trace ID is the stable workflow grouping key; the
-    # worker ID is the root run's actual last component.
-    worker_dotted = f"{stamp}{worker_uuid}"
+    worker_dotted = identity["worker_dotted_order"]
+    parent_run_id, _parent_dotted_order = _langsmith_parent(task_body)
     project_name = _safe_id(runtime_env.get("LANGSMITH_PROJECT", "First")) or "First"
     worker_metadata = _metadata(
         task_id=task_id,
@@ -524,12 +683,21 @@ def publish_department_worker_trace(
         tool_duration_total_ms=tool_duration_total_ms,
         tool_error_count=tool_error_count,
         tool_latency_available=tool_latency_available,
+        workflow_mode=workflow_mode,
+        analysis_mode=analysis_mode,
+        configured_max_turns=configured_max_turns,
     )
+    worker_metadata["tool_trace_mode"] = tool_trace_mode
+    worker_metadata["tool_trace_published_count"] = len(published_tool_names)
+    worker_metadata["tool_trace_aggregated"] = bool(tool_names)
     safe_inputs = {
         "task_id": task_id,
         "workflow_root_task_id": root_id,
         "kanban_run_id": run_id,
         "profile": profile,
+        "workflow_mode": workflow_mode,
+        "analysis_mode": analysis_mode,
+        "configured_max_turns": configured_max_turns,
         "task_body_present": bool(str(task_body).strip()),
         "task_body_length": len(str(task_body)),
         "request_id": request_id,
@@ -537,6 +705,7 @@ def publish_department_worker_trace(
         "attempts": attempts,
         "retries": max(0, attempts - 1),
         "llm_calls": llm_turn_count,
+        "actual_turns": llm_turn_count,
         "tool_calls": tool_count,
         "tool_error_count": tool_error_count,
         "tool_duration_total_ms": tool_duration_total_ms,
@@ -545,6 +714,8 @@ def publish_department_worker_trace(
             "hermes-log-duration" if tool_latency_available else "unavailable"
         ),
         "telemetry_completeness": worker_metadata["telemetry_completeness"],
+        "tool_trace_mode": tool_trace_mode,
+        "tool_trace_published_count": len(published_tool_names),
     }
     safe_outputs = {
         "status": status,
@@ -554,6 +725,10 @@ def publish_department_worker_trace(
         "attempts": attempts,
         "retries": max(0, attempts - 1),
         "llm_calls": llm_turn_count,
+        "actual_turns": llm_turn_count,
+        "workflow_mode": workflow_mode,
+        "analysis_mode": analysis_mode,
+        "configured_max_turns": configured_max_turns,
         "tool_calls": tool_count,
         "tool_error_count": tool_error_count,
         "tool_duration_total_ms": tool_duration_total_ms,
@@ -563,6 +738,8 @@ def publish_department_worker_trace(
         ),
         "telemetry_completeness": worker_metadata["telemetry_completeness"],
         "raw_payloads_sent": False,
+        "tool_trace_mode": tool_trace_mode,
+        "tool_trace_published_count": len(published_tool_names),
     }
     worker_latency_ms = max(int(ended_ms) - int(started_ms), 0)
     model_latency_ms = (
@@ -598,6 +775,7 @@ def publish_department_worker_trace(
             ended_ms=ended_ms,
             metadata=worker_metadata,
             project_name=project_name,
+            parent_run_id=parent_run_id,
             inputs=safe_inputs,
             outputs=safe_outputs,
         ),
@@ -617,7 +795,7 @@ def publish_department_worker_trace(
         ),
     ]
     tool_cursor_ms = int(started_ms)
-    for index, tool_name in enumerate(tool_names):
+    for index, tool_name in enumerate(published_tool_names):
         tool_uuid = _uuid(f"tool:{base}:{index}:{tool_name}")
         tool_count_for_name, tool_duration_ms = tool_stats.get(tool_name, (1, 0))
         tool_start_ms = tool_cursor_ms
@@ -670,6 +848,99 @@ def publish_department_worker_trace(
     return _post_batch(env=runtime_env, runs=runs)
 
 
+def publish_discord_worker_trace(
+    *,
+    message_id: str,
+    profile: str,
+    status: str,
+    started_ms: int,
+    ended_ms: int,
+    session_id: str | None = None,
+    return_code: int = 0,
+    llm_calls: int = 1,
+    error_count: int = 0,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Publish one redacted trace for a direct Discord Hermes turn.
+
+    Kanban workers use :func:`publish_department_worker_trace`, which derives
+    its identity from a task and persisted worker log. Direct Discord turns do
+    not have either of those inputs, so this boundary records only the stable
+    message/session coordinates and terminal timing. The same batch publisher,
+    project, redaction policy, and profile registry are reused; no raw message,
+    prompt, answer, tool argument, or tool result is sent.
+    """
+
+    runtime_env = env or os.environ
+    profile_spec = _PROFILE_SPECS.get(str(profile).strip())
+    safe_message_id = _safe_id(message_id, limit=160)
+    if profile_spec is None or not safe_message_id:
+        return False
+
+    started = int(started_ms)
+    ended = max(int(ended_ms), started)
+    trace_uuid = _uuid(f"discord:{profile}:{safe_message_id}")
+    worker_uuid = _uuid(f"discord-worker:{profile}:{safe_message_id}")
+    worker_id = f"{profile}.discord"
+    request_id = f"discord:{safe_message_id}"
+    safe_status = _safe_id(status, limit=40) or "completed"
+    safe_session_id = _safe_id(session_id, limit=160) if session_id else None
+    metadata = {
+        "schema_version": profile_spec["schema_version"],
+        "trace_kind": "discord_worker",
+        "observation_unit": "worker",
+        "source": "hermes-discord-gateway",
+        "department": profile_spec["department"],
+        "stage": profile_spec["department"],
+        "profile": str(profile),
+        "worker_id": worker_id,
+        "role": "department_head",
+        "workflow_mode": "discord",
+        "request_id": request_id,
+        "trace_id": str(trace_uuid),
+        "discord_message_id": safe_message_id,
+        "session_id": safe_session_id,
+        "status": safe_status,
+        "return_code": int(return_code),
+        "error_count": max(0, int(error_count)),
+        "llm_calls": max(0, int(llm_calls)),
+        "actual_turns": max(0, int(llm_calls)),
+        "latency_ms": max(ended - started, 0),
+        "latency_scope": "discord_turn",
+        "tool_calls": 0,
+        "tool_error_count": 0,
+        "tool_latency_available": False,
+        "tool_timing_source": "unavailable",
+        "telemetry_completeness": "gateway-boundary",
+        "raw_payloads_sent": False,
+    }
+    project_name = _safe_id(runtime_env.get("LANGSMITH_PROJECT", "First")) or "First"
+    run = _run_payload(
+        run_uuid=worker_uuid,
+        trace_uuid=trace_uuid,
+        dotted_order=f"{_ls_time(started)}{worker_uuid}",
+        name=f"{profile_spec['name_prefix']}.discord",
+        run_type="chain",
+        started_ms=started,
+        ended_ms=ended,
+        metadata=metadata,
+        project_name=project_name,
+        inputs={
+            "message_id": safe_message_id,
+            "session_id_present": bool(safe_session_id),
+            "raw_payloads_sent": False,
+        },
+        outputs={
+            "status": safe_status,
+            "return_code": int(return_code),
+            "latency_ms": max(ended - started, 0),
+            "llm_calls": max(0, int(llm_calls)),
+            "raw_payloads_sent": False,
+        },
+    )
+    return _post_batch(env=runtime_env, runs=[run])
+
+
 def publish_accounting_worker_trace(**kwargs: Any) -> bool:
     """Backward-compatible Accounting entry point."""
 
@@ -679,7 +950,9 @@ def publish_accounting_worker_trace(**kwargs: Any) -> bool:
 __all__ = [
     "ACCOUNTING_PROFILE",
     "QA_PROFILE",
+    "department_worker_trace_identity",
     "publish_accounting_worker_trace",
     "publish_department_worker_trace",
+    "publish_discord_worker_trace",
     "worker_log_metrics",
 ]

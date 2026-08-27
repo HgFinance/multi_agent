@@ -108,6 +108,19 @@ def test_retained_operational_services_do_not_reference_factory_image() -> None:
         assert "factory-autopilot" not in service.get("depends_on", {})
 
 
+def test_strategy_runtime_has_readonly_research_input_and_state_volume() -> None:
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    service = compose["services"]["strategy-runtime-control"]
+
+    assert "autonomous_research_lab:/var/lib/autonomous-research:ro" in service["volumes"]
+    assert "strategy_runtime_data:/var/lib/strategy-runtime" in service["volumes"]
+    assert service["environment"]["STRATEGY_PAPER_IMAGE"].endswith("hedgefund-operations-runtime:latest}")
+    source = (ROOT / "apps/api/strategy_runtime.py").read_text(encoding="utf-8")
+    assert "strategy_paper_executor" in source
+    executor = (ROOT / "apps/api/strategy_paper_executor.py").read_text(encoding="utf-8")
+    assert '"orders_enabled": False' in executor
+
+
 def test_model_overlay_evolution_workers_use_non_factory_runtime() -> None:
     overlay = yaml.safe_load((ROOT / "docker-compose.model.yml").read_text(encoding="utf-8"))
     for name in ("skill-evolution-worker", "skill-evolution-control-worker"):

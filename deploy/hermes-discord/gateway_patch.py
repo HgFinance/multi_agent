@@ -1,9 +1,16 @@
 """Runtime shim installed into the Hermes Discord gateway image.
 
-The shim is intentionally limited to message admission and final Discord
-publication.  It does not change Discord permissions, mention rules,
-history backfill policy, or the Hermes session/worker implementation.
+The shim is intentionally limited to configured message admission, final
+Discord publication, and bounded HR trace observation. It does not change
+Discord permissions, history backfill policy, or the Hermes session/worker
+implementation; channel and mention policy are enforced here before the
+upstream admission path so every profile shares the same boundary.
 """
+
+# Discord/Hermes compatibility boundaries intentionally contain third-party
+# exceptions so a transport or telemetry failure cannot widen ingress. Keep
+# this module-level lint exception narrow to that boundary policy.
+# ruff: noqa: BLE001
 
 from __future__ import annotations
 
@@ -34,9 +41,9 @@ from orchestration.qa_discord_feedback import (
     SKILL_PROPOSAL_MARKER,
     QaFeedbackCommand,
     artifact_id_from_text,
+    hr_langfuse_channel_id,
     parse_qa_feedback_command,
     proposal_id_from_text,
-    hr_langfuse_channel_id,
     qa_feedback_channel_id,
     submit_qa_feedback_decision,
     submit_skill_proposal_decision,
@@ -120,6 +127,7 @@ def _log_event(
     dedup_key: str,
     handler: str,
     dedup_hit: bool = False,
+    admission_completed: bool = False,
     hermes_invocation_started: bool = False,
     discord_publish_started: bool = False,
     discord_publish_completed: bool = False,
@@ -137,6 +145,7 @@ def _log_event(
         "dedup_key": dedup_key,
         "handler": handler,
         "dedup_hit": dedup_hit,
+        "admission_completed": admission_completed,
         "hermes_invocation_started": hermes_invocation_started,
         "discord_publish_started": discord_publish_started,
         "discord_publish_completed": discord_publish_completed,
@@ -256,7 +265,7 @@ def _admission_drop_reason(adapter: Any, message: Any, *, claim: bool) -> str:
             if bool(contains(message_id)):
                 return "DEDUP"
         except Exception:
-            pass
+            logger.debug("discord admission dedup inspection failed", exc_info=True)
 
     client = getattr(adapter, "_client", None)
     author = getattr(message, "author", None)
@@ -290,7 +299,7 @@ def _admission_drop_reason(adapter: Any, message: Any, *, claim: bool) -> str:
             ):
                 return "MENTION_POLICY"
         except Exception:
-            pass
+            logger.debug("discord bot mention inspection failed", exc_info=True)
         return "OTHER"
 
     # Avoid re-running the potentially role-aware user check on the hot path.
@@ -308,13 +317,13 @@ def _admission_drop_reason(adapter: Any, message: Any, *, claim: bool) -> str:
         if not has_user_or_role_policy and not open_mode:
             return "CHANNEL_POLICY"
     except Exception:
-        pass
+        logger.debug("discord user admission inspection failed", exc_info=True)
 
     raw_self_mention = False
     try:
         raw_self_mention = bool(adapter._self_is_explicitly_mentioned(message))
     except Exception:
-        pass
+        logger.debug("discord mention inspection failed", exc_info=True)
     mentions = getattr(message, "mentions", None) or ()
     if raw_self_mention or mentions:
         return "MENTION_POLICY"
@@ -330,16 +339,123 @@ def _admission_drop_reason(adapter: Any, message: Any, *, claim: bool) -> str:
             if "*" not in free_channels and not (channel_keys & free_channels):
                 return "MENTION_POLICY"
     except Exception:
-        pass
+        logger.debug("discord free-response inspection failed", exc_info=True)
     return "OTHER"
+
+
+def _discord_channel_keys(adapter: Any, message: Any) -> set[str]:
+    resolver = getattr(adapter, "_discord_channel_keys", None)
+    if callable(resolver):
+        try:
+            return {str(value) for value in resolver(message)}
+        except Exception:
+            logger.debug("discord channel-key inspection failed", exc_info=True)
+    context = _message_context(message, adapter)
+    channel_keys = {str(context.get("channel_id") or "")}
+    if context.get("thread_id"):
+        channel_keys.add(str(context["thread_id"]))
+    return {value for value in channel_keys if value}
+
+
+def _discord_is_dm(message: Any) -> bool:
+    return getattr(message, "guild", None) is None
+
+
+def _runtime_admission_drop_reason(adapter: Any, message: Any) -> str | None:
+    """Apply the gateway's channel and mention policy before claiming work.
+
+    Hermes historically evaluated part of its no-mention policy only when a
+    message already had a mention.  The shim owns the deployment-wide
+    allowlist, so every non-DM event is checked before the profile can claim
+    the shared inbound ledger.
+    """
+
+    if _discord_is_dm(message):
+        return None
+
+    channel_keys = _discord_channel_keys(adapter, message)
+    try:
+        allowed_channels = {
+            str(value)
+            for value in adapter._get_allowed_channels()
+            if str(value)
+        }
+    except Exception:
+        allowed_channels = {
+            value
+            for value in os.getenv("DISCORD_ALLOWED_CHANNELS", "")
+            .replace(",", " ")
+            .split()
+            if value
+        }
+    if (
+        allowed_channels
+        and "*" not in allowed_channels
+        and not channel_keys.intersection(allowed_channels)
+    ):
+        return "CHANNEL_POLICY"
+
+    try:
+        ignored_channels = {
+            str(value)
+            for value in adapter._get_ignored_channels()
+            if str(value)
+        }
+    except Exception:
+        ignored_channels = set()
+    if "*" in ignored_channels or channel_keys.intersection(ignored_channels):
+        return "CHANNEL_POLICY"
+
+    try:
+        require_mention = bool(adapter._discord_require_mention())
+        free_channels = {
+            str(value)
+            for value in adapter._discord_free_response_channels()
+            if str(value)
+        }
+        thread_require_mention = bool(adapter._discord_thread_require_mention())
+        thread_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        in_bot_thread = bool(
+            getattr(getattr(adapter, "_threads", None), "__contains__", lambda _: False)(
+                thread_id
+            )
+        )
+        if thread_require_mention:
+            in_bot_thread = False
+        is_free_channel = "*" in free_channels or bool(
+            channel_keys.intersection(free_channels)
+        )
+        explicitly_mentioned = bool(adapter._self_is_explicitly_mentioned(message))
+    except Exception:
+        # Test doubles and old Hermes images without the policy helpers keep
+        # their native behavior; current deployed images expose all helpers.
+        return None
+
+    if require_mention and not is_free_channel and not in_bot_thread and not explicitly_mentioned:
+        return "MENTION_POLICY"
+    return None
 
 
 def _store(adapter: Any) -> DiscordIdempotencyStore:
     store = getattr(adapter, "_hgfinance_idempotency", None)
     if store is None:
-        store = DiscordIdempotencyStore(Path(os.getenv("HERMES_HOME", "/opt/data")))
+        store = DiscordIdempotencyStore(
+            Path(
+                os.getenv(
+                    "DISCORD_IDEMPOTENCY_HOME",
+                    os.getenv("HERMES_HOME", "/opt/data"),
+                )
+            )
+        )
         adapter._hgfinance_idempotency = store
     return store
+
+
+def _reconciliation_profile() -> str | None:
+    """Sweep historical local rows when the active ledger is global."""
+
+    scope = os.getenv("DISCORD_IDEMPOTENCY_SCOPE", "profile").strip().lower()
+    return None if scope == "global" else _profile_name()
 
 
 def _claim_inbound(adapter: Any, message: Any, *, handler: str) -> tuple[str, dict[str, str | None], ClaimResult]:
@@ -374,27 +490,28 @@ def _wrap_init(cls: type[Any]) -> None:
         # it never replays a Discord message or invokes Hermes. New rows are
         # closed by the normal success/failure hooks below.
         try:
+            reconciliation_profile = _reconciliation_profile()
             reconciliation = store.reconcile_stale_inbound(
-                profile=_profile_name(),
+                profile=reconciliation_profile,
             )
             if reconciliation["completed"] or reconciliation["expired"]:
                 logger.warning(
                     "discord-idempotency-reconcile profile=%s scanned=%d "
                     "completed=%d expired=%d skipped=%d",
-                    _profile_name(),
+                    reconciliation_profile or "all",
                     reconciliation["scanned"],
                     reconciliation["completed"],
                     reconciliation["expired"],
                     reconciliation["skipped"],
                 )
-        except Exception as exc:  # noqa: BLE001 - gateway remains fail-closed.
+        except Exception as exc:
             # A reconciliation failure must not make adapter construction
             # appear successful with an unknown ledger state. Normal claim
             # operations still fail closed through IdempotencyStoreUnavailable.
             logger.error(
                 "discord-idempotency-reconcile status=unavailable "
                 "profile=%s error_type=%s",
-                _profile_name(),
+                _reconciliation_profile() or "all",
                 type(exc).__name__,
             )
 
@@ -475,7 +592,11 @@ def _csv_ids(name: str) -> set[str]:
     }
 
 
-def _qa_approver_authorized(message: Any) -> bool:
+def _approver_authorized(
+    message: Any, *, user_env: str, role_env: str
+) -> bool:
+    """Apply one fail-closed Discord approver policy for any review room."""
+
     author = getattr(message, "author", None)
     author_id = str(getattr(author, "id", "") or "")
     guild_owner_id = str(
@@ -483,8 +604,8 @@ def _qa_approver_authorized(message: Any) -> bool:
     )
     if author_id and author_id == guild_owner_id:
         return True
-    allowed_users = _csv_ids("QA_DISCORD_APPROVER_USER_IDS")
-    allowed_roles = _csv_ids("QA_DISCORD_APPROVER_ROLE_IDS")
+    allowed_users = _csv_ids(user_env)
+    allowed_roles = _csv_ids(role_env)
     if not allowed_users and not allowed_roles:
         return False
     if author_id in allowed_users:
@@ -494,29 +615,24 @@ def _qa_approver_authorized(message: Any) -> bool:
         for role in (getattr(author, "roles", None) or ())
     }
     return bool(role_ids.intersection(allowed_roles))
+
+
+def _qa_approver_authorized(message: Any) -> bool:
+    return _approver_authorized(
+        message,
+        user_env="QA_DISCORD_APPROVER_USER_IDS",
+        role_env="QA_DISCORD_APPROVER_ROLE_IDS",
+    )
 
 
 def _hr_langfuse_approver_authorized(message: Any) -> bool:
     """Authorize HR-channel decisions without widening the QA owner scope."""
 
-    author = getattr(message, "author", None)
-    author_id = str(getattr(author, "id", "") or "")
-    guild_owner_id = str(
-        getattr(getattr(message, "guild", None), "owner_id", "") or ""
+    return _approver_authorized(
+        message,
+        user_env="HR_LANGFUSE_APPROVER_USER_IDS",
+        role_env="HR_LANGFUSE_APPROVER_ROLE_IDS",
     )
-    if author_id and author_id == guild_owner_id:
-        return True
-    allowed_users = _csv_ids("HR_LANGFUSE_APPROVER_USER_IDS")
-    allowed_roles = _csv_ids("HR_LANGFUSE_APPROVER_ROLE_IDS")
-    if not allowed_users and not allowed_roles:
-        return False
-    if author_id in allowed_users:
-        return True
-    role_ids = {
-        str(getattr(role, "id", "") or "")
-        for role in (getattr(author, "roles", None) or ())
-    }
-    return bool(role_ids.intersection(allowed_roles))
 
 
 async def _qa_reply(message: Any, content: str) -> None:
@@ -1073,6 +1189,16 @@ def _wrap_admission(cls: type[Any]) -> None:
                 dedup_hit=True,
             )
             return False, False
+        policy_reason = _runtime_admission_drop_reason(self, message)
+        if policy_reason:
+            _log_pre_filter_drop(
+                self,
+                message,
+                stage="admission",
+                reason=policy_reason,
+            )
+            return False, False
+
         admitted, role_authorized = original(self, message, *args, **kwargs)
         if not admitted:
             _log_pre_filter_drop(
@@ -1129,7 +1255,7 @@ def _wrap_admission(cls: type[Any]) -> None:
             context=context,
             dedup_key=dedup_key,
             handler=handler,
-            hermes_invocation_started=True,
+            admission_completed=True,
         )
         return admitted, role_authorized
 
@@ -1268,7 +1394,7 @@ def _post_ingress_failure_alert(
             exc.code,
             dedupe_key,
         )
-    except Exception as exc:  # noqa: BLE001 - alerting must not affect ingress.
+    except Exception as exc:
         logger.error(
             "discord-ingress-alert status=failed reason=transport "
             "exception_type=%s key=%s",
@@ -1309,7 +1435,7 @@ def _schedule_ingress_failure_alert(reason: str, message_id: str) -> None:
             name="ceo-ingress-alert",
             daemon=True,
         ).start()
-    except Exception as exc:  # noqa: BLE001 - preserve fail-closed admission.
+    except Exception as exc:
         with _ingress_alert_lock:
             _ingress_alert_in_flight = False
             _ingress_alert_last_attempt[dedupe_key] = time.monotonic()
@@ -1402,7 +1528,7 @@ async def _notify_ingress_failure(message: Any) -> None:
             await send(_INGRESS_FAILURE_MESSAGE)
             return
         raise AttributeError("Discord message has no reply transport")
-    except Exception as exc:  # noqa: BLE001 - reporting failure cannot replay an order.
+    except Exception as exc:
         logger.error(
             "discord-ingress failure-notice=failed exception_type=%s message_id=%s",
             type(exc).__name__,
@@ -1588,7 +1714,7 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
             _mark_ingress_failure(message, f"http_{exc.code}")
             _mark_ingress_failed(adapter, message_id)
             return True
-        except Exception as exc:  # noqa: BLE001 - retried with one stable request ID.
+        except Exception as exc:
             if attempt < len(_INGRESS_RETRY_DELAYS_SECONDS):
                 time.sleep(_INGRESS_RETRY_DELAYS_SECONDS[attempt])
                 continue
@@ -1634,7 +1760,7 @@ async def _forward_to_ingress_async(message: Any, adapter: Any) -> bool:
         _mark_ingress_failure(message, "concurrency_limit")
         try:
             _mark_ingress_failed(adapter, message_id)
-        except Exception:  # noqa: BLE001 - bounded rejection must not escape.
+        except Exception:
             logger.debug(
                 "discord-ingress ledger_fail_ack=failed reason=concurrency_limit",
                 exc_info=True,
@@ -1732,7 +1858,7 @@ async def _resolve_thread_followup_context(adapter: Any, message: Any) -> Any:
             ),
             timeout=_THREAD_CONTEXT_FETCH_TIMEOUT_SECONDS,
         )
-    except Exception as exc:  # noqa: BLE001 - supplementary bounded lookup.
+    except Exception as exc:
         logger.warning(
             "discord-thread-context status=unavailable thread_id=%s error_type=%s",
             thread_id,
@@ -1978,6 +2104,86 @@ async def _ensure_request_thread(adapter: Any, message: Any) -> Any:
     return routed
 
 
+async def _publish_discord_trace_async(
+    *,
+    message_id: str,
+    profile: str,
+    status: str,
+    started_ms: int,
+    ended_ms: int,
+    session_id: str | None,
+    return_code: int,
+    llm_calls: int,
+) -> None:
+    """Publish a direct Discord trace without extending the user turn."""
+
+    try:
+        try:
+            from hermes_worker_observability import publish_discord_worker_trace
+        except ImportError:
+            from scripts.hermes_worker_observability import publish_discord_worker_trace
+
+        published = await asyncio.to_thread(
+            publish_discord_worker_trace,
+            message_id=message_id,
+            profile=profile,
+            status=status,
+            started_ms=started_ms,
+            ended_ms=ended_ms,
+            session_id=session_id,
+            return_code=return_code,
+            llm_calls=llm_calls,
+            env=os.environ,
+        )
+        logger.info(
+            "discord-langsmith-trace profile=%s message_id=%s status=%s published=%s",
+            profile,
+            message_id,
+            status,
+            bool(published),
+        )
+    except Exception as exc:
+        # LangSmith is an observer. An unavailable import, network, or SDK must
+        # never change the Discord business result or surface raw payloads.
+        logger.warning(
+            "discord-langsmith-trace profile=%s message_id=%s status=observer_failed error_type=%s",
+            profile,
+            message_id,
+            type(exc).__name__,
+        )
+
+
+def _schedule_discord_trace(
+    *,
+    message: Any,
+    session_id: str | None,
+    started_ms: int,
+    status: str,
+    return_code: int,
+    llm_calls: int,
+) -> None:
+    """Schedule one bounded trace only for direct HR Discord turns."""
+
+    profile = _profile_name()
+    if profile != "hr-department":
+        return
+    message_id = str(getattr(message, "id", "") or "")
+    if not message_id:
+        return
+    asyncio.create_task(
+        _publish_discord_trace_async(
+            message_id=message_id,
+            profile=profile,
+            status=status,
+            started_ms=started_ms,
+            ended_ms=int(time.time() * 1000),
+            session_id=session_id,
+            return_code=return_code,
+            llm_calls=llm_calls,
+        )
+    )
+
+
 def _wrap_handle_message(cls: type[Any]) -> None:
     if not hasattr(cls, "_handle_message"):
         return
@@ -2080,6 +2286,25 @@ def _wrap_handle_message(cls: type[Any]) -> None:
                 await _notify_ingress_failure(resolved_message)
             return True
 
+        message_id = str(getattr(resolved_message, "id", "") or "")
+        started_ms = int(time.time() * 1000)
+        key = (
+            _store(self).inbound_key_for_message(message_id, _profile_name())
+            if message_id
+            else None
+        )
+        if key:
+            context = _message_context(resolved_message, self)
+            _log_event(
+                self,
+                message_id=message_id,
+                context=context,
+                dedup_key=key,
+                handler="live",
+                admission_completed=True,
+                hermes_invocation_started=True,
+            )
+
         try:
             result = await original(
                 self,
@@ -2088,7 +2313,7 @@ def _wrap_handle_message(cls: type[Any]) -> None:
                 **kwargs,
             )
             resolved_session_id = _session_id(self, result) or _session_id(
-                self, message
+                self, resolved_message
             )
             if resolved_session_id:
                 _store(self).bind_inbound_session(
@@ -2096,19 +2321,27 @@ def _wrap_handle_message(cls: type[Any]) -> None:
                     resolved_session_id,
                     _profile_name(),
                 )
+            _schedule_discord_trace(
+                message=resolved_message,
+                session_id=resolved_session_id,
+                started_ms=started_ms,
+                status="completed" if result else "failed",
+                return_code=0 if result else 1,
+                llm_calls=1 if result else 0,
+            )
             return result
         except Exception:
-            message_id = str(getattr(message, "id", "") or "")
-            key = _store(self).inbound_key_for_message(message_id, _profile_name()) if message_id else None
             if key:
                 _store(self).mark_inbound(key, "FAILED", _profile_name())
+            _schedule_discord_trace(
+                message=resolved_message,
+                session_id=_session_id(self, resolved_message),
+                started_ms=started_ms,
+                status="failed",
+                return_code=1,
+                llm_calls=0,
+            )
             raise
-        if not result:
-            message_id = str(getattr(message, "id", "") or "")
-            key = _store(self).inbound_key_for_message(message_id, _profile_name()) if message_id else None
-            if key:
-                _store(self).mark_inbound(key, "FAILED", _profile_name())
-        return result
 
     cls._handle_message = wrapped
 
@@ -2125,6 +2358,16 @@ def _wrap_processing_complete(cls: type[Any]) -> None:
             await original(self, event, outcome)
         finally:
             if key:
+                raw_message = getattr(event, "raw_message", None)
+                session_id = _session_id(self, event) or _session_id(
+                    self, raw_message
+                )
+                if session_id and raw_message is not None:
+                    _store(self).bind_inbound_session(
+                        str(getattr(raw_message, "id", "") or ""),
+                        session_id,
+                        _profile_name(),
+                    )
                 state = "COMPLETED" if getattr(outcome, "name", str(outcome)) == "SUCCESS" else "FAILED"
                 _store(self).mark_inbound(key, state, _profile_name())
 

@@ -1,6 +1,6 @@
 # CEO Hermes 아키텍처·라우팅·운영 정본
 
-검토일: 2026-08-26 (UTC)
+검토일: 2026-08-27 (UTC)
 작성: CEO Office
 상태: **현재 실행 경로의 정본**
 
@@ -106,6 +106,7 @@ Web과 Discord는 모두 `portfolio-bff`의 canonical ingress로 들어온다.
 | `TAX_LIQUIDITY` | research → risk → accounting → ceo | QA audit은 CEO 응답 후 |
 | `PORTFOLIO_RECOMMENDATION` | research → quant → risk → ceo | QA audit은 CEO 응답 후 |
 | `REBALANCING_PROPOSAL` | research → quant → trading → risk → accounting → ceo | QA audit은 CEO 응답 후 |
+| `ACCOUNT_STATUS` | accounting → ceo | 계좌·잔고·평가/실현/매매손익 read-only 보고; QA audit은 CEO 응답 후 |
 | `STRATEGY_PROPOSAL` | research → quant → ceo | 정식 승격은 별도 governance workflow |
 | 자연어 전략 생성/백테스트 | autonomous research lab | `labs/<request_id>/`에서 Hermes가 실험·검증·계보를 반복; 후보만 출력 |
 
@@ -115,7 +116,11 @@ Web과 Discord는 모두 `portfolio-bff`의 canonical ingress로 들어온다.
 
 구조화된 category가 알 수 없으면 조용히 버리지 않고 `category_recognized=false`와
 bounded fallback을 남긴다. 자유 질의 keyword는 부서 집합을 추가할 수 있지만
-권한을 줄이지 않는다.
+권한을 줄이지 않는다. 단, `오늘/금일/당일 매매손익` 또는 `거래손익`처럼 계좌
+원장·성과 수치의 조회 의도가 명시된 질의는 `ACCOUNT_STATUS`로 승격되어
+`accounting-portfolio-department`만 primary로 선택한다. 시장·위험 검토를 같은
+질의에서 명시한 경우에만 해당 부서를 추가한다. CEO는 이 BFF 결정을 재판정하지
+않고 회계 primary 결과를 종합한다.
 
 ### 3.3 부서 handoff와 CEO synthesis
 
@@ -129,6 +134,11 @@ CEO synthesis가 수행하는 일은 다음과 같다.
 - primary 결과와 deterministic runner facts를 하나의 advisory 설명으로 종합
 - 결과의 누락·차단·불확실성을 숨기지 않음
 - 사용자에게 전달할 최종 응답과 bounded metadata 생성
+
+Primary handoff의 정본은 Hermes `result`/`final_answer`다. `summary`는 짧은
+운영용 전달문으로만 사용하며, 본문이 `summary`나 metadata에만 있으면 CEO는
+추측으로 복원하지 않고 fail-closed로 처리한다. supervisor는 모든 CEO primary
+생성 카드의 단일 create 경계에 이 계약을 붙인다.
 
 CEO가 수행하지 않는 일은 다음과 같다.
 
@@ -212,7 +222,12 @@ trace, QA/metrics reader가 연결된 상태**다.
 - evals project: `HgFinance-Evals`
 - root는 `start_root_trace()`에서 생성되고 terminal 시 `close_root_trace()`로 갱신
 - Worker graph는 `worker_graph_trace_config()`를 `invoke/ainvoke`에 직접 전달
-- input/output 원문은 숨기며 correlation id·stage·status·latency만 metadata로 보낸다.
+- input/output 원문은 숨기며 bounded summary·hash와 correlation metadata만 보낸다.
+  BFF root에는 안전한 입력 요약과 terminal 결과 요약이 남고, worker와
+  post-response QA는 root run ID를 parent context로 전달한다. worker의 LLM/tool
+  span은 해당 worker 아래에 계속 연결된다.
+- `qa-terminal`도 QA trace stage로 인식하며, SDK transport 예외가 래핑된 경우
+  direct `/api/v2/runs/query` fallback을 사용한다.
 - LangSmith 오류는 workflow를 실패시키지 않는 fail-open observer다. 동일 root의
   duplicate PATCH는 provider가 이미 받은 종료 갱신의 재시도로 간주해 idempotent
   success로 처리한다.
@@ -244,6 +259,9 @@ Notion은 CEO 응답의 저장소가 아니라 비동기 Projection이다.
 - 담당 프로세스: `ceo-kanban-supervisor`
 - schema read/cache, idempotency, mismatch 재조회, 429/5xx retryable 결과를 지원
 - 페이지 생성·갱신 실패가 CEO 응답을 취소하거나 다시 쓰지 않는다.
+- QA terminal projection이 끝나면 같은 CEO synthesis projection을 idempotent
+  upsert해 QA task와 verdict가 보고서에 뒤늦게 반영된다. 이 갱신도 응답·실행
+  제어와 분리된 비동기 관찰이다.
 
 실행 중인 supervisor에서 CEO Notion DB schema API가 HTTP 200으로 응답해 token·DB
 권한·네트워크 연결은 확인됐다. Notion projection 로그에도 terminal 결과가
@@ -252,6 +270,11 @@ Notion은 CEO 응답의 저장소가 아니라 비동기 Projection이다.
 Notion의 위치는 의도적으로 supervisor다. CEO Hermes에 Notion credential을 넣어
 Head가 임의로 페이지를 만들도록 하지 않는다. Notion sync가 필요해도 canonical
 Kanban/audit 상태를 먼저 바꾸지 않는다.
+
+CEO·부서 Notion projection은 `실행 연결` 블록과 선언된 schema property에
+task/root/request/trace/LangSmith/Discord 식별자를 기록한다. 원문 payload는
+복사하지 않으며, 구형 DB에 해당 property가 없으면 body의 bounded identifier만
+사용해 projection 실패를 피한다.
 
 ### 5.3 Governed memory
 
@@ -262,9 +285,11 @@ CEO의 운영 메모리는 새 DB나 Hermes `MEMORY.md` 복제본을 추가하�
 
 - BFF는 root를 만들기 전에 기존 경험을 조회하고, `active`일 때만 길이 제한된
   advisory hint를 CEO planner에 전달한다.
-- CEO supervisor는 최종 응답이 확정된 뒤 root당 한 번만 Discord/Kanban terminal
-  결과를 기록한다. Portfolio recommendation도 자체 terminal close에서 같은
-  `ExperienceBank` writer를 사용한다.
+- CEO supervisor는 최종 응답을 먼저 전달한 뒤, 비동기 QA terminal projection이
+  끝난 경우에만 Discord/Kanban 결과를 D5에 기록한다. QA PASS가 아닌 결과와
+  중앙 라우팅 계약 불일치는 성공 경험으로 승격하지 않는다. Portfolio
+  recommendation은 자체 terminal close에서 같은 `ExperienceBank` writer를
+  사용한다.
 - `experience_identity`의 unique 계약으로 재시도·중복 관측을 멱등 처리한다.
   저장 실패는 응답을 실패시키지 않지만, hint로 사용하지 않는다.
 - 성공·실패·운영 장애의 보존 기간과 recent/latest 예외는 기존
@@ -275,7 +300,7 @@ CEO의 운영 메모리는 새 DB나 Hermes `MEMORY.md` 복제본을 추가하�
 
 | 입력원 | 자동화된 역할 | 메모리 원문 저장 |
 |---|---|---|
-| Discord/Kanban | terminal workflow 결과를 D5에 aggregate | 금지 |
+| Discord/Kanban | QA가 확인한 terminal workflow 결과를 D5에 aggregate | 금지 |
 | LangSmith | trace metadata와 QA 승인·benchmark 통과 feedback hint | 금지 |
 | Notion | CEO projection·audit·retention 대상 | 금지 |
 | Hermes logs | bounded timing/error-class 관측 | 금지 |
@@ -283,9 +308,17 @@ CEO의 운영 메모리는 새 DB나 Hermes `MEMORY.md` 복제본을 추가하�
 
 따라서 “스스로 학습”은 모델 가중치 재학습이나 시장 사실의 영구 복사가 아니다.
 신선한 원천 데이터가 항상 우선이고, 반복되는 workflow의 구조적 패턴만 자동
-축적한다. 코드·Profile·Skill 변경은 memory가 직접 수행하지 않으며, LangSmith의
-QA 승인 및 benchmark 통과 feedback과 기존 evolution governance를 거쳐야 한다.
+축적한다. QA finding identity가 확인되면 CEO synthesis에는 코드에 고정된
+CEO-owned corrective guardrail만 전달되어 다음 응답의 근거·재현성·불확실성을
+자기검토한다. 이것은 QA가 CEO를 직접 수정하는 경로도, 실패 기억/skill 재주입도
+아니다. 코드·Profile·Skill 변경은 memory가 직접 수행하지 않으며, CEO/사람 소유의
+승인 및 benchmark/regression gate와 기존 evolution governance를 거쳐야 한다.
 메모리 hint는 주문 제출, Risk 승인, 원장 수정, QA 종결, 승격 권한을 갖지 않는다.
+
+Discord CEO 경험은 `discord_ceo_verified:<routing_category>` 키로 분리한다.
+기존의 QA 이전 관측 행은 삭제하지 않지만 새 CEO 힌트에는 사용하지 않는다.
+라우팅 불일치는 `ROUTING_MISMATCH`로 기록하며, 같은 오류의 코드·라우팅 규칙
+변경은 중앙 `ceo_query_routing.py`와 회귀 테스트를 통해서만 승격한다.
 
 검증 명령:
 
@@ -300,6 +333,13 @@ Discord gateway는 BFF ingress만 호출하고, CEO 최종 답변과 부서 진�
 기존 thread/message correlation을 사용한다. mirror event의 QA는 `evaluation`
 lane이며 `CEO_FINAL`을 block하지 않는다. `failed_closed`는 사용자 mirror와 분리된
 operations alert sink로 비동기 알림을 보낼 수 있다.
+
+부서별 Discord 조회는 기본적으로 공유 CEO 채널을 읽되 응답에
+`channel_scope=shared_ceo`와 `department_log_isolated=false`를 명시한다.
+실제 부서별 로그가 필요한 경우 `DISCORD_<DEPARTMENT>_CHANNEL_ID`를 설정하며,
+그때만 `channel_scope=department`로 표시한다. 전략 보고 notifier는 Discord
+ingress의 deterministic message ID가 있으면 text-match ambiguity를 사용하지
+않는다.
 
 운영·migration 절차는 다음 문서가 소유한다.
 
@@ -327,7 +367,8 @@ pending 128개)로 넘기며, root lock을 잡은 상태에서 외부 I/O를 수
 | supervisor event worker | 기본 2개 | 외부 observer와 분리됨 | 현재 큐 대기는 낮음 |
 | Notion/Discord observer | 실측 1~10초 | 저장/미러 지연 | 응답을 막지 않음 |
 | 전체 workflow deadline | 1200초 | 멈춘 workflow가 오래 남을 수 있음 | recovery/timeout 모니터링 필요 |
-| dispatcher | 기본 1초 tick, board cap 별도 | shared Kanban 포화 시 ready 대기 | 가장 큰 용량 병목 후보 |
+| dispatcher | 기본 1초 tick, 명시적 `--max`/failure limit | shared Kanban 포화·worker protocol 실패 시 ready 대기 | 배포 후 queue/spawn 지표 확인 필요 |
+| Research MCP | keepalive/read 오류 발생 시 loop-stall watchdog이 process 종료 후 Compose 재기동 | MCP 요청 retry·latency 증가 | 배포 후 degraded/error rate 재측정 필요 |
 
 즉 지금의 핵심 병목은 QA가 아니다. 여러 primary 결과를 기다리는 fan-in, Hermes
 dispatcher의 shared board 슬롯, CEO Head의 실제 모델 지연이 response-plane의

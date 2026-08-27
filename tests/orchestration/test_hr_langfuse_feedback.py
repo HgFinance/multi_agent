@@ -105,6 +105,10 @@ def test_hr_langfuse_publisher_uses_shared_ledger_and_one_discord_attempt() -> N
             "orchestration.hr_langfuse_feedback.post_hr_langfuse_discord_message",
             return_value="discord-message-1",
         ) as post,
+        patch(
+            "orchestration.hr_langfuse_feedback.verify_discord_message_delivery",
+            return_value=True,
+        ) as readback,
     ):
         status = publish_hr_langfuse_review(_observability(), ledger=ledger)
 
@@ -113,6 +117,7 @@ def test_hr_langfuse_publisher_uses_shared_ledger_and_one_discord_attempt() -> N
     assert ledger.finished[0][1]["delivered"] is True
     post.assert_called_once()
     assert post.call_args.kwargs["channel_id"] == "1542405626531942432"
+    readback.assert_called_once()
 
 
 def test_unavailable_langfuse_signal_is_approvable_as_an_actionable_finding(

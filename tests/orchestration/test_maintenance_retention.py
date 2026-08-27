@@ -32,7 +32,7 @@ def test_health_ledger_keeps_independent_job_results(tmp_path: Path) -> None:
     assert state["jobs"]["kanban"]["status"] == "ok"
     assert state["jobs"]["notion"]["status"] == "failed"
     assert state["jobs"]["notion"]["error"] == "RuntimeError"
-    assert healthcheck(path, now=103.0)
+    assert not healthcheck(path, now=103.0)
 
 
 def test_healthcheck_rejects_stale_scheduler_and_overdue_job(tmp_path: Path) -> None:
@@ -95,3 +95,33 @@ def test_scheduler_projects_worker_error_code_into_health(tmp_path: Path) -> Non
     assert state["jobs"]["langsmith"]["status"] == "failed"
     assert state["jobs"]["langsmith"]["error"] == "MaintenanceResultError"
     assert state["jobs"]["langsmith"]["error_code"] == "TRACE_DELETE_HOURLY_LIMIT"
+
+
+def test_scheduler_exposes_async_langsmith_delete_backlog_without_failing_health(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "health.json"
+    ledger = HealthLedger(path)
+    job = MaintenanceJob(
+        "langsmith",
+        10,
+        lambda: SimpleNamespace(
+            scanned=10,
+            eligible=2,
+            deleted=2,
+            queued=2,
+            pending_visible=2,
+            visible_overflow=2,
+            skipped=0,
+            error_code=None,
+        ),
+        30,
+    )
+
+    _job_loop(job, threading.Event(), ledger, once=True)
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    assert state["jobs"]["langsmith"]["status"] == "ok"
+    assert state["jobs"]["langsmith"]["warning"] == "LANGSMITH_DELETE_PENDING"
+    assert state["jobs"]["langsmith"]["result"]["pending_visible"] == 2
+    assert healthcheck(path)

@@ -8,6 +8,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import ClassVar
 
 from orchestration.adapters.ceo_supervisor import (
     CeoSupervisorService,
@@ -18,23 +19,37 @@ from orchestration.adapters.ceo_supervisor import (
     SupervisorDecision,
     SupervisorState,
     SupervisorValidationError,
-    _analysis_synthesis_decision,
-    _augment_hr_final_answer,
-    _compact_hr_qa_handoff,
-    _department_progress_text,
     _analysis_execution_mode_from_root_body,
-    _initial_primary_materialization_decisions,
+    _analysis_synthesis_decision,
+    _append_accounting_delivery_scope,
+    _append_research_source_coordinates,
+    _append_trading_source_coordinates,
+    _augment_accounting_reconciliation_answer,
+    _augment_hr_final_answer,
+    _canonicalize_research_source_urls,
+    _compact_hr_qa_handoff,
+    _deduplicate_research_conclusion_headings,
+    _department_progress_text,
+    _ensure_quant_retrieval_attempt,
+    _expand_research_implicit_source_urls,
     _handoff_provenance,
+    _initial_primary_materialization_decisions,
     _materialization_plan_body,
+    _normalize_research_answer_headings,
+    _normalize_research_handoff_provenance,
+    _recover_compact_ceo_synthesis,
+    _remove_research_duplicate_section,
+    _research_answer_is_complete,
     _single_primary_passthrough_child,
+    _synthesis_handoff_payload,
     _terminal_payload_mapping,
-    decide_supervisor,
     cli_lane,
+    decide_supervisor,
     parse_supervisor_output,
 )
+from orchestration.answer_contract import grade_answer, strip_bounded_retrieval_attempt
 from orchestration.ceo_workflow_scope import (
     UserPaperOrderScope,
-    WorkflowScopeViolation,
     build_root_body,
     build_scoped_task_body,
     infer_workflow_mode,
@@ -44,7 +59,6 @@ from orchestration.ceo_workflow_scope import (
     validate_workflow_scope,
     workflow_mode_from_body,
 )
-from orchestration.answer_contract import grade_answer
 
 
 def test_answer_contract_accepts_iso_timestamp_as_observation_time() -> None:
@@ -55,6 +69,513 @@ def test_answer_contract_accepts_iso_timestamp_as_observation_time() -> None:
 
     assert grade.has_as_of is True
     assert grade.trustworthy is True
+
+
+def test_research_source_coordinates_survive_short_ceo_synthesis() -> None:
+    result = _append_research_source_coordinates(
+        "### CEO 종합 판단\n리서치 요약",
+        (
+            {
+                "assignee": "research-department",
+                "workflow_role": "primary",
+                "result": (
+                    "2026-08-27 CBC뉴스는 산업 수요를 보도했습니다 "
+                    "(https://example.com/cbc).\n"
+                    "같은 날 기계신문은 배터리 업황을 보도했습니다 "
+                    "(https://example.com/mt)."
+                ),
+            },
+        ),
+    )
+
+    assert "CBC뉴스 · 발행일 2026-08-27: https://example.com/cbc" in result
+    assert "기계신문 · 발행일 2026-08-27: https://example.com/mt" in result
+
+
+def test_accounting_delivery_scope_is_user_readable_and_bounded() -> None:
+    result = _append_accounting_delivery_scope(
+        "### CEO 종합 판단\n회계 결과를 종합했습니다.",
+        (
+            {
+                "assignee": "accounting-portfolio-department",
+                "workflow_role": "primary",
+                "comments": [
+                    {
+                        "body": (
+                            "hgfinance.department-notion-delivery.v1 "
+                            "delivery_status=DELIVERED readback_status=VERIFIED"
+                        )
+                    }
+                ],
+            },
+        ),
+    )
+
+    assert "### 시스템 전달 상태" in result
+    assert "Notion: 회계 보고서 저장 및 재확인 완료." in result
+    assert "LangSmith:" in result
+    assert "Discord:" in result
+    assert "delivery_status" not in result
+
+
+def test_research_source_coordinates_prefer_url_domain_over_adjacent_dart_label() -> (
+    None
+):
+    result = _append_research_source_coordinates(
+        "### CEO 종합 판단\n리서치 요약",
+        (
+            {
+                "assignee": "research-department",
+                "workflow_role": "primary",
+                "result": (
+                    "2026-08-27 DART 공시를 확인했으며 출처: "
+                    "https://www.pinpointnews.co.kr/news/articleView.html?idxno=479097"
+                ),
+            },
+        ),
+    )
+
+    assert "Pinpoint News · 발행일 2026-08-27" in result
+    assert "DART · 발행일" not in result
+
+
+def test_answer_contract_recognizes_explicit_unverified_source_limit() -> None:
+    grade = grade_answer(
+        "자료 기준 시각은 2026-08-27입니다. 공식 원문은 이번 검토에서 "
+        "직접 확인하지 못했습니다. 근거 URL https://example.invalid/source"
+    )
+
+    assert grade.states_unknowns is True
+    assert (
+        "한계·미확인 항목 언급 없음(모르는 것을 밝혔는지 확인 필요)" not in grade.gaps
+    )
+
+
+def test_answer_contract_accepts_bounded_unavailable_retrieval_attempt() -> None:
+    grade = grade_answer(
+        "검증 보류: 원본 시계열이 없어 성과지표를 계산하지 않았습니다.\n"
+        "retrieval_attempt:\n"
+        "instrument=069500.KS\n"
+        "requested_window=2025-08-27/2026-08-27\n"
+        "source=ls-securities\n"
+        "tr=UNAVAILABLE\n"
+        "status=UNAVAILABLE\n"
+        "queried_at=2026-08-27T00:00:00Z\n"
+        "extracted_at=2026-08-27T00:00:02Z\n"
+        "snapshot_hash=UNAVAILABLE"
+    )
+
+    assert grade.has_evidence is True
+    assert grade.has_as_of is True
+    assert grade.trustworthy is True
+
+
+def test_answer_contract_rejects_incomplete_retrieval_attempt() -> None:
+    grade = grade_answer(
+        "검증 보류: 데이터가 없습니다.\n"
+        "retrieval_attempt:\n"
+        "instrument=069500.KS\n"
+        "status=UNAVAILABLE\n"
+        "extracted_at=2026-08-27T00:00:02Z"
+    )
+
+    assert grade.has_evidence is False
+
+
+def test_accounting_synthesis_correction_preserves_bridge_direction_and_coordinates() -> (
+    None
+):
+    root_body = (
+        "## Accounting Engine snapshot (read-only, hgfinance.accounting-snapshot.v1)\n"
+        '{"as_of":"2026-08-27T02:23:48Z","nav":"506468430",'
+        '"cash":"475759362","securities_value":"24893460"}\n\n'
+        "## User request\nPAPER 읽기 전용"
+    )
+    result = _augment_accounting_reconciliation_answer(
+        "현금과 증권가액 합계가 NAV보다 5,815,608원 많아 확정할 수 없습니다.",
+        (
+            {"body": root_body},
+            {
+                "assignee": "accounting-portfolio-department",
+                "result": "조회 근거: CSPAQ12300, t0424",
+            },
+        ),
+    )
+
+    assert "5,815,608원 부족합니다" in result
+    assert "5,815,608원 많아" not in result
+
+
+def test_trading_synthesis_uses_only_frozen_root_snapshot_coordinates() -> None:
+    root_body = (
+        "hgfinance.mandate-snapshot.v1\n"
+        "content_hash=abcdef0123456789abcdef0123456789\n"
+        "\n## Accounting Engine snapshot (read-only, hgfinance.accounting-snapshot.v1)\n"
+        '{"as_of":"2026-08-27T02:23:48Z","nav":"506468430"}\n\n'
+        "## User request\n삼성전자 PAPER 읽기 전용 검증"
+    )
+    payloads = (
+        {
+            "profile": "trading-department",
+            "workflow_role": "primary",
+        },
+    )
+    answer = _append_trading_source_coordinates(
+        "2026-08-27 기준 주문 조건이 없어 OrderIntent 후보를 만들 수 없습니다.",
+        root_body=root_body,
+        task_payloads=payloads,
+    )
+
+    assert "### 거래 부서 검증 근거" in answer
+    assert "동결 투자한도 스냅샷" in answer
+    assert "회계 읽기 전용 스냅샷" in answer
+    assert "기록 해시: abcdef0123456789abcdef0123456789" in answer
+    assert (
+        _append_trading_source_coordinates(
+            answer,
+            root_body=root_body,
+            task_payloads=payloads,
+        )
+        == answer
+    )
+    assert grade_answer(answer).trustworthy is True
+
+
+def test_trading_handoff_and_qa_grade_share_root_evidence_projection() -> None:
+    root_body = (
+        "hgfinance.mandate-snapshot.v1\n"
+        "content_hash=abcdef0123456789abcdef0123456789\n"
+        "\n## Accounting Engine snapshot (read-only, hgfinance.accounting-snapshot.v1)\n"
+        '{"as_of":"2026-08-27T02:23:48Z","nav":"506468430"}\n\n'
+        "## User request\n삼성전자 PAPER 읽기 전용 검증"
+    )
+    child = ChildTaskState.from_hermes(
+        {
+            "id": "trading-task",
+            "assignee": "trading-department",
+            "status": "done",
+            "body": (
+                "workflow_root_task_id=root\n"
+                "workflow_role=primary\n"
+                "workflow_mode=analysis"
+            ),
+            "result": (
+                "2026-08-27 기준 주문 방향·수량·주문 유형이 없어 후보를 만들 수 없습니다. "
+                "실제 주문·체결·원장 변경은 수행하지 않았습니다."
+            ),
+        }
+    )
+
+    handoff = _synthesis_handoff_payload(child, root_body=root_body)
+
+    assert handoff["answer_trustworthy"] is True
+    assert "기록 해시:" in handoff["final_answer"]
+    assert len(handoff["provenance"]["source_references"]) == 2
+
+
+def test_accounting_synthesis_correction_recovers_embedded_handoff() -> None:
+    synthesis_body = (
+        "instructions\n"
+        '[{"task_id":"t_accounting","profile":"accounting-portfolio-department",'
+        '"result":"근거 CSPAQ12200, t0424"}]'
+    )
+    result = _augment_accounting_reconciliation_answer(
+        "- 🔬 **Research:** Accounting Engine와 LS CSPAQ12200 기준 NAV 506,468,430원, 현금 475,759,362원입니다.",
+        ({"body": synthesis_body},),
+    )
+
+    assert "📒 **Accounting / Portfolio:**" in result
+    assert "CSPAQ12200" in result
+    assert "### 회계 근거 좌표" in result
+    assert "t0424" in result
+
+
+def test_accounting_synthesis_correction_repairs_mislabelled_research_and_keeps_liquidity_details() -> (
+    None
+):
+    result = _augment_accounting_reconciliation_answer(
+        "- 📒 **Accounting / Portfolio:** 6개 포지션의 단순 평가손익은 약 +1,722,308원이며 출처 URL·인용 좌표가 없어 외부 검증은 제한됩니다.\n"
+        "- 📒 **Accounting / Portfolio:** Preliminary NAV 506,468,430원입니다.",
+        (
+            {
+                "assignee": "accounting-portfolio-department",
+                "result": (
+                    "LS 예수금: KRW 477,504,522. D+1 예수금 KRW 477,504,430, "
+                    "D+2 예수금 KRW 473,399,477. 인출가능액 및 현금주문가능액: "
+                    "각각 KRW 476,609,219. D+2 예상 결제: KRW -4,104,953. "
+                    "신용·대출·미수금: 모두 0으로 보고됐고 담보부족액도 0입니다. "
+                    "당일 체결 상태: 주문수량 344, 체결수량 344, 미체결 0, "
+                    "총 거래대금 KRW 5,875,856. 총 수수료 KRW 876, 총비용 KRW 2,645."
+                ),
+            },
+        ),
+    )
+
+    assert "- 🔬 **Research:**" in result
+    assert "### 회계·포트폴리오 세부 상태" in result
+    assert "인출가능액·현금주문가능액: 각각 476,609,219원" in result
+    assert "D+2 예상 결제: -4,104,953원" in result
+    assert "당일 거래비용: 수수료 876원, 총비용 2,645원" in result
+
+
+def test_accounting_synthesis_correction_handles_broker_payload_variants() -> None:
+    result = _augment_accounting_reconciliation_answer(
+        "- 📊 **Accounting/Portfolio:** 회계 결과를 확인했습니다.",
+        (
+            {
+                "assignee": "accounting-portfolio-department",
+                "result": (
+                    "예수금: KRW 477,504,522. D+1 예수금 KRW 477,504,430. "
+                    "D+2 예수금 KRW 473,399,477. 출금가능액 및 현금 주문가능액: "
+                    "각각 KRW 476,609,219. D+2 예상결제: KRW -4,104,953. "
+                    "금일 체결: 주문수량 344, 미체결 0, 체결금액 KRW 5,875,856. "
+                    "commission KRW 876, total cost KRW 2,645. "
+                    "FOCCQ33600은 ERROR(모의투자에서 해당 업무 제공되지 않음)."
+                ),
+            },
+        ),
+    )
+
+    assert "- 📒 **Accounting / Portfolio:**" in result
+    assert "인출가능액·현금주문가능액: 각각 476,609,219원" in result
+    assert "D+2 예상 결제: -4,104,953원" in result
+    assert "당일 체결 수량: 주문 344주, 체결 344주, 미체결 0주" in result
+    assert "당일 거래비용: 수수료 876원, 총비용 2,645원" in result
+    assert "기간 수익률 자료는 증권사에서 제공되지 않아" in result
+
+
+def test_accounting_synthesis_correction_preserves_full_live_accounting_summary() -> (
+    None
+):
+    result = _augment_accounting_reconciliation_answer(
+        "### CEO 종합 판단\n회계 결과를 종합했습니다.",
+        (
+            {
+                "assignee": "accounting-portfolio-department",
+                "result": (
+                    "- Preliminary NAV: KRW 506,468,430.\n"
+                    "- 현금: KRW 475,759,362.\n"
+                    "- 유가증권 평가액: KRW 24,893,460.\n"
+                    "- 실현 PnL: KRW 106,469.7322.\n"
+                    "- 미실현 PnL: KRW 1,722,308.2678.\n"
+                    "- 비용: 수수료 KRW 196,093, 세금 KRW 5,759.\n"
+                    "- LS 현금성 예수금: KRW 477,504,522. D+1 예상 정산: KRW -92, "
+                    "D+2 예상 정산: KRW -4,104,953.\n"
+                    "- LS 당일 집계: 수수료 KRW 876, 총 비용 KRW 2,645.\n"
+                    "- 체결 상태는 총 주문 344주 중 344주 체결, 미체결 0.\n"
+                    "- 삼성전자 (005930): 29주, 평가액 KRW 7,757,500.\n"
+                    "* 005930: 28주 대 29주"
+                ),
+            },
+        ),
+    )
+
+    assert "순자산 가치 506,468,430원" in result
+    assert "현금 475,759,362원" in result
+    assert "실현손익 106,469.7322원" in result
+    assert "D+1 예수금: -92원" in result
+    assert "당일 거래비용: 수수료 876원, 총비용 2,645원" in result
+    assert "삼성전자(005930) 수량 대사 차이" in result
+
+
+def test_accounting_synthesis_includes_named_vs_breaks_and_empty_quality_source() -> (
+    None
+):
+    result = _augment_accounting_reconciliation_answer(
+        "### CEO 종합 판단\n회계 결과를 종합했습니다.",
+        (
+            {
+                "assignee": "accounting-portfolio-department",
+                "result": (
+                    "- 삼성전자(005930): CSPAQ12300 28주 vs t0424 29주.\n"
+                    "- 한온시스템(018880): CSPAQ12300 0주 vs t0424 300주.\n"
+                    "- 두산에너빌리티(034020): 0주 vs 10주.\n"
+                    "- 레인보우로보틱스(277810): 0주 vs 2주.\n"
+                    "- 두산로보틱스(454910): 0주 vs 20주.\n"
+                    "FOCCQ33600은 ERROR이며 t0151은 EMPTY입니다."
+                ),
+            },
+        ),
+    )
+
+    assert result.count("수량 대사 차이") == 5
+    assert "전일 거래·수수료 조회 자료는 비어 있어" in result
+    assert "기간 수익률 자료는 증권사에서 제공되지 않아" in result
+
+
+def test_compact_ceo_synthesis_recovery_keeps_one_bullet_per_primary() -> None:
+    result = _recover_compact_ceo_synthesis(
+        "PAPER 읽기 전용 요약만 저장되었습니다.",
+        (
+            {
+                "assignee": "research-department",
+                "body": "workflow_role=primary",
+                "result": "### 핵심 판단\nResearch 근거와 확인 한계를 정리했습니다.",
+            },
+            {
+                "assignee": "risk-management",
+                "body": "workflow_role=primary",
+                "result": "### 종합 위험도\n자료 공백으로 한도 검증은 제한됩니다.",
+            },
+            {
+                "assignee": "accounting-portfolio-department",
+                "body": "workflow_role=primary",
+                "result": "상태 WARN. NAV 100원, 현금 80원, 대사 BREAK입니다.",
+            },
+        ),
+    )
+
+    assert result.count("### 부서별 핵심 의견") == 1
+    assert result.count("**Research:**") == 1
+    assert result.count("**Risk:**") == 1
+    assert result.count("**Accounting / Portfolio:**") == 1
+
+
+def test_compact_ceo_synthesis_recovery_keeps_quant_evidence() -> None:
+    result = _recover_compact_ceo_synthesis(
+        "HOLD / NOT_VERIFIABLE; no orders or executions.",
+        (
+            {
+                "assignee": "quant-backtest-department",
+                "body": "workflow_role=primary",
+                "result": (
+                    "### 핵심 판단\n069500.KS 데이터셋 시계열을 확인하지 못했습니다. "
+                    "성과지표는 HOLD입니다.\nTR 카탈로그 결과가 없습니다."
+                ),
+            },
+        ),
+    )
+
+    assert "**Quant:**" in result
+    assert "069500.KS 데이터셋" in result
+    assert "retrieval_attempt" not in result
+
+
+def test_compact_ceo_synthesis_recovery_removes_nested_handoff_json() -> None:
+    result = _recover_compact_ceo_synthesis(
+        (
+            "### CEO 종합 판단\n"
+            "069500.KS는 데이터가 부족해 HOLD입니다.\n\n"
+            "### 부서별 핵심 의견\n"
+            '- 📊 **Quant:** {"final_answer":"중복된 Quant 본문",'
+            '"retrieval_attempt":{"instrument":"069500.KS"}}\n'
+            "\n### 결론\n검증 전까지 보류합니다."
+        ),
+        (
+            {
+                "assignee": "quant-backtest-department",
+                "body": "workflow_role=primary",
+                "result": (
+                    "### 핵심 판단\n069500.KS 시계열을 확인하지 못해 "
+                    "성과지표를 산출하지 않았습니다. HOLD입니다."
+                ),
+            },
+        ),
+    )
+
+    assert "중복된 Quant 본문" not in result
+    assert '{"final_answer":' not in result
+    assert "069500.KS 시계열을 확인하지 못해" in result
+
+
+def test_answer_contract_accepts_inline_json_retrieval_attempt() -> None:
+    answer = (
+        "검증된 수급 결과이며 기준 시각을 확인했습니다.\n"
+        'retrieval_attempt: {"instrument":"005930.KS",'
+        '"requested_window":"20 trading days","source":"LS MCP",'
+        '"tr":"t1717","status":"AVAILABLE",'
+        '"queried_at":"2026-08-27T09:15:42Z",'
+        '"extracted_at":"2026-08-27T09:15:42Z",'
+        '"snapshot_hash":"84aa0dcf79ac2096"}'
+    )
+
+    assert grade_answer(answer).trustworthy is True
+    assert "retrieval_attempt:" not in strip_bounded_retrieval_attempt(answer)
+
+
+def test_answer_contract_accepts_fenced_json_retrieval_attempt() -> None:
+    answer = (
+        "검증 보류: 원본 시계열이 없어 성과지표를 계산하지 않았습니다.\n"
+        "### retrieval_attempt\n"
+        "```json\n"
+        '{"instrument":"069500.KS","requested_window":"UNSPECIFIED",'
+        '"source":"LS OpenAPI","tr":"UNAVAILABLE",'
+        '"status":"UNAVAILABLE","queried_at":"UNAVAILABLE",'
+        '"extracted_at":"UNAVAILABLE","snapshot_hash":"UNAVAILABLE"}\n'
+        "```"
+    )
+
+    assert grade_answer(answer).trustworthy is True
+    assert "retrieval_attempt" not in strip_bounded_retrieval_attempt(answer)
+
+
+def test_answer_contract_accepts_bare_json_retrieval_attempt() -> None:
+    answer = (
+        "검증 보류: 원본 시계열이 없어 성과지표를 계산하지 않았습니다.\n"
+        "retrieval_attempt:\n"
+        '{"instrument":"069500.KS","requested_window":"UNSPECIFIED",'
+        '"source":"LS OpenAPI","tr":"UNAVAILABLE",'
+        '"status":"UNAVAILABLE","queried_at":"UNAVAILABLE",'
+        '"extracted_at":"UNAVAILABLE","snapshot_hash":"UNAVAILABLE"}'
+    )
+
+    assert grade_answer(answer).trustworthy is True
+    assert "retrieval_attempt" not in strip_bounded_retrieval_attempt(answer)
+
+
+def test_quant_synthesis_preserves_primary_retrieval_attempt() -> None:
+    record = (
+        "retrieval_attempt:\n"
+        "instrument=069500.KS\n"
+        "requested_window=2026-08-01/2026-08-27\n"
+        "source=ls-securities\n"
+        "tr=UNAVAILABLE\n"
+        "status=UNAVAILABLE\n"
+        "queried_at=2026-08-27T08:00:00Z\n"
+        "extracted_at=2026-08-27T08:00:02Z\n"
+        "snapshot_hash=UNAVAILABLE"
+    )
+    answer = _ensure_quant_retrieval_attempt(
+        "Quant 결과를 HOLD로 보류합니다.",
+        [
+            {
+                "assignee": "quant-backtest-department",
+                "body": "workflow_root_task_id=root\nworkflow_role=primary",
+                "result": f"검증 보류입니다.\n{record}",
+            }
+        ],
+    )
+
+    assert answer.count("retrieval_attempt:") == 1
+    assert "instrument=069500.KS" in answer
+    assert grade_answer(answer).trustworthy is True
+
+
+def test_quant_synthesis_builds_retrieval_attempt_from_run_metadata() -> None:
+    answer = _ensure_quant_retrieval_attempt(
+        "Quant 결과를 확인했습니다.",
+        [
+            {
+                "assignee": "quant-backtest-department",
+                "body": "workflow_role=primary",
+                "result": "Quant 결과를 확인했습니다.",
+                "run_metadata": {
+                    "instrument": "005930.KS",
+                    "window": "20 trading days",
+                    "source": "LS MCP",
+                    "tr": "t1717",
+                    "status": "AVAILABLE",
+                    "queried_at": "2026-08-27T09:15:42Z",
+                    "extracted_at": "2026-08-27T09:15:42Z",
+                    "snapshot_hash": "84aa0dcf79ac2096",
+                },
+            }
+        ],
+    )
+
+    assert answer.count("retrieval_attempt:") == 1
+    assert "tr=t1717" in answer
+    assert grade_answer(answer).trustworthy is True
 
 
 def child(
@@ -70,7 +591,11 @@ def child(
     result: str = "",
 ) -> ChildTaskState:
     if "workflow_root_task_id=" not in body:
-        body = f"workflow_root_task_id=root\n{body}" if body else "workflow_root_task_id=root"
+        body = (
+            f"workflow_root_task_id=root\n{body}"
+            if body
+            else "workflow_root_task_id=root"
+        )
     if "workflow_role=" not in body:
         role = "qa" if profile == "qa-department" else "primary"
         body = f"{body}\nworkflow_role={role}"
@@ -127,6 +652,240 @@ def test_hr_handoff_discovers_bounded_workspace_evidence_artifact() -> None:
 
     assert provenance["artifacts"][0]["name"] == "hr_e2e_evidence.json"
     assert len(provenance["artifacts"][0]["sha256"]) == 64
+
+
+def test_research_handoff_links_string_source_labels_to_answer_urls() -> None:
+    state = ChildTaskState(
+        task_id="t_research",
+        profile="research-department",
+        status="done",
+        result=(
+            "근거: Samsung Newsroom (2026-07-30) "
+            "https://news.example/newsroom 및 DNews (2026-08-26) "
+            "https://news.example/dnews"
+        ),
+        metadata={
+            "sources": [
+                "Samsung Newsroom (2026-07-30)",
+                "Naver news_search result citing DNews (2026-08-26)",
+            ]
+        },
+    )
+
+    provenance = _handoff_provenance(state)
+
+    assert provenance["source_references"] == [
+        {
+            "title": "Samsung Newsroom (2026-07-30)",
+            "published": "2026-07-30",
+            "url": "https://news.example/newsroom",
+        },
+        {
+            "title": "Naver news_search result citing DNews (2026-08-26)",
+            "published": "2026-08-26",
+            "url": "https://news.example/dnews",
+        },
+    ]
+
+
+def test_research_handoff_provenance_uses_scoped_canonical_url() -> None:
+    canonical = (
+        "https://news.example/%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90-%EC%8B%A4%EC%A0%81"
+    )
+    handoff = {
+        "provenance": {
+            "source_references": [
+                {
+                    "title": "Samsung Newsroom",
+                    "published": "2026-07-30",
+                    "url": "https://news.example/삼성전자-실적",
+                },
+                {
+                    "title": "Samsung Newsroom",
+                    "published": "2026-07-30",
+                    "url": "https://news.example/%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90-실적",
+                },
+            ]
+        }
+    }
+
+    _normalize_research_handoff_provenance(
+        handoff,
+        ({"body": f"\n## User request\n공식 자료: {canonical}"},),
+    )
+
+    assert handoff["provenance"]["source_references"] == [
+        {"title": "Samsung Newsroom", "published": "2026-07-30", "url": canonical}
+    ]
+
+
+def test_research_string_sources_match_urls_by_source_host() -> None:
+    state = ChildTaskState(
+        task_id="t_research",
+        profile="research-department",
+        status="done",
+        result=(
+            "삼성전자 뉴스룸 https://news.samsung.com/kr/official "
+            "서울경제 https://n.news.naver.com/mnews/article/011/1"
+        ),
+        metadata={
+            "sources": [
+                "Samsung Newsroom (2026-07-30)",
+                "서울경제 네이버 기사 (2026-07-08)",
+            ]
+        },
+    )
+
+    provenance = _handoff_provenance(state)
+
+    assert [item["url"] for item in provenance["source_references"]] == [
+        "https://news.samsung.com/kr/official",
+        "https://n.news.naver.com/mnews/article/011/1",
+    ]
+
+
+def test_research_synthesis_canonicalizes_equivalent_url_encoding() -> None:
+    primary = {
+        "assignee": "research-department",
+        "workflow_role": "primary",
+        "result": ("출처: https://news.example/삼성전자-실적"),
+    }
+
+    result = _canonicalize_research_source_urls(
+        "출처: https://news.example/%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90-%EC%8B%A4%EC%A0%81",
+        (primary,),
+    )
+
+    assert (
+        result
+        == "출처: https://news.example/%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90-%EC%8B%A4%EC%A0%81"
+    )
+
+
+def test_research_synthesis_normalizes_partially_encoded_scoped_url() -> None:
+    root = {
+        "body": (
+            "\n## User request\n공식 자료: "
+            "https://news.samsung.com/kr/%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90-2026%EB%85%84-"
+            "%EB%B6%84기-%EC%8B%A4적-%EB%B0%9C%ED%91%9C"
+        )
+    }
+    result = _canonicalize_research_source_urls(
+        "출처: https://news.samsung.com/kr/%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90-2026%EB%85%84-"
+        "%EB%B6%84기-%EC%8B%A4적-%EB%B0%9C%ED%91%9C",
+        (root,),
+    )
+
+    assert result == (
+        "출처: https://news.samsung.com/kr/%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90-2026%EB%85%84-"
+        "%EB%B6%84%EA%B8%B0-%EC%8B%A4%EC%A0%81-%EB%B0%9C%ED%91%9C"
+    )
+
+
+def test_research_final_projection_removes_repeated_department_block() -> None:
+    content = (
+        "### 핵심 판단\n요약\n\n"
+        "### 긍정 근거\n1. 근거\n\n"
+        "### 반대 근거\n1. 반대\n\n"
+        "### 관찰할 촉매·무효화 조건\n조건\n\n"
+        "### 자료 기준과 확인하지 못한 자료\n한계\n\n"
+        "### 부서별 핵심 의견\n- Research 원문 반복\n\n"
+        "### 결론\nPAPER 읽기 전용입니다."
+    )
+
+    result = _remove_research_duplicate_section(content)
+
+    assert "### 부서별 핵심 의견" not in result
+    assert result.endswith("### 결론\nPAPER 읽기 전용입니다.")
+
+
+def test_research_final_projection_expands_implicit_source_url() -> None:
+    canonical = "https://news.samsung.com/kr/official-result"
+    result = _expand_research_implicit_source_urls(
+        "2. 계획 근거 URL: 위와 동일(삼성전자 뉴스룸, 2026-07-30)",
+        ({"body": f"\n## User request\n공식 자료: {canonical}"},),
+    )
+
+    assert result == (
+        "2. 계획 근거 URL: https://news.samsung.com/kr/official-result "
+        "(삼성전자 뉴스룸, 2026-07-30)"
+    )
+
+
+def test_research_final_projection_deduplicates_conclusion_heading() -> None:
+    result = _deduplicate_research_conclusion_headings(
+        "### 핵심 판단\n요약\n\n### 결론\n판단입니다.\n\n"
+        "### 결론\nPAPER 읽기 전용입니다."
+    )
+
+    assert result.count("### 결론") == 1
+    assert "판단입니다." in result
+    assert "PAPER 읽기 전용입니다." in result
+
+
+def test_research_source_coordinates_are_not_appended_when_items_are_cited() -> None:
+    content = (
+        "### 긍정 근거\n1. 사실 (출처: 삼성전자 뉴스룸, 2026-07-30, "
+        "https://news.example/official)\n\n"
+        "### 반대 근거\n1. 한계 (출처: 보조 기사, 2026-07-08, "
+        "https://news.example/secondary)\n\n"
+        "### 결론\n조건부 판단"
+    )
+
+    assert _append_research_source_coordinates(content, ()) == content
+
+
+def test_research_primary_plain_section_labels_are_normalized() -> None:
+    result = _normalize_research_answer_headings(
+        "긍정 근거\n1. 근거\n반대 근거\n1. 반대\n"
+        "관찰할 촉매·무효화 조건\n조건\n자료 기준과 확인하지 못한 자료\n한계"
+    )
+
+    assert result.count("### 긍정 근거") == 1
+    assert result.count("### 반대 근거") == 1
+    assert result.count("### 관찰할 촉매·무효화 조건") == 1
+    assert result.count("### 자료 기준과 확인하지 못한 자료") == 1
+
+
+def test_research_synthesis_uses_single_scoped_source_for_malformed_repeats() -> None:
+    canonical = (
+        "https://news.example/%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90-%EC%8B%A4%EC%A0%81"
+    )
+    primary = {
+        "assignee": "research-department",
+        "workflow_role": "primary",
+        "result": (
+            "출처: https://news.example/삼성전자-실적 "
+            "반복: https://news.example/%EC%82%BC%EC%A0%84%EC%9E%90-실적"
+        ),
+    }
+    root = {"body": f"\n## User request\n공식 자료: {canonical}"}
+
+    result = _canonicalize_research_source_urls(
+        "반복: https://news.example/삼성전자-실적 "
+        "다시: https://news.example/%EC%82%BC%EC%A0%84%EC%9E%90-실적",
+        (root, primary),
+    )
+
+    assert result == f"반복: {canonical} 다시: {canonical}"
+
+
+def test_research_answer_completeness_rejects_corrupted_synthesis() -> None:
+    complete = (
+        "### 핵심 판단\n"
+        "2026-08-27 확인 결과입니다.\n"
+        "### 긍정 근거\n"
+        "1. 출처: https://news.example/positive\n"
+        "### 반대 근거\n"
+        "1. 출처: https://news.example/counter\n"
+        "### 관찰할 촉매·무효화 조건\n"
+        "촉매와 무효화 조건을 관찰합니다.\n"
+        "### 자료 기준과 확인하지 못한 자료\n"
+        "확인하지 못한 자료는 없습니다."
+    )
+
+    assert _research_answer_is_complete(complete)
+    assert not _research_answer_is_complete(complete[:80] + '{"error":""}')
 
 
 def test_hr_handoff_preserves_timeout_receipt_status_and_error() -> None:
@@ -232,7 +991,9 @@ def test_hr_status_normalization_preserves_fractional_iso_timestamp() -> None:
     assert "UNAVAILABLE 0" not in enriched
 
 
-def test_hr_projection_does_not_publish_unknown_delivery_status_without_receipt() -> None:
+def test_hr_projection_does_not_publish_unknown_delivery_status_without_receipt() -> (
+    None
+):
     primary = {
         "id": "hr",
         "assignee": "hr-department",
@@ -276,7 +1037,7 @@ def test_hr_projection_does_not_publish_unknown_delivery_status_without_receipt(
 
 def test_active_unscoped_child_does_not_poison_root_cache() -> None:
     class Client:
-        environment = {}
+        environment: ClassVar[dict[str, object]] = {}
 
         def show(self, task_id: str):
             return {
@@ -354,8 +1115,7 @@ class NoAnalysisChildrenOriginGuardTest(unittest.TestCase):
             "ceo-agent",
             "done",
             body=(
-                "workflow_role=synthesis\n"
-                "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
+                "workflow_role=synthesis\nhgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
             ),
         )
 
@@ -431,7 +1191,10 @@ class UserQueryPriorityTest(unittest.TestCase):
         )
         self.assertEqual(factory.priority, 0)
         query = CanonicalKanbanTaskRequest(
-            "research-liaison", "질의", "origin=user-query\nbody", "k2",
+            "research-liaison",
+            "질의",
+            "origin=user-query\nbody",
+            "k2",
             priority=USER_QUERY_PRIORITY,
         )
         self.assertGreater(query.priority, factory.priority)
@@ -441,6 +1204,37 @@ class UserQueryPriorityTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             CanonicalKanbanTaskRequest("qa-department", "t", "b", "k", priority="9")
+
+    def test_research_user_child_gets_research_lane_priority(self) -> None:
+        import json
+        import subprocess
+
+        calls: list[list[str]] = []
+
+        def runner(args, **kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(
+                args, 0, json.dumps({"id": "research"}), ""
+            )
+
+        from orchestration.canonical_profiles import RESEARCH_QUERY_PRIORITY
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = HermesKanbanClient(
+                runner=runner,
+                environment={"HERMES_KANBAN_HOME": tmp},
+            )
+            client.create_task(
+                title="Research user child",
+                body="origin=user-query\nworkflow_role=primary",
+                assignee="research-department",
+                parent_task_ids=("root",),
+                idempotency_key="root:primary:research-department",
+            )
+
+        assert calls
+        priority_index = calls[0].index("--priority")
+        assert calls[0][priority_index + 1] == str(RESEARCH_QUERY_PRIORITY)
 
 
 class AnswerBodyHandoffTest(unittest.TestCase):
@@ -452,13 +1246,11 @@ class AnswerBodyHandoffTest(unittest.TestCase):
 
     # 실제 창구 답변의 형태 - 표 + 근거 좌표 + 기준일 + 한계 명시.
     # answer_contract 가 보는 네 항목이 전부 들어 있어야 gaps 가 비어야 한다.
-    ANSWER = "\n".join(
-        (
-            "2026-08-13 기준 외국인 순매수 상위",
-            "| 1 | SK하이닉스 | 000660 | 649,842주 |",
-            "근거: investor_flow TR=t1717 citation=150ae2d8b8c1849e",
-            "2026-08-14 는 장중 미집계라 제외했다.",
-        )
+    ANSWER = (
+        "2026-08-13 기준 외국인 순매수 상위\n"
+        "| 1 | SK하이닉스 | 000660 | 649,842주 |\n"
+        "근거: investor_flow TR=t1717 citation=150ae2d8b8c1849e\n"
+        "2026-08-14 는 장중 미집계라 제외했다."
     )
 
     def _bodies_for(self, **child_kwargs: str) -> list[str]:
@@ -466,8 +1258,15 @@ class AnswerBodyHandoffTest(unittest.TestCase):
         for role_body in ("workflow_role=primary", ""):
             state = SupervisorState(
                 "root",
-                (child("r", "research-department", "done", body=role_body,
-                       **child_kwargs),),
+                (
+                    child(
+                        "r",
+                        "research-department",
+                        "done",
+                        body=role_body,
+                        **child_kwargs,
+                    ),
+                ),
             )
             decision = decide_supervisor(state)
             self.assertIsNotNone(decision)
@@ -533,10 +1332,7 @@ class SupervisorPolicyTest(unittest.TestCase):
                 "id": "r",
                 "assignee": "research-department",
                 "status": "blocked",
-                "body": (
-                    "workflow_root_task_id=root\n"
-                    "workflow_role=primary"
-                ),
+                "body": ("workflow_root_task_id=root\nworkflow_role=primary"),
                 "runs": [
                     {
                         "status": "crashed",
@@ -738,7 +1534,9 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertIn("not a synthesis prerequisite", second.body)
         self.assertNotIn("after QA", second.body.casefold())
 
-    def test_all_blocked_primary_results_skip_qa_and_synthesize_failure_aware(self) -> None:
+    def test_all_blocked_primary_results_skip_qa_and_synthesize_failure_aware(
+        self,
+    ) -> None:
         state = SupervisorState(
             "root",
             (
@@ -831,7 +1629,14 @@ class SupervisorPolicyTest(unittest.TestCase):
         replan = decide_supervisor(
             SupervisorState(
                 "root",
-                (child("r", "research-department", "blocked", block_reason="source unavailable"),),
+                (
+                    child(
+                        "r",
+                        "research-department",
+                        "blocked",
+                        block_reason="source unavailable",
+                    ),
+                ),
             )
         )
         self.assertEqual(replan.action, SupervisorAction.CREATE_TASK)
@@ -903,7 +1708,9 @@ class SupervisorPolicyTest(unittest.TestCase):
         )
         self.assertEqual(wakeup_limit.action, SupervisorAction.BLOCK_ABORT)
 
-    def test_binding_partial_primary_synthesizes_from_successful_dependencies(self) -> None:
+    def test_binding_partial_primary_synthesizes_from_successful_dependencies(
+        self,
+    ) -> None:
         state = SupervisorState(
             "root",
             (
@@ -1055,8 +1862,18 @@ class SupervisorPolicyTest(unittest.TestCase):
             SupervisorState(
                 "root",
                 (
-                    child("research", "research-department", "done", body="workflow_role=primary"),
-                    child("quant", "quant-backtest-department", "failed", body="workflow_role=primary"),
+                    child(
+                        "research",
+                        "research-department",
+                        "done",
+                        body="workflow_role=primary",
+                    ),
+                    child(
+                        "quant",
+                        "quant-backtest-department",
+                        "failed",
+                        body="workflow_role=primary",
+                    ),
                 ),
                 selected_primary_profiles=("research-department",),
             )
@@ -1138,7 +1955,9 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual([c.task_id for c in state.analysis_children], ["primary"])
         self.assertEqual([c.task_id for c in state.qa_children], ["qa"])
 
-    def test_root_selection_is_machine_readable_and_legacy_prose_is_supported(self) -> None:
+    def test_root_selection_is_machine_readable_and_legacy_prose_is_supported(
+        self,
+    ) -> None:
         self.assertEqual(
             selected_primary_profiles_from_body(
                 "selected_primary_profiles=research-department,risk-management"
@@ -1230,7 +2049,9 @@ class SupervisorPolicyTest(unittest.TestCase):
             (
                 child("research", "research-department", "done", body=scoped),
                 child("risk", "risk-management", "done", body=scoped),
-                child("accounting", "accounting-portfolio-department", "done", body=scoped),
+                child(
+                    "accounting", "accounting-portfolio-department", "done", body=scoped
+                ),
                 child(
                     "foreign",
                     "research-department",
@@ -1261,7 +2082,9 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual(state.duplicate_primary_profiles, selected)
         self.assertEqual(state.ready_count, 0)
         self.assertFalse(state.primary_ready)
-        with self.assertLogs("orchestration.adapters.ceo_supervisor", level="WARNING") as logs:
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor", level="WARNING"
+        ) as logs:
             self.assertIsNone(decide_supervisor(state))
         self.assertTrue(
             any("primary-duplicate-detected" in message for message in logs.output)
@@ -1295,10 +2118,25 @@ class SupervisorPolicyTest(unittest.TestCase):
             "accounting-portfolio-department",
         )
         children = (
-            child("research", "research-department", "running", body="workflow_role=primary"),
-            child("quant", "quant-backtest-department", "done", body="workflow_role=primary"),
+            child(
+                "research",
+                "research-department",
+                "running",
+                body="workflow_role=primary",
+            ),
+            child(
+                "quant",
+                "quant-backtest-department",
+                "done",
+                body="workflow_role=primary",
+            ),
             child("risk", "risk-management", "done", body="workflow_role=primary"),
-            child("accounting", "accounting-portfolio-department", "done", body="workflow_role=primary"),
+            child(
+                "accounting",
+                "accounting-portfolio-department",
+                "done",
+                body="workflow_role=primary",
+            ),
         )
         state = SupervisorState("root", children, selected_primary_profiles=selected)
         self.assertEqual(state.ready_count, 3)
@@ -1463,7 +2301,8 @@ class SupervisorPolicyTest(unittest.TestCase):
 
         with_qa = SupervisorState(
             "root",
-            children + (child("qa", "qa-department", "running", body="workflow_role=qa"),),
+            children
+            + (child("qa", "qa-department", "running", body="workflow_role=qa"),),
             selected_primary_profiles=selected,
         )
         synthesis = decide_supervisor(with_qa)
@@ -1473,7 +2312,9 @@ class SupervisorPolicyTest(unittest.TestCase):
             tuple(f"marked-{i}" for i in range(4)),
         )
 
-    def test_selected_set_waits_without_request_user_input_when_children_are_late(self) -> None:
+    def test_selected_set_waits_without_request_user_input_when_children_are_late(
+        self,
+    ) -> None:
         state = SupervisorState(
             "root",
             (),
@@ -1568,7 +2409,6 @@ class SupervisorPolicyTest(unittest.TestCase):
         decision = decide_supervisor(state)
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(decision.parent_task_ids, ("request-research",))
-
 
 
 class HermesCreateBoundaryTest(unittest.TestCase):
@@ -1735,6 +2575,152 @@ class FakeClient:
         self.blocked.append(task_id)
 
 
+def test_ceo_synthesis_receives_owned_self_review_guardrails() -> None:
+    client = FakeClient()
+    client.root_body = build_root_body(
+        "삼성전자 분석",
+        "req-ceo-self-review",
+        ceo_self_improvement_hint={
+            "schema_version": "hgfinance.memo-harness.ceo-self-improvement.v1",
+            "owner": "ceo",
+            "mode": "corrective_guardrails_only",
+            "verified_qa_required": True,
+            "raw_payloads_sent": False,
+            "guardrails": [
+                {
+                    "id": "CEO_TRACE_EVIDENCE_RECHECK",
+                    "rule": (
+                        "Treat an unavailable authoritative execution trace as unverified. "
+                        "A published receipt or metadata-only record is not proof that a "
+                        "trace exists."
+                    ),
+                }
+            ],
+        },
+    )
+    service = CeoSupervisorService(client)
+    state = SupervisorState(
+        "root",
+        (child("research", "research-department", "done", result="근거 포함 결과"),),
+        root_body=client.root_body,
+    )
+    decision = SupervisorDecision(
+        SupervisorAction.SYNTHESIZE,
+        "root",
+        assignee="ceo-agent",
+        title="CEO final synthesis",
+        body=(
+            "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE\n"
+            "workflow_plane=response"
+        ),
+        parent_task_ids=("research",),
+    )
+
+    service._execute(decision, state)
+
+    assert len(client.created) == 1
+    synthesis_body = str(client.created[0]["body"])
+    assert "CEO_TRACE_EVIDENCE_RECHECK" in synthesis_body
+    assert "CEO self-improvement guardrails" in synthesis_body
+    assert "D5_CHECK_" not in synthesis_body
+    assert "QA does not command or mutate the CEO" in synthesis_body
+
+
+def test_risk_primary_result_contract_repairs_transport_token_from_metadata():
+    class EditingClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.edited: list[dict[str, object]] = []
+
+        def edit_task(self, task_id: str, **kwargs: object) -> None:
+            self.edited.append({"task_id": task_id, **kwargs})
+
+    client = EditingClient()
+    task = {
+        "id": "t_risk_contract",
+        "assignee": "risk-management",
+        "status": "done",
+        "summary": "Risk handoff",
+        "result": "success",
+        "run_metadata": {"final_answer": "리스크 최종 분석 결과입니다."},
+        "body": "workflow_root_task_id=root\nworkflow_role=primary",
+    }
+
+    repaired = CeoSupervisorService(client)._repair_risk_primary_result_contract(task)
+
+    assert repaired["result"] == "리스크 최종 분석 결과입니다."
+    assert repaired["final_answer"] == "리스크 최종 분석 결과입니다."
+    assert len(client.edited) == 1
+    assert client.edited[0]["result"] == "리스크 최종 분석 결과입니다."
+    assert (
+        client.edited[0]["metadata"]["risk_result_contract_version"] == "risk.result.v1"
+    )
+
+
+def test_risk_primary_result_contract_accepts_durable_run_result():
+    class EditingClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.edited: list[dict[str, object]] = []
+
+        def edit_task(self, task_id: str, **kwargs: object) -> None:
+            self.edited.append({"task_id": task_id, **kwargs})
+
+    client = EditingClient()
+    task = {
+        "id": "t_risk_run_result",
+        "assignee": "risk-management",
+        "status": "done",
+        "result": "",
+        "latest_summary": "generic completion summary",
+        "runs": [
+            {
+                "metadata": {
+                    "result": "영속 run 결과에서 복구한 리스크 분석입니다.",
+                }
+            }
+        ],
+        "body": "workflow_root_task_id=root\nworkflow_role=primary",
+    }
+
+    repaired = CeoSupervisorService(client)._repair_risk_primary_result_contract(task)
+
+    assert repaired["result"] == "영속 run 결과에서 복구한 리스크 분석입니다."
+    assert len(client.edited) == 1
+
+
+def test_risk_primary_result_contract_accepts_markerless_legacy_card():
+    class EditingClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.edited: list[dict[str, object]] = []
+
+        def edit_task(self, task_id: str, **kwargs: object) -> None:
+            self.edited.append({"task_id": task_id, **kwargs})
+
+    client = EditingClient()
+    task = {
+        "id": "t_risk_markerless_legacy",
+        "assignee": "risk-management",
+        "status": "done",
+        "result": "",
+        "runs": [
+            {
+                "metadata": {
+                    "final_answer": "마커가 없는 legacy Risk 카드의 영속 답변입니다.",
+                }
+            }
+        ],
+        "body": "PAPER 및 읽기 전용 Risk 검증입니다.",
+    }
+
+    repaired = CeoSupervisorService(client)._repair_risk_primary_result_contract(task)
+
+    assert repaired["result"] == "마커가 없는 legacy Risk 카드의 영속 답변입니다."
+    assert repaired["metadata"]["risk_result_contract_version"] == "risk.result.v1"
+    assert len(client.edited) == 1
+
+
 class PostResponseQaAuditTest(unittest.TestCase):
     def test_supervisor_cannot_materialize_pre_response_qa(self) -> None:
         client = FakeClient()
@@ -1779,7 +2765,9 @@ class PostResponseQaAuditTest(unittest.TestCase):
             "id": root_id,
             "assignee": "ceo-agent",
             "status": "done",
-            "body": build_root_body("삼성전자 위험과 근거를 설명해줘", "req-post-response"),
+            "body": build_root_body(
+                "삼성전자 위험과 근거를 설명해줘", "req-post-response"
+            ),
         }
         primary = {
             "id": "research",
@@ -1787,10 +2775,7 @@ class PostResponseQaAuditTest(unittest.TestCase):
             "status": "done",
             "result": "공식 연구 근거",
             "final_answer": "공식 연구 근거",
-            "body": (
-                f"workflow_root_task_id={root_id}\n"
-                "workflow_role=primary"
-            ),
+            "body": (f"workflow_root_task_id={root_id}\nworkflow_role=primary"),
         }
         synthesis_body = (
             f"workflow_root_task_id={root_id}\n"
@@ -1816,7 +2801,11 @@ class PostResponseQaAuditTest(unittest.TestCase):
             root_task_id=root_id,
             task_id="ceo-response",
             task_payloads=(root, primary, synthesis),
-            event={"event_id": "post-response-1", "task_id": "ceo-response", "kind": "completed"},
+            event={
+                "event_id": "post-response-1",
+                "task_id": "ceo-response",
+                "kind": "completed",
+            },
         )
 
         self.assertEqual(timeline, ["deliver", "create:qa-department"])
@@ -1827,12 +2816,84 @@ class PostResponseQaAuditTest(unittest.TestCase):
         self.assertIn("qa_timing=after_ceo_response", qa["body"])
         self.assertIn("ceo_input_is_identical=true", qa["body"])
         self.assertIn('"workflow_observations": {', qa["body"])
+        self.assertIn('"langsmith_evidence": {', qa["body"])
         self.assertIn('"trace_closed": false', qa["body"])
         self.assertIn('"raw_payloads_sent": false', qa["body"])
         self.assertIn('"metadata_only": true', qa["body"])
         self.assertIn("CEO가 받은 연구 결과", qa["body"])
         self.assertIn(synthesis_body.replace("\n", "\\n"), qa["body"])
         self.assertIn("CEO 최종 응답", qa["body"])
+
+    def test_qa_receives_root_backed_trading_evidence_without_new_task(self) -> None:
+        root_id = "root-trading-evidence"
+        root = {
+            "id": root_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "body": (
+                f"workflow_root_task_id={root_id}\n"
+                "workflow_role=control\n"
+                "workflow_mode=analysis\n"
+                "selected_primary_profiles=trading-department\n"
+                "hgfinance.mandate-snapshot.v1\n"
+                "content_hash=abcdef0123456789abcdef0123456789\n"
+                "\n## Accounting Engine snapshot (read-only, hgfinance.accounting-snapshot.v1)\n"
+                '{"as_of":"2026-08-27T02:23:48Z","nav":"506468430"}\n\n'
+                "## User request\n삼성전자 PAPER 읽기 전용 검증"
+            ),
+        }
+        trading = {
+            "id": "trading-primary",
+            "assignee": "trading-department",
+            "status": "done",
+            "body": (
+                f"workflow_root_task_id={root_id}\n"
+                "workflow_role=primary\n"
+                "workflow_mode=analysis"
+            ),
+            "result": (
+                "2026-08-27 기준 주문 방향·수량·주문 유형이 없어 후보를 만들 수 없습니다. "
+                "실제 주문·체결·원장 변경은 수행하지 않았습니다."
+            ),
+        }
+        synthesis = {
+            "id": "ceo-trading-response",
+            "assignee": "ceo-agent",
+            "status": "done",
+            "result": "CEO 최종 응답입니다.",
+            "final_answer": "CEO 최종 응답입니다.",
+            "body": (
+                f"workflow_root_task_id={root_id}\n"
+                "workflow_role=synthesis\n"
+                "workflow_mode=analysis\n"
+                "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
+            ),
+        }
+
+        class DeliverySpy:
+            def deliver(self, **_kwargs):
+                return "sent"
+
+            def deliver_to_existing_thread(self, **_kwargs):
+                return "sent"
+
+        client = FakeClient()
+        service = CeoSupervisorService(client, discord_delivery=DeliverySpy())
+        service._project_terminal_task(
+            root_task_id=root_id,
+            task_id="ceo-trading-response",
+            task_payloads=(root, trading, synthesis),
+            event={
+                "event_id": "trading-evidence-1",
+                "task_id": "ceo-trading-response",
+                "kind": "completed",
+            },
+        )
+
+        self.assertEqual(len(client.created), 1)
+        qa_body = client.created[0]["body"]
+        self.assertIn("거래 부서 검증 근거", qa_body)
+        self.assertIn('"answer_trustworthy": true', qa_body)
 
     def test_web_synthesis_without_discord_context_does_not_fail_root(self) -> None:
         timeline: list[str] = []
@@ -1856,10 +2917,7 @@ class PostResponseQaAuditTest(unittest.TestCase):
             "id": root_id,
             "assignee": "ceo-agent",
             "status": "done",
-            "body": (
-                build_root_body("웹 요청", "req-web")
-                + "\nsource=web"
-            ),
+            "body": (build_root_body("웹 요청", "req-web") + "\nsource=web"),
         }
         synthesis = {
             "id": "web-response",
@@ -1909,7 +2967,9 @@ class PostResponseQaAuditTest(unittest.TestCase):
             "id": root_id,
             "assignee": "ceo-agent",
             "status": "done",
-            "body": build_root_body("Discord 전달 실패를 점검해줘", "req-discord-failure"),
+            "body": build_root_body(
+                "Discord 전달 실패를 점검해줘", "req-discord-failure"
+            ),
         }
         synthesis = {
             "id": "discord-failure-response",
@@ -1944,7 +3004,9 @@ class PostResponseQaAuditTest(unittest.TestCase):
         self.assertIn('"delivery_status": "missing_context"', qa["body"])
         self.assertIn('"response_delivered": false', qa["body"])
 
-    def test_completed_empty_synthesis_is_edited_instead_of_completed_again(self) -> None:
+    def test_completed_empty_synthesis_is_edited_instead_of_completed_again(
+        self,
+    ) -> None:
         class EditingClient(FakeClient):
             def __init__(self) -> None:
                 super().__init__()
@@ -1984,7 +3046,11 @@ class PostResponseQaAuditTest(unittest.TestCase):
             root_task_id=root_id,
             task_id=synthesis_id,
             task_payloads=(root, synthesis),
-            event={"event_id": "repair-1", "task_id": synthesis_id, "kind": "completed"},
+            event={
+                "event_id": "repair-1",
+                "task_id": synthesis_id,
+                "kind": "completed",
+            },
         )
 
         self.assertEqual([item["task_id"] for item in client.edited], [synthesis_id])
@@ -2022,6 +3088,25 @@ class WorkforceAdvisoryAttachmentTest(unittest.TestCase):
         self.assertIn("hgfinance.workforce-advisory.v1", body)
         self.assertIn('"department":"research"', body)
         self.assertIn("Do not repeat browser, terminal, file", body)
+
+    def test_every_primary_create_gets_one_terminal_result_contract(self) -> None:
+        client = FakeClient()
+        service = CeoSupervisorService(client, qa_required=False)
+        decision = SupervisorDecision(
+            SupervisorAction.CREATE_TASK,
+            "root",
+            assignee="research-department",
+            title="CEO delegated research analysis",
+            body="analysis_mode=standard_analysis\n분석 결과를 작성하십시오.",
+        )
+
+        service._execute(decision, SupervisorState("root", ()))
+
+        body = str(client.created[0]["body"])
+        self.assertEqual(
+            body.count("Terminal result persistence contract (required):"), 1
+        )
+        self.assertIn("complete user-facing answer in result", body)
 
 
 class BindingPartialDeferExecutionTest(unittest.TestCase):
@@ -2096,7 +3181,9 @@ class SynthesisTimingInstrumentationTest(unittest.TestCase):
                 assignee="ceo-agent",
                 title="CEO final synthesis",
                 body="synthesis body",
-                parent_task_ids=tuple(child.task_id for child in state.analysis_children),
+                parent_task_ids=tuple(
+                    child.task_id for child in state.analysis_children
+                ),
             ),
         )
         service._project_terminal_task = lambda **kwargs: None
@@ -2120,9 +3207,7 @@ class SynthesisTimingInstrumentationTest(unittest.TestCase):
             )
 
         timing = next(
-            line
-            for line in captured.output
-            if "supervisor-synthesis-timing" in line
+            line for line in captured.output if "supervisor-synthesis-timing" in line
         )
         self.assertIn("request_id=request-1", timing)
         self.assertIn("root_id=root", timing)
@@ -2176,7 +3261,9 @@ class UnmaterializedPrimaryFinalDeliveryTest(unittest.TestCase):
             return "sent"
 
     class Client:
-        environment = {"HERMES_HOME": "/tmp/ceo-invalid-primary-final"}
+        environment: ClassVar[dict[str, object]] = {
+            "HERMES_HOME": "/tmp/ceo-invalid-primary-final"
+        }
 
         def __init__(self, root: dict[str, object]) -> None:
             self.root = root
@@ -2256,7 +3343,9 @@ class UnmaterializedPrimaryFinalDeliveryTest(unittest.TestCase):
         self.assertEqual(delivery.finals[0]["content"], "CEO usable final answer")
         self.assertEqual(client.created, [])
 
-    def test_invalid_primary_without_result_creates_one_deferred_synthesis(self) -> None:
+    def test_invalid_primary_without_result_creates_one_deferred_synthesis(
+        self,
+    ) -> None:
         root = self.root_payload()
         client = self.Client(root)
         delivery = self.Delivery()
@@ -2288,14 +3377,20 @@ class UnmaterializedPrimaryFinalDeliveryTest(unittest.TestCase):
             client.completed[0]["metadata"]["final_answer"],
         )
 
-    def test_materialized_valid_primary_does_not_use_invalid_primary_fallback(self) -> None:
+    def test_materialized_valid_primary_does_not_use_invalid_primary_fallback(
+        self,
+    ) -> None:
         root = self.root_payload(final_answer="CEO planner metadata")
-        root["body"] = str(root["body"]).replace(
-            "selected_primary_profiles=qa-department",
-            "selected_primary_profiles=research-department",
-        ).replace(
-            "delegation_instruction.qa-department=Measure the system response latency.",
-            "delegation_instruction.research-department=Research the system response latency.",
+        root["body"] = (
+            str(root["body"])
+            .replace(
+                "selected_primary_profiles=qa-department",
+                "selected_primary_profiles=research-department",
+            )
+            .replace(
+                "delegation_instruction.qa-department=Measure the system response latency.",
+                "delegation_instruction.research-department=Research the system response latency.",
+            )
         )
         research = {
             "id": "research-primary",
@@ -2500,7 +3595,9 @@ class UnmaterializedPrimaryFinalDeliveryTest(unittest.TestCase):
 
 
 class SupervisorWakeupTest(unittest.TestCase):
-    def test_startup_reconciliation_recovers_direct_root_and_blocked_primary(self) -> None:
+    def test_startup_reconciliation_recovers_direct_root_and_blocked_primary(
+        self,
+    ) -> None:
         class ExistingRootClient(FakeClient):
             def __init__(self) -> None:
                 super().__init__()
@@ -2517,14 +3614,15 @@ class SupervisorWakeupTest(unittest.TestCase):
                     "planning_terminal_state=done_after_child_creation\n"
                     "producer=ceo-hermes-direct\n"
                     "request_class=non-binding advisory analysis\n"
-                    "selected_primary_profiles="
-                    + ",".join(selected)
+                    "selected_primary_profiles=" + ",".join(selected)
                 )
                 self.payloads = [
                     {
                         "id": f"{profile}-task",
                         "assignee": profile,
-                        "status": "blocked" if profile.endswith("portfolio-department") else "done",
+                        "status": "blocked"
+                        if profile.endswith("portfolio-department")
+                        else "done",
                         "summary": profile,
                         "block_reason": "data gap"
                         if profile.endswith("portfolio-department")
@@ -2558,7 +3656,9 @@ class SupervisorWakeupTest(unittest.TestCase):
             },
         )
 
-    def test_startup_reconciliation_recovers_modern_root_from_blocked_primary(self) -> None:
+    def test_startup_reconciliation_recovers_modern_root_from_blocked_primary(
+        self,
+    ) -> None:
         now = int(time.time())
 
         class ModernRootClient(FakeClient):
@@ -2681,7 +3781,9 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(decisions, ())
         self.assertEqual(client.show_calls, 0)
 
-    def test_completed_synthesis_reconciliation_replays_missed_terminal_event(self) -> None:
+    def test_completed_synthesis_reconciliation_replays_missed_terminal_event(
+        self,
+    ) -> None:
         class CompletedSynthesisClient(FakeClient):
             def __init__(self) -> None:
                 super().__init__()
@@ -2760,7 +3862,9 @@ class SupervisorWakeupTest(unittest.TestCase):
             "reconcile-synthesis:synthesis-done:done",
         )
 
-    def test_completed_synthesis_reconciliation_ignores_non_synthesis_tasks(self) -> None:
+    def test_completed_synthesis_reconciliation_ignores_non_synthesis_tasks(
+        self,
+    ) -> None:
         class NonSynthesisClient(FakeClient):
             def list_tasks(self):
                 return (
@@ -2768,10 +3872,7 @@ class SupervisorWakeupTest(unittest.TestCase):
                         "id": "risk",
                         "assignee": "risk-management",
                         "status": "done",
-                        "body": (
-                            "workflow_root_task_id=root\\n"
-                            "workflow_role=primary"
-                        ),
+                        "body": ("workflow_root_task_id=root\\nworkflow_role=primary"),
                     },
                 )
 
@@ -2977,8 +4078,8 @@ class SupervisorWakeupTest(unittest.TestCase):
 
         client = OrderingClient()
         service = CeoSupervisorService(client)
-        service._project_terminal_task = (
-            lambda **kwargs: timeline.append("terminal-observer")
+        service._project_terminal_task = lambda **kwargs: timeline.append(
+            "terminal-observer"
         )
         service._deliver_department_progress = lambda **kwargs: None
         service._reconcile_department_terminal_progress = lambda **kwargs: None
@@ -3016,7 +4117,11 @@ class SupervisorWakeupTest(unittest.TestCase):
         service._deliver_department_progress = lambda **kwargs: None
         service._reconcile_department_terminal_progress = lambda **kwargs: None
         service.handle_terminal_event(
-            {"event_id": "observer-after-root-lock", "task_id": "r", "kind": "completed"}
+            {
+                "event_id": "observer-after-root-lock",
+                "task_id": "r",
+                "kind": "completed",
+            }
         )
 
         self.assertEqual(acquired_from_peer, [True])
@@ -3090,9 +4195,7 @@ class SupervisorWakeupTest(unittest.TestCase):
                             "id": "qa-created",
                             "assignee": "qa-department",
                             "status": "ready",
-                            "body": build_scoped_task_body(
-                                "QA", "root", role="qa"
-                            ),
+                            "body": build_scoped_task_body("QA", "root", role="qa"),
                         }
                     )
                     # Model a concurrent sibling event that already created the
@@ -3169,9 +4272,7 @@ class SupervisorWakeupTest(unittest.TestCase):
 
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
-        self.assertEqual(
-            client.created[0]["parent_task_ids"], ("r", "risk")
-        )
+        self.assertEqual(client.created[0]["parent_task_ids"], ("r", "risk"))
         self.assertIn("workflow_mode=binding", client.created[0]["body"])
 
     def test_user_paper_order_skips_strategy_qa_even_if_event_requests_it(self) -> None:
@@ -3218,9 +4319,7 @@ class SupervisorWakeupTest(unittest.TestCase):
 
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
-        self.assertEqual(
-            [item["assignee"] for item in client.created], ["ceo-agent"]
-        )
+        self.assertEqual([item["assignee"] for item in client.created], ["ceo-agent"])
         synthesis_body = client.created[0]["body"]
         self.assertIn("synthesis_mode=structured_primary_template", synthesis_body)
         self.assertEqual(client.created[0]["initial_status"], "blocked")
@@ -3230,7 +4329,9 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertIsInstance(metadata, dict)
         self.assertTrue(metadata["preserved_primary_final_answer_verbatim"])
 
-    def test_binding_template_failure_releases_same_synthesis_for_llm_fallback(self) -> None:
+    def test_binding_template_failure_releases_same_synthesis_for_llm_fallback(
+        self,
+    ) -> None:
         class CompletionFailureClient(FakeClient):
             def complete_task(self, task_id: str, **kwargs: object) -> None:
                 del task_id, kwargs
@@ -3285,14 +4386,19 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertIn("planning_terminal_state=done_after_child_creation", body)
         self.assertNotIn("child_parent_required=current_root_task_id", body)
         self.assertIn("workflow_mode=analysis", body)
-        self.assertIn("analysis_response_rule=primary_results_ready_allows_immediate_ceo_synthesis", body)
+        self.assertIn(
+            "analysis_response_rule=primary_results_ready_allows_immediate_ceo_synthesis",
+            body,
+        )
         self.assertNotIn("then CEO synthesis", body)
         self.assertIn("response_plane=primary_results_ready", body)
         self.assertIn("governance_plane=async_qa", body)
         self.assertIn("qa_is_not_synthesis_prerequisite=true", body)
         self.assertNotIn("QA then synthesis", body)
 
-    def test_binding_mode_is_explicit_and_legacy_scoped_roots_remain_gated(self) -> None:
+    def test_binding_mode_is_explicit_and_legacy_scoped_roots_remain_gated(
+        self,
+    ) -> None:
         self.assertEqual(infer_workflow_mode("삼성전자 분석"), "analysis")
         self.assertEqual(infer_workflow_mode("삼성전자 주문을 집행해"), "binding")
         self.assertEqual(infer_workflow_mode("삼성전자 매수해도 될까?"), "analysis")
@@ -3307,7 +4413,9 @@ class SupervisorWakeupTest(unittest.TestCase):
             "analysis",
         )
         self.assertEqual(infer_workflow_mode("매매 실행은 하지 마"), "analysis")
-        self.assertEqual(infer_workflow_mode("주문은 하지 말고 분석만 해줘"), "analysis")
+        self.assertEqual(
+            infer_workflow_mode("주문은 하지 말고 분석만 해줘"), "analysis"
+        )
         self.assertEqual(
             infer_workflow_mode(
                 "PAPER 읽기 전용 E2E 검증이다. 주문 제출·원장 변경·설정 변경은 "
@@ -3320,7 +4428,9 @@ class SupervisorWakeupTest(unittest.TestCase):
             "analysis",
         )
         self.assertEqual(workflow_mode_from_body(build_root_body("q", "r")), "analysis")
-        self.assertEqual(workflow_mode_from_body("hgfinance.ceo-workflow-scope.v1"), "binding")
+        self.assertEqual(
+            workflow_mode_from_body("hgfinance.ceo-workflow-scope.v1"), "binding"
+        )
 
     def test_direct_non_binding_root_without_workflow_mode_is_analysis(self) -> None:
         body = (
@@ -3334,8 +4444,7 @@ class SupervisorWakeupTest(unittest.TestCase):
     def test_invalid_workflow_mode_aborts_only_current_workflow(self) -> None:
         client = FakeClient()
         client.root_body = (
-            "hgfinance.ceo-workflow-scope.v1\n"
-            "workflow_mode=unsupported\n"
+            "hgfinance.ceo-workflow-scope.v1\nworkflow_mode=unsupported\n"
         )
 
         decision = CeoSupervisorService(client).handle_terminal_event(
@@ -3346,14 +4455,16 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(decision.action, SupervisorAction.BLOCK_ABORT)
         self.assertEqual(client.blocked, ["root"])
         self.assertTrue(
-            any("ceo-workflow-scope-error" in comment["body"] for comment in client.comments)
+            any(
+                "ceo-workflow-scope-error" in comment["body"]
+                for comment in client.comments
+            )
         )
 
     def test_legacy_scope_error_does_not_mutate_terminal_root_and_dedupes(self) -> None:
         client = FakeClient()
         client.root_body = (
-            "hgfinance.ceo-workflow-scope.v1\n"
-            "workflow_mode=unsupported\n"
+            "hgfinance.ceo-workflow-scope.v1\nworkflow_mode=unsupported\n"
         )
         original_show = client.show
 
@@ -3373,7 +4484,9 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertIsNone(second)
         self.assertEqual(client.blocked, [])
         scope_comments = [
-            item for item in client.comments if "ceo-workflow-scope-error" in item["body"]
+            item
+            for item in client.comments
+            if "ceo-workflow-scope-error" in item["body"]
         ]
         self.assertEqual(len(scope_comments), 1)
 
@@ -3446,7 +4559,11 @@ class SupervisorWakeupTest(unittest.TestCase):
             ["ceo-agent"],
         )
         self.assertEqual(
-            sum("event=duplicate-1" in comment["body"] and "state=done" in comment["body"] for comment in client.comments),
+            sum(
+                "event=duplicate-1" in comment["body"]
+                and "state=done" in comment["body"]
+                for comment in client.comments
+            ),
             1,
         )
 
@@ -3454,8 +4571,8 @@ class SupervisorWakeupTest(unittest.TestCase):
         client = FakeClient()
         service = CeoSupervisorService(client)
         projected = []
-        service._project_terminal_task = (
-            lambda **kwargs: projected.append(kwargs["task_id"])
+        service._project_terminal_task = lambda **kwargs: projected.append(
+            kwargs["task_id"]
         )
         service._deliver_department_progress = lambda **kwargs: None
         service._reconcile_department_terminal_progress = lambda **kwargs: None
@@ -3722,9 +4839,7 @@ class SupervisorWakeupTest(unittest.TestCase):
             "id": primary,
             "assignee": "research-department",
             "status": "done",
-            "body": build_scoped_task_body(
-                "research", root, role="primary"
-            ),
+            "body": build_scoped_task_body("research", root, role="primary"),
             "parents": [],
         }
 
@@ -3738,9 +4853,7 @@ class SupervisorWakeupTest(unittest.TestCase):
                 "",
             )
 
-        discovered_root = HermesKanbanClient(runner=runner).workflow_root(
-            primary
-        )
+        discovered_root = HermesKanbanClient(runner=runner).workflow_root(primary)
 
         self.assertEqual(discovered_root, root)
         self.assertEqual(len(calls), 1)
@@ -3764,9 +4877,7 @@ class SupervisorWakeupTest(unittest.TestCase):
                 "id": primary,
                 "assignee": "research-department",
                 "status": "done",
-                "body": build_scoped_task_body(
-                    "research", root, role="primary"
-                ),
+                "body": build_scoped_task_body("research", root, role="primary"),
             },
             sibling: {
                 "id": sibling,
@@ -3807,22 +4918,21 @@ class SupervisorWakeupTest(unittest.TestCase):
         shown = [command[3] for command in calls if command[1:3] == ("kanban", "show")]
         self.assertCountEqual(shown, [root, primary, sibling])
 
-    def test_primary_scope_task_cannot_depend_on_scope_root(self) -> None:
+    def test_primary_scope_task_can_depend_on_scope_root(self) -> None:
         root = "t_aaaaaaaa"
         primary = build_scoped_task_body("research", root, role="primary")
-        with self.assertRaises(WorkflowScopeViolation):
-            validate_workflow_scope(
-                root_task_id=root,
-                root_payload={"id": root, "body": build_root_body("q", "req")},
-                descendants=[
-                    {
-                        "id": "t_bbbbbbbb",
-                        "assignee": "research-department",
-                        "body": primary,
-                        "parents": [root],
-                    }
-                ],
-            )
+        validate_workflow_scope(
+            root_task_id=root,
+            root_payload={"id": root, "body": build_root_body("q", "req")},
+            descendants=[
+                {
+                    "id": "t_bbbbbbbb",
+                    "assignee": "research-department",
+                    "body": primary,
+                    "parents": [root],
+                }
+            ],
+        )
 
     def test_root_delegation_comment_does_not_become_second_scope_root(self) -> None:
         root = "t_aaaaaaaa"
@@ -3848,8 +4958,6 @@ class SupervisorWakeupTest(unittest.TestCase):
                 }
             ],
         )
-
-
 
 
 class ReadyPrimaryPlanRecoveryTest(unittest.TestCase):
@@ -3950,13 +5058,10 @@ class ReadyPrimaryPlanRecoveryTest(unittest.TestCase):
             self.selected,
         )
         self.assertTrue(
-            all(item["parent_task_ids"] == () for item in client.created)
+            all(item["parent_task_ids"] == ("root",) for item in client.created)
         )
         self.assertTrue(
-            all(
-                "workflow_root_task_id=root" in item["body"]
-                for item in client.created
-            )
+            all("workflow_root_task_id=root" in item["body"] for item in client.created)
         )
 
         # Re-polling the same durable plan must be idempotent.
@@ -4013,9 +5118,7 @@ class ReadyPrimaryPlanRecoveryTest(unittest.TestCase):
 
         client = Client()
 
-        decisions = CeoSupervisorService(
-            client
-        ).materialize_ready_primary_plans()
+        decisions = CeoSupervisorService(client).materialize_ready_primary_plans()
 
         self.assertEqual(decisions, ())
         self.assertEqual(client.created, [])
@@ -4141,9 +5244,7 @@ class ReadyPrimaryPlanRecoveryTest(unittest.TestCase):
                             "status": payload["status"],
                             "created_at": now - 4 + index,
                             "body": payload["body"],
-                            "idempotency_key": self.created[index][
-                                "idempotency_key"
-                            ],
+                            "idempotency_key": self.created[index]["idempotency_key"],
                         }
                     )
                 return tuple(rows)
@@ -4229,12 +5330,11 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
             self.selected,
         )
         self.assertTrue(
-            all(decision.parent_task_ids == () for decision in decisions)
+            all(decision.parent_task_ids == ("root",) for decision in decisions)
         )
         self.assertTrue(
             all(
-                "analysis_mode=fast_advisory" in decision.body
-                for decision in decisions
+                "analysis_mode=fast_advisory" in decision.body for decision in decisions
             )
         )
         self.assertTrue(
@@ -4244,6 +5344,13 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
                 for decision in decisions
             )
         )
+        quant_body = next(
+            decision.body
+            for decision in decisions
+            if decision.assignee == "quant-backtest-department"
+        )
+        self.assertIn("retrieval_attempt", quant_body)
+        self.assertIn("Do not call delegate_task", quant_body)
 
     def test_materializes_hr_for_workforce_improvement_analysis(self) -> None:
         body = (
@@ -4269,7 +5376,58 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
         self.assertEqual(decisions[0].action, SupervisorAction.CREATE_TASK)
         self.assertEqual(decisions[0].assignee, "hr-department")
 
-    def test_internal_workflow_failure_is_not_reported_as_provider_failure(self) -> None:
+    def test_quant_standard_analysis_is_single_owner_and_root_linked(self) -> None:
+        body = (
+            "origin=user-query\n"
+            "workflow_role=root\n"
+            "workflow_mode=analysis\n"
+            "analysis_mode=standard_analysis\n"
+            "selected_primary_profiles=quant-backtest-department\n"
+            "delegation_instruction.quant-backtest-department="
+            "Assess AMZN trend and quantitative risk.\n"
+        )
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(),
+            workflow_mode="analysis",
+            selected_primary_profiles=("quant-backtest-department",),
+            root_is_user_query=True,
+        )
+
+        decisions = _initial_primary_materialization_decisions(state, body)
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].parent_task_ids, ("root",))
+        self.assertIn("Do not call delegate_task", decisions[0].body)
+        self.assertIn("retrieval_attempt", decisions[0].body)
+
+    def test_standard_risk_primary_receives_terminal_result_contract(self) -> None:
+        body = (
+            "origin=user-query\n"
+            "workflow_role=root\n"
+            "workflow_mode=analysis\n"
+            "analysis_mode=standard_analysis\n"
+            "selected_primary_profiles=risk-management\n"
+            "delegation_instruction.risk-management="
+            "Assess the requested downside and policy risks.\n"
+        )
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(),
+            workflow_mode="analysis",
+            selected_primary_profiles=("risk-management",),
+            root_is_user_query=True,
+        )
+
+        decisions = _initial_primary_materialization_decisions(state, body)
+
+        assert len(decisions) == 1
+        assert "Terminal result persistence contract" in decisions[0].body
+        assert "analysis_mode=fast_advisory" not in decisions[0].body
+
+    def test_internal_workflow_failure_is_not_reported_as_provider_failure(
+        self,
+    ) -> None:
         child = ChildTaskState(
             task_id="control",
             profile="ceo-agent",
@@ -4339,9 +5497,7 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
             root_is_user_query=True,
         )
 
-        with self.assertLogs(
-            "orchestration.adapters.ceo_supervisor", level="WARNING"
-        ):
+        with self.assertLogs("orchestration.adapters.ceo_supervisor", level="WARNING"):
             decisions = _initial_primary_materialization_decisions(state, body)
 
         self.assertEqual(len(decisions), 1)
@@ -4428,11 +5584,7 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
         )
 
     def test_split_ceo_plan_and_mode_correction_are_recovered_once(self) -> None:
-        root_body = (
-            "origin=user-query\n"
-            "workflow_role=root\n"
-            "workflow_mode=analysis\n"
-        )
+        root_body = "origin=user-query\nworkflow_role=root\nworkflow_mode=analysis\n"
         payload = {
             "body": root_body,
             "comments": [
@@ -4485,7 +5637,6 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
             ),
             (),
         )
-
 
     def test_duplicate_primary_suppresses_materialization(self) -> None:
         first = child(
@@ -4543,9 +5694,7 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
             "workflow_role=root\n"
             "workflow_mode=analysis\n"
             "analysis_mode=fast_advisory\n"
-            "selected_primary_profiles="
-            + ",".join(cls.selected)
-            + "\n"
+            "selected_primary_profiles=" + ",".join(cls.selected) + "\n"
             "delegation_instruction.research-department=Research plan\n"
             "delegation_instruction.quant-backtest-department=Quant plan\n"
             "delegation_instruction.risk-management=Risk plan\n"
@@ -4628,7 +5777,9 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
         timeline: list[str] = []
 
         class Client:
-            environment = {"HERMES_HOME": "/tmp/ceo-ordering-failure"}
+            environment: ClassVar[dict[str, object]] = {
+                "HERMES_HOME": "/tmp/ceo-ordering-failure"
+            }
 
             def show(self, task_id: str):
                 return {
@@ -4664,7 +5815,9 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
         timeline: list[str] = []
 
         class Client:
-            environment = {"HERMES_HOME": "/tmp/ceo-ordering-lock"}
+            environment: ClassVar[dict[str, object]] = {
+                "HERMES_HOME": "/tmp/ceo-ordering-lock"
+            }
 
             def show(self, task_id: str):
                 return {
@@ -4719,7 +5872,9 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
 
     def test_fast_projection_skips_after_authoritative_primary_exists(self) -> None:
         class Client:
-            environment = {"HERMES_HOME": "/tmp/ceo-ordering-existing"}
+            environment: ClassVar[dict[str, object]] = {
+                "HERMES_HOME": "/tmp/ceo-ordering-existing"
+            }
 
             def __init__(self) -> None:
                 self.created: list[dict[str, object]] = []
@@ -4732,9 +5887,7 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
                         "status": "done",
                         "body": DelegationProjectionOrderingTest.root_body(),
                     }
-                return next(
-                    item for item in self.created if item["id"] == task_id
-                )
+                return next(item for item in self.created if item["id"] == task_id)
 
             def root_scoped_task_ids(self, root_id: str):
                 return (root_id,) + tuple(item["id"] for item in self.created)
@@ -4783,7 +5936,9 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
         timeline: list[str] = []
 
         class Client:
-            environment = {"HERMES_HOME": "/tmp/ceo-ordering-replay"}
+            environment: ClassVar[dict[str, object]] = {
+                "HERMES_HOME": "/tmp/ceo-ordering-replay"
+            }
 
             def __init__(self):
                 self.created = []
@@ -4818,6 +5973,7 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
         service.handle_terminal_event(event)
 
         self.assertEqual(timeline, ["ceo-dispatch"])
+
 
 class SupervisorWorkflowRootCacheTest(unittest.TestCase):
     """Hot-path root cache removes redundant workflow reconstruction."""
@@ -4914,9 +6070,7 @@ class SupervisorWorkflowRootCacheTest(unittest.TestCase):
 
         delivered = []
 
-        service._deliver_department_progress = (
-            lambda **kwargs: delivered.append(kwargs)
-        )
+        service._deliver_department_progress = lambda **kwargs: delivered.append(kwargs)
 
         service.handle_terminal_event(
             {
@@ -4960,12 +6114,8 @@ class SupervisorWorkflowRootCacheTest(unittest.TestCase):
 
         delivered = []
 
-        service._deliver_department_progress = (
-            lambda **kwargs: delivered.append(kwargs)
-        )
-        service._reconcile_department_start_progress = (
-            lambda **kwargs: None
-        )
+        service._deliver_department_progress = lambda **kwargs: delivered.append(kwargs)
+        service._reconcile_department_start_progress = lambda **kwargs: None
 
         service.handle_terminal_event(
             {
@@ -5000,9 +6150,9 @@ class AuthoritativePayloadReuseTest(unittest.TestCase):
             build_root_body("Samsung", "req-authoritative")
             + f"\nselected_primary_profiles={selected}\n"
         )
-        primary_body = lambda label: build_scoped_task_body(
-            label, root_id, role="primary"
-        )
+
+        def primary_body(label: str) -> str:
+            return build_scoped_task_body(label, root_id, role="primary")
 
         root = {
             "id": root_id,
@@ -5039,7 +6189,9 @@ class AuthoritativePayloadReuseTest(unittest.TestCase):
         }
 
         class Client:
-            environment = {"HERMES_HOME": "/tmp/ceo-authoritative-test"}
+            environment: ClassVar[dict[str, object]] = {
+                "HERMES_HOME": "/tmp/ceo-authoritative-test"
+            }
 
             def __init__(self):
                 self.show_calls = []
@@ -5072,7 +6224,11 @@ class AuthoritativePayloadReuseTest(unittest.TestCase):
         service.decider = lambda state: None
 
         service.handle_terminal_event(
-            {"event_id": "authoritative-synthesis", "task_id": synthesis_id, "kind": "completed"}
+            {
+                "event_id": "authoritative-synthesis",
+                "task_id": synthesis_id,
+                "kind": "completed",
+            }
         )
 
         self.assertEqual(
@@ -5087,6 +6243,29 @@ class AuthoritativePayloadReuseTest(unittest.TestCase):
 
 
 class HermesCliObservabilityTest(unittest.TestCase):
+    def test_list_uses_native_reader_when_available(self) -> None:
+        def runner(*args, **kwargs):
+            raise AssertionError("native Kanban reader should avoid the CLI")
+
+        class DirectReader:
+            available = True
+
+            def list_tasks(self, *, include_archived=False):
+                return (
+                    {
+                        "id": "archived-task",
+                        "status": "archived" if include_archived else "done",
+                    },
+                )
+
+        client = HermesKanbanClient(runner=runner)
+        client._direct_show_reader = DirectReader()
+
+        self.assertEqual(
+            client.list_tasks(include_archived=True),
+            ({"id": "archived-task", "status": "archived"},),
+        )
+
     def test_success_logs_operation_lane_and_overlap_metrics(self) -> None:
         import json
         import subprocess
@@ -5095,11 +6274,13 @@ class HermesCliObservabilityTest(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, json.dumps([]), "")
 
         client = HermesKanbanClient(runner=runner, timeout=2)
-        with self.assertLogs(
-            "orchestration.adapters.ceo_supervisor", level="INFO"
-        ) as logs:
-            with cli_lane("recovery"):
-                self.assertEqual(client.list_tasks(), ())
+        with (
+            self.assertLogs(
+                "orchestration.adapters.ceo_supervisor", level="INFO"
+            ) as logs,
+            cli_lane("recovery"),
+        ):
+            self.assertEqual(client.list_tasks(), ())
 
         rendered = "\n".join(logs.output)
         self.assertIn("operation=list", rendered)
@@ -5117,12 +6298,14 @@ class HermesCliObservabilityTest(unittest.TestCase):
             raise subprocess.TimeoutExpired(cmd=args[0], timeout=2)
 
         client = HermesKanbanClient(runner=runner, timeout=2)
-        with self.assertLogs(
-            "orchestration.adapters.ceo_supervisor", level="INFO"
-        ) as logs:
-            with self.assertRaises(HermesKanbanCommandError):
-                with cli_lane("event"):
-                    client.show("task-with-secret-prompt")
+        with (
+            self.assertLogs(
+                "orchestration.adapters.ceo_supervisor", level="INFO"
+            ) as logs,
+            self.assertRaises(HermesKanbanCommandError),
+            cli_lane("event"),
+        ):
+            client.show("task-with-secret-prompt")
 
         rendered = "\n".join(logs.output)
         self.assertIn("operation=show", rendered)
@@ -5143,12 +6326,14 @@ class HermesCliObservabilityTest(unittest.TestCase):
             )
 
         client = HermesKanbanClient(runner=runner)
-        with self.assertLogs(
-            "orchestration.adapters.ceo_supervisor", level="INFO"
-        ) as logs:
-            with self.assertRaises(HermesKanbanCommandError):
-                with cli_lane("synthesis-recovery"):
-                    client.list_tasks()
+        with (
+            self.assertLogs(
+                "orchestration.adapters.ceo_supervisor", level="INFO"
+            ) as logs,
+            self.assertRaises(HermesKanbanCommandError),
+            cli_lane("synthesis-recovery"),
+        ):
+            client.list_tasks()
 
         rendered = "\n".join(logs.output)
         self.assertIn("operation=list", rendered)
@@ -5164,11 +6349,13 @@ class HermesCliObservabilityTest(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, "not-json", "")
 
         client = HermesKanbanClient(runner=runner)
-        with self.assertLogs(
-            "orchestration.adapters.ceo_supervisor", level="INFO"
-        ) as logs:
-            with self.assertRaises(HermesKanbanCommandError):
-                client.show("task")
+        with (
+            self.assertLogs(
+                "orchestration.adapters.ceo_supervisor", level="INFO"
+            ) as logs,
+            self.assertRaises(HermesKanbanCommandError),
+        ):
+            client.show("task")
 
         self.assertIn("stderr_category=JSON_ERROR", "\n".join(logs.output))
 
@@ -5242,16 +6429,17 @@ class HermesCliObservabilityTest(unittest.TestCase):
             )
 
         client = HermesKanbanClient(runner=runner)
-        with self.assertLogs(
-            "orchestration.adapters.ceo_supervisor", level="INFO"
-        ) as logs:
-            with cli_lane("event"):
-                client.workflow("root")
+        with (
+            self.assertLogs(
+                "orchestration.adapters.ceo_supervisor", level="INFO"
+            ) as logs,
+            cli_lane("event"),
+        ):
+            client.workflow("root")
 
         rendered = "\n".join(logs.output)
         self.assertIn("operation=workflow-reconstruction", rendered)
         self.assertIn("lane=event", rendered)
-
 
 
 if __name__ == "__main__":

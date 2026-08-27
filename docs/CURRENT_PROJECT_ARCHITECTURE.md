@@ -77,7 +77,7 @@ governance components but must not be collapsed into one claimed E2E pipeline:
 |---|---|
 | General CEO request | mirror/dedup → one `/ui/ceo/ask` implementation → root Kanban card → selected primary departments → CEO response → QA post-response audit (async) |
 | Portfolio advisory | profile validation → Research → Quant → Trading → Risk → Accounting → CEO response → QA post-response audit (async); all order/risk outputs remain non-binding and default to HOLD/manual review |
-| Autonomous Research–Quant lab | natural-language intake → opt-in `strategy-hermes` → file-backed lab → PIT/robustness validation → evidence-gated candidate; no automatic promotion or execution |
+| Autonomous Research–Quant lab | natural-language intake → opt-in `strategy-hermes` → file-backed lab → PIT/robustness validation → evidence-gated candidate → report + explicit human PAPER approval → immutable allowlisted signal Bundle/container; start/stop/remove lifecycle is tracked, but StrategySignal→OMS order execution remains disabled |
 | Automated strategy execution | StrategySignal → OrderIntent → deterministic Risk → OMS is implemented in parts; a continuously operated end-to-end lifecycle is not established |
 | Explicit user PAPER directive | exact local-fixture user instruction → deterministic verification → Trading directive service → LS PAPER adapter → durable status/reconciliation; no LIVE route and no login |
 
@@ -247,6 +247,33 @@ Therefore the response-plane rule is deterministic: CEO response delivery comes
 first, then QA runs as a separate asynchronous audit. The conditional QA workers
 themselves are parallelized internally, while pre-execution financial safety is
 owned by deterministic Risk/OMS/ledger barriers.
+
+### 6.1 Observability and reconciliation closure
+
+The current implementation closes the previously missing joins without storing
+raw user or model text in an external observer:
+
+- BFF-created CEO roots send a bounded input summary and terminal result summary
+  to LangSmith. Department workers and post-response QA carry the root run ID as
+  their parent context; worker model/tool runs remain children of the worker.
+- CEO/API completion is synthesis-based. A synthesis task without a non-empty
+  result remains running, and its completion timestamp is not reported before
+  synthesis has finished. Post-response QA remains asynchronous and is not part
+  of this response completion boundary.
+- QA projection publishes a structured `qa_verdict` marker. Readers accept both
+  `qa` and `qa-terminal` stages and can fall back from wrapped SDK transport
+  errors to the direct `/api/v2/runs/query` path.
+- CEO and department Notion projections retain bounded task, root, request,
+  trace, LangSmith, and available Discord identifiers in one execution
+  connection block. Existing schemas receive optional properties only when the
+  property is declared, so older databases do not fail with a schema error.
+- Department Discord reads explicitly report `shared_ceo` until a
+  `DISCORD_<DEPARTMENT>_CHANNEL_ID` is configured; the API no longer presents a
+  shared channel as an isolated department log.
+
+These are repository/test-verified changes. A deployed runtime must be
+recreated and the target trace re-run before they can be labeled
+`RUNTIME_VERIFIED`.
 
 ## 7. Model Serving Architecture
 

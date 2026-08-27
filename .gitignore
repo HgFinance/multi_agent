@@ -62,6 +62,8 @@ departments/01-research/var/
 
 # 실행 산출물 - 매 실행마다 쌓인다. 리포트는 Notion·DB 에 남으므로 git 은 코드만 본다
 departments/01-research/reports/
+departments/06-ai-qa-audit/reports/
+departments/06-ai-qa-audit/tests/qa_completion_test_report.json
 ai-office/*.log
 /test-results/
 /migration_reports/

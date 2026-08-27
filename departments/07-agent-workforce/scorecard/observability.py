@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """2026-08-10 신규: Langfuse 원격 관측을 읽어 6개 투자본부 Worker의 유휴 여부를 판정.
 
 소유: 영주 (Agent Workforce 인사팀)
@@ -54,7 +53,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 # The HR observer consumes only the versioned, metadata-only Worker Registry.
 # It never imports another department runtime Python module.
@@ -398,13 +397,12 @@ class LangfuseTraceReader:
     # ── 배치 조회 (2026-08-27) ────────────────────────────────────────────────
     #
     # Langfuse Public API 는 **분당 15 요청** 상한이다(실측: 429 응답의
-    # `x-ratelimit-limit: 15`). 관측 1회는 Worker 8명 × 2 = 16 요청이라 매번
-    # 정확히 한 건이 429 를 맞고, SDK 가 `Retry-After` 만큼 잔다(상한 60초 -
-    # langfuse/api/core/http_client.py MAX_RETRY_DELAY_SECONDS). 실측 collect
-    # 41~62초 중 37~59초가 그 잠자는 시간이었다.
+    # `x-ratelimit-limit: 15`). 도입 전에는 Worker별 실행/미발화 조회가
+    # 이 한도를 넘었고, SDK가 `Retry-After`만큼 대기해 collect가 41~62초로
+    # 늘어나는 사례가 있었다.
     #
-    # 아래 둘은 그 16 요청을 2 로 접는다. 기본 구현은 이름마다 기존 단건
-    # 메서드를 부르는 것이라, 이 메서드를 모르는 테스트 대역도 그대로 동작한다
+    # 아래 둘은 현재 실행/미발화 조회를 각각 한 번의 배치로 접는다. 기본 구현은
+    # 이름마다 기존 단건 메서드를 부르는 것이라, 이 메서드를 모르는 테스트 대역도 그대로 동작한다
     # (fetch_worker_activity 가 list_worker_activity 로 접히는 것과 같은 이유).
 
     def fetch_many_worker_activity(
@@ -485,7 +483,7 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
                 self._client.api.trace.list,
                 name=event_name, from_timestamp=since, limit=limit, page=page,
             )
-        except Exception as exc:  # noqa: BLE001 - 조회 실패는 항상 UNAVAILABLE 로 접힌다.
+        except Exception as exc:
             raise LangfuseQueryError(_query_failure_reason(exc)) from exc
 
     def fetch_worker_activity(
@@ -561,7 +559,7 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
                 from_timestamp=since, limit=DEFAULT_ACTIVITY_PAGE_LIMIT,
                 page=page, filter=payload,
             )
-        except Exception as exc:  # noqa: BLE001 - 조회 실패는 항상 UNAVAILABLE 로 접힌다.
+        except Exception as exc:
             raise LangfuseQueryError(_query_failure_reason(exc)) from exc
 
     def fetch_many_worker_activity(
@@ -639,7 +637,7 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
                 self._client.api.metrics.metrics,
                 query=json.dumps(query),
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # The Metrics endpoint is independently rate-limited in Langfuse.
             # On 429, use the same bounded Trace batch already used for
             # execution activity and count only event names/timestamps.  This
@@ -654,12 +652,9 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
             counts = dict.fromkeys(names, 0)
             page_number = 1
             while True:
-                try:
-                    page = self._list_page_many(
-                        event_names=names, since=since, page=page_number,
-                    )
-                except LangfuseQueryError:
-                    raise
+                page = self._list_page_many(
+                    event_names=names, since=since, page=page_number,
+                )
                 for item in page.data:
                     name = getattr(item, "name", None)
                     if name in counts:
@@ -847,10 +842,10 @@ class WindowedActivityReader(LangfuseTraceReader):
     ) -> None:
         """창 하나에 필요한 것을 **묶음 2회**로 미리 채운다 (2026-08-27).
 
-        왜: Langfuse Public API 는 분당 15 요청 상한인데(429 의 `x-ratelimit-limit`)
-        Worker 8명 × 2 = 16 요청이라 관측 1회가 매번 한 건씩 429 를 맞았다. SDK 가
-        `Retry-After` 만큼 자면서(상한 60초) collect 가 41~62초로 늘어났다. 여기서
-        16 을 2 로 줄여 한도 아래로 내려간다.
+        도입 전에는 Langfuse Public API 분당 15 요청 상한(429 의
+        `x-ratelimit-limit`)보다 많은 Worker별 조회가 나갔다. SDK가
+        `Retry-After`만큼 대기하며 collect가 41~62초로 늘어난 사례가 있어,
+        현재는 실행/미발화 조회를 각각 한 번의 배치로 줄여 한도 아래로 내린다.
 
         판정은 아무것도 안 한다 - 아래 네 집계 함수는 그대로 단건 메서드를 부르고,
         그 호출이 여기서 채운 캐시에 맞으면 왕복이 없다. 그래서 집계 로직과 왕복
@@ -1082,7 +1077,7 @@ def load_head_profile_spec(repo_root: Path, department: str) -> HeadProfileSpec 
             continue
         try:
             config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except Exception as exc:  # noqa: BLE001 - 깨진 Profile 도 "모른다" 로 접힌다
+        except Exception as exc:
             raise HeadProfilesUnavailable(
                 f"profile_unreadable:{department}:{type(exc).__name__}"
             ) from exc
@@ -1129,8 +1124,14 @@ def check_idle_agents(
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_hours)
 
-    reader, reader_reason = _resolve_reader(reader)
-    reader_reason = reader_unavailable_reason or reader_reason or _READER_UNAVAILABLE_REASON
+    # An explicitly supplied reason means the caller already attempted reader
+    # construction and failed. Do not create a second live reader here: that
+    # would turn a deterministic unavailable result into an unrelated query.
+    if reader is None and reader_unavailable_reason:
+        reader_reason = reader_unavailable_reason
+    else:
+        reader, reader_reason = _resolve_reader(reader)
+        reader_reason = reader_unavailable_reason or reader_reason or _READER_UNAVAILABLE_REASON
 
     reports: list[WorkerIdleReport] = []
     for department in departments:
@@ -1222,11 +1223,10 @@ class CapacityObservationStatus(str, Enum):
 class DepartmentCapacityReport:
     """부서 하나의 Langfuse 기반 Capacity 관측 한 건.
 
-    `workforce.capacity_snapshots` writer가 아직 없어(P1-2 미착수) DB 기반
-    `GET .../scorecard`의 capacity 필드가 항상 null이다 - 이 리포트가 그 빈
-    자리를 Langfuse 직접 집계로 메운다(idle-agents 와 같은 원리). DB Snapshot과
-    스키마가 다르므로 `cost.py`의 `CapacitySnapshot`으로 강제하지 않는다 -
-    출처가 다른 두 값을 같은 타입으로 섞으면 어느 쪽 계약을 따르는지 흐려진다.
+    `GET .../scorecard`는 DB Snapshot을 읽고, 이 리포트는 최신 진단용으로
+    Langfuse를 직접 집계한다. 두 경로의 목적과 스키마가 다르므로 `cost.py`의
+    `CapacitySnapshot`으로 강제하지 않는다 - 출처가 다른 두 값을 같은 타입으로
+    섞으면 어느 쪽 계약을 따르는지 흐려진다.
 
     department 등록 Worker 전원을 합산한 값이라 여러 Worker가 겹쳐 돌면
     utilization 이 1.0을 넘을 수 있다 - 단일 서버 가동률이 아니라 "부서 총
@@ -2294,7 +2294,7 @@ if __name__ == "__main__":
     #   가짜 문구로 만들면 이 검사가 자기가 막아야 할 사고를 못 잡는다.
     class _ApiError(Exception):
         status_code = 400
-        body = {
+        body: ClassVar[dict[str, Any]] = {
             "message": "Invalid request data",
             "error": [{"code": "too_big", "maximum": 100, "path": ["limit"],
                        "message": "Too big: expected number to be <=100"}],

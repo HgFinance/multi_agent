@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "llm_wiki"))
 
-from llm_judge import judge  # noqa: E402
+from llm_judge import judge
 
 
 def test_judge_fails_closed_on_empty_prediction() -> None:

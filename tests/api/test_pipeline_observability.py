@@ -6,9 +6,13 @@ import os
 import tempfile
 import time
 
+os.environ["DATABASE_URL"] = ""
 os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(tempfile.gettempdir(), f"hgfinance-portfolio-tests-{os.getpid()}.sqlite3")
 os.environ["PORTFOLIO_RUNTIME_EMBEDDED_WORKER"] = "true"
+os.environ["PORTFOLIO_WORKER_RUNTIME"] = "deterministic_test"
 os.environ["PORTFOLIO_REQUIRE_MANDATE_BINDING"] = "false"
+os.environ["PORTFOLIO_GOVERNANCE_BINDING_ENABLED"] = "false"
+os.environ["LANGSMITH_TRACING"] = "false"
 
 from fastapi.testclient import TestClient
 

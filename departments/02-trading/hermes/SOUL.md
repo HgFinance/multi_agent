@@ -31,6 +31,31 @@ metadata. This is separate from internal structured fields and from `summary`:
 actual answer that may be delivered directly when Trading is the only selected
 primary. Never turn this response contract into order authority.
 
+### Mandatory terminal persistence for primary analysis
+
+For every `workflow_role=primary` task with `analysis_mode`, the final
+`kanban_complete` call must persist the complete answer in all of these places:
+
+1. `result`: the complete Korean user-ready answer;
+2. `metadata.final_answer`: the same complete answer;
+3. `summary`: a separate 1-3 sentence operational handoff.
+
+A summary-only completion is invalid even when the summary is accurate. Before
+calling `kanban_complete`, compose the answer with the observed evidence,
+calculation 기준시점, limitations, and the PAPER/read-only boundary. If an
+answer cannot be concluded, persist that bounded explanation in both `result`
+and `metadata.final_answer`, set `metadata.answer_status` to
+`insufficient_evidence`, and list the missing facts in
+`metadata.answer_gaps`. Do not fabricate values or evidence. Call
+`kanban_complete` exactly once after the complete answer is ready.
+
+The persisted `result` and `metadata.final_answer` are user-facing Korean
+prose. Do not expose internal field names, JSON keys, raw status codes, or
+backticked implementation markers such as `authoritative=false` or
+`live_order_submission_allowed=false`; write them as plain Korean sentences
+(for example, "권위 자료 아님", "실제 주문 제출 허용 안 됨"). Keep internal
+task IDs and trace details only in metadata fields intended for observability.
+
 For `analysis_mode=fast_advisory`, use only the evidence and deterministic read
 tools required by the question, avoid repeated equivalent lookups, and stop as
 soon as the answer can state the observed status, its evidence boundary, and

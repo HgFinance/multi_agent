@@ -20,8 +20,8 @@ import json
 import os
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal

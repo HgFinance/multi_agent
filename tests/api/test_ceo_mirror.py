@@ -437,6 +437,190 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(admit.call_args_list[1].kwargs["discord_channel_id"], "channel-1")
         self.assertEqual(admit.call_args_list[1].kwargs["discord_message_id"], "555555555555555555")
 
+    def test_central_router_sends_human_strategy_deployment_to_release_boundary(self) -> None:
+        from apps.api.ceo import CeoAsk
+
+        accepted = ceo_mirror_api.StrategyDeploymentAccepted(
+            request_id="strategy-central-2",
+            deployment_id="deployment-central-2",
+            mode="paper",
+            symbols=["000660"],
+            status="REVIEW_REQUIRED",
+            research_status="COMPLETED",
+            message="배포 요청을 릴리스 게이트에 등록했습니다.",
+        )
+        with (
+            patch.object(ceo_mirror_api, "request_strategy_deployment_from_text", return_value=accepted) as deploy,
+            patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
+        ):
+            web = ceo_mirror_api.mirror_ask(
+                CeoAsk(
+                    query="하이닉스 전략 배포해줘",
+                    request_id="central-deploy-web-1",
+                ),
+                x_source_message_id=None,
+                x_actor_id=None,
+                owner_id="user-a",
+            )
+            discord = ceo_mirror_api.mirror_ingress(
+                CanonicalIngress(
+                    query="하이닉스 전략 배포해줘",
+                    request_id="discord:deploy-555555555555555555",
+                    source="discord",
+                    source_message_id="deploy-555555555555555555",
+                    actor_id="discord-user",
+                    discord_channel_id="channel-1",
+                    discord_message_id="deploy-555555555555555555",
+                ),
+                _http_request(internal_discord=True),
+            )
+
+        self.assertEqual(web["schema_version"], "autonomous-strategy-deployment.v1")
+        self.assertEqual(discord.ceo["schema_version"], "autonomous-strategy-deployment.v1")
+        self.assertEqual(deploy.call_count, 2)
+        self.assertEqual(ceo_query.call_count, 0)
+
+    def test_central_router_sends_explicit_strategy_approval_to_approval_boundary(self) -> None:
+        from apps.api.ceo import CeoAsk
+
+        accepted = ceo_mirror_api.StrategyDeploymentAccepted(
+            request_id="strategy-central-approval-1",
+            deployment_id="deployment-111111111111111111111111",
+            mode="paper",
+            symbols=["000660"],
+            status="ACTIVE",
+            research_status="CANDIDATE",
+            approval_required=True,
+            approved_by="user-a",
+            runtime_status="RUNNING",
+            execution_status="SIGNAL_ONLY",
+            message="PAPER 컨테이너가 실행 중입니다.",
+        )
+        with (
+            patch.object(
+                ceo_mirror_api,
+                "approve_strategy_deployment_from_text",
+                return_value=accepted,
+            ) as approve,
+            patch.object(ceo_mirror_api, "request_strategy_deployment_from_text") as deploy,
+            patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
+        ):
+            web = ceo_mirror_api.mirror_ask(
+                CeoAsk(
+                    query="전략 배포 승인해줘 deployment-111111111111111111111111",
+                    request_id="central-approval-web-1",
+                ),
+                x_source_message_id=None,
+                x_actor_id=None,
+                owner_id="user-a",
+            )
+            discord = ceo_mirror_api.mirror_ingress(
+                CanonicalIngress(
+                    query="전략 배포 승인해줘 deployment-111111111111111111111111",
+                    request_id="discord:approval-555555555555555555",
+                    source="discord",
+                    source_message_id="approval-555555555555555555",
+                    actor_id="discord-user",
+                    discord_channel_id="channel-1",
+                    discord_message_id="approval-555555555555555555",
+                ),
+                _http_request(internal_discord=True),
+            )
+
+        self.assertEqual(web["status"], "ACTIVE")
+        self.assertEqual(discord.reason, "strategy_deployment_approved")
+        self.assertEqual(approve.call_count, 2)
+        self.assertEqual(deploy.call_count, 0)
+        self.assertEqual(ceo_query.call_count, 0)
+
+    def test_central_router_sends_top_level_strategy_exception_to_same_approval_boundary(self) -> None:
+        from apps.api.ceo import CeoAsk
+
+        accepted = ceo_mirror_api.StrategyDeploymentAccepted(
+            request_id="strategy-central-override-1",
+            deployment_id="deployment-333333333333333333333333",
+            mode="paper",
+            symbols=["000660"],
+            status="ACTIVE",
+            research_status="COMPLETED",
+            override_review_required=True,
+            approval_required=True,
+            approved_by="user-a",
+            runtime_status="RUNNING",
+            execution_status="SIGNAL_ONLY",
+            message="최상위 사람 예외 승인으로 PAPER 컨테이너가 실행 중입니다.",
+        )
+        query = "하이닉스 전략 배포 예외 승인해줘 deployment-333333333333333333333333"
+        with (
+            patch.object(
+                ceo_mirror_api,
+                "approve_strategy_deployment_from_text",
+                return_value=accepted,
+            ) as approve,
+            patch.object(ceo_mirror_api, "request_strategy_deployment_from_text") as deploy,
+            patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
+        ):
+            web = ceo_mirror_api.mirror_ask(
+                CeoAsk(query=query, request_id="central-override-web-1"),
+                x_source_message_id=None,
+                x_actor_id=None,
+                owner_id="user-a",
+            )
+            discord = ceo_mirror_api.mirror_ingress(
+                CanonicalIngress(
+                    query=query,
+                    request_id="discord:override-555555555555555555",
+                    source="discord",
+                    source_message_id="override-555555555555555555",
+                    actor_id="discord-user",
+                    discord_channel_id="channel-1",
+                    discord_message_id="override-555555555555555555",
+                ),
+                _http_request(internal_discord=True),
+            )
+
+        self.assertTrue(web["override_review_required"])
+        self.assertTrue(discord.ceo["override_review_required"])
+        self.assertEqual(approve.call_count, 2)
+        self.assertEqual(deploy.call_count, 0)
+        self.assertEqual(ceo_query.call_count, 0)
+
+    def test_central_router_sends_strategy_container_power_command_to_lifecycle_boundary(self) -> None:
+        from apps.api.ceo import CeoAsk
+
+        accepted = ceo_mirror_api.StrategyDeploymentAccepted(
+            request_id="strategy-central-power-1",
+            deployment_id="deployment-222222222222222222222222",
+            mode="paper",
+            symbols=["000660"],
+            status="PAUSED",
+            research_status="CANDIDATE",
+            runtime_status="STOPPED",
+            execution_status="SIGNAL_ONLY",
+            message="PAPER 컨테이너를 중지했습니다.",
+        )
+        with (
+            patch.object(
+                ceo_mirror_api,
+                "power_strategy_deployment_from_text",
+                return_value=accepted,
+            ) as power,
+            patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
+        ):
+            response = ceo_mirror_api.mirror_ask(
+                CeoAsk(
+                    query="하이닉스 전략 컨테이너 중지해줘 deployment-222222222222222222222222",
+                    request_id="central-power-web-1",
+                ),
+                x_source_message_id=None,
+                x_actor_id=None,
+                owner_id="user-a",
+            )
+
+        self.assertEqual(response["status"], "PAUSED")
+        self.assertEqual(power.call_count, 1)
+        self.assertEqual(ceo_query.call_count, 0)
+
     def test_non_binding_ceo_query_forwards_source_to_ceo_boundary(self) -> None:
         response = {
             "task_id": "t_trace_root",

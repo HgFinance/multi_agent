@@ -374,8 +374,8 @@ export default function QaLangsmithPanel() {
           <div className="min-w-0 rounded-lg border border-outline-variant bg-surface-container-lowest">
             <div className="flex items-center justify-between gap-3 border-b border-outline-variant px-4 py-3">
               <div className="min-w-0">
-                <h3 className="m-0 text-body-md font-semibold text-on-surface">Trace Latency</h3>
-                <p className="m-0 mt-0.5 text-xs text-on-surface-variant">Trace latency percentiles over time</p>
+                <h3 className="m-0 text-body-md font-semibold text-on-surface">QA Trace Latency</h3>
+                <p className="m-0 mt-0.5 text-xs text-on-surface-variant">QA Worker execution latency percentiles over time</p>
               </div>
               <span className="material-symbols-outlined shrink-0 text-[18px] text-outline" aria-hidden="true">
                 open_in_full

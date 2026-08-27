@@ -18,7 +18,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = ROOT / "docs" / "02-engineering" / "contracts"
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
@@ -29,7 +28,7 @@ def load_json(name: str) -> dict[str, Any]:
     with (CONTRACTS / name).open(encoding="utf-8") as handle:
         value = json.load(handle)
     if not isinstance(value, dict):
-        raise AssertionError(f"{name} must contain a JSON object")
+        raise TypeError(f"{name} must contain a JSON object")
     return value
 
 
@@ -102,12 +101,12 @@ def openapi_pairs(paths: dict[str, Any]) -> set[tuple[str, str]]:
     pairs: set[tuple[str, str]] = set()
     for path, path_item in paths.items():
         if not isinstance(path_item, dict):
-            raise AssertionError(f"OpenAPI path item is not an object: {path}")
+            raise TypeError(f"OpenAPI path item is not an object: {path}")
         for method, operation in path_item.items():
             if method.upper() not in HTTP_METHODS:
                 continue
             if not isinstance(operation, dict):
-                raise AssertionError(f"OpenAPI operation is not an object: {method} {path}")
+                raise TypeError(f"OpenAPI operation is not an object: {method} {path}")
             pairs.add((method.upper(), path))
     return pairs
 

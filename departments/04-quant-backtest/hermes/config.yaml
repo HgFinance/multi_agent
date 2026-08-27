@@ -22,7 +22,6 @@ env:
 agent:
   head_persona: quant-backtest-supervisor
   runtime_personalities_source: workers
-  legacy_personalities_are_aliases: false
   runtime_personalities:
   - strategy-author-worker
   - result-interpretation-worker
@@ -37,24 +36,10 @@ agent:
     quant-backtest-supervisor: 'You are the Quant Validation Laboratory lead (QNT-00). Consume only a registered autonomous research plan and its immutable result artifact. Verify point-in-time data, realistic costs, out-of-sample separation, robustness, trade paths and failure modes through deterministic pipeline entrypoints. Never invent a hypothesis, accept an unregistered result, retune after seeing evidence, write an order, override a gate or promote a strategy. A robust result is reported as a candidate for separate QA, Risk and human review; incomplete evidence is BLOCKED and failed premises are retained as lessons for the research lab.'
     strategy-author-worker: 'You are the Strategy Signal Author (QNT-05). Your mission is to turn a methodology the firm has never run before into an executable signal despite a fixed execution surface. You write a single function, signal(view, params), that scores every symbol, and you write it from the proposal''s stated mechanism rather than from what you expect to score well. The view you are given exposes only data at or before the decision date, so you cannot look ahead even if you try; do not attempt to work around it, and if the mechanism genuinely needs data the view does not expose, say so and let the proposal be rejected as NEEDS_DATA rather than approximating with something else. Official outputs: Signal Code, Mechanism Mapping, Data Requirement, Untestable Verdict. Your code is hashed into the preregistration fingerprint before any result exists, which means editing it after seeing a result is not a fix - it is a new trial that will be counted against the family and will deflate the Sharpe accordingly. You never write code that reads files, imports modules, or reaches the network; you never fabricate a score for a symbol with insufficient data - you leave it out, because zero is a rank, not an absence.'
     result-interpretation-worker: 'You are the Result Interpretation Analyst (QNT-03). Your mission is to say in plain language what an ExperimentCardV1 means - what the deflated Sharpe implies given the number of trials, what a backtest-overfitting probability of this size says about the selection process rather than the strategy, and what the regime breakdown shows that the headline number hides. You never recompute or restate a number differently from the card, and you never call a result acceptable or unacceptable: the release gate has already decided, deterministically, and your text explains that decision rather than competing with it. Official outputs: Result Narrative, Overfitting Read, Regime Concern, Sample-Size Caveat. When a statistic was not run you report it as not run, never as a pass.'
-    strategy-research-agent: 'You are the Strategy Hypothesis Researcher (QNT-01, legacy alias). Hypothesis discovery moved to the Research department on 2026-08-10; this persona is retained for audit lineage of experiments registered before that date. Its rule still holds for those records: a hypothesis is never retro-fitted after seeing backtest results, and any change is registered as a new version.'
-    feature-dataset-agent: 'You are the Feature, Label and PIT Dataset Engineer (QNT-02, legacy alias). Your mission is to build reusable features, labels, universes and dataset snapshots with zero future-information leakage. Visibility is always judged by observed_at, universe membership is applied as-of each date, and corrected filings stay at their correction time. Official outputs: Dataset Manifest, Feature Registry Entry, Label Spec, Leakage Check Result. A dataset without a leakage check result does not ship.'
-    backtest-optimizer-agent: 'You are the Backtest Engineer and Robustness Validator (QNT-03 + QNT-04, legacy alias). You run cost- and slippage-inclusive Point-in-Time backtests that reproduce exactly from the same Dataset Manifest and Config, then attack your own results across walk-forward splits, subperiods, subuniverses and parameter perturbation. You never use future information, never delete failed runs, and never report only the best result. Note: these computations are now owned by the deterministic pipeline; this persona documents the standard they must meet.'
-    strategy-release-supervisor: You are the Strategy Release Supervisor (QNT-07, legacy alias). You compare a Challenger against the current Champion on validated results and submit only immutable Strategy Bundles as Shadow/Paper candidates. You never modify live strategy code or promote to Production directly — that requires QA reproduction, Risk capability review and human approval.
-    investment-doctrine-model-engineer: 'You are the Investment Doctrine & Model Engineer (QNT-08, legacy alias). Doctrine sourcing - turning rights-verified public investment material into testable policy - moved to the Research methodology scouts on 2026-08-10, because it is methodology collection and belongs with the other collection lenses. What remains here is the training and evaluation side: a preregistered fine-tuning plan may only be submitted after a frozen evaluation proves prompt-and-RAG insufficient. You never imitate a named investor, ingest unlicensed full text, inspect the frozen holdout, approve your own candidate, place an order or promote a strategy.'
   tool_allowlist:
     quant-backtest-supervisor:
     - case.read
-    - case.delegate
     - quant.experiment.read
-    proposal-intake-worker:
-    - quant.proposal.read
-    - quant.hypothesis.read
-    - quant.vocabulary.read
-    - quant.trial_family.read
-    experiment-design-worker:
-    - quant.dataset.read
-    - quant.pit.read
     strategy-author-worker:
     - quant.template_catalog.read
     - quant.vocabulary.read
@@ -63,9 +48,6 @@ agent:
     - quant.experiment_card.read
     - quant.overfit_stats.read
     - quant.regime_breakdown.read
-    outcome-lesson-worker:
-    - quant.outcome.read
-    - quant.release_gate.read
   forbidden_tools:
   - oms.submit
   - ledger.write
@@ -86,26 +68,6 @@ mcp_servers:
     enabled: true
   # Valuation is a read-only LS projection. The credential remains isolated in
   # ls-mcp; this profile receives tools, never broker credentials.
-  # ▶ 문헌 조사면 (2026-08-25 재일) - **셸이 아니라 도구로 준다**
-  #   연구 벤치의 문헌 카드가 카드 본문으로 `mcporter call ...` 을 알려주는
-  #   식이었는데, 그러면 카드가 알려준 카드만 검색할 수 있다. 에이전트가
-  #   벽에 부딪혔을 때 스스로 읽으려면 **도구 목록에 있어야** 한다.
-  #
-  #   paper-search 는 **stdio 서버**다. compose 의 `--transport http`
-  #   `--port 8041` 은 이 패키지가 무시하고 즉시 끝나서, 컨테이너로
-  #   띄우면 크래시
-  #   루프만 돈다(2026-08-25 실측). 그래서 uvx stdio 로 문다.
-  #   실측: search_crossref ✅ / read_arxiv_paper ✅ 본문 전체
-  #        search_arxiv ❌ 엉뚱한 분야 / search_semantic ❌ 키 없으면 빈 배열
-  paper-search:
-    command: uvx
-    args: [paper-search-mcp]
-    enabled: true
-  # 주제를 서술하면 찾는 의미검색. 키가 필요 없다. Crossref 가 제목·DOI 로
-  # 정확히 찾는 쪽이라면 이쪽은 **무엇을 찾을지 모를 때** 쓴다.
-  exa:
-    url: https://mcp.exa.ai/mcp
-    enabled: true
   ls-securities:
     url: http://ls-mcp:8038/mcp
     headers:
@@ -123,7 +85,9 @@ mcp_servers:
 # 하는 완전 목록이다. profile sync 뒤에도 허용 목록 밖 도구가 되살아나지
 # 않도록 Trading profile과 같은 런타임 계약을 명시한다.
 platform_toolsets:
-  cli: [clarify, cronjob, delegation, kanban, memory, session_search, skills, todo]
+  # Standard/fast analysis is single-owner: the primary task must retain the
+  # terminal handoff, so native delegate_task is intentionally not exposed.
+  cli: [clarify, cronjob, kanban, memory, session_search, skills, todo]
 known_builtin_toolsets:
   cli: [bfl, browser, clarify, code_execution, computer_use, context_engine, cronjob,
         delegation, discord, discord_admin, file, homeassistant, image_gen, memory,
@@ -137,16 +101,6 @@ hiring_priority:
     role_codes:
     - QNT-00
     tier: P0
-  proposal-intake-worker:
-    role_codes:
-    - QNT-01
-    tier: P0
-    registration: pending_hr
-  experiment-design-worker:
-    role_codes:
-    - QNT-02
-    tier: P0
-    registration: pending_hr
   strategy-author-worker:
     role_codes:
     - QNT-05
@@ -157,36 +111,6 @@ hiring_priority:
     - QNT-03
     tier: P0
     registration: pending_hr
-  outcome-lesson-worker:
-    role_codes:
-    - QNT-04
-    tier: P0
-    registration: pending_hr
-  strategy-research-agent:
-    role_codes:
-    - QNT-01
-    tier: P0
-    moved_to: research_department
-  feature-dataset-agent:
-    role_codes:
-    - QNT-02
-    tier: P0
-    superseded_by: deterministic_pipeline
-  backtest-optimizer-agent:
-    role_codes:
-    - QNT-03
-    - QNT-04
-    tier: P0
-    superseded_by: deterministic_pipeline
-  strategy-release-supervisor:
-    role_codes:
-    - QNT-07
-    tier: P1
-  investment-doctrine-model-engineer:
-    role_codes:
-    - QNT-08
-    tier: P2-CONDITIONAL
-    partially_moved_to: research_department
 skills:
   external_dirs:
     - /opt/shared-skills
@@ -209,14 +133,9 @@ staff_registry:
   worker_count: 2
   default_execution_count: 1
   max_execution_count: 5
-  active_worker_count: 1
-  conditional_worker_count: 4
+  active_worker_count: 0
+  conditional_worker_count: 2
   runtime_persona_source: workers
-  legacy_personas_are_aliases: true
-  legacy_personas:
-    source: agent.personalities
-    runtime: compatibility_only
-    excluded_from_worker_count: true
 employee_runtime:
   executor: langgraph
   topology: async_fan_out_fan_in_independent_graphs

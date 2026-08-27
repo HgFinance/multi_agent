@@ -229,6 +229,16 @@ def qa_projection_checks(
     checks = metadata.get("checks") or task.get("checks")
     if checks:
         return checks
+    nested_result = (
+        metadata.get("qa_result")
+        or metadata.get("structured_result")
+        or task.get("qa_result")
+        or task.get("structured_result")
+    )
+    if isinstance(nested_result, Mapping):
+        checks = nested_result.get("checks")
+        if checks:
+            return checks
     return [
         {"check": key, "result": metadata[key]}
         for key in _QA_FLATTENED_CHECK_KEYS
@@ -242,6 +252,14 @@ def qa_projection_findings(
     """Normalize QA findings without fabricating source coordinates."""
 
     findings = metadata.get("findings") or task.get("findings")
+    nested_result = (
+        metadata.get("qa_result")
+        or metadata.get("structured_result")
+        or task.get("qa_result")
+        or task.get("structured_result")
+    )
+    if not findings and isinstance(nested_result, Mapping):
+        findings = nested_result.get("findings")
     if findings:
         gap_text = _qa_nav_gap_text(metadata)
         mapped = metadata.get("mapped_positions")

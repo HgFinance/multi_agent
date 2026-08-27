@@ -156,7 +156,7 @@ audit.rag_graph_extractions
 | Context Tools | `departments/03-risk/skills/context_tools.py` | `risk.trading_state.read`, P1 snapshot, market/portfolio API Adapter |
 | Risk Gate Adapter | `departments/03-risk/skills/risk_gate.py` | 기존 `engine/risk_engine.py` 호출만 담당. 계산 복제 금지 |
 | Policy RAG | `departments/03-risk/skills/policy_rag.py` | `skills/agentic-rag`와 `api.match_evidence_chunks` Adapter |
-| Worker Graph Factory | `departments/03-risk/skills/graph_nodes.py` | Worker별 허용 Skill topology 생성 |
+| Worker Skill Router/Tools | `departments/03-risk/skills/rag_router.py`, `tools.py` | 활성 Worker의 허용 Skill topology와 adapter 경계 |
 | Trace/Replay | `departments/03-risk/skills/trace.py` | `trace_id`, `input_hash`, `output_hash`, retry, fallback 기록 |
 
 새 Python 모듈은 기존 `risk_employee_workers.py`가 소유한 Worker Registry를 우회하지 않는다. `WORKER_SPECS`의 Skill 목록과 `hermes/config.yaml`의 Tool allowlist가 일치해야 한다.

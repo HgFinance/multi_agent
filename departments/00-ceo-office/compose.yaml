@@ -71,6 +71,19 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # Every Discord gateway uses one shared inbound claim ledger. The
+      # allowlist is evaluated before Hermes admission, including messages
+      # without a mention.
+      DISCORD_IDEMPOTENCY_HOME: /opt/kanban
+      DISCORD_IDEMPOTENCY_SCOPE: global
+      # Slash-command registration is not part of the message ingress path.
+      # A single Discord application can be mounted by several gateways, so
+      # repeated startup syncs only create rate-limit latency.
+      DISCORD_COMMAND_SYNC_POLICY: ${DISCORD_COMMAND_SYNC_POLICY:-off}
+      # Keep the gateway admission channel aligned with DISCORD_CEO_CHANNEL_ID.
+      # The CEO BFF, Discord reader, and mirror all use the shared CEO channel.
+      DISCORD_ALLOWED_CHANNELS: ${DISCORD_CEO_ALLOWED_CHANNELS:-1536997434507657261}
+      DISCORD_FREE_RESPONSE_CHANNELS: ${DISCORD_CEO_FREE_RESPONSE_CHANNELS:-1536997434507657261}
       # Discord 메시지는 반드시 BFF canonical ingress를 거쳐 웹 질의와 같은
       # root 카드/권한 경계를 사용한다. 전용 bearer 값이 없으면 Compose가
       # fail-closed 하며, 값 자체는 이미지나 프로필에 저장하지 않는다.

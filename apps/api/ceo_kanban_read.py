@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """CEO Kanban workflow Read Model. `/ui/ceo/tasks/*`가 이 모듈만 통해 판을 읽는다.
 
 근거: docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md 6(명령 경계)
@@ -21,6 +20,7 @@ Hermes v0.19.0 `kanban show --json` 실측 형태:
     {"task": {...}, "latest_summary": str|null, "parents": [id],
      "children": [id], "comments": [...], "events": [...], "runs": [...]}
 """
+
 from __future__ import annotations
 
 import json
@@ -132,7 +132,9 @@ _KANBAN_COLUMN_BY_STATUS: dict[str, str] = {
 # 앞에 있을수록 우선. 문제를 진행 중 표시 뒤에 숨기지 않는다.
 _STAGE_PRIORITY = ("blocked", "failed", "running", "todo", "done")
 
-_NOT_FOUND_RE = re.compile(r"no such task|unknown id|unknown or non-canonical", re.IGNORECASE)
+_NOT_FOUND_RE = re.compile(
+    r"no such task|unknown id|unknown or non-canonical", re.IGNORECASE
+)
 
 # CEO Synthesis와 QA 요약은 Agent가 쓴 자유 서술이다. 구조화된 판정 필드가
 # 아니므로, 명시적으로 라벨을 붙여 적은 값만 뽑고 없으면 None을 준다 - 문장을
@@ -158,6 +160,7 @@ _MAX_PARENT_HOPS = 32
 _FETCH_WORKERS = max(1, int(os.getenv("CEO_KANBAN_FETCH_WORKERS", "8")))
 _WORKFLOW_ROOT_RE = re.compile(r"(?m)^workflow_root_task_id=(\S+)\s*$")
 _WORKFLOW_ROLE_RE = re.compile(r"(?m)^workflow_role=(\S+)\s*$")
+_INDEXED_ROOT_PRODUCER_RE = re.compile(r"(?m)^producer=portfolio-bff-deterministic\s*$")
 _WORKFLOW_METADATA_KEYS = (
     "primary_tasks",
     "primary_task_ids",
@@ -271,6 +274,11 @@ def _entry_ttl(key: tuple[str, ...], stdout: str, base_ttl: float) -> float:
 
     판정에 실패하면(형태가 예상과 다르면) 조용히 긴 TTL 로 넘어가지 않고 기본
     TTL 로 떨어진다 - 확신이 없을 때 오래 들고 있는 쪽이 위험하다.
+
+    CEO workflow task는 예외다. Primary가 끝난 뒤에도 supervisor가 그 카드의
+    `children`에 synthesis를 붙이고, synthesis 뒤에 QA를 붙일 수 있으므로
+    terminal 상태만으로 그래프가 불변이라고 볼 수 없다. 이 경계에서 긴 캐시를
+    쓰면 실제 완료 workflow가 계속 processing으로 보이는 stale graph가 된다.
     """
 
     if key[0] != "show":
@@ -281,7 +289,18 @@ def _entry_ttl(key: tuple[str, ...], stdout: str, base_ttl: float) -> float:
         if not isinstance(task, Mapping):
             return base_ttl
         status = str(task.get("status") or "").casefold()
+        body = str(task.get("body") or "")
     except (TypeError, ValueError):
+        return base_ttl
+    if status in _DONE_STATUSES and any(
+        marker in body
+        for marker in (
+            "hgfinance.ceo-workflow-scope.v1",
+            "workflow_root_task_id=",
+            "workflow_role=",
+            "producer=portfolio-bff-deterministic",
+        )
+    ):
         return base_ttl
     if status in _DONE_STATUSES:
         return max(base_ttl, _terminal_cache_ttl())
@@ -373,9 +392,13 @@ def run_kanban(args: Sequence[str]) -> str:
             "Hermes CLI를 찾을 수 없습니다. Hermes Runtime 설치를 확인하세요."
         ) from exc
     except subprocess.TimeoutExpired as exc:
-        raise KanbanUnavailable("Hermes Kanban CLI 응답이 시간 내에 오지 않았습니다.") from exc
+        raise KanbanUnavailable(
+            "Hermes Kanban CLI 응답이 시간 내에 오지 않았습니다."
+        ) from exc
     except OSError as exc:
-        raise KanbanUnavailable(f"Hermes Kanban CLI 실행 실패: {type(exc).__name__}") from exc
+        raise KanbanUnavailable(
+            f"Hermes Kanban CLI 실행 실패: {type(exc).__name__}"
+        ) from exc
 
     if process.returncode != 0:
         message = (process.stderr or process.stdout or "").strip()
@@ -395,7 +418,9 @@ def _load_json(payload: str, *, what: str) -> Any:
     try:
         return json.loads(payload)
     except (TypeError, ValueError) as exc:
-        raise KanbanUnavailable(f"hermes kanban {what}가 잘못된 JSON을 반환했습니다.") from exc
+        raise KanbanUnavailable(
+            f"hermes kanban {what}가 잘못된 JSON을 반환했습니다."
+        ) from exc
 
 
 def show_task(task_id: str) -> dict[str, Any]:
@@ -414,7 +439,9 @@ def show_task(task_id: str) -> dict[str, Any]:
     return flattened
 
 
-def list_tasks(*, assignee: str | None = None, include_archived: bool = False) -> list[dict[str, Any]]:
+def list_tasks(
+    *, assignee: str | None = None, include_archived: bool = False
+) -> list[dict[str, Any]]:
     """`kanban list --json`. Row에는 parents/children이 없다(그래프는 show로만)."""
 
     args: list[str] = ["list", "--json", "--sort", "created-desc"]
@@ -555,7 +582,9 @@ def is_ceo_root_body(body: str) -> bool:
     )
 
 
-def _labelled_token(text: str, pattern: re.Pattern[str], allowed: frozenset[str]) -> str | None:
+def _labelled_token(
+    text: str, pattern: re.Pattern[str], allowed: frozenset[str]
+) -> str | None:
     for match in pattern.finditer(text):
         token = match.group(1).strip().upper()
         if token in allowed:
@@ -587,13 +616,15 @@ class WorkflowNode:
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
-    def from_hermes(cls, payload: Mapping[str, Any]) -> "WorkflowNode":
+    def from_hermes(cls, payload: Mapping[str, Any]) -> WorkflowNode:
         runs = payload.get("runs")
         run_outcome = ""
         if isinstance(runs, Sequence) and not isinstance(runs, (str, bytes)):
             for run in runs:
                 if isinstance(run, Mapping):
-                    outcome = str(run.get("outcome") or run.get("status") or "").casefold()
+                    outcome = str(
+                        run.get("outcome") or run.get("status") or ""
+                    ).casefold()
                     if outcome:
                         run_outcome = outcome
         summary = _text(
@@ -829,7 +860,7 @@ class Workflow:
         if self.root.status == "archived":
             return STATUS_ARCHIVED
         synthesis = self.synthesis_node
-        if synthesis is not None and synthesis.done:
+        if synthesis is not None and synthesis.done and synthesis.summary:
             return STATUS_COMPLETED
         if self.root.blocked:
             return STATUS_BLOCKED
@@ -849,7 +880,12 @@ class Workflow:
         if any(not node.terminal for node in self.descendants):
             return STATUS_RUNNING
         if self.root.done:
-            return STATUS_COMPLETED
+            # A root with descendants is the planning card, not the response
+            # boundary. If the supervisor has not materialized a usable
+            # synthesis yet, keep the workflow running even when Hermes has
+            # already marked the planning root done. This prevents the UI/API
+            # from reporting a response before CEO synthesis exists.
+            return STATUS_RUNNING
         # 모든 자식이 끝났지만 Supervisor가 다음 Task를 아직 안 만든 구간.
         return STATUS_RUNNING
 
@@ -900,7 +936,56 @@ class Workflow:
             return "FAIL"
         if not node.done:
             return None
-        return _labelled_token(node.summary, _VERDICT_RE, _VERDICT_VALUES)
+        metadata = _run_metadata(node.raw)
+        for key in (
+            "qa_verdict",
+            "canonical_decision",
+            "verdict",
+            "overall",
+            "overall_decision",
+            "overall_status",
+            "audit_result",
+            "decision",
+            "audit_conclusion",
+            "audit_status",
+            "qa_result",
+            "qa_gate",
+            "independent_conclusion",
+            "executive_conclusion",
+        ):
+            value = str(metadata.get(key) or "").strip().upper()
+            if value in _VERDICT_VALUES:
+                return value
+
+        comments = node.raw.get("comments")
+        comment_text = ""
+        if isinstance(comments, Sequence) and not isinstance(
+            comments, (str, bytes, bytearray)
+        ):
+            comment_text = " ".join(
+                str(item.get("body") if isinstance(item, Mapping) else item)
+                for item in comments
+            )
+        return _labelled_token(
+            f"{node.summary} {comment_text}", _VERDICT_RE, _VERDICT_VALUES
+        )
+
+    @property
+    def completed_at(self) -> str | None:
+        """Return the response-plane completion, not the planning root time.
+
+        CEO roots intentionally finish their planning turn before department
+        work starts. Exposing that timestamp as workflow completion created a
+        false terminal interval in the UI. Synthesis is the response-plane
+        terminal boundary; post-response QA remains asynchronous by contract.
+        """
+
+        synthesis = self.synthesis_node
+        if synthesis is not None and synthesis.done and synthesis.summary:
+            return synthesis.completed_at
+        if not self.descendants and self.root.done:
+            return self.root.completed_at if self.root.summary else None
+        return None
 
     @property
     def decision(self) -> str | None:
@@ -999,27 +1084,58 @@ def load_workflow(
     # extra `show` used by root discovery on the bounded task-list endpoint;
     # callers that receive an arbitrary task ID keep the original resolution
     # path by leaving this false.
-    root_id = task_id if known_root else resolve_root_id(task_id, fetch=fetch)
-    root_payload = fetch(root_id)
+    if known_root:
+        root_id = task_id
+        root_payload = fetch(root_id)
+    else:
+        # `resolve_root_id` historically fetched a root once to validate it and
+        # `load_workflow` fetched the same root again. Keep the first response
+        # in a request-local cache; this removes one Hermes process from every
+        # status/result poll without changing child-ID resolution semantics.
+        initial_payload = fetch(task_id)
+        fetched: dict[str, dict[str, Any]] = {task_id: initial_payload}
+
+        def cached_fetch(candidate_id: str) -> dict[str, Any]:
+            if candidate_id not in fetched:
+                fetched[candidate_id] = fetch(candidate_id)
+            return fetched[candidate_id]
+
+        if is_ceo_root_body(str(initial_payload.get("body") or "")):
+            root_id = task_id
+        else:
+            root_id = resolve_root_id(task_id, fetch=cached_fetch)
+        root_payload = cached_fetch(root_id)
     payloads: dict[str, dict[str, Any]] = {root_id: root_payload}
     # Active reconstruction must not pay for the historical board. An
     # explicitly archived root is the one exception: operator/debug reads of
     # that workflow need archived marker-based descendants as well. ``None``
     # keeps this behavior automatic for existing callers.
     if include_archived is None:
-        include_archived = str(root_payload.get("status") or "").casefold() == "archived"
+        include_archived = (
+            str(root_payload.get("status") or "").casefold() == "archived"
+        )
     root_metadata = _run_metadata(payloads[root_id])
     frontier = list(_ids(payloads[root_id].get("children")))
     frontier.extend(_metadata_task_ids(root_metadata))
 
     # Primary/QA/synthesis tasks may intentionally have no Hermes parent edge.
     # The durable workflow marker is the membership source for those tasks.
+    linked_membership = bool(frontier) and bool(
+        _INDEXED_ROOT_PRODUCER_RE.search(str(root_payload.get("body") or ""))
+    )
     if listed_rows is not None:
         # A maintenance caller may already have one authoritative board list
         # for the scan. Reusing that snapshot prevents N roots from repeating
         # the same expensive full-board discovery; each matching task is still
         # hydrated through ``fetch`` below.
         listed = [dict(row) for row in listed_rows if isinstance(row, Mapping)]
+    elif linked_membership:
+        # New BFF roots have a complete parent/child chain: root -> primary ->
+        # synthesis -> post-response QA. Reading the complete 1,200+ row board
+        # to rediscover those already-linked nodes was the dominant status
+        # latency. Legacy marker-only workflows still take the indexed board
+        # path below, so this optimization does not weaken their read model.
+        listed = []
     else:
         try:
             listed = list_tasks(include_archived=include_archived)
@@ -1039,7 +1155,11 @@ def load_workflow(
 
     with ThreadPoolExecutor(max_workers=max_workers or _FETCH_WORKERS) as pool:
         while frontier and len(payloads) < _MAX_NODES:
-            pending = [child_id for child_id in dict.fromkeys(frontier) if child_id not in payloads]
+            pending = [
+                child_id
+                for child_id in dict.fromkeys(frontier)
+                if child_id not in payloads
+            ]
             if listed_rows is not None:
                 # A supplied board snapshot is the authoritative membership
                 # boundary. Legacy link/run metadata can reference a task

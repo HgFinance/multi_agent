@@ -17,6 +17,7 @@ from orchestration.qa_discord_feedback import (
     hr_langfuse_channel_id,
     is_actionable_feedback,
     post_hr_langfuse_discord_message,
+    verify_discord_message_delivery,
 )
 
 LOGGER = logging.getLogger("hr.langfuse.feedback")
@@ -81,7 +82,7 @@ def build_hr_langfuse_evaluation(
 ) -> EvaluationResult:
     """Convert one Workforce Langfuse window into a redacted review result."""
 
-    reports, measured_count, unavailable_count, group_count, report_count = _report_metrics(
+    _reports, measured_count, unavailable_count, group_count, report_count = _report_metrics(
         observability
     )
     capacity = list(getattr(observability, "capacity", ()) or ())
@@ -242,6 +243,21 @@ def publish_hr_langfuse_review(
         message_id = post_hr_langfuse_discord_message(
             content, token=token, channel_id=channel_id
         )
+        if not verify_discord_message_delivery(
+            content,
+            token=token,
+            channel_id=channel_id,
+            message_id=message_id,
+        ):
+            feedback_ledger.finish_discord_delivery(
+                artifact_id,
+                delivered=False,
+                error_code="discord_message_readback_failed",
+            )
+            LOGGER.warning(
+                "hr-langfuse-review status=FAILED reason=discord_message_readback_failed"
+            )
+            return "FAILED"
         feedback_ledger.finish_discord_delivery(
             artifact_id, delivered=True, discord_message_id=message_id
         )

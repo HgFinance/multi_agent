@@ -14,10 +14,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bm25 import BM25Index  # noqa: E402
-from grep_seed import grep_seed, keyword_seed  # noqa: E402
-from run_experiment import load_golden_set  # noqa: E402
-from wiki_reader import read_bounded  # noqa: E402
+from bm25 import BM25Index
+from grep_seed import grep_seed, keyword_seed
+from run_experiment import load_golden_set
+from wiki_reader import read_bounded
 
 WIKI_DIR = Path(__file__).resolve().parent / "data" / "wiki"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"

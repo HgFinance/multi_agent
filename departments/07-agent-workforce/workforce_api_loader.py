@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-
 _MODULE_NAME = "hgfinance_workforce.api_app"
 _APP_PATH = Path(__file__).resolve().parent / "api" / "app.py"
 
@@ -25,4 +24,3 @@ def load_workforce_api() -> ModuleType:
     sys.modules[_MODULE_NAME] = module
     spec.loader.exec_module(module)
     return module
-

@@ -27,6 +27,13 @@
 #   그 코드를 고칠 수는 있고(공학 부서니까), 고친 코드는 QA·감사 대상이다.
 FROM nousresearch/hermes-agent:latest
 
+# Every dispatcher worker uses this image. Install the shared completion
+# contract here so summary-only handoffs cannot produce done tasks with a
+# NULL canonical result.
+COPY --chmod=0644 deploy/ceo-kanban/install_result_contract.py /tmp/install_result_contract.py
+RUN python3 /tmp/install_result_contract.py \
+    && rm -f /tmp/install_result_contract.py
+
 # Strategy Hermes is the actual research worker.  This small root bootstrap
 # only prepares the dedicated lab volume before the upstream image drops to
 # the hermes user; it does not make research decisions or invoke another

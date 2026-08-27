@@ -23,3 +23,4 @@ from __future__ import annotations
 import os
 
 os.environ["LANGFUSE_TRACING"] = "false"
+os.environ["LANGSMITH_TRACING"] = "false"

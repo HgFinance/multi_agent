@@ -124,10 +124,9 @@ Shadow Router·CEO 예산/조직 승인과 Scorecard 관찰의 실제 API 배선
     갱신(`supabase/migrations/20260825000400_...`). `department_id`/`agent_id`는 DDL check 상
     하나만 있어도 되므로 unique index 는 `nulls not distinct`를 쓴다(일반 unique 는 null 을
     서로 다른 값으로 봐서 같은 부서 단위 재보고를 막지 못한다). 창구는
-    `POST/GET /workforce/v1/capacity-snapshots`. 여전히 `scorecard/observability.py`가
-    Langfuse 실행 이벤트를 직접 집계해 capacity 를 메우는 우회 경로도 남아 있다 — DB
-    Snapshot 쪽에 보고를 넣는 호출자가 아직 없어서다. 창구는 통합 엔드포인트의
-    `capacity` 필드다(아래).
+    `POST/GET /workforce/v1/capacity-snapshots`이며 `scorecard/snapshot_writer.py`가
+    10분 주기로 Langfuse 집계를 이 창구에 기록한다. Scorecard는 DB Snapshot을 읽고,
+    통합 `observability` 엔드포인트는 최신 진단용 외부 관측을 별도로 제공한다.
 
 - `scorecard/observability.py` — `check_worker_trigger_rates()`(2026-08-25). 실행기 셋이
   발행하는 `llm.opportunity.v1`(trigger 미충족 1건) 이벤트를 읽어 `fire_rate = 실행 /
@@ -147,8 +146,9 @@ Shadow Router·CEO 예산/조직 승인과 Scorecard 관찰의 실제 API 배선
   각각 엔드포인트였고 각자 reader 를 만들어 **같은 실행 이벤트를 네 번** 읽었다 —
   Worker 8명 기준 화면 1회당 Langfuse 왕복 40회, 그중 capacity 와 llm-usage 는
   event_name·창·limit 이 글자 그대로 같은 질의였다(집계 축만 달랐다). 60초 폴링이라
-  그게 그대로 분당 부하가 됐다. 지금은 Worker 당 최대 2회(실행 이벤트 1 + 미발화
-  건수 1)다. 왕복 수는 `tests/test_hr_shared_activity_reader.py`가 직접 센다 —
+  그게 그대로 분당 부하가 됐다. 현재는 shared reader가 실행·유휴·LLM·발화율을
+  묶고, Worker 당 최대 2회(실행 이벤트 1 + 미발화 건수 1)만 조회한다. 왕복 수는
+  `tests/test_hr_shared_activity_reader.py`가 직접 센다 —
   값은 맞는데 왕복만 늘어나는 회귀는 화면으로 보이지 않아서다.
 
   같은 변경에서 건수 포화도 고쳤다. 이전 `count_events()`는 `len(page.data)`를

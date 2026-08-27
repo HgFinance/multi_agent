@@ -12,17 +12,17 @@ rows are held in memory only while a candidate is being evaluated.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 import logging
 import os
 import re
-import signal
 import shutil
+import signal
 import sqlite3
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,8 +36,8 @@ from apps.api.ceo_kanban_read import (
     Workflow,
     WorkflowNode,
     is_ceo_root_body,
-    load_workflow,
     list_tasks,
+    load_workflow,
 )
 from orchestration.adapters.ceo_supervisor import (
     TERMINAL_STATUSES,
@@ -1216,7 +1216,7 @@ class SQLiteKanbanMaintenance:
 
     def archive_workflow(self, root_id: str, task_ids: Sequence[str]) -> bool:
         ids = tuple(dict.fromkeys((root_id, *task_ids)))
-        with workflow_mutation_lock(root_id, environment=self.environment):
+        with workflow_mutation_lock(root_id, environment=self.environment):  # noqa: SIM117 - keep the mutation lock outermost.
             with closing(self._connect()) as conn:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
@@ -1253,7 +1253,7 @@ class SQLiteKanbanMaintenance:
 
     def purge_workflow(self, root_id: str, task_ids: Sequence[str]) -> bool:
         ids = tuple(dict.fromkeys((root_id, *task_ids)))
-        with workflow_mutation_lock(root_id, environment=self.environment):
+        with workflow_mutation_lock(root_id, environment=self.environment):  # noqa: SIM117 - keep the mutation lock outermost.
             with closing(self._connect()) as conn:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
@@ -1423,20 +1423,19 @@ class RetentionWorker:
                 ),
                 None,
             )
-            if row is not None:
+            if row is not None and not _has_marker_descendant(listed_rows, root_id):
                 # A number of old workflows have no task_links but do have
                 # marker-owned descendants. Treating their root as a
                 # standalone card makes the later atomic-scope CAS fail and
                 # leaves the graph immortal. Only take the fast singleton
                 # path after proving no marker descendant exists in the
                 # authoritative board snapshot.
-                if not _has_marker_descendant(listed_rows, root_id):
-                    payload = dict(row)
-                    return Workflow(
-                        root_task_id=root_id,
-                        nodes=(WorkflowNode.from_hermes(payload),),
-                        root_payload=payload,
-                    )
+                payload = dict(row)
+                return Workflow(
+                    root_task_id=root_id,
+                    nodes=(WorkflowNode.from_hermes(payload),),
+                    root_payload=payload,
+                )
         kwargs: dict[str, Any] = {"include_archived": include_archived}
         try:
             parameters = signature(self.workflow_loader).parameters.values()
@@ -1882,11 +1881,22 @@ def _build_worker(
             **kwargs,
         )
 
+    def list_retention_tasks(
+        *, include_archived: bool = False
+    ) -> list[dict[str, Any]]:
+        try:
+            return list(kanban_client.list_tasks(include_archived=include_archived))
+        except HermesKanbanCommandError as exc:
+            raise KanbanUnavailable(
+                "Hermes Kanban list is unavailable during retention"
+            ) from exc
+
     return RetentionWorker(
         maintenance=SQLiteKanbanMaintenance(env),
         audit=AuditStore(default_audit_path(env)),
         environment=env,
         workflow_loader=load_retention_workflow,
+        row_lister=list_retention_tasks,
         dry_run=dry_run,
         allow_purge=allow_purge,
         max_archive_roots=max_archive_roots,
@@ -1969,9 +1979,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 __all__ = [
     "ACTIVE_AGE_SECONDS",
+    "AUDIT_CAPSULE_SCHEMA_VERSION",
     "AuditMetadata",
     "AuditStore",
-    "AUDIT_CAPSULE_SCHEMA_VERSION",
     "DeliveryState",
     "DiscordLedgerReader",
     "FilesystemArtifactCleaner",

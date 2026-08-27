@@ -362,6 +362,52 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     assert stored.trading_task_id == "t_trade1"
 
 
+def test_deterministic_paper_result_closes_existing_redacted_root_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_trace = SimpleNamespace(context="trace-paper-root", run_id="run-paper-root")
+    start = Mock(return_value=root_trace)
+    close = Mock(return_value=True)
+    monkeypatch.setattr(llm_observability, "start_root_trace", start)
+    monkeypatch.setattr(llm_observability, "close_root_trace", close)
+    monkeypatch.setattr(
+        ceo,
+        "_route_user_paper_order",
+        lambda *_args, **_kwargs: {
+            "task_id": "t_paper_root",
+            "trading_task_id": "t_paper_trading",
+            "execution": {
+                "decision": "EXECUTE",
+                "mode": "PAPER",
+                "order_submitted": True,
+                "request_state": "COMPLETED",
+            },
+        },
+    )
+
+    response = ceo._route_traced_user_paper_order(
+        ceo.CeoAsk(query="삼성전자 매수 1주 시장가", request_id="paper-trace-1"),
+        owner_id=USER_ID,
+        mandate=None,
+        conditional_rule=False,
+    )
+
+    assert response["execution"]["request_state"] == "COMPLETED"
+    start.assert_called_once()
+    close.assert_called_once()
+    kwargs = close.call_args.kwargs
+    assert kwargs["department"] == "trading"
+    assert kwargs["task_id"] == "t_paper_trading"
+    assert kwargs["terminal_metadata"]["raw_payloads_sent"] is False
+    assert kwargs["output_summary"] == {
+        "execution_path": "deterministic_paper",
+        "mode": "PAPER",
+        "request_state": "COMPLETED",
+        "decision": "EXECUTE",
+        "order_submitted": True,
+    }
+
+
 def test_relative_time_order_activates_existing_conditional_worker_without_hermes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -16,6 +16,7 @@ from orchestration.llm_observability import (
     publish_root_trace,
     redacted_trace,
     start_root_trace,
+    suppress_langsmith_automatic_tracing,
     trace_correlation_metadata,
     worker_graph_trace_config,
 )
@@ -89,6 +90,10 @@ def test_worker_trace_config_carries_request_root_task_correlation() -> None:
         worker_id="qa-worker",
         role="auditor",
         correlation=correlation,
+        workflow_mode="analysis",
+        analysis_mode="fast_advisory",
+        configured_max_turns=8,
+        actual_turns=5,
     )
 
     assert config["metadata"]["request_id"] == "req-1"
@@ -97,6 +102,10 @@ def test_worker_trace_config_carries_request_root_task_correlation() -> None:
     assert config["metadata"]["trace_id"] == "trace-1"
     assert config["metadata"]["profile"] == "qa-department"
     assert config["metadata"]["department"] == "qa"
+    assert config["metadata"]["workflow_mode"] == "analysis"
+    assert config["metadata"]["analysis_mode"] == "fast_advisory"
+    assert config["metadata"]["configured_max_turns"] == 8
+    assert config["metadata"]["actual_turns"] == 5
     assert "prompt" not in config["metadata"]
 
 
@@ -106,6 +115,32 @@ def test_worker_trace_config_generates_complete_opaque_correlation() -> None:
     for key in ("request_id", "root_id", "task_id", "trace_id"):
         assert first["metadata"][key]
     assert first["metadata"]["trace_id"] != second["metadata"]["trace_id"]
+
+
+def test_suppress_langsmith_automatic_tracing_uses_disabled_context(monkeypatch):
+    events: list[object] = []
+
+    class Context:
+        def __enter__(self):
+            events.append("enter")
+
+        def __exit__(self, *_args):
+            events.append("exit")
+
+    def fake_tracing_context(*, enabled):
+        events.append(enabled)
+        return Context()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "langsmith",
+        SimpleNamespace(tracing_context=fake_tracing_context),
+    )
+
+    with suppress_langsmith_automatic_tracing():
+        events.append("body")
+
+    assert events == [False, "enter", "body", "exit"]
 
 
 def test_trace_correlation_has_deterministic_legacy_fallbacks() -> None:
@@ -317,6 +352,29 @@ def test_publish_metric_defaults_to_metrics_project(
     assert client.create_run.call_args.kwargs["project_name"] == "HgFinance-Metrics"
 
 
+def test_publish_metric_can_confirm_quota_rejection_before_reporting_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+    enabled = iter((True, False))
+    monkeypatch.setattr(observability, "langsmith_enabled", lambda: next(enabled))
+
+    assert (
+        publish_metric(
+            {"worker_id": "qa-department", "status": "COMPLETED"},
+            confirm_delivery=True,
+        )
+        is False
+    )
+    client.flush.assert_called_once_with(timeout=3.0)
+
+
 def test_publish_metric_preserves_explicit_name_and_terminal_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -439,6 +497,7 @@ def test_start_root_trace_posts_and_returns_only_dotted_order_context(
         request_id="discord:req-1",
         workflow_mode="analysis",
         source="discord",
+        query="삼성전자 분석; secret=do-not-send",
     )
 
     assert handle is not None
@@ -450,6 +509,11 @@ def test_start_root_trace_posts_and_returns_only_dotted_order_context(
     assert all(
         metadata[key] for key in ("request_id", "root_id", "task_id", "trace_id")
     )
+    input_summary = FakeRunTree.instance.kwargs["inputs"]["summary"]
+    assert input_summary["kind"] == "user_query"
+    assert input_summary["present"] is True
+    assert input_summary["raw_payloads_sent"] is False
+    assert "secret" not in repr(FakeRunTree.instance.kwargs["inputs"])
     assert not hasattr(handle, "prompt")
 
 
@@ -522,10 +586,10 @@ def test_close_root_trace_updates_only_terminal_fields_without_renaming_root(
         "source": "discord",
         "status": "completed",
         "terminal_status": "completed",
-            "terminal_reason": "HTTPException",
-            "error_code": "paper_order_hermes_runtime_unavailable",
-            "http_status": 503,
-        }
+        "terminal_reason": "HTTPException",
+        "error_code": "paper_order_hermes_runtime_unavailable",
+        "http_status": 503,
+    }
 
 
 def test_close_root_trace_prefers_explicit_start_run_id(
@@ -552,7 +616,35 @@ def test_close_root_trace_prefers_explicit_start_run_id(
         status="completed",
     )
     assert client.update_run.call_args.kwargs["run_id"] == "run-from-start"
-    client.flush.assert_called_once_with()
+    assert client.flush.call_count == 2
+
+
+def test_close_root_trace_omits_mismatched_legacy_dotted_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "langsmith",
+        SimpleNamespace(RunTree=SimpleNamespace),
+    )
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_structured_langsmith_client", lambda: client)
+
+    assert close_root_trace(
+        "20260827T090000000000Z11111111-1111-4111-8111-111111111111",
+        run_id="22222222-2222-4222-8222-222222222222",
+        request_id="request-1",
+        status="completed",
+    )
+
+    kwargs = client.update_run.call_args.kwargs
+    assert "trace_id" not in kwargs
+    assert "dotted_order" not in kwargs
 
 
 def test_close_root_trace_can_reconcile_without_persisted_context(
@@ -648,7 +740,7 @@ def test_close_root_trace_recovers_legacy_root_id_from_context(
         client.update_run.call_args.kwargs["run_id"]
         == "01a03c8a-c170-72f1-ae24-b603a16f7dd6"
     )
-    client.flush.assert_called_once_with()
+    assert client.flush.call_count == 2
 
 
 def test_redacted_trace_is_noop_when_langsmith_setup_fails(

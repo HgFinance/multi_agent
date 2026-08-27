@@ -283,6 +283,67 @@ class DiscordGatewayPatchTests(unittest.TestCase):
                 "session-1",
             )
 
+    def test_channel_policy_runs_before_original_admission(self) -> None:
+        class Dedup:
+            def contains(self, message_id: str) -> bool:
+                return False
+
+            def discard(self, message_id: str) -> None:
+                return None
+
+        class Adapter:
+            def __init__(self) -> None:
+                self._dedup = Dedup()
+
+            def _get_allowed_channels(self):
+                return {"hr-channel"}
+
+            def _discord_channel_keys(self, message):
+                return {str(message.channel.id)}
+
+            def _discord_message_admission(self, message, *, claim):
+                raise AssertionError("channel policy must run before Hermes admission")
+
+        message = SimpleNamespace(
+            id="policy-message-1",
+            channel=SimpleNamespace(id="meeting-channel", parent_id=None),
+            guild=SimpleNamespace(id="guild-1"),
+        )
+        gateway_patch._wrap_admission(Adapter)
+        with patch.dict("os.environ", {"HERMES_PROFILE": "hr-department"}):
+            self.assertEqual(
+                Adapter()._discord_message_admission(message, claim=True),
+                (False, False),
+            )
+
+    def test_hr_trace_is_scheduled_as_fail_open_background_observation(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        async def fake_publish(**kwargs: object) -> None:
+            calls.append(kwargs)
+
+        message = SimpleNamespace(id="hr-discord-message-1")
+        with patch.dict("os.environ", {"HERMES_PROFILE": "hr-department"}), patch.object(
+            gateway_patch, "_publish_discord_trace_async", fake_publish
+        ):
+            async def run() -> None:
+                gateway_patch._schedule_discord_trace(
+                    message=message,
+                    session_id="hr-session-1",
+                    started_ms=1_000,
+                    status="completed",
+                    return_code=0,
+                    llm_calls=1,
+                )
+                await asyncio.sleep(0)
+
+            asyncio.run(run())
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["message_id"], "hr-discord-message-1")
+        self.assertEqual(calls[0]["session_id"], "hr-session-1")
+        self.assertEqual(calls[0]["status"], "completed")
+
     def test_final_publish_wrapper_calls_original_send_once(self) -> None:
         class Result:
             success = True
@@ -470,13 +531,13 @@ class ForwardToIngressTests(unittest.TestCase):
         class _Response:
             status = 202
 
-            def __enter__(self):  # noqa: ANN204 - 컨텍스트 매니저 대역
+            def __enter__(self):
                 return self
 
             def __exit__(self, *args: object) -> bool:
                 return False
 
-        def fake_urlopen(request, timeout=None):  # noqa: ANN001
+        def fake_urlopen(request, timeout=None):
             import json
 
             captured.update(json.loads(request.data.decode("utf-8")))
@@ -505,7 +566,7 @@ class ForwardToIngressTests(unittest.TestCase):
         class _Response:
             status = 202
 
-            def __enter__(self):  # noqa: ANN204 - 컨텍스트 매니저 대역
+            def __enter__(self):
                 return self
 
             def __exit__(self, *args: object) -> bool:
@@ -555,7 +616,7 @@ class ForwardToIngressTests(unittest.TestCase):
         class _Response:
             status = 202
 
-            def __enter__(self):  # noqa: ANN204
+            def __enter__(self):
                 return self
 
             def __exit__(self, *args: object) -> bool:
@@ -581,7 +642,7 @@ class ForwardToIngressTests(unittest.TestCase):
 
         calls = 0
 
-        def boom(request, timeout=None):  # noqa: ANN001
+        def boom(request, timeout=None):
             nonlocal calls
             calls += 1
             raise OSError("connection refused")
@@ -604,7 +665,7 @@ class ForwardToIngressTests(unittest.TestCase):
             def __init__(self, status: int) -> None:
                 self.status = status
 
-            def __enter__(self):  # noqa: ANN204 - 컨텍스트 매니저 대역
+            def __enter__(self):
                 return self
 
             def __exit__(self, *args: object) -> bool:
@@ -624,7 +685,7 @@ class ForwardToIngressTests(unittest.TestCase):
         responses = iter((_Response(400), _Response(204)))
         opened: list[tuple[object, float | None]] = []
 
-        def fake_urlopen(request, timeout=None):  # noqa: ANN001
+        def fake_urlopen(request, timeout=None):
             opened.append((request, timeout))
             return next(responses)
 
@@ -675,7 +736,7 @@ class ForwardToIngressTests(unittest.TestCase):
         class _Response:
             status = 202
 
-            def __enter__(self):  # noqa: ANN204
+            def __enter__(self):
                 return self
 
             def __exit__(self, *args: object) -> bool:
@@ -686,7 +747,7 @@ class ForwardToIngressTests(unittest.TestCase):
 
         calls = 0
 
-        def recover(request, timeout=None):  # noqa: ANN001
+        def recover(request, timeout=None):
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -734,7 +795,7 @@ class ForwardToIngressTests(unittest.TestCase):
     def test_auth_rejection_is_consumed_instead_of_bypassing_bff(self) -> None:
         import urllib.error
 
-        def unauthorized(request, timeout=None):  # noqa: ANN001
+        def unauthorized(request, timeout=None):
             raise urllib.error.HTTPError(  # type: ignore[arg-type]
                 "u", 401, "unauthorized", {}, None
             )
@@ -750,7 +811,7 @@ class ForwardToIngressTests(unittest.TestCase):
 
         import urllib.error
 
-        def conflict(request, timeout=None):  # noqa: ANN001
+        def conflict(request, timeout=None):
             raise urllib.error.HTTPError("u", 409, "conflict", {}, None)  # type: ignore[arg-type]
 
         env = self._env()
@@ -821,11 +882,11 @@ class AsyncForwardToIngressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.content, "지금 위 질문 다시 분석해줘")
         self.assertEqual(resolved.content, "지금 위 질문 다시 분석해줘")
         self.assertEqual(
-            getattr(resolved, "_hgfinance_previous_question_context"),
+            resolved._hgfinance_previous_question_context,
             "삼성전자 이거 4분 뒤에 1주 매수해줘",
         )
         self.assertEqual(
-            getattr(resolved, "_hgfinance_previous_question_context_source_message_id"),
+            resolved._hgfinance_previous_question_context_source_message_id,
             "100",
         )
         self.assertEqual(parent.fetch_count, 1)
@@ -847,7 +908,7 @@ class AsyncForwardToIngressTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_thread_context_timeout_preserves_current_request(self) -> None:
         class SlowParent:
-            async def fetch_message(self, message_id: int):  # noqa: ARG002
+            async def fetch_message(self, message_id: int):
                 await asyncio.sleep(1)
 
         message = self._Message()
@@ -869,7 +930,7 @@ class AsyncForwardToIngressTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_ingress_does_not_block_discord_event_loop(self) -> None:
         release = threading.Event()
 
-        def slow_forward(message, adapter):  # noqa: ANN001, ARG001
+        def slow_forward(message, adapter):
             release.wait(timeout=1)
             return True
 
@@ -934,10 +995,10 @@ class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):
         def __init__(self, *, contains: bool = False) -> None:
             self._contains = contains
 
-        def contains(self, message_id: str) -> bool:  # noqa: ARG002
+        def contains(self, message_id: str) -> bool:
             return self._contains
 
-        def discard(self, message_id: str) -> None:  # noqa: ARG002
+        def discard(self, message_id: str) -> None:
             return None
 
     def _assert_log_contains(self, records: list[object], text: str) -> None:
@@ -949,13 +1010,13 @@ class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 self._dedup = DiscordPreAcceptTelemetryTests._Dedup()
                 self._client = type("Client", (), {"user": object()})()
 
-            def _self_is_raw_mentioned(self, message):  # noqa: ANN001
+            def _self_is_raw_mentioned(self, message):
                 return False
 
-            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+            def _discord_message_admission(self, message, *, claim):
                 return True, False
 
-            async def _dispatch_discord_message(self, message):  # noqa: ANN001
+            async def _dispatch_discord_message(self, message):
                 admitted, _role_authorized = self._discord_message_admission(
                     message, claim=True
                 )
@@ -985,7 +1046,7 @@ class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 self._dedup = DiscordPreAcceptTelemetryTests._Dedup()
                 self._client = type("Client", (), {"user": object()})()
 
-            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+            def _discord_message_admission(self, message, *, claim):
                 return False, False
 
             def _get_allow_bots(self):
@@ -1005,7 +1066,7 @@ class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 self._dedup = DiscordPreAcceptTelemetryTests._Dedup()
                 self._client = type("Client", (), {"user": object()})()
 
-            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+            def _discord_message_admission(self, message, *, claim):
                 return False, False
 
         message = self._Message()
@@ -1023,7 +1084,7 @@ class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 self._allowed_user_ids = set()
                 self._allowed_role_ids = set()
 
-            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+            def _discord_message_admission(self, message, *, claim):
                 return False, False
 
             def _discord_allow_all_users(self):
@@ -1043,7 +1104,7 @@ class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 self._dedup = DiscordPreAcceptTelemetryTests._Dedup()
                 self._client = type("Client", (), {"user": object()})()
 
-            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+            def _discord_message_admission(self, message, *, claim):
                 return False, False
 
             def _discord_allow_all_users(self):
@@ -1052,16 +1113,16 @@ class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):
             def _gateway_allow_all_users(self):
                 return False
 
-            def _self_is_explicitly_mentioned(self, message):  # noqa: ANN001
+            def _self_is_explicitly_mentioned(self, message):
                 return False
 
-            def _self_is_raw_mentioned(self, message):  # noqa: ANN001
+            def _self_is_raw_mentioned(self, message):
                 return False
 
             def _discord_free_response_channels(self):
                 return set()
 
-            def _discord_channel_keys(self, message):  # noqa: ANN001
+            def _discord_channel_keys(self, message):
                 return {"channel-1"}
 
         gateway_patch._wrap_admission(Adapter)
@@ -1077,7 +1138,7 @@ class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 self._dedup = DiscordPreAcceptTelemetryTests._Dedup(contains=True)
                 self._client = type("Client", (), {"user": object()})()
 
-            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+            def _discord_message_admission(self, message, *, claim):
                 raise AssertionError("dedup must short-circuit the original admission")
 
         gateway_patch._wrap_admission(Adapter)
@@ -1087,7 +1148,7 @@ class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_telemetry_does_not_log_auth_or_payload_values(self) -> None:
         class Adapter:
-            def _self_is_raw_mentioned(self, message):  # noqa: ANN001
+            def _self_is_raw_mentioned(self, message):
                 return False
 
         message = self._Message()

@@ -840,10 +840,8 @@ calibration_history
 Doctrine은 유명인의 정체성을 모방하지 않고 평가 가능한 투자 원칙만 표현한다. 동일 Case에서
 실적이 나쁜 Doctrine은 이름의 유명세와 무관하게 비활성화한다.
 
-조건부 `QNT-08 Investment Doctrine & Model Engineer`의 역할, Dataset, SFT/LoRA, 독립 Eval과
-Shadow 배포 기준은 [Investment Doctrine Model Factory](../02-engineering/INVESTMENT_DOCTRINE_MODEL_FACTORY.md)를
-따른다. Doctrine Model은 `Strategy Reviewer` 또는 `Research Lens`이며 주문이나 Risk 승인을
-생성하지 않는다.
+Doctrine Model은 현재 활성 Quant Worker가 아니며, 별도 Dataset·독립 Eval·승인 경로가 구현되기
+전까지 제안 단계로만 취급한다. 주문이나 Risk 승인을 생성하지 않는다.
 
 ### 12.12 12주 실행안
 

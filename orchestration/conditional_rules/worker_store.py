@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg2
 from psycopg2 import sql
@@ -21,6 +21,9 @@ from .identities import evaluation_id, execution_idempotency_key, trigger_id
 from .semantic import validate_rule_spec
 
 register_uuid()
+
+_OCO_SUBMISSION_LEASE_SECONDS = 60
+_OUTBOX_CLAIM_LEASE_SECONDS = 300
 
 
 class RuleWorkerStoreError(RuntimeError):
@@ -836,8 +839,336 @@ class PostgresRuleWorkerStore:
                 retryable=True,
             ) from exc
 
-    def mark_submitting(self, rule_execution_id: UUID) -> None:
-        self._set_execution_retry_state(rule_execution_id, "SUBMITTING", None, None)
+    def _record_oco_event(
+        self,
+        cursor: Any,
+        *,
+        event_id: str,
+        rule_id: UUID,
+        rule_version: int,
+        event_type: str,
+        from_state: str,
+        to_state: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Persist one OCO lifecycle event and its transactional outbox row."""
+
+        cursor.execute(
+            """
+            insert into execution.conditional_trade_rule_events (
+              event_id,rule_id,rule_version,event_type,from_state,to_state,payload
+            ) values (%s,%s,%s,%s,%s,%s,%s)
+            on conflict (event_id) do nothing
+            """,
+            (
+                event_id,
+                rule_id,
+                rule_version,
+                event_type,
+                from_state,
+                to_state,
+                Json(dict(payload)),
+            ),
+        )
+        cursor.execute(
+            """
+            insert into execution.conditional_rule_outbox (
+              event_id,aggregate_id,event_type,payload
+            ) values (%s,%s,%s,%s)
+            on conflict (event_id) do nothing
+            """,
+            (
+                _stable_id("cro_", event_id),
+                str(rule_id),
+                event_type,
+                Json(dict(payload)),
+            ),
+        )
+
+    def _select_submission_row(
+        self, cursor: Any, rule_execution_id: UUID, *, for_update: bool = False
+    ) -> Any:
+        query = """
+            select execution.rule_id,execution.trigger_id,execution.rule_version,
+                   execution.state,execution.updated_at,
+                   version.spec->>'oco_group_id',
+                   rule.user_id,rule.fund_id,rule.book_id
+              from execution.conditional_rule_executions execution
+              join execution.conditional_trade_rules rule
+                on rule.rule_id=execution.rule_id
+              join execution.conditional_trade_rule_versions version
+                on version.rule_id=execution.rule_id
+               and version.rule_version=execution.rule_version
+             where execution.rule_execution_id=%s
+        """
+        if for_update:
+            query += " for update of execution,rule"
+        cursor.execute(query, (rule_execution_id,))
+        return cursor.fetchone()
+
+    def _pause_oco_siblings(
+        self,
+        cursor: Any,
+        *,
+        rule_id: UUID,
+        group_id: str,
+        user_id: UUID,
+        fund_id: UUID,
+        book_id: UUID,
+    ) -> int:
+        """Temporarily disarm armed siblings while one leg is submitted."""
+
+        cursor.execute(
+            """
+            update execution.conditional_trade_rules sibling
+               set state='PAUSED',version=sibling.version+1
+              from execution.conditional_trade_rule_versions sibling_version
+             where sibling_version.rule_id=sibling.rule_id
+               and sibling_version.rule_version=sibling.current_version
+               and sibling_version.spec->>'oco_group_id'=%s
+               and sibling.rule_id<>%s
+               and sibling.state='ACTIVE'
+               and sibling.user_id=%s
+               and sibling.fund_id=%s
+               and sibling.book_id=%s
+            returning sibling.rule_id,sibling.current_version
+            """,
+            (group_id, rule_id, user_id, fund_id, book_id),
+        )
+        paused = cursor.fetchall()
+        for sibling_id, sibling_version in paused:
+            payload = {
+                "reserved_by_rule_id": str(rule_id),
+                "oco_group_id": group_id,
+            }
+            self._record_oco_event(
+                cursor,
+                event_id=_stable_id("oco_", sibling_id, rule_id, "reserved"),
+                rule_id=sibling_id,
+                rule_version=int(sibling_version),
+                event_type="OCO_RESERVED",
+                from_state="ACTIVE",
+                to_state="PAUSED",
+                payload=payload,
+            )
+        return len(paused)
+
+    def _supersede_oco_execution(
+        self,
+        cursor: Any,
+        *,
+        rule_execution_id: UUID,
+        trigger_id: str,
+        rule_id: UUID,
+        rule_version: int,
+        winner_rule_id: UUID,
+    ) -> None:
+        """Close a losing pending leg without calling the broker."""
+
+        payload = {
+            "superseded_by_rule_id": str(winner_rule_id),
+            "rule_execution_id": str(rule_execution_id),
+        }
+        cursor.execute(
+            """
+            update execution.conditional_rule_executions
+               set state='FAILED',error_code='OCO_SUPERSEDED',
+                   error_message='OCO sibling already owns submission slot',
+                   completed_at=now()
+             where rule_execution_id=%s and state in ('PENDING','SUBMITTING')
+            """,
+            (rule_execution_id,),
+        )
+        cursor.execute(
+            """
+            update execution.conditional_rule_triggers
+               set state='FAILED'
+             where trigger_id=%s and state='EXECUTION_PENDING'
+            """,
+            (trigger_id,),
+        )
+        cursor.execute(
+            """
+            update execution.conditional_trade_rules
+               set state='FAILED',version=version+1,completed_at=now()
+             where rule_id=%s and current_version=%s
+               and state='EXECUTION_PENDING'
+            """,
+            (rule_id, rule_version),
+        )
+        self._record_oco_event(
+            cursor,
+            event_id=_stable_id("oco_", rule_execution_id, winner_rule_id, "superseded"),
+            rule_id=rule_id,
+            rule_version=rule_version,
+            event_type="OCO_SUPERSEDED",
+            from_state="EXECUTION_PENDING",
+            to_state="FAILED",
+            payload=payload,
+        )
+
+    def mark_submitting(self, rule_execution_id: UUID) -> bool:
+        """Acquire the external submission slot, serializing one OCO group."""
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                row = self._select_submission_row(cursor, rule_execution_id)
+                if row is None:
+                    return False
+                initial_group_id = row[5]
+                if initial_group_id:
+                    cursor.execute(
+                        "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (str(initial_group_id),),
+                    )
+                row = self._select_submission_row(
+                    cursor, rule_execution_id, for_update=True
+                )
+                if row is None:
+                    return False
+                (
+                    rule_id,
+                    trigger_identity,
+                    rule_version,
+                    state,
+                    _updated_at,
+                    group_id,
+                    user_id,
+                    fund_id,
+                    book_id,
+                ) = row
+                if state not in {"PENDING", "SUBMITTING"}:
+                    return False
+
+                if group_id:
+                    cursor.execute(
+                        """
+                        select exists(
+                                 select 1
+                                   from execution.conditional_rule_executions sibling_execution
+                                   join execution.conditional_trade_rules sibling_rule
+                                     on sibling_rule.rule_id=sibling_execution.rule_id
+                                   join execution.conditional_trade_rule_versions sibling_version
+                                     on sibling_version.rule_id=sibling_execution.rule_id
+                                    and sibling_version.rule_version=sibling_execution.rule_version
+                                  where sibling_execution.rule_execution_id<>%s
+                                    and sibling_rule.user_id=%s
+                                    and sibling_rule.fund_id=%s
+                                    and sibling_rule.book_id=%s
+                                    and sibling_version.spec->>'oco_group_id'=%s
+                                    and sibling_execution.state in ('SUBMITTED','COMPLETED')
+                               ),
+                               exists(
+                                 select 1
+                                   from execution.conditional_rule_executions sibling_execution
+                                   join execution.conditional_trade_rules sibling_rule
+                                     on sibling_rule.rule_id=sibling_execution.rule_id
+                                   join execution.conditional_trade_rule_versions sibling_version
+                                     on sibling_version.rule_id=sibling_execution.rule_id
+                                    and sibling_version.rule_version=sibling_execution.rule_version
+                                  where sibling_execution.rule_execution_id<>%s
+                                    and sibling_rule.user_id=%s
+                                    and sibling_rule.fund_id=%s
+                                    and sibling_rule.book_id=%s
+                                    and sibling_version.spec->>'oco_group_id'=%s
+                                    and sibling_execution.state='SUBMITTING'
+                                    and sibling_execution.updated_at > now() - (%s * interval '1 second')
+                               )
+                        """,
+                        (
+                            rule_execution_id,
+                            user_id,
+                            fund_id,
+                            book_id,
+                            str(group_id),
+                            rule_execution_id,
+                            user_id,
+                            fund_id,
+                            book_id,
+                            str(group_id),
+                            _OCO_SUBMISSION_LEASE_SECONDS,
+                        ),
+                    )
+                    submitted, inflight = cursor.fetchone()
+                    if submitted:
+                        cursor.execute(
+                            """
+                            select sibling_execution.rule_id
+                              from execution.conditional_rule_executions sibling_execution
+                              join execution.conditional_trade_rules sibling_rule
+                                on sibling_rule.rule_id=sibling_execution.rule_id
+                              join execution.conditional_trade_rule_versions sibling_version
+                                on sibling_version.rule_id=sibling_execution.rule_id
+                               and sibling_version.rule_version=sibling_execution.rule_version
+                             where sibling_execution.rule_execution_id<>%s
+                               and sibling_rule.user_id=%s
+                               and sibling_rule.fund_id=%s
+                               and sibling_rule.book_id=%s
+                               and sibling_version.spec->>'oco_group_id'=%s
+                               and sibling_execution.state in ('SUBMITTED','COMPLETED')
+                             order by sibling_execution.updated_at desc,
+                                      sibling_execution.rule_execution_id desc
+                             limit 1
+                            """,
+                            (
+                                rule_execution_id,
+                                user_id,
+                                fund_id,
+                                book_id,
+                                str(group_id),
+                            ),
+                        )
+                        winner_row = cursor.fetchone()
+                        self._supersede_oco_execution(
+                            cursor,
+                            rule_execution_id=rule_execution_id,
+                            trigger_id=str(trigger_identity),
+                            rule_id=rule_id,
+                            rule_version=int(rule_version),
+                            winner_rule_id=(
+                                UUID(str(winner_row[0]))
+                                if winner_row and winner_row[0]
+                                else rule_id
+                            ),
+                        )
+                        return False
+                    if inflight:
+                        # Leave this leg PENDING. It can win if the current
+                        # winner later fails terminally; no external call is
+                        # made while another fresh submission is in flight.
+                        return False
+                    self._pause_oco_siblings(
+                        cursor,
+                        rule_id=rule_id,
+                        group_id=str(group_id),
+                        user_id=user_id,
+                        fund_id=fund_id,
+                        book_id=book_id,
+                    )
+
+                cursor.execute(
+                    """
+                    update execution.conditional_rule_executions
+                       set state='SUBMITTING',error_code=null,error_message=null
+                     where rule_execution_id=%s
+                       and (
+                         state='PENDING'
+                         or (
+                           state='SUBMITTING'
+                           and updated_at <= now() - (%s * interval '1 second')
+                         )
+                       )
+                    """,
+                    (rule_execution_id, _OCO_SUBMISSION_LEASE_SECONDS),
+                )
+                return cursor.rowcount == 1
+        except psycopg2.Error as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not acquire conditional submission slot",
+                retryable=True,
+            ) from exc
 
     def mark_retryable_failure(
         self, rule_execution_id: UUID, *, code: str, message: str
@@ -850,20 +1181,29 @@ class PostgresRuleWorkerStore:
         try:
             with self._connect() as connection, connection.cursor() as cursor:
                 self._set_role(cursor)
-                cursor.execute(
-                    """
-                    select trigger_id,rule_id,rule_version
-                      from execution.conditional_rule_executions
-                     where rule_execution_id=%s
-                       and state in ('PENDING','SUBMITTING')
-                     for update
-                    """,
-                    (rule_execution_id,),
-                )
-                row = cursor.fetchone()
+                row = self._select_submission_row(cursor, rule_execution_id)
                 if row is None:
                     return
-                trigger_identity, rule_id, rule_version = row
+                rule_id = row[0]
+                self._lock_oco_group(cursor, rule_id=rule_id)
+                row = self._select_submission_row(
+                    cursor, rule_execution_id, for_update=True
+                )
+                if row is None:
+                    return
+                (
+                    rule_id,
+                    trigger_identity,
+                    rule_version,
+                    state,
+                    _updated_at,
+                    _group_id,
+                    _user_id,
+                    _fund_id,
+                    _book_id,
+                ) = row
+                if state not in {"PENDING", "SUBMITTING"}:
+                    return
                 cursor.execute(
                     """
                     update execution.conditional_rule_executions
@@ -889,6 +1229,7 @@ class PostgresRuleWorkerStore:
                     """,
                     (rule_id, rule_version),
                 )
+                self._release_oco_siblings(cursor, rule_id=rule_id)
         except psycopg2.Error as exc:
             raise RuleWorkerStoreError(
                 "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
@@ -927,7 +1268,81 @@ class PostgresRuleWorkerStore:
                 retryable=True,
             ) from exc
 
-    def _cancel_oco_siblings(self, cursor, *, rule_id: UUID) -> int:
+    def _lock_oco_group(
+        self, cursor: Any, *, rule_id: UUID
+    ) -> tuple[str, UUID, UUID, UUID] | None:
+        """Serialize one OCO group and return its authority tuple."""
+
+        cursor.execute(
+            """
+            select version.spec->>'oco_group_id',rule.user_id,rule.fund_id,rule.book_id
+              from execution.conditional_trade_rules rule
+              join execution.conditional_trade_rule_versions version
+                on version.rule_id=rule.rule_id
+               and version.rule_version=rule.current_version
+             where rule.rule_id=%s
+            """,
+            (rule_id,),
+        )
+        row = cursor.fetchone()
+        if row is None or not row[0]:
+            return None
+        group_id, user_id, fund_id, book_id = row
+        cursor.execute(
+            "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (str(group_id),),
+        )
+        return str(group_id), user_id, fund_id, book_id
+
+    def _release_oco_siblings(self, cursor: Any, *, rule_id: UUID) -> int:
+        """Re-arm siblings when the reserved winner failed terminally."""
+
+        context = self._lock_oco_group(cursor, rule_id=rule_id)
+        if context is None:
+            return 0
+        group_id, user_id, fund_id, book_id = context
+        cursor.execute(
+            """
+            update execution.conditional_trade_rules sibling
+               set state='ACTIVE',version=sibling.version+1
+              from execution.conditional_trade_rule_versions sibling_version
+             where sibling_version.rule_id=sibling.rule_id
+               and sibling_version.rule_version=sibling.current_version
+               and sibling_version.spec->>'oco_group_id'=%s
+               and sibling.rule_id<>%s
+               and sibling.state='PAUSED'
+               and sibling.user_id=%s
+               and sibling.fund_id=%s
+               and sibling.book_id=%s
+               and exists (
+                 select 1
+                   from execution.conditional_trade_rule_events reservation
+                  where reservation.rule_id=sibling.rule_id
+                    and reservation.event_type='OCO_RESERVED'
+                    and reservation.payload->>'reserved_by_rule_id'=%s
+               )
+            returning sibling.rule_id,sibling.current_version
+            """,
+            (group_id, rule_id, user_id, fund_id, book_id, str(rule_id)),
+        )
+        released = cursor.fetchall()
+        for sibling_id, sibling_version in released:
+            self._record_oco_event(
+                cursor,
+                event_id=_stable_id("oco_", sibling_id, rule_id, "released"),
+                rule_id=sibling_id,
+                rule_version=int(sibling_version),
+                event_type="OCO_RELEASED",
+                from_state="PAUSED",
+                to_state="ACTIVE",
+                payload={
+                    "released_by_rule_id": str(rule_id),
+                    "oco_group_id": group_id,
+                },
+            )
+        return len(released)
+
+    def _cancel_oco_siblings(self, cursor: Any, *, rule_id: UUID) -> int:
         """Retire the alternatives once this rule's order actually went out.
 
         A take-profit and a stop-loss on one position are two ways for the same
@@ -936,56 +1351,53 @@ class PostgresRuleWorkerStore:
         way the book stops matching what the user asked for.
 
         Runs inside the submitting transaction so the cancel cannot be lost if
-        the worker dies right after the broker accepted the order.  Only ACTIVE
-        siblings are retired: one already past its own trigger is in flight at
-        the broker and is not ours to revoke.
+        the worker dies right after the broker accepted the order.  ACTIVE and
+        PAUSED siblings are retired; one already past its own trigger is in
+        flight at the broker and is not ours to revoke.
         """
+
+        context = self._lock_oco_group(cursor, rule_id=rule_id)
+        if context is None:
+            return 0
+        group_id, user_id, fund_id, book_id = context
 
         cursor.execute(
             """
-            with winner as (
-              select (version.spec->>'oco_group_id') as group_id,
-                     rule.user_id, rule.fund_id, rule.book_id
-                from execution.conditional_trade_rules rule
-                join execution.conditional_trade_rule_versions version
-                  on version.rule_id=rule.rule_id
-                 and version.rule_version=rule.current_version
-               where rule.rule_id=%s
+            with candidates as materialized (
+                select sibling.rule_id,sibling.state as previous_state
+                  from execution.conditional_trade_rules sibling
+                  join execution.conditional_trade_rule_versions sibling_version
+                    on sibling_version.rule_id=sibling.rule_id
+                   and sibling_version.rule_version=sibling.current_version
+                 where sibling_version.spec->>'oco_group_id'=%s
+                   and sibling.rule_id<>%s
+                   and sibling.state in ('ACTIVE','PAUSED')
+                   and sibling.user_id=%s
+                   and sibling.fund_id=%s
+                   and sibling.book_id=%s
             )
             update execution.conditional_trade_rules sibling
                set state='CANCELLED',version=sibling.version+1,completed_at=now()
-              from winner,
-                   execution.conditional_trade_rule_versions sibling_version
-             where winner.group_id is not null
-               and sibling_version.rule_id=sibling.rule_id
-               and sibling_version.rule_version=sibling.current_version
-               and sibling_version.spec->>'oco_group_id'=winner.group_id
-               and sibling.rule_id<>%s
-               and sibling.state='ACTIVE'
-               -- The group never crosses an authority boundary.
-               and sibling.user_id=winner.user_id
-               and sibling.fund_id=winner.fund_id
-               and sibling.book_id=winner.book_id
-            returning sibling.rule_id, sibling.current_version
+              from candidates
+             where sibling.rule_id=candidates.rule_id
+            returning sibling.rule_id,sibling.current_version,candidates.previous_state
             """,
-            (rule_id, rule_id),
+            (group_id, rule_id, user_id, fund_id, book_id),
         )
         cancelled = cursor.fetchall()
-        for sibling_id, sibling_version in cancelled:
-            cursor.execute(
-                """
-                insert into execution.conditional_trade_rule_events (
-                  event_id,rule_id,rule_version,event_type,from_state,
-                  to_state,payload
-                ) values (%s,%s,%s,'OCO_CANCELLED','ACTIVE','CANCELLED',%s)
-                on conflict (event_id) do nothing
-                """,
-                (
-                    _stable_id("oco_", sibling_id, str(rule_id)),
-                    sibling_id,
-                    sibling_version,
-                    Json({"cancelled_by_rule_id": str(rule_id)}),
-                ),
+        for sibling_id, sibling_version, previous_state in cancelled:
+            self._record_oco_event(
+                cursor,
+                event_id=_stable_id("oco_", sibling_id, rule_id, "cancelled"),
+                rule_id=sibling_id,
+                rule_version=int(sibling_version),
+                event_type="OCO_CANCELLED",
+                from_state=str(previous_state),
+                to_state="CANCELLED",
+                payload={
+                    "cancelled_by_rule_id": str(rule_id),
+                    "oco_group_id": group_id,
+                },
             )
         return len(cancelled)
 
@@ -993,6 +1405,24 @@ class PostgresRuleWorkerStore:
         try:
             with self._connect() as connection, connection.cursor() as cursor:
                 self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select rule_id
+                      from execution.conditional_rule_executions
+                     where rule_execution_id=%s
+                    """,
+                    (rule_execution_id,),
+                )
+                identity_row = cursor.fetchone()
+                if identity_row is None:
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_EXECUTION_MISSING",
+                        "conditional execution disappeared",
+                    )
+                # All OCO transitions take the group lock before locking an
+                # execution row, otherwise two legs can deadlock while each
+                # holds its own row and waits for the other leg's group lock.
+                self._lock_oco_group(cursor, rule_id=identity_row[0])
                 cursor.execute(
                     """
                     select execution.trigger_id,execution.rule_id,
@@ -1143,36 +1573,43 @@ class PostgresRuleWorkerStore:
                 retryable=True,
             ) from exc
 
-    def drain_outbox(
-        self,
-        publisher: Callable[[ConditionalRuleOutboxRow], None],
-        *,
-        limit: int = 100,
-    ) -> dict[str, int]:
-        """Publish conditional-rule events with DB-locked, at-least-once claims.
+    def _claim_outbox_rows(
+        self, *, limit: int
+    ) -> tuple[str, list[ConditionalRuleOutboxRow]]:
+        """Claim rows in a short transaction, returning a durable lease token."""
 
-        The Redis publish happens inside the short database transaction while
-        the selected rows are locked. A crash after Redis accepts an event but
-        before the commit can produce a duplicate, so consumers must dedupe by
-        ``event_id``. That is the intended outbox contract; marking an event as
-        published before the external write would lose events.
-        """
-
-        counts = {"picked": 0, "published": 0, "failed": 0}
+        claim_token = str(uuid4())
         try:
             with self._connect() as connection, connection.cursor() as cursor:
                 self._set_role(cursor)
                 cursor.execute(
                     """
-                    select event_id,aggregate_id,event_type,payload,
-                           created_at,attempts
-                      from execution.conditional_rule_outbox
-                     where published_at is null
-                     order by created_at,event_id
-                     limit %s
-                       for update skip locked
+                    with claimable as (
+                        select outbox.event_id
+                          from execution.conditional_rule_outbox outbox
+                         where outbox.published_at is null
+                           and (
+                             outbox.claim_token is null
+                             or outbox.claim_expires_at <= now()
+                           )
+                         order by outbox.created_at,outbox.event_id
+                         limit %s
+                           for update skip locked
+                    )
+                    update execution.conditional_rule_outbox outbox
+                       set claim_token=%s,
+                           claim_expires_at=now() + (%s * interval '1 second')
+                      from claimable
+                     where outbox.event_id=claimable.event_id
+                       and outbox.published_at is null
+                    returning outbox.event_id,outbox.aggregate_id,outbox.event_type,
+                              outbox.payload,outbox.created_at,outbox.attempts
                     """,
-                    (max(1, min(int(limit), 1000)),),
+                    (
+                        max(1, min(int(limit), 1000)),
+                        claim_token,
+                        _OUTBOX_CLAIM_LEASE_SECONDS,
+                    ),
                 )
                 rows = [
                     ConditionalRuleOutboxRow(
@@ -1185,40 +1622,90 @@ class PostgresRuleWorkerStore:
                     )
                     for row in cursor.fetchall()
                 ]
-                counts["picked"] = len(rows)
-                for row in rows:
-                    try:
-                        publisher(row)
-                    except Exception as exc:  # noqa: BLE001 - preserve retryable row
-                        cursor.execute(
-                            """
-                            update execution.conditional_rule_outbox
-                               set attempts=attempts+1,last_error=%s
-                             where event_id=%s and published_at is null
-                            """,
-                            (str(exc)[:2000], row.event_id),
-                        )
-                        counts["failed"] += 1
-                    else:
-                        cursor.execute(
-                            """
-                            update execution.conditional_rule_outbox
-                               set published_at=now(),attempts=attempts+1,
-                                   last_error=null
-                             where event_id=%s and published_at is null
-                            """,
-                            (row.event_id,),
-                        )
-                        counts["published"] += 1
-            return counts
-        except RuleWorkerStoreError:
-            raise
+                rows.sort(key=lambda row: (row.created_at, row.event_id))
+                return claim_token, rows
         except psycopg2.Error as exc:
             raise RuleWorkerStoreError(
                 "CONDITIONAL_RULE_OUTBOX_UNAVAILABLE",
-                "could not drain conditional rule outbox",
+                "could not claim conditional rule outbox",
                 retryable=True,
             ) from exc
+
+    def _finalize_outbox_claim(
+        self,
+        row: ConditionalRuleOutboxRow,
+        *,
+        claim_token: str,
+        error: str | None,
+    ) -> bool:
+        """Mark one claimed row and release its lease in a short transaction."""
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                if error is None:
+                    cursor.execute(
+                        """
+                        update execution.conditional_rule_outbox
+                           set published_at=now(),attempts=attempts+1,
+                               last_error=null,claim_token=null,
+                               claim_expires_at=null
+                         where event_id=%s and published_at is null
+                           and claim_token=%s
+                        """,
+                        (row.event_id, claim_token),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        update execution.conditional_rule_outbox
+                           set attempts=attempts+1,last_error=%s,
+                               claim_token=null,claim_expires_at=null
+                         where event_id=%s and published_at is null
+                           and claim_token=%s
+                        """,
+                        (error[:2000], row.event_id, claim_token),
+                    )
+                return cursor.rowcount == 1
+        except psycopg2.Error as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_OUTBOX_UNAVAILABLE",
+                "could not finalize conditional rule outbox claim",
+                retryable=True,
+            ) from exc
+
+    def drain_outbox(
+        self,
+        publisher: Callable[[ConditionalRuleOutboxRow], None],
+        *,
+        limit: int = 100,
+    ) -> dict[str, int]:
+        """Publish conditional-rule events with short DB leases.
+
+        Claim and finalization transactions never contain the external publish
+        call. A crash after Redis accepts an event but before finalization can
+        produce a duplicate after the lease expires, so consumers must dedupe
+        by ``event_id``. Marking an event as published before the external write
+        would lose events.
+        """
+
+        counts = {"picked": 0, "published": 0, "failed": 0, "lost": 0}
+        claim_token, rows = self._claim_outbox_rows(limit=limit)
+        counts["picked"] = len(rows)
+        for row in rows:
+            try:
+                publisher(row)
+            except Exception as exc:  # noqa: BLE001 - preserve retryable row
+                finalized = self._finalize_outbox_claim(
+                    row, claim_token=claim_token, error=str(exc)
+                )
+                counts["failed" if finalized else "lost"] += 1
+            else:
+                finalized = self._finalize_outbox_claim(
+                    row, claim_token=claim_token, error=None
+                )
+                counts["published" if finalized else "lost"] += 1
+        return counts
 
 
 __all__ = [

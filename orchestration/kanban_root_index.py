@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import quote
@@ -226,7 +227,9 @@ class SQLiteRootScopedIndex:
             except Exception:
                 pass
 
-    def recovery_candidate_rows(self) -> tuple[dict[str, object], ...]:
+    def recovery_candidate_rows(
+        self, *, include_historical: bool = True
+    ) -> tuple[dict[str, object], ...]:
         """Return discovery-only rows for active recovery candidates.
 
         This query intentionally returns only the small set of rows whose
@@ -329,12 +332,67 @@ class SQLiteRootScopedIndex:
             # child from recovery discovery; other REQUEST_USER_INPUT tasks
             # remain eligible for the existing recovery paths.
             control_key_clause = ""
-            query_parameters: tuple[object, ...] = ()
+            query_parameters: tuple[object, ...] = (bool(include_historical),)
+            if not include_historical:
+                # The steady-state recovery lane only needs ready/running
+                # roots and a short race-recovery window for terminal roots.
+                # Historical reconciliation opts in explicitly at startup;
+                # otherwise old completed roots turn an indexed lookup into a
+                # repeated scan of the entire board.
+                recent_cutoff = int(time.time()) - 120
+                query_parameters += (recent_cutoff,)
+                recent_filter = (
+                    "AND (lower(status) IN ('ready', 'running') OR ("
+                    "lower(status) IN ('done', 'completed', 'archived') AND "
+                    f"coalesce({completed_at_expression}, created_at) >= ?)) "
+                )
+            else:
+                recent_filter = ""
             if "idempotency_key" in columns:
                 control_key_clause = (
                     "AND control.idempotency_key = tasks.id || ? "
                 )
-                query_parameters = (REQUEST_USER_INPUT_SUFFIX,)
+                query_parameters += (REQUEST_USER_INPUT_SUFFIX,)
+            line_body = "char(10) || replace(coalesce(body, ''), char(13), '') || char(10)"
+            line_root_marker = (
+                f"instr({line_body}, char(10) || 'workflow_role=root' || char(10)) > 0"
+            )
+            line_planning_marker = (
+                "instr("
+                f"{line_body}, "
+                "char(10) || 'root_task_role=scope_and_planning' || char(10)"
+                ") > 0"
+            )
+            line_synthesis_marker = (
+                f"instr({line_body}, char(10) || 'workflow_role=synthesis' || char(10)) > 0"
+            )
+            synthesis_child_marker = (
+                "instr(char(10) || replace(coalesce(s.body, ''), char(13), '') "
+                "|| char(10), char(10) || 'workflow_role=synthesis' || char(10)) > 0"
+            )
+            primary_child_marker = (
+                "EXISTS (SELECT 1 FROM tasks AS primary_child "
+                "WHERE primary_child.workflow_root_task_id = tasks.id "
+                "AND instr(char(10) || replace(coalesce(primary_child.body, ''), "
+                "char(13), '') || char(10), "
+                "char(10) || 'workflow_role=primary' || char(10)) > 0)"
+            )
+            selection_comment_marker = (
+                "EXISTS (SELECT 1 FROM task_comments AS selected_comment "
+                "WHERE selected_comment.task_id = tasks.id "
+                "AND instr(replace(coalesce(selected_comment.body, ''), "
+                "char(13), ''), 'selected_primary_profiles=') > 0)"
+                if "task_comments" in tables
+                else "0"
+            )
+            root_candidate_clause = (
+                f"({line_root_marker} OR {line_planning_marker}) "
+                "AND (lower(status) IN ('ready', 'running') OR ("
+                "NOT EXISTS (SELECT 1 FROM tasks AS existing_synthesis "
+                "WHERE existing_synthesis.workflow_root_task_id = tasks.id "
+                f"AND {synthesis_child_marker.replace('s.', 'existing_synthesis.')}) "
+                f"AND ({primary_child_marker} OR {selection_comment_marker})))"
+            )
             rows = conn.execute(
                 "SELECT id, body, status, created_at, "
                 f"{completed_at_expression} AS completed_at, "
@@ -345,10 +403,8 @@ class SQLiteRootScopedIndex:
                 f"{selection_comment_expression} AS has_selection_comment "
                 "FROM tasks "
                 "WHERE body IS NOT NULL AND ("
-                "instr(body, 'workflow_role=root') > 0 OR "
-                "instr(body, 'root_task_role=scope_and_planning') > 0 OR "
-                "instr(body, 'workflow_role=synthesis') > 0"
-                ") AND NOT EXISTS ("
+                f"{root_candidate_clause} OR (NOT ? AND {line_synthesis_marker})"
+                f"){recent_filter}AND NOT EXISTS ("
                 "SELECT 1 FROM tasks AS control "
                 "WHERE control.workflow_root_task_id = tasks.id "
                 "AND control.status != 'archived' "

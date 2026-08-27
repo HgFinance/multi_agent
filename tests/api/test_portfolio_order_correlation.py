@@ -82,6 +82,32 @@ def test_duplicate_raw_broker_number_with_distinct_lineage_stays_unattributed() 
     ) == {}
 
 
+def test_conditional_outbox_replay_does_not_bump_version_or_duplicate_audit() -> None:
+    repository = InMemoryUserOrderRequestRepository()
+    record = _record(repository, "replay")
+    first = repository.mark_outcome(
+        record.order_request_id,
+        state="COMPLETED",
+        directive_id="11111111-1111-4111-8111-111111111111",
+        event_type="BROKER_EXECUTION_SNAPSHOT",
+        event_id="conditional-event-1",
+        event_payload={"broker_order_id": "ls-paper:22988"},
+    )
+
+    replay = repository.mark_outcome(
+        record.order_request_id,
+        state="COMPLETED",
+        directive_id="11111111-1111-4111-8111-111111111111",
+        event_type="BROKER_EXECUTION_SNAPSHOT",
+        event_id="conditional-event-1",
+        event_payload={"broker_order_id": "ls-paper:22988"},
+    )
+
+    assert replay == first
+    assert replay.version == record.version + 1
+    assert len(repository.events_for(record.order_request_id)) == 1
+
+
 def test_portfolio_projection_labels_exact_conditional_order(monkeypatch) -> None:
     correlation = BrokerOrderCorrelation(
         broker_order_no="22988",

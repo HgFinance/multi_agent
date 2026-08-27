@@ -193,6 +193,34 @@ def test_artifact_validator_accepts_hermes_compact_plan_shapes(tmp_path: Path) -
     assert lab.plans()[0]["signature"] == {"signature": "compact-signature-v1"}
 
 
+def test_artifact_validator_normalizes_direct_hermes_aliases(tmp_path: Path) -> None:
+    lab = ResearchLab(tmp_path / "lab")
+    lab.initialize(Objective(goal="Test direct Hermes aliases", universe="stocks"))
+    (lab.hypotheses_dir / "h1.json").write_text(json.dumps({
+        "hypothesis_id": "h1", "statement": "A testable effect exists.",
+        "mechanism": "A measurable mechanism.", "expected_behavior": "It survives costs.",
+        "falsifiers": ["No effect"], "dimensions": ["costs"],
+    }), encoding="utf-8")
+    (lab.plans_dir / "p1.json").write_text(json.dumps({
+        "plan_id": "p1", "hypothesis_id": "h1", "objective": "Measure the effect.",
+        "method": "backtest", "data_requirements": ["local"], "splits": ["oos"],
+        "cost_model": "fees", "integer_seed": 20260827, "signature": {"v": "1"},
+        "preregistration_hash": "hash-p1", "status": "PREREGISTERED",
+    }), encoding="utf-8")
+    (lab.results_dir / "p1.json").write_text(json.dumps({
+        "plan_id": "p1", "preregistration_hash": "hash-p1", "status": "BLOCKED",
+        "cost_included": True, "oos_evaluated": False, "leakage_detected": False,
+        "robustness": {"data_integrity": True}, "measured_metrics": {"rows": 10},
+        "failure_reason": "No suitable data.",
+    }), encoding="utf-8")
+
+    decisions = artifact_validator.sync_agent_artifacts(lab)
+
+    assert decisions[0]["decision"] == "PAUSE"
+    assert lab.plans()[0]["seed"] == 20260827
+    assert lab.results()[0].metrics == {"rows": 10}
+
+
 def test_runner_requires_registered_plan_and_publishes_candidate(tmp_path: Path) -> None:
     lab_root = tmp_path / "lab"
     init_args = runner.build_parser().parse_args([

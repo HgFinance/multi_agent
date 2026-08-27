@@ -2,7 +2,7 @@
 """회계본부 마감 결과를 Notion Accounting DB(NOTION_ACCOUNTING_DB)에 올리는 업로드 로직.
 
 담당: 도현 (회계/포트폴리오본부)
-형식 근거: departments/03-risk/notion_reporter.py, departments/02-trading/notion_reporter.py
+형식 근거: departments/03-risk/notion_reporter.py와 공통 Notion projection 계약
 설계 근거: docs/06-integrations/notion/NOTION_DEPARTMENT_DB_DESIGN.md 3절 공통 속성 +
       5절 `05 · 회계·포트폴리오본부` — 제목 후보 journal_id, severity 4개 전체,
       match_method 5개 전체, "Ledger 원장은 append-only라 Notion에서 절대 수정 유도 UI를

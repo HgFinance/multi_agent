@@ -42,7 +42,7 @@
 | 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen3:1.7b` | `agent-quant` | local fallback alias |
 | 회계/포트폴리오본부 | [`departments/05-accounting-portfolio/Modelfile`](../../departments/05-accounting-portfolio/Modelfile) | `qwen3:1.7b` | `agent-accounting` | local fallback alias |
 | AI QA/감사본부 | [`departments/06-ai-qa-audit/Modelfile`](../../departments/06-ai-qa-audit/Modelfile) | `qwen3:1.7b` | `agent-qa` (호환 Alias) | 실제 실행은 LangGraph Worker |
-| Agent Workforce 인사팀 | [`departments/07-agent-workforce/Modelfile`](../../departments/07-agent-workforce/Modelfile) | `qwen3:1.7b` | `agent-hr` | local fallback alias |
+| Agent Workforce 인사팀 | — | — | — | 현재 HR Head는 Hermes `openai-codex/gpt-5.6-luna`; 과거 HR 전용 Ollama alias는 폐기 |
 
 ### 2.1 현재 SYSTEM 역할 요약
 
@@ -147,7 +147,6 @@ ollama create agent-risk -f departments/03-risk/Modelfile
 ollama create agent-quant -f departments/04-quant-backtest/Modelfile
 ollama create agent-accounting -f departments/05-accounting-portfolio/Modelfile
 ollama create agent-qa -f departments/06-ai-qa-audit/Modelfile
-ollama create agent-hr -f departments/07-agent-workforce/Modelfile
 ```
 
 ### 6.3 수동 Smoke Test

@@ -29,9 +29,39 @@ export type StrategyResearchAccepted = {
   duplicate: boolean;
   request_id: string;
   lab_id: string;
-  status: "QUEUED" | "RESEARCHING" | "BLOCKED" | "CANDIDATE";
+  status: "QUEUED" | "RESEARCHING" | "COMPLETED" | "BLOCKED" | "CANDIDATE";
   message: string;
   status_url: string;
+};
+
+export type StrategyDeploymentAccepted = {
+  schema_version: "autonomous-strategy-deployment.v1";
+  request_id: string;
+  deployment_id: string;
+  mode: "shadow" | "paper" | "live";
+  symbols: string[];
+  status:
+    | "AWAITING_APPROVAL"
+    | "REQUESTED"
+    | "REVIEW_REQUIRED"
+    | "BLOCKED"
+    | "APPROVED"
+    | "DEPLOYING"
+    | "ACTIVE"
+    | "PAUSED"
+    | "FAILED"
+    | "REMOVED";
+  research_status: string;
+  plan_id: string | null;
+  result_hash: string | null;
+  approval_required: boolean;
+  override_review_required: boolean;
+  approved_by: string | null;
+  bundle_hash: string | null;
+  runtime_status: string;
+  execution_status: string;
+  backtest_summary: Record<string, unknown>;
+  message: string;
 };
 
 export type StrategyResearchStatus = {
@@ -41,7 +71,7 @@ export type StrategyResearchStatus = {
   goal: string;
   universe: string;
   horizon: string;
-  status: "QUEUED" | "RESEARCHING" | "BLOCKED" | "CANDIDATE";
+  status: "QUEUED" | "RESEARCHING" | "COMPLETED" | "BLOCKED" | "CANDIDATE";
   cycle: number;
   last_action: string | null;
   active_plan_id: string | null;
@@ -50,6 +80,8 @@ export type StrategyResearchStatus = {
   candidate_available: boolean;
   updated_at: string;
   error: string | null;
+  deployment_count: number;
+  deployments: StrategyDeploymentAccepted[];
 };
 
 export type CeoQueryPlanning = {
@@ -228,7 +260,7 @@ export async function askCeo(
   requestId?: string,
   bookId?: string,
   fundId?: string,
-): Promise<CeoQueryResult | StrategyResearchAccepted> {
+): Promise<CeoQueryResult | StrategyResearchAccepted | StrategyDeploymentAccepted> {
   const resolvedFundId = fundId ?? currentFundId();
   let response: Response;
   try {
@@ -267,6 +299,14 @@ export async function askCeo(
   // The BFF is the central classifier.  Strategy intents may return the
   // independent research-session contract from this legacy-compatible path.
   const strategy = body as Partial<StrategyResearchAccepted>;
+  const deployment = body as Partial<StrategyDeploymentAccepted>;
+  if (
+    deployment.schema_version === "autonomous-strategy-deployment.v1" &&
+    typeof deployment.deployment_id === "string" &&
+    typeof deployment.request_id === "string"
+  ) {
+    return deployment as StrategyDeploymentAccepted;
+  }
   if (
     strategy.schema_version === "autonomous-research-request.v1" &&
     strategy.accepted === true &&
@@ -330,6 +370,147 @@ export async function strategyResearchStatus(
 ): Promise<StrategyResearchStatus> {
   return getJson<StrategyResearchStatus>(
     `/ui/strategy-research/requests/${encodeURIComponent(requestId)}`,
+  );
+}
+
+export async function requestStrategyDeployment(
+  requestId: string,
+  input: {
+    mode: "shadow" | "paper" | "live";
+    symbols: string[];
+    confirm: boolean;
+    reason: string;
+  },
+): Promise<StrategyDeploymentAccepted> {
+  const response = await bffFetch(
+    `/ui/strategy-research/requests/${encodeURIComponent(requestId)}/deploy`,
+    {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok || typeof body !== "object" || body === null) {
+    throw new Error(explainError(body, response.status));
+  }
+  const result = body as Partial<StrategyDeploymentAccepted>;
+  if (
+    result.schema_version !== "autonomous-strategy-deployment.v1" ||
+    typeof result.deployment_id !== "string" ||
+    typeof result.request_id !== "string"
+  ) {
+    throw new Error("전략 배포 요청 응답 계약이 올바르지 않습니다.");
+  }
+  return result as StrategyDeploymentAccepted;
+}
+
+export async function approveStrategyDeployment(
+  requestId: string,
+  deploymentId: string,
+  input: {
+    confirm: boolean;
+    reason: string;
+    override_review_required?: boolean;
+  },
+): Promise<StrategyDeploymentAccepted> {
+  const response = await bffFetch(
+    `/ui/strategy-research/requests/${encodeURIComponent(requestId)}/deployments/${encodeURIComponent(deploymentId)}/approve`,
+    {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok || typeof body !== "object" || body === null) {
+    throw new Error(explainError(body, response.status));
+  }
+  const result = body as Partial<StrategyDeploymentAccepted>;
+  if (
+    result.schema_version !== "autonomous-strategy-deployment.v1" ||
+    typeof result.deployment_id !== "string" ||
+    typeof result.request_id !== "string"
+  ) {
+    throw new Error("전략 배포 승인 응답 계약이 올바르지 않습니다.");
+  }
+  return result as StrategyDeploymentAccepted;
+}
+
+export async function powerStrategyDeployment(
+  requestId: string,
+  deploymentId: string,
+  input: { action: "start" | "stop"; reason: string },
+): Promise<StrategyDeploymentAccepted> {
+  const response = await bffFetch(
+    `/ui/strategy-research/requests/${encodeURIComponent(requestId)}/deployments/${encodeURIComponent(deploymentId)}/power`,
+    {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok || typeof body !== "object" || body === null) {
+    throw new Error(explainError(body, response.status));
+  }
+  const result = body as Partial<StrategyDeploymentAccepted>;
+  if (
+    result.schema_version !== "autonomous-strategy-deployment.v1" ||
+    typeof result.deployment_id !== "string" ||
+    typeof result.request_id !== "string"
+  ) {
+    throw new Error("전략 컨테이너 상태 응답 계약이 올바르지 않습니다.");
+  }
+  return result as StrategyDeploymentAccepted;
+}
+
+export async function removeStrategyDeployment(
+  requestId: string,
+  deploymentId: string,
+  input: { confirm: boolean; reason: string },
+): Promise<StrategyDeploymentAccepted> {
+  const response = await bffFetch(
+    `/ui/strategy-research/requests/${encodeURIComponent(requestId)}/deployments/${encodeURIComponent(deploymentId)}/remove`,
+    {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok || typeof body !== "object" || body === null) {
+    throw new Error(explainError(body, response.status));
+  }
+  const result = body as Partial<StrategyDeploymentAccepted>;
+  if (
+    result.schema_version !== "autonomous-strategy-deployment.v1" ||
+    typeof result.deployment_id !== "string" ||
+    typeof result.request_id !== "string"
+  ) {
+    throw new Error("전략 제거 응답 계약이 올바르지 않습니다.");
+  }
+  return result as StrategyDeploymentAccepted;
+}
+
+export async function strategyDeployments(
+  requestId: string,
+): Promise<{ schema_version: "autonomous-strategy-deployments.v1"; request_id: string; deployments: StrategyDeploymentAccepted[] }> {
+  return getJson(
+    `/ui/strategy-research/requests/${encodeURIComponent(requestId)}/deployments`,
+  );
+}
+
+export async function strategyDeploymentStatus(
+  requestId: string,
+  deploymentId: string,
+): Promise<StrategyDeploymentAccepted> {
+  return getJson<StrategyDeploymentAccepted>(
+    `/ui/strategy-research/requests/${encodeURIComponent(requestId)}/deployments/${encodeURIComponent(deploymentId)}`,
   );
 }
 

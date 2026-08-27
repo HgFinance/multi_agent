@@ -21,18 +21,20 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from urllib.error import HTTPError, URLError
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from orchestration.langsmith_queries import query_runs
+from orchestration.langsmith_queries import close_query_client, query_runs
 
 LOGGER = logging.getLogger(__name__)
+_T = TypeVar("_T")
+_SQLITE_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
 
 WORKFLOW_PROJECT_DEFAULT = "First"
 EVALS_PROJECT_DEFAULT = "HgFinance-Evals"
@@ -58,10 +60,15 @@ _ACTIONABLE_FEEDBACK_CODES = frozenset(
         "SEMANTIC_QA_FAILED",
         "SEMANTIC_QA_SCORE_LOW",
         "PRIVACY_PAYLOAD_PRESENT",
+        "REDACTION_MARKER_MISSING",
     }
 )
-TERMINAL_STATUSES = frozenset({"success", "completed", "complete", "error", "failed", "blocked", "degraded"})
-ERROR_STATUSES = frozenset({"error", "failed", "blocked", "degraded", "gave_up", "timed_out"})
+TERMINAL_STATUSES = frozenset(
+    {"success", "completed", "complete", "error", "failed", "blocked", "degraded"}
+)
+ERROR_STATUSES = frozenset(
+    {"error", "failed", "blocked", "degraded", "gave_up", "timed_out"}
+)
 _NON_WORKFLOW_ROOT_NAMES = frozenset(
     {
         "llm.performance.metric",
@@ -103,6 +110,7 @@ _SAFE_METADATA_KEYS = frozenset(
         "root_id",
         "task_id",
         "workflow_mode",
+        "analysis_mode",
         "workflow_role",
         "department",
         "stage",
@@ -146,6 +154,11 @@ _SAFE_METADATA_KEYS = frozenset(
         "provider",
         "model_name",
         "raw_payloads_sent",
+        "configured_max_turns",
+        "actual_turns",
+        "observation_category",
+        "department_key",
+        "stage_status",
         "source",
         "metric_count",
         "window_start",
@@ -181,6 +194,7 @@ _TEXT_METADATA_KEYS = frozenset(
         "task_id",
         "trace_id",
         "workflow_mode",
+        "analysis_mode",
         "workflow_role",
         "department",
         "stage",
@@ -214,6 +228,9 @@ _TEXT_METADATA_KEYS = frozenset(
         "telemetry_completeness",
         "observability_source",
         "output_verdict",
+        "observation_category",
+        "department_key",
+        "stage_status",
     }
 )
 _INT_METADATA_KEYS = frozenset(
@@ -238,6 +255,8 @@ _INT_METADATA_KEYS = frozenset(
         "model_latency_ms",
         "tool_duration_total_ms",
         "return_code",
+        "configured_max_turns",
+        "actual_turns",
     }
 )
 _SCORE_METADATA_KEYS = frozenset(
@@ -259,7 +278,9 @@ def _normalized_metadata_value(key: str, value: Any) -> Any:
     if key == "tool_names":
         if not isinstance(value, (list, tuple)):
             return None
-        return [_bounded_text(item, 80) for item in value[:32] if _bounded_text(item, 80)]
+        return [
+            _bounded_text(item, 80) for item in value[:32] if _bounded_text(item, 80)
+        ]
     if key in _TEXT_METADATA_KEYS:
         return _bounded_text(value, 160)
     if key in _INT_METADATA_KEYS:
@@ -269,7 +290,15 @@ def _normalized_metadata_value(key: str, value: Any) -> Any:
     if key in _SCORE_METADATA_KEYS:
         return _bounded_score(value)
     if key == "raw_payloads_sent":
-        return bool(value)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized == "true":
+                return True
+            if normalized == "false":
+                return False
+        return None
     if key in {"latency_available", "tool_latency_available"}:
         return bool(value)
     return None
@@ -277,6 +306,23 @@ def _normalized_metadata_value(key: str, value: Any) -> Any:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _with_sqlite_lock_retry(operation: Callable[[], _T]) -> _T:
+    """Retry only transient SQLite lock contention around one transaction."""
+
+    for attempt, delay in enumerate(_SQLITE_LOCK_RETRY_DELAYS):
+        if delay:
+            time.sleep(delay)
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            message = str(exc).casefold()
+            if "locked" not in message and "busy" not in message:
+                raise
+            if attempt == len(_SQLITE_LOCK_RETRY_DELAYS) - 1:
+                raise
+    raise AssertionError("sqlite lock retry exhausted without a result")
 
 
 def _bounded_text(value: Any, limit: int = 160) -> str:
@@ -288,6 +334,17 @@ def canonical_department(value: Any) -> str:
 
     candidate = _bounded_text(value, 64).lower()
     return _DEPARTMENT_CANONICAL.get(candidate, candidate)
+
+
+def _observation_category(metadata: Mapping[str, Any]) -> str:
+    """Classify one bounded observation for QA filtering."""
+
+    source = _bounded_text(metadata.get("source"), 80)
+    return {
+        "metrics-window": "metrics",
+        "conditional-execution-consumer": "conditional",
+        "langfuse-workforce-observability": "workforce",
+    }.get(source, "workflow")
 
 
 def _feedback_semantic_key(
@@ -355,7 +412,15 @@ def _bounded_score(value: Any) -> float | None:
 
 
 def feedback_mode(value: str | None = None) -> str:
-    candidate = str(value if value is not None else os.getenv("LANGSMITH_FEEDBACK_MODE", "shadow")).strip().lower()
+    candidate = (
+        str(
+            value
+            if value is not None
+            else os.getenv("LANGSMITH_FEEDBACK_MODE", "shadow")
+        )
+        .strip()
+        .lower()
+    )
     return candidate if candidate in FEEDBACK_MODES else "off"
 
 
@@ -395,24 +460,42 @@ class FeedbackConfig:
 
         return cls(
             mode=feedback_mode(),
-            workflow_project=os.getenv("LANGSMITH_PROJECT", WORKFLOW_PROJECT_DEFAULT).strip() or WORKFLOW_PROJECT_DEFAULT,
-            metrics_project=os.getenv("LANGSMITH_METRICS_PROJECT", "HgFinance-Metrics").strip() or "HgFinance-Metrics",
-            evals_project=os.getenv("LANGSMITH_EVALS_PROJECT", EVALS_PROJECT_DEFAULT).strip() or EVALS_PROJECT_DEFAULT,
-            state_path=os.getenv("LANGSMITH_FEEDBACK_STATE_PATH", "/var/lib/portfolio/langsmith-feedback.sqlite3").strip()
+            workflow_project=os.getenv(
+                "LANGSMITH_PROJECT", WORKFLOW_PROJECT_DEFAULT
+            ).strip()
+            or WORKFLOW_PROJECT_DEFAULT,
+            metrics_project=os.getenv(
+                "LANGSMITH_METRICS_PROJECT", "HgFinance-Metrics"
+            ).strip()
+            or "HgFinance-Metrics",
+            evals_project=os.getenv(
+                "LANGSMITH_EVALS_PROJECT", EVALS_PROJECT_DEFAULT
+            ).strip()
+            or EVALS_PROJECT_DEFAULT,
+            state_path=os.getenv(
+                "LANGSMITH_FEEDBACK_STATE_PATH",
+                "/var/lib/portfolio/langsmith-feedback.sqlite3",
+            ).strip()
             or "/var/lib/portfolio/langsmith-feedback.sqlite3",
             poll_seconds=_float("LANGSMITH_FEEDBACK_POLL_SECONDS", 30.0, 5.0, 300.0),
             # Discovery is based on completed roots' end_time, not only their
             # start_time.  Keep a bounded completion window so a long-running
             # workflow can still be found after it finishes without scanning
             # the whole project.
-            lookback_seconds=_int("LANGSMITH_FEEDBACK_LOOKBACK_SECONDS", 900, 30, 86_400),
+            lookback_seconds=_int(
+                "LANGSMITH_FEEDBACK_LOOKBACK_SECONDS", 900, 30, 86_400
+            ),
             batch_size=_int("LANGSMITH_FEEDBACK_BATCH_SIZE", 25, 1, 100),
             max_pending=_int("LANGSMITH_FEEDBACK_MAX_PENDING", 500, 10, 10_000),
             retention_days=_int("LANGSMITH_FEEDBACK_RETENTION_DAYS", 30, 1, 365),
-            latency_warn_ms=_int("LANGSMITH_FEEDBACK_LATENCY_WARN_MS", 60_000, 1_000, 3_600_000),
+            latency_warn_ms=_int(
+                "LANGSMITH_FEEDBACK_LATENCY_WARN_MS", 60_000, 1_000, 3_600_000
+            ),
             max_feedback_items=_int("LANGSMITH_FEEDBACK_MAX_ITEMS", 3, 1, 10),
             max_feedback_chars=_int("LANGSMITH_FEEDBACK_MAX_CHARS", 1_200, 200, 4_000),
-            metrics_window_seconds=_int("LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS", 300, 60, 3_600),
+            metrics_window_seconds=_int(
+                "LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS", 300, 60, 3_600
+            ),
             # SmithDB v2 accepts at most 100 rows per page. Keep the bound
             # below that server-side limit so a bad tuning value cannot turn
             # the background, fail-open poller into a repeated 400 loop.
@@ -439,12 +522,22 @@ class TraceObservation:
 
     @property
     def department(self) -> str:
-        value = self.metadata.get("department") or self.metadata.get("stage") or "unknown"
+        value = (
+            self.metadata.get("department") or self.metadata.get("stage") or "unknown"
+        )
         return _bounded_text(value, 64).lower()
 
     @property
+    def department_key(self) -> str:
+        """Return the canonical QA routing key without losing raw evidence."""
+
+        return canonical_department(self.department)
+
+    @property
     def workflow_role(self) -> str:
-        return _bounded_text(self.metadata.get("workflow_role") or self.metadata.get("role"), 64).lower()
+        return _bounded_text(
+            self.metadata.get("workflow_role") or self.metadata.get("role"), 64
+        ).lower()
 
 
 @dataclass(frozen=True)
@@ -515,7 +608,6 @@ def observation_from_run(run: Any) -> TraceObservation:
                 max(0.0, (end_time - start_time).total_seconds()) * 1_000,
                 maximum=3_600_000,
             )
-    metadata.setdefault("raw_payloads_sent", False)
     return TraceObservation(
         source_run_id=_bounded_text(getattr(run, "id", ""), 128),
         name=_bounded_text(getattr(run, "name", ""), 160),
@@ -638,9 +730,13 @@ def evaluate_observation(
     metadata = observation.metadata
     findings: list[str] = []
     summaries: list[str] = []
-    if metadata.get("raw_payloads_sent") is True:
+    raw_payloads_sent = metadata.get("raw_payloads_sent")
+    if raw_payloads_sent is True:
         findings.append("PRIVACY_PAYLOAD_PRESENT")
         summaries.append("trace payload privacy contract requires review")
+    redaction_marker_missing = (
+        raw_payloads_sent is not False and raw_payloads_sent is not True
+    )
     status = _bounded_text(metadata.get("status") or observation.status, 32).lower()
     error_count = _bounded_int(metadata.get("error_count"))
     if status in ERROR_STATUSES or error_count > 0:
@@ -660,13 +756,24 @@ def evaluate_observation(
         findings.append("LATENCY_ABOVE_THRESHOLD")
         latency_scope = _bounded_text(metadata.get("latency_scope"), 40)
         if latency_scope == "end_to_end":
-            summaries.append("end-to-end latency exceeded the configured observation threshold")
+            summaries.append(
+                "end-to-end latency exceeded the configured observation threshold"
+            )
         elif latency_scope == "worker_execution":
-            summaries.append("worker execution latency exceeded the configured observation threshold")
+            summaries.append(
+                "worker execution latency exceeded the configured observation threshold"
+            )
         else:
-            summaries.append("observed latency exceeded the configured observation threshold")
+            summaries.append(
+                "observed latency exceeded the configured observation threshold"
+            )
     is_metrics_window = metadata.get("source") == "metrics-window"
-    if not is_metrics_window and not metadata.get("request_id") and not metadata.get("root_id"):
+    observation_category = _observation_category(metadata)
+    if (
+        not is_metrics_window
+        and not metadata.get("request_id")
+        and not metadata.get("root_id")
+    ):
         findings.append("CORRELATION_METADATA_MISSING")
         summaries.append("request/root correlation metadata is missing")
     if not metadata.get("stage") and not metadata.get("department"):
@@ -675,7 +782,9 @@ def evaluate_observation(
     score = _bounded_score(metadata.get("eval_score"))
     if score is not None and score < 0.8:
         findings.append("STRUCTURED_EVAL_SCORE_LOW")
-        summaries.append("structured worker evaluation score is below the review threshold")
+        summaries.append(
+            "structured worker evaluation score is below the review threshold"
+        )
     semantic_score = _bounded_score(metadata.get("semantic_qa_score"))
     semantic_verdict = _bounded_text(metadata.get("semantic_qa_verdict"), 32).upper()
     if semantic_verdict == "FAIL":
@@ -683,16 +792,28 @@ def evaluate_observation(
         summaries.append("answer contract semantic QA failed")
     elif semantic_score is not None and semantic_score < 0.8:
         findings.append("SEMANTIC_QA_SCORE_LOW")
-        summaries.append("answer contract semantic QA score is below the review threshold")
+        summaries.append(
+            "answer contract semantic QA score is below the review threshold"
+        )
+    if redaction_marker_missing:
+        # Keep the established summary order for existing findings while
+        # making an absent marker an explicit, reviewable finding.
+        findings.append("REDACTION_MARKER_MISSING")
+        summaries.append("trace payload redaction status is unverified")
     if score is None:
         score = semantic_score
     if not findings:
         decision = "OBSERVED_PASS"
         summaries.append("metadata-only trace passed operational checks")
-    elif "PRIVACY_PAYLOAD_PRESENT" in findings:
+    elif {"PRIVACY_PAYLOAD_PRESENT", "REDACTION_MARKER_MISSING"} & set(findings):
         decision = "REVIEW_REQUIRED"
     else:
         decision = "IMPROVEMENT_CANDIDATE"
+    department_key = getattr(
+        observation,
+        "department_key",
+        canonical_department(observation.department),
+    )
     safe_metadata = {
         "schema_version": FEEDBACK_SCHEMA,
         "source_run_id": observation.source_run_id,
@@ -704,8 +825,13 @@ def evaluate_observation(
         "root_id": metadata.get("root_id"),
         "task_id": metadata.get("task_id"),
         "workflow_mode": metadata.get("workflow_mode"),
+        "analysis_mode": metadata.get("analysis_mode"),
         "workflow_role": observation.workflow_role,
         "department": observation.department,
+        "department_key": department_key,
+        "stage": metadata.get("stage"),
+        "stage_status": "PRESENT" if metadata.get("stage") else "MISSING",
+        "observation_category": observation_category,
         "status": status,
         "error_code": metadata.get("error_code"),
         "error_class": metadata.get("error_class"),
@@ -737,6 +863,21 @@ def evaluate_observation(
         "observability_source": metadata.get("observability_source"),
         "observation_unit": metadata.get("observation_unit"),
         "profile": metadata.get("profile"),
+        "configured_max_turns": (
+            _bounded_int(metadata.get("configured_max_turns"))
+            if metadata.get("configured_max_turns") is not None
+            else None
+        ),
+        "actual_turns": (
+            _bounded_int(metadata.get("actual_turns"))
+            if metadata.get("actual_turns") is not None
+            else None
+        ),
+        "llm_turn_count_observed": (
+            _bounded_int(metadata.get("llm_turn_count_observed"))
+            if metadata.get("llm_turn_count_observed") is not None
+            else None
+        ),
         "output_verdict": metadata.get("output_verdict"),
         "finding_count": _bounded_int(metadata.get("finding_count")) or None,
         "eval_score": score,
@@ -744,14 +885,34 @@ def evaluate_observation(
         "semantic_qa_evaluator": metadata.get("semantic_qa_evaluator"),
         "semantic_qa_verdict": semantic_verdict or None,
         "semantic_qa_score": semantic_score,
-        "semantic_qa_completeness": _bounded_score(metadata.get("semantic_qa_completeness")),
-        "semantic_qa_groundedness": _bounded_score(metadata.get("semantic_qa_groundedness")),
-        "semantic_qa_temporal_consistency": _bounded_score(metadata.get("semantic_qa_temporal_consistency")),
-        "semantic_qa_uncertainty_honesty": _bounded_score(metadata.get("semantic_qa_uncertainty_honesty")),
+        "semantic_qa_completeness": _bounded_score(
+            metadata.get("semantic_qa_completeness")
+        ),
+        "semantic_qa_groundedness": _bounded_score(
+            metadata.get("semantic_qa_groundedness")
+        ),
+        "semantic_qa_temporal_consistency": _bounded_score(
+            metadata.get("semantic_qa_temporal_consistency")
+        ),
+        "semantic_qa_uncertainty_honesty": _bounded_score(
+            metadata.get("semantic_qa_uncertainty_honesty")
+        ),
         "semantic_qa_relevance": _bounded_score(metadata.get("semantic_qa_relevance")),
-        "semantic_qa_finding_count": _bounded_int(metadata.get("semantic_qa_finding_count")) or None,
+        "semantic_qa_finding_count": _bounded_int(
+            metadata.get("semantic_qa_finding_count")
+        )
+        or None,
         "semantic_qa_finding_codes": metadata.get("semantic_qa_finding_codes"),
-        "raw_payloads_sent": False,
+        "raw_payloads_sent": (
+            raw_payloads_sent if isinstance(raw_payloads_sent, bool) else None
+        ),
+        "redaction_status": (
+            "PAYLOAD_PRESENT"
+            if raw_payloads_sent is True
+            else "VERIFIED_SAFE"
+            if raw_payloads_sent is False
+            else "UNVERIFIED"
+        ),
     }
     return EvaluationResult(
         source_run_id=observation.source_run_id,
@@ -775,18 +936,20 @@ class FeedbackLedger:
 
     def _connect(self) -> sqlite3.Connection:
         # Evaluation completion, Discord review, and benchmark updates can
-        # briefly contend on the same small WAL database.  A 200ms budget made
-        # harmless bursts spill into the retry queue; this plane is isolated
-        # from business execution, so waiting up to two seconds is both safer
-        # and faster than re-running an evaluation job.
-        connection = sqlite3.connect(self.path, timeout=2.0)
+        # briefly contend on the same small WAL database.  This plane is
+        # isolated from business execution, so a bounded five-second wait is
+        # safer and faster than re-running an evaluation job.
+        connection = sqlite3.connect(self.path, timeout=5.0)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=2000")
-        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=5000")
         return connection
 
     def _init_schema(self) -> None:
+        _with_sqlite_lock_retry(self._init_schema_once)
+
+    def _init_schema_once(self) -> None:
         with self._connect() as db:
+            db.execute("PRAGMA journal_mode=WAL")
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS langsmith_feedback_jobs (
@@ -864,7 +1027,9 @@ class FeedbackLedger:
             )
             artifact_columns = {
                 str(row["name"])
-                for row in db.execute("PRAGMA table_info(langsmith_feedback_artifacts)").fetchall()
+                for row in db.execute(
+                    "PRAGMA table_info(langsmith_feedback_artifacts)"
+                ).fetchall()
             }
             if "department_key" not in artifact_columns:
                 db.execute(
@@ -910,7 +1075,9 @@ class FeedbackLedger:
                 )
             columns = {
                 str(row["name"])
-                for row in db.execute("PRAGMA table_info(langsmith_feedback_jobs)").fetchall()
+                for row in db.execute(
+                    "PRAGMA table_info(langsmith_feedback_jobs)"
+                ).fetchall()
             }
             if "observation" not in columns:
                 db.execute(
@@ -1035,7 +1202,16 @@ class FeedbackLedger:
             LOGGER.exception("langsmith_feedback_claim_failed")
             return None
 
-    def complete(self, source_run_id: str, eval_run_id: str, result: EvaluationResult) -> str:
+    def complete(
+        self, source_run_id: str, eval_run_id: str, result: EvaluationResult
+    ) -> str:
+        return _with_sqlite_lock_retry(
+            lambda: self._complete_once(source_run_id, eval_run_id, result)
+        )
+
+    def _complete_once(
+        self, source_run_id: str, eval_run_id: str, result: EvaluationResult
+    ) -> str:
         artifact_id = f"feedback-{uuid4().hex}"
         now = _now()
         semantic_key = _feedback_semantic_key(
@@ -1088,8 +1264,14 @@ class FeedbackLedger:
                     result.decision,
                     result.score,
                     json.dumps(list(result.finding_codes), separators=(",", ":")),
-                    json.dumps(list(result.summaries), ensure_ascii=False, separators=(",", ":")),
-                    json.dumps(result.metadata, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(
+                        list(result.summaries),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        result.metadata, ensure_ascii=False, separators=(",", ":")
+                    ),
                     now,
                 ),
             )
@@ -1118,7 +1300,13 @@ class FeedbackLedger:
         with self._connect() as db:
             db.execute(
                 "UPDATE langsmith_feedback_jobs SET status=?, last_error=?, next_attempt_at=?, lease_until=NULL, updated_at=? WHERE source_run_id=?",
-                (status, _bounded_text(error_code, 120), next_at, now.isoformat(), source_run_id),
+                (
+                    status,
+                    _bounded_text(error_code, 120),
+                    next_at,
+                    now.isoformat(),
+                    source_run_id,
+                ),
             )
 
     def pending(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -1134,6 +1322,47 @@ class FeedbackLedger:
                 (limit,),
             ).fetchall()
         return [self._artifact(row) for row in rows]
+
+    def d5_finding_codes(self, limit: int = 400) -> tuple[str, ...]:
+        """Return only structured D5 finding identities for CEO self-review.
+
+        This is intentionally narrower than :meth:`pending`: the CEO self-
+        improvement lane may consume the existence of a verified D5 finding,
+        but never its request, answer, summaries, raw metadata, failure
+        department set, or skill target.  The returned values are stable
+        identifiers only and are filtered again by the D5 allow-list before
+        they can reach a CEO prompt.
+        """
+
+        limit = max(1, min(int(limit), 1_000))
+        try:
+            with self._connect() as db:
+                rows = db.execute(
+                    """SELECT finding_codes, metadata
+                    FROM langsmith_feedback_artifacts
+                    ORDER BY created_at DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+        except sqlite3.Error:
+            LOGGER.exception("d5_finding_codes_read_failed")
+            return ()
+
+        codes: list[str] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+                findings = json.loads(row["finding_codes"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(metadata, Mapping) or metadata.get("source") != "memo_harness_d5":
+                continue
+            if not isinstance(findings, list):
+                continue
+            for value in findings[:12]:
+                code = str(value or "").strip().upper()
+                if code.startswith("D5_") and code not in codes:
+                    codes.append(code[:96])
+        return tuple(codes[:64])
 
     def approve(
         self,
@@ -1160,7 +1389,7 @@ class FeedbackLedger:
         try:
             with self._connect() as db:
                 artifact = db.execute(
-                    """SELECT artifact_id, decision, finding_codes
+                    """SELECT artifact_id, decision, finding_codes, metadata
                     FROM langsmith_feedback_artifacts WHERE artifact_id=?""",
                     (artifact_id,),
                 ).fetchone()
@@ -1168,9 +1397,21 @@ class FeedbackLedger:
                     return False
                 if decision == "APPROVED":
                     finding_codes = set(json.loads(artifact["finding_codes"]))
-                    if (
-                        artifact["decision"] == "OBSERVED_PASS"
-                        or not _ACTIONABLE_FEEDBACK_CODES.intersection(finding_codes)
+                    try:
+                        artifact_metadata = json.loads(artifact["metadata"] or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        artifact_metadata = {}
+                    d5_candidate = (
+                        isinstance(artifact_metadata, Mapping)
+                        and artifact_metadata.get("source") == "memo_harness_d5"
+                        and any(
+                            str(code).upper().startswith("D5_")
+                            for code in finding_codes
+                        )
+                    )
+                    if artifact["decision"] == "OBSERVED_PASS" or not (
+                        _ACTIONABLE_FEEDBACK_CODES.intersection(finding_codes)
+                        or d5_candidate
                     ):
                         return False
                 now = _now()
@@ -1433,8 +1674,11 @@ class FeedbackLedger:
             error_code="DISCORD_QA_DELETE_FAILED" if failed else None,
         )
 
-    def approved_hints(self, department: str | None, limit: int, max_chars: int) -> dict[str, Any] | None:
+    def approved_hints(
+        self, department: str | None, limit: int, max_chars: int
+    ) -> dict[str, Any] | None:
         limit = max(1, min(int(limit), 10))
+        query_limit = min(40, limit * 4)
         with self._connect() as db:
             if department:
                 rows = db.execute(
@@ -1447,7 +1691,7 @@ class FeedbackLedger:
                       AND a.decision != 'OBSERVED_PASS'
                       AND a.department_key=?
                     ORDER BY a.created_at DESC LIMIT ?""",
-                    (canonical_department(department), limit),
+                    (canonical_department(department), query_limit),
                 ).fetchall()
             else:
                 rows = db.execute(
@@ -1459,12 +1703,24 @@ class FeedbackLedger:
                       AND d.improvement_type != 'NO_ACTION'
                       AND a.decision != 'OBSERVED_PASS'
                     ORDER BY a.created_at DESC LIMIT ?""",
-                    (limit,),
+                    (query_limit,),
                 ).fetchall()
         if not rows:
             return None
         items: list[dict[str, Any]] = []
         for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            # A D5 candidate is a review/regression work item, not a routing
+            # hint. An approved candidate must never alter the next plan
+            # before the central router regression gate has run.
+            if (
+                isinstance(metadata, Mapping)
+                and metadata.get("source") == "memo_harness_d5"
+            ):
+                continue
             item = {
                 "department": canonical_department(row["department"]),
                 "decision": row["decision"],
@@ -1473,11 +1729,57 @@ class FeedbackLedger:
                 "source": "qa-approved-langsmith-feedback",
             }
             items.append(item)
+            if len(items) >= limit:
+                break
+        if not items:
+            return None
         payload = {"schema_version": FEEDBACK_SCHEMA, "items": items}
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if len(encoded) > max_chars:
             payload["items"] = items[:1]
         return payload
+
+    def approved_benchmark_candidates(
+        self, *, source: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Return benchmark-passed candidates for an explicit downstream gate.
+
+        This is intentionally separate from ``approved_hints``. Passing the
+        redaction/admission benchmark never grants authority to change the CEO
+        router; callers still need the central regression and promotion
+        controls owned by that subsystem.
+        """
+
+        limit = max(1, min(int(limit), 100))
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT a.*, d.decision AS approval_decision,
+                    d.approved_by, d.reason AS approval_reason,
+                    d.improvement_type, d.target_skill_slug,
+                    b.status AS benchmark_status, b.benchmark_id,
+                    b.score AS benchmark_score, b.report_ref,
+                    b.result_summary AS benchmark_result_summary
+                FROM langsmith_feedback_artifacts a
+                JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
+                JOIN langsmith_feedback_benchmarks b ON b.artifact_id=a.artifact_id
+                WHERE d.decision='APPROVED' AND b.status='PASSED'
+                  AND d.improvement_type != 'NO_ACTION'
+                  AND a.decision != 'OBSERVED_PASS'
+                ORDER BY b.updated_at DESC LIMIT ?""",
+                (min(400, limit * 4),),
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._artifact(row)
+            metadata = item.get("metadata")
+            if source is not None and (
+                not isinstance(metadata, Mapping) or metadata.get("source") != source
+            ):
+                continue
+            items.append(item)
+            if len(items) >= limit:
+                break
+        return items
 
     def benchmark_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return QA-approved, redacted candidates waiting for offline replay."""
@@ -1503,9 +1805,7 @@ class FeedbackLedger:
             ).fetchall()
         return [self._artifact(row) for row in rows]
 
-    def evolution_benchmark_candidates(
-        self, limit: int = 100
-    ) -> list[dict[str, Any]]:
+    def evolution_benchmark_candidates(self, limit: int = 100) -> list[dict[str, Any]]:
         """Return first-approved skill findings awaiting admission benchmark."""
 
         limit = max(1, min(int(limit), 500))
@@ -1580,7 +1880,9 @@ class FeedbackLedger:
     ) -> bool:
         """Record only the offline benchmark gate result, never raw benchmark data."""
 
-        if status not in {"RUNNING", "PASSED", "FAILED"} or not _bounded_text(benchmark_id, 160):
+        if status not in {"RUNNING", "PASSED", "FAILED"} or not _bounded_text(
+            benchmark_id, 160
+        ):
             return False
         bounded_score = _bounded_score(score)
         now = _now()
@@ -1679,7 +1981,9 @@ class FeedbackLedger:
         }
 
     def cleanup(self, retention_days: int) -> int:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))).isoformat()
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))
+        ).isoformat()
         with self._connect() as db:
             db.execute(
                 """DELETE FROM langsmith_feedback_decisions
@@ -1729,6 +2033,9 @@ class FeedbackLedger:
 
 def _evaluation_metadata(result: EvaluationResult) -> dict[str, Any]:
     has_semantic = result.metadata.get("semantic_qa_version") is not None
+    observation_category = result.metadata.get(
+        "observation_category"
+    ) or _observation_category(result.metadata)
     return {
         **result.metadata,
         "schema_version": FEEDBACK_SCHEMA,
@@ -1742,7 +2049,12 @@ def _evaluation_metadata(result: EvaluationResult) -> dict[str, Any]:
         "finding_count": len(result.finding_codes),
         "summaries": list(result.summaries)[:8],
         "qa_approval": "PENDING",
-        "raw_payloads_sent": False,
+        "observation_category": observation_category,
+        "department_key": result.metadata.get("department_key")
+        or canonical_department(result.department),
+        "stage_status": result.metadata.get("stage_status")
+        or ("PRESENT" if result.metadata.get("stage") else "MISSING"),
+        "raw_payloads_sent": result.metadata.get("raw_payloads_sent"),
     }
 
 
@@ -1780,7 +2092,7 @@ def publish_evaluation(result: EvaluationResult, project_name: str) -> str | Non
         run.end(outputs={})
         run.patch(exclude_inputs=True)
         return str(run.id)
-    except Exception:  # noqa: BLE001 - observability must never affect workflow
+    except Exception:
         LOGGER.exception("langsmith_feedback_publish_failed")
         return None
 
@@ -1803,7 +2115,9 @@ def _aggregate_metric_window(
         if not observation.source_run_id or not observation.ended_at:
             continue
         count += 1
-        status = (observation.metadata.get("status") or observation.status or "").lower()
+        status = (
+            observation.metadata.get("status") or observation.status or ""
+        ).lower()
         saw_error = saw_error or status in ERROR_STATUSES
         error_count += _bounded_int(observation.metadata.get("error_count"))
         latency = _bounded_int(observation.metadata.get("latency_ms"))
@@ -1853,6 +2167,7 @@ def _publish_qa_discord_request(
         is_actionable_feedback,
         post_qa_discord_message,
         qa_feedback_channel_id,
+        verify_discord_message_delivery,
     )
 
     if not is_actionable_feedback(result.finding_codes):
@@ -1875,6 +2190,13 @@ def _publish_qa_discord_request(
         message_id = post_qa_discord_message(
             content, token=token, channel_id=channel_id
         )
+        if not verify_discord_message_delivery(
+            content,
+            token=token,
+            channel_id=channel_id,
+            message_id=message_id,
+        ):
+            raise RuntimeError("discord_message_readback_failed")
         ledger.finish_discord_delivery(
             artifact_id,
             delivered=True,
@@ -1901,21 +2223,56 @@ def _publish_qa_discord_request(
 class LangSmithFeedbackService:
     """Bounded, asynchronous evaluator owned by the portfolio worker process."""
 
-    def __init__(self, config: FeedbackConfig | None = None, ledger: FeedbackLedger | None = None) -> None:
+    def __init__(
+        self, config: FeedbackConfig | None = None, ledger: FeedbackLedger | None = None
+    ) -> None:
         self.config = config or FeedbackConfig.from_env()
         try:
             self.ledger = ledger or FeedbackLedger(self.config.state_path)
-        except Exception:  # noqa: BLE001 - local coordination is fail-open
+        except Exception:
             LOGGER.exception("langsmith_feedback_ledger_unavailable")
             self.ledger = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_discord_retention_attempt = 0.0
+        self._poll_failure_streak = 0
+        self._last_poll_error_code: str | None = None
+
+    @staticmethod
+    def _poll_error_code(error: BaseException) -> str:
+        message = _bounded_text(str(error), 96)
+        if message.startswith("langsmith_"):
+            return message
+        return type(error).__name__
+
+    def _record_poll_failure(self, error: BaseException) -> None:
+        self._poll_failure_streak = min(self._poll_failure_streak + 1, 8)
+        self._last_poll_error_code = self._poll_error_code(error)
+        LOGGER.warning(
+            "langsmith_feedback_poll_failed error_code=%s failure_streak=%d",
+            self._last_poll_error_code,
+            self._poll_failure_streak,
+        )
+
+    def _record_poll_success(self) -> None:
+        self._poll_failure_streak = 0
+        self._last_poll_error_code = None
+
+    def _poll_wait_seconds(self, elapsed: float) -> float:
+        """Back off only after a provider poll failure, then recover on success."""
+
+        base = max(0.1, float(self.config.poll_seconds))
+        if self._poll_failure_streak <= 0:
+            return max(0.1, base - max(0.0, elapsed))
+        backoff = min(300.0, base * (2 ** min(self._poll_failure_streak, 5)))
+        return max(0.1, backoff - max(0.0, elapsed))
 
     def start(self) -> None:
         if self.config.mode == "off" or self._thread is not None:
             return
-        self._thread = threading.Thread(target=self._loop, name="langsmith-feedback", daemon=True)
+        self._thread = threading.Thread(
+            target=self._loop, name="langsmith-feedback", daemon=True
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -1926,12 +2283,15 @@ class LangSmithFeedbackService:
 
     def run_once(self) -> dict[str, int]:
         if self.config.mode == "off" or self.ledger is None:
+            self._record_poll_success()
             return {"discovered": 0, "completed": 0, "failed": 0, "dropped": 0}
         discovered = completed = failed = dropped = 0
+        client: Any | None = None
         try:
             from orchestration.llm_observability import langsmith_enabled
 
             if not langsmith_enabled():
+                self._record_poll_success()
                 return {"discovered": 0, "completed": 0, "failed": 0, "dropped": 0}
             from langsmith import Client
 
@@ -1949,7 +2309,9 @@ class LangSmithFeedbackService:
             # keep the end_time filter for completed roots. The SQLite
             # source-run key makes repeated pages idempotent.
             root_filter = f'gt(end_time, "{since.isoformat()}")'
-            root_limit = min(100, max(self.config.batch_size * 4, self.config.batch_size))
+            root_limit = min(
+                100, max(self.config.batch_size * 4, self.config.batch_size)
+            )
             root_runs = query_runs(
                 client,
                 project_name=self.config.workflow_project,
@@ -1987,7 +2349,9 @@ class LangSmithFeedbackService:
                     continue
                 if observation.status not in TERMINAL_STATUSES:
                     continue
-                if not observation.metadata.get("stage") and not observation.metadata.get("department"):
+                if not observation.metadata.get(
+                    "stage"
+                ) and not observation.metadata.get("department"):
                     continue
                 discovered += 1
                 if self.ledger.pending_count() >= self.config.max_pending:
@@ -2040,7 +2404,9 @@ class LangSmithFeedbackService:
                 try:
                     raw_observation = json.loads(job["observation"] or "{}")
                     observation = TraceObservation(
-                        source_run_id=_bounded_text(raw_observation.get("source_run_id"), 128),
+                        source_run_id=_bounded_text(
+                            raw_observation.get("source_run_id"), 128
+                        ),
                         name=_bounded_text(raw_observation.get("name"), 160),
                         status=_bounded_text(raw_observation.get("status"), 32).lower(),
                         started_at=raw_observation.get("started_at"),
@@ -2050,21 +2416,39 @@ class LangSmithFeedbackService:
                     result = evaluate_observation(
                         observation,
                         latency_warn_ms=self.config.latency_warn_ms,
-                        source_project=str(job["project_name"] or self.config.workflow_project),
+                        source_project=str(
+                            job["project_name"] or self.config.workflow_project
+                        ),
                     )
                     eval_run_id = publish_evaluation(result, self.config.evals_project)
                     if not eval_run_id:
                         raise RuntimeError("eval_publish_unavailable")
-                    artifact_id = self.ledger.complete(job["source_run_id"], eval_run_id, result)
+                    artifact_id = self.ledger.complete(
+                        job["source_run_id"], eval_run_id, result
+                    )
                     if self.config.mode == "active":
                         _publish_qa_discord_request(self.ledger, artifact_id, result)
                     completed += 1
                 except Exception as exc:  # noqa: BLE001 - retry outside business path
                     failed += 1
-                    self.ledger.retry(job["source_run_id"], type(exc).__name__, int(job["attempts"] or 0))
+                    self.ledger.retry(
+                        job["source_run_id"],
+                        type(exc).__name__,
+                        int(job["attempts"] or 0),
+                    )
         except Exception as exc:  # noqa: BLE001 - LangSmith outage is fail-open
-            LOGGER.warning("langsmith_feedback_poll_failed error=%s", type(exc).__name__)
-        return {"discovered": discovered, "completed": completed, "failed": failed, "dropped": dropped}
+            self._record_poll_failure(exc)
+        else:
+            self._record_poll_success()
+        finally:
+            if client is not None:
+                close_query_client(client)
+        return {
+            "discovered": discovered,
+            "completed": completed,
+            "failed": failed,
+            "dropped": dropped,
+        }
 
     def run_discord_retention_once(self) -> dict[str, int]:
         """Delete only resolved QA/review cards while retaining local history."""
@@ -2107,7 +2491,8 @@ class LangSmithFeedbackService:
                 self.run_once()
                 if self.ledger is not None:
                     self.ledger.cleanup(self.config.retention_days)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:
+                self._record_poll_failure(exc)
                 LOGGER.exception("langsmith_feedback_loop_failed")
             now = time.monotonic()
             if (
@@ -2120,9 +2505,9 @@ class LangSmithFeedbackService:
                 self._last_discord_retention_attempt = now
                 try:
                     self.run_discord_retention_once()
-                except Exception:  # noqa: BLE001 - retention is fail-open
+                except Exception:
                     LOGGER.exception("langsmith_feedback_discord_retention_failed")
-            self._stop.wait(max(0.1, self.config.poll_seconds - (time.monotonic() - started)))
+            self._stop.wait(self._poll_wait_seconds(time.monotonic() - started))
 
 
 _HINT_LOCK = threading.Lock()

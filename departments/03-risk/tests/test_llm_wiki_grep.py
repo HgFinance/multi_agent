@@ -5,7 +5,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "llm_wiki"))
 
-from grep_seed import TOPIC_KEYWORDS, detect_clause_ids, grep_seed, keyword_seed  # noqa: E402
+from grep_seed import (
+    TOPIC_KEYWORDS,
+    detect_clause_ids,
+    grep_seed,
+    keyword_seed,
+)
 
 
 def _write_page(wiki_dir: Path, page_id: str, clause_id: str) -> None:

@@ -182,6 +182,15 @@ Never return only operational descriptions such as:
 "scripts created"
 without the actual findings.
 
+### Terminal result persistence
+
+Before calling `kanban_complete`, write the complete Korean user-facing answer
+to both `result` and `final_answer`. Keep `summary` as a short handoff and keep
+structured metadata supplementary; neither may be the only answer store.
+`kanban_complete` is the final state transition and final tool call. If required
+evidence is missing, use `kanban_block` with `kind=needs_input`, or finish with
+an explicit fail-closed answer in `result`.
+
 For `fast_advisory`, keep the user-facing result concise and highly
 scannable. Prefer roughly 400-800 Korean characters per department unless
 additional evidence is necessary.

@@ -58,8 +58,7 @@ def _window_around(body: str, query: str) -> str:
         if found >= 0:
             idx = found
             break
-    if idx < 0:
-        idx = 0
+    idx = max(idx, 0)
     start = max(0, idx - WINDOW_CHARS // 2)
     end = min(len(body), idx + WINDOW_CHARS // 2)
     return body[start:end].strip()

@@ -29,21 +29,64 @@
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 # 근거 좌표로 인정하는 흔적. MCP 도구가 실제로 붙여 주는 형태들이다.
 #   citation=<sha16> / TR 코드(t1717) / rcept_no / URL / accession
 _EVIDENCE_PATTERNS = (
-    re.compile(r"citation[\"'\s:=]+([0-9a-f]{8,})", re.I),
+    re.compile(r"citation[\"'\s:=]+([0-9a-f]{8,})", re.IGNORECASE),
     re.compile(r"\bt\d{4}\b"),  # LS TR 코드
-    re.compile(r"\brcept_no\b", re.I),  # DART 접수번호
+    re.compile(r"\brcept_no\b", re.IGNORECASE),  # DART 접수번호
     re.compile(r"https?://[^\s)\]]+"),
-    re.compile(r"\baccession\b", re.I),  # SEC
+    re.compile(r"\baccession\b", re.IGNORECASE),  # SEC
+    # Trading의 PAPER 검증은 외부 시장 TR이 아니라 CEO root에 고정된
+    # 투자한도·회계 스냅샷을 근거로 한다. 원본을 재현할 수 있는 기록 해시만
+    # 허용하며, 임의의 "근거" 단어만으로는 통과시키지 않는다.
+    re.compile(
+        r"(?:기록\s*해시|검증\s*기록\s*식별자)\s*[:：=]\s*[0-9a-f]{8,}",
+        re.IGNORECASE,
+    ),
     # PAPER execution reports cite the authoritative Trading row rather than
     # a market-data TR or URL.  The UUID remains a coordinate, not a claim.
-    re.compile(r"\bdirective_id\s*[=:]\s*[0-9a-f]{8}-[0-9a-f-]{27,}", re.I),
+    re.compile(
+        r"\bdirective_id\s*[=:]\s*[0-9a-f]{8}-[0-9a-f-]{27,}",
+        re.IGNORECASE,
+    ),
 )
+
+# A failed retrieval is still reproducible when the attempt itself is
+# bounded and recorded.  This is deliberately strict: a bare word such as
+# ``unavailable`` must not turn an answer with no provenance into evidence.
+_BOUNDED_RETRIEVAL_FIELDS = (
+    "instrument",
+    "requested_window",
+    "source",
+    "tr",
+    "status",
+    "queried_at",
+    "extracted_at",
+    "snapshot_hash",
+)
+_BOUNDED_RETRIEVAL_MARKER = re.compile(
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]+)?retrieval_attempt[ \t]*:?[ \t]*\n?"
+)
+_BOUNDED_RETRIEVAL_FIELD = re.compile(
+    r"(?im)^[ \t]*([a-z][a-z0-9_]*)[ \t]*[:=][ \t]*([^\n]+)[ \t]*$"
+)
+
+
+def _normalized_bounded_record(
+    values: Mapping[str, object],
+) -> dict[str, str] | None:
+    record = {
+        field: str(values.get(field) or "").strip()
+        for field in _BOUNDED_RETRIEVAL_FIELDS
+    }
+    return record if all(record.values()) else None
+
 
 # 시점 표기. "지금 기준"인지 "어느 거래일 기준"인지가 시세성 답의 생명이다.
 _ASOF_PATTERNS = (
@@ -51,19 +94,173 @@ _ASOF_PATTERNS = (
     # after YYYY-MM-DD would incorrectly reject values such as
     # ``2026-08-26T15:22:30Z``.
     re.compile(r"\b20\d{2}[-/.]?\d{2}[-/.]?\d{2}"),
-    re.compile(r"queried_at|as[_\s-]?of|기준일|조회\s*시각|검증\s*시각|기준", re.I),
+    re.compile(
+        r"queried_at|as[_\s-]?of|기준일|조회\s*시각|검증\s*시각|기준",
+        re.IGNORECASE,
+    ),
 )
 
 # "모르는 것을 밝힌" 흔적. 없음을 없다고 말하는 문장.
 _HONESTY_PATTERNS = (
-    re.compile(r"미집계|집계\s*전|장중", re.I),
-    re.compile(r"미구현|미큐레이션|없다|없음|unavailable|not available", re.I),
-    re.compile(r"확인되지\s*않|검증\s*불가|추정|한계", re.I),
+    re.compile(r"미집계|집계\s*전|장중", re.IGNORECASE),
+    re.compile(
+        r"미구현|미큐레이션|없다|없음|unavailable|not available",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"확인되지\s*않|검증\s*불가|추정|한계|제한적|제한됨|"
+        r"확정(?:하기)?(?:는|은)?\s*(?:어렵|불가)|판단\s*보류|"
+        r"판단\s*할\s*수\s*없|제공되지\s*않|보고하지\s*않|"
+        r"공식\s*(?:확정값|확정 자료)\s*(?:이|가)?\s*아니|"
+        r"추가\s*(?:확인|검증)\s*(?:이|가)?\s*필요|"
+        r"(?:확인|검증|대조)(?:하지\s*못|할\s*수\s*없)|"
+        r"(?:확인|검증|대조)\s*(?:이|가)?\s*필요",
+        re.IGNORECASE,
+    ),
 )
 
 # 24자 = 숫자·단위·기준일이 함께 들어갈 수 없는 하한. 임계값을 높이면
 # 짧지만 정확한 답("8/13 외인계 -401,379주")을 빈 답으로 몰게 된다.
 MIN_BODY_CHARS = 24
+
+
+def _bounded_retrieval_parts(
+    text: str,
+) -> tuple[dict[str, str] | None, int | None, int | None]:
+    """Parse one record and return its source span for projection reuse."""
+
+    marker = _BOUNDED_RETRIEVAL_MARKER.search(text)
+    if marker is None:
+        return None, None, None
+    line_end = text.find("\n", marker.start())
+    if line_end < 0:
+        line_end = len(text)
+    marker_line = text[marker.start() : line_end].strip()
+    inline_payload = marker_line.partition(":")[2].strip()
+    if inline_payload:
+        try:
+            decoded = json.loads(inline_payload)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, Mapping):
+            record = _normalized_bounded_record(decoded)
+            if record is not None:
+                end = line_end + (1 if line_end < len(text) else 0)
+                return record, marker.start(), end
+    fenced_payload = re.match(
+        r"\s*```(?:json)?\s*(\{.*?\})\s*```",
+        text[marker.end() :],
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if fenced_payload is not None:
+        try:
+            decoded = json.loads(fenced_payload.group(1))
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, Mapping):
+            record = _normalized_bounded_record(decoded)
+            if record is not None:
+                end = marker.end() + fenced_payload.end()
+                return record, marker.start(), end
+    json_payload = text[marker.end() :]
+    leading_whitespace = len(json_payload) - len(json_payload.lstrip())
+    json_payload = json_payload.lstrip()
+    if json_payload.startswith("{"):
+        try:
+            decoded, consumed = json.JSONDecoder().raw_decode(json_payload)
+        except json.JSONDecodeError:
+            decoded = None
+            consumed = 0
+        if isinstance(decoded, Mapping):
+            record = _normalized_bounded_record(decoded)
+            if record is not None:
+                end = marker.end() + leading_whitespace + consumed
+                return record, marker.start(), end
+    fields: dict[str, str] = {}
+    end = marker.end()
+    for line in text[marker.end() :].splitlines(keepends=True):
+        if not line.strip():
+            break
+        field = _BOUNDED_RETRIEVAL_FIELD.fullmatch(line.rstrip("\r\n"))
+        if field is None:
+            break
+        fields[field.group(1)] = field.group(2).strip()
+        end += len(line)
+    record = _normalized_bounded_record(fields)
+    if record is None:
+        return None, None, None
+    return record, marker.start(), end
+
+
+def bounded_retrieval_attempt(text: str) -> dict[str, str] | None:
+    """Return one complete bounded retrieval-attempt record, if present.
+
+    The record is valid for both available and unavailable data.  In the
+    latter case ``source``, ``tr`` and ``snapshot_hash`` may explicitly be
+    ``UNAVAILABLE``; the attempt still has to identify the target and both
+    query/extraction times so an operator can reproduce the boundary.
+    """
+
+    record, _start, _end = _bounded_retrieval_parts(text)
+    return record
+
+
+def bounded_retrieval_attempt_from_metadata(
+    metadata: Mapping[str, object],
+) -> dict[str, str] | None:
+    """Normalize the same record when Hermes kept it in run metadata.
+
+    Older Quant workers put retrieval fields in ``task_runs.metadata`` while
+    newer workers may include the machine-readable block in ``result``.  The
+    projection boundary accepts both representations, but only when every
+    bounded field is present.
+    """
+
+    aliases = {
+        "instrument": ("instrument", "symbol", "ticker"),
+        "requested_window": ("requested_window", "window"),
+        "source": ("source", "data_source"),
+        "tr": ("tr", "tr_code", "transaction_id"),
+        "status": ("status", "data_status", "quality_status"),
+        "queried_at": ("queried_at", "as_of", "observed_at"),
+        "extracted_at": ("extracted_at", "retrieved_at"),
+        "snapshot_hash": ("snapshot_hash", "content_hash", "input_hash"),
+    }
+    values = {
+        field: next(
+            (metadata.get(alias) for alias in names if metadata.get(alias)),
+            "",
+        )
+        for field, names in aliases.items()
+    }
+    return _normalized_bounded_record(values)
+
+
+def format_bounded_retrieval_attempt(record: Mapping[str, object]) -> str:
+    """Render one normalized record for the final answer boundary."""
+
+    values = {
+        field: str(record.get(field) or "")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .strip()
+        for field in _BOUNDED_RETRIEVAL_FIELDS
+    }
+    if not all(values.values()):
+        return ""
+    return "\n".join(
+        ["retrieval_attempt:"]
+        + [f"{field}={values[field]}" for field in _BOUNDED_RETRIEVAL_FIELDS]
+    )
+
+
+def strip_bounded_retrieval_attempt(text: str) -> str:
+    """Remove the machine-readable record from manager-facing prose."""
+
+    _record, start, end = _bounded_retrieval_parts(text)
+    if start is None or end is None:
+        return str(text or "").strip()
+    return f"{text[:start]}\n{text[end:]}".strip()
 
 
 @dataclass(frozen=True)
@@ -110,7 +307,9 @@ def grade_answer(result: str, *, summary: str = "") -> AnswerGrade:
     body = str(result or "").strip()
     text = f"{body}\n{summary or ''}"
     has_body = len(body) >= MIN_BODY_CHARS
-    has_evidence = any(p.search(text) for p in _EVIDENCE_PATTERNS)
+    has_evidence = any(p.search(text) for p in _EVIDENCE_PATTERNS) or bool(
+        bounded_retrieval_attempt(text)
+    )
     has_as_of = any(p.search(text) for p in _ASOF_PATTERNS)
     states_unknowns = any(p.search(text) for p in _HONESTY_PATTERNS)
 
@@ -134,4 +333,12 @@ def grade_answer(result: str, *, summary: str = "") -> AnswerGrade:
     )
 
 
-__all__ = ["AnswerGrade", "MIN_BODY_CHARS", "grade_answer"]
+__all__ = [
+    "MIN_BODY_CHARS",
+    "AnswerGrade",
+    "bounded_retrieval_attempt",
+    "bounded_retrieval_attempt_from_metadata",
+    "format_bounded_retrieval_attempt",
+    "grade_answer",
+    "strip_bounded_retrieval_attempt",
+]

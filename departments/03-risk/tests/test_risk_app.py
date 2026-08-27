@@ -146,3 +146,14 @@ def test_04_risk_request_id_passthrough():
         },
     )
     assert r4.json()["risk_request_id"] == fixed_id
+
+
+def test_runtime_observability_declares_hermes_scope():
+    response = client.get("/risk/v1/observability/runtime")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["observability_scope"] == "risk-api-deterministic-pipeline"
+    assert body["hermes_included"] is False
+    assert body["aggregation_status"] == "PARTIAL"
+    assert "LangSmith" in body["hermes_observability_source"]

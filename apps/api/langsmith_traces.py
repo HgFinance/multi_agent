@@ -9,10 +9,12 @@ ledger, offline benchmark gate, CEO advisory의 source가 아니다. 새 평가 
 남고, `orchestration/llm_observability.py`의 기존 `publish_metric()` 요약 핑은
 고빈도 성능 데이터이므로 `LANGSMITH_METRICS_PROJECT`(기본
 `HgFinance-Metrics`)로 분리된다. 따라서 이 QA 화면은 metric ping이 아니라
-`First`에 있는 실제 `stage=qa` Worker trace를 읽는다(prompt/output은 절대
-전송하지 않는다). run 자체의 `tags`는 실측(2026-08-24) 결과
+`First`에 있는 실제 `stage=qa` 또는 `stage=qa-terminal` Worker trace를 읽는다(prompt/output은 절대
+전송하지 않는다). 여기서 latency는 QA Worker 실행시간이지 LangSmith API 요청
+왕복시간이 아니다. run 자체의 `tags`는 실측(2026-08-24) 결과
 비어 있고 - `redacted_trace()`가 여는 `tracing_context`의 태그가 LangGraph 자체
-root run까지 전파되지 않는다 - 부서 구분은 오직 `extra.metadata.stage`에만 있다.
+root run까지 전파되지 않는다 - 부서 구분은 `extra.metadata.stage`를 기준으로
+하고, workflow/turn-budget 값도 같은 metadata envelope에서 읽을 수 있다.
 그래서 여기서는 `stage:qa` 태그가 아니라 이 metadata 필드로 판정한다.
 
 같은 이유로 run 자체의 `error` 필드도 쓰지 않는다 - `publish_metric()`은
@@ -28,7 +30,7 @@ DEGRADED/BLOCKED/ERROR)와 `error_count`로 판정한다.
 Count가 실제 QA 실행량의 1%도 못 세고 있었다. 지금은 Worker 그래프
 invoke 자체가 `extra.metadata.stage`를 남기므로
 (`orchestration/llm_observability.py`의 `worker_graph_trace_config()`), 아래
-`_QA_STAGE` 필터가 실제 실행량을 온전히 잡는다.
+`_QA_STAGES` 필터가 실제 실행량을 온전히 잡는다.
 
 LangSmith는 선택적 추적 어댑터다(`docs/02-engineering/TECH_STACK_DECISIONS.md`).
 자격증명이 없거나 API 호출이 실패해도 이 모듈은 예외를 던지지 않고 상태 문자열로만
@@ -46,9 +48,9 @@ from typing import Any
 
 from starlette.concurrency import run_in_threadpool
 
-from orchestration.langsmith_queries import query_runs
+from orchestration.langsmith_queries import close_query_client, query_runs
 
-_QA_STAGE = "qa"
+_QA_STAGES = frozenset({"qa", "qa-terminal"})
 # AgentLogsView.tsx의 `degraded` 판정과 같은 집합 - 화면 전체에서 "실패"의 뜻을
 # 하나로 맞춘다.
 _ERROR_STATUSES = {"DEGRADED", "BLOCKED", "ERROR"}
@@ -89,6 +91,14 @@ def _day_range(days: int) -> list[str]:
 
 def _is_error(metadata: dict[str, Any]) -> bool:
     status = str(metadata.get("status") or "").upper()
+    # Risk uses BLOCKED as a valid fail-closed business outcome when required
+    # evidence is missing. Keep that distinct from an execution failure in
+    # the shared trace dashboard; the worker publisher applies the same rule.
+    if status == "BLOCKED" and (
+        str(metadata.get("department") or "").casefold() == "risk"
+        or str(metadata.get("profile") or "").casefold() == "risk-management"
+    ):
+        return False
     if status in _ERROR_STATUSES:
         return True
     error_count = metadata.get("error_count")
@@ -117,28 +127,47 @@ def _collect(days: int, project: str | None) -> dict[str, Any]:
     # adapter resolves the configured name once per process and enforces the
     # server page-size bound; the total result cap remains local.
     # 부서 구분이 태그가 아니라 metadata에 있어서(머리말) 서버 필터를 걸 수 없고,
-    # root run을 받아 이 안에서 stage=="qa"만 추린다.
+    # Worker/terminal QA runs may be children of the CEO root. Query the whole
+    # bounded tree and select QA stages locally; ``is_root=True`` would hide
+    # the repaired parent-linked traces.
     from orchestration.llm_observability import langsmith_project
 
-    runs = query_runs(
-        client,
-        project_name=project or langsmith_project("workflow") or "First",
-        min_start_time=since,
-        max_start_time=now,
-        is_root=True,
-        page_size=100,
-        max_results=_MAX_RUNS,
-        selects=["START_TIME", "END_TIME", "EXTRA"],
-    )
+    try:
+        runs = query_runs(
+            client,
+            project_name=project or langsmith_project("workflow") or "First",
+            min_start_time=since,
+            max_start_time=now,
+            is_root=None,
+            page_size=100,
+            max_results=_MAX_RUNS,
+            selects=["ID", "START_TIME", "END_TIME", "EXTRA"],
+        )
+    finally:
+        close_query_client(client)
 
-    by_day: dict[str, dict[str, Any]] = defaultdict(lambda: {"success": 0, "error": 0, "latencies": []})
-    for seen, run in enumerate(runs):
-        if seen >= _MAX_RUNS:
-            break
+    # A QA worker and its terminal projection can both carry a QA stage. Count
+    # one logical QA task, preferring the terminal projection because it owns
+    # the durable verdict and persisted QA execution latency.
+    selected: dict[tuple[str, str, str], tuple[int, Any, dict[str, Any]]] = {}
+    for run in runs[:_MAX_RUNS]:
         extra = getattr(run, "extra", None) or {}
         metadata = extra.get("metadata") or {}
-        if metadata.get("stage") != _QA_STAGE:
+        stage = str(metadata.get("stage") or "").strip().casefold()
+        if stage not in _QA_STAGES:
             continue
+        key = (
+            str(metadata.get("root_id") or ""),
+            str(metadata.get("task_id") or ""),
+            str(metadata.get("request_id") or getattr(run, "id", "")),
+        )
+        priority = 1 if stage == "qa-terminal" else 0
+        current = selected.get(key)
+        if current is None or priority > current[0]:
+            selected[key] = (priority, run, metadata)
+
+    by_day: dict[str, dict[str, Any]] = defaultdict(lambda: {"success": 0, "error": 0, "latencies": []})
+    for _priority, run, metadata in selected.values():
         started = getattr(run, "start_time", None)
         if started is None:
             continue
@@ -232,7 +261,7 @@ def _is_rate_limited(exc: Exception) -> bool:
 
 
 async def qa_trace_timeseries(days: int = 7) -> dict[str, Any]:
-    """`metadata.stage == "qa"`인 LangSmith root run을 날짜별로 집계한다."""
+    """QA Worker 실행시간을 LangSmith trace에서 날짜별로 집계한다."""
 
     days = max(1, min(int(days), _MAX_DAYS))
     if not _configured():

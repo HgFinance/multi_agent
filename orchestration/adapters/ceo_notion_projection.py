@@ -30,7 +30,11 @@ from orchestration.adapters.terminal_projection_utils import (
     workflow_role,
     workflow_root,
 )
-from orchestration.ceo_workflow_scope import selected_primary_profiles_from_task
+from orchestration.ceo_workflow_scope import (
+    langsmith_trace_run_id_from_body,
+    read_marker,
+    selected_primary_profiles_from_task,
+)
 from orchestration.qa_contract import split_planner_selection
 
 logger = logging.getLogger(__name__)
@@ -413,6 +417,13 @@ class CeoNotionProjection:
         return {
             "root_task_id": root_task_id,
             "synthesis_task_id": task_id(task),
+            "request_id": str(
+                metadata.get("request_id") or read_marker(root_body, "request_id")
+            ).strip(),
+            "langsmith_root_run_id": langsmith_trace_run_id_from_body(root_body),
+            "discord_channel_id": read_marker(root_body, "discord_channel_id"),
+            "discord_message_id": read_marker(root_body, "discord_message_id"),
+            "discord_thread_id": read_marker(root_body, "discord_thread_id"),
             "original_query": str(
                 metadata.get("original_query")
                 or metadata.get("query")
@@ -607,6 +618,12 @@ class CeoNotionProjection:
             "## 업무 개요\n\n"
             f"- 검토 부서: {selected_departments}\n"
             f"- 업무 유형: {_workflow_mode_label(fields['workflow_mode'])}\n\n"
+            "## 실행 연결\n\n"
+            f"- CEO Task ID: `{fields['root_task_id']}`\n"
+            f"- Synthesis Task ID: `{fields['synthesis_task_id']}`\n"
+            f"- Request ID: `{fields['request_id'] or '미기록'}`\n"
+            f"- LangSmith Root ID: `{fields['langsmith_root_run_id'] or '미기록'}`\n"
+            f"- Discord Thread ID: `{fields['discord_thread_id'] or '미기록'}`\n\n"
             "## 최종 판단\n\n"
             f"{fields['final_answer']}"
         )
@@ -630,6 +647,18 @@ class CeoNotionProjection:
                 "created_at": _rich_text(fields["created_at"]),
                 "completed_at": _rich_text(fields["completed_at"]),
             }
+            # Projection databases are user-managed. Add correlation fields
+            # only when the existing schema declares them; the same IDs remain
+            # in the report body for older databases.
+            for field_name in (
+                "request_id",
+                "langsmith_root_run_id",
+                "discord_channel_id",
+                "discord_message_id",
+                "discord_thread_id",
+            ):
+                if field_name in schema_properties:
+                    properties[field_name] = _rich_text(fields[field_name])
         children = markdown_to_notion_blocks(report)
         try:
 
@@ -639,11 +668,14 @@ class CeoNotionProjection:
                     existing = transport.query_projection(database_id, key)
                     if existing:
                         return existing
-                elif current_report_schema and force_upsert:
+                elif current_report_schema:
                     query_title = getattr(transport, "query_title", None)
                     if callable(query_title):
-                        # New pages use a human-readable timestamp title. Keep
-                        # the former task-id title as a one-time migration
+                        # The current CEO schema has no machine projection-key
+                        # property. Query its stable human title on every
+                        # replay; the Kanban comment is only a compatibility
+                        # hint and can be absent after a partial delivery.
+                        # Keep the former task-id title as a one-time migration
                         # fallback so correction/replay remains idempotent.
                         for title in (
                             _human_report_title(fields),

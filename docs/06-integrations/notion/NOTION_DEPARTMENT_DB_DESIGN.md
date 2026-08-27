@@ -1,6 +1,6 @@
 # Notion 부서별 데이터베이스 설계
 
-> Current runtime 기준: 2026-08-03
+> Current runtime 기준: 2026-08-27
 
 Notion은 부서 산출물을 사람이 검토하기 위한 Projection이다. 결정론적 Risk/QA Engine, OMS, Ledger, NAV, Hermes 세션의 Source of Truth가 아니며 Notion 값을 수정해 binding decision을 바꿀 수 없다.
 
@@ -12,12 +12,12 @@ Notion은 부서 산출물을 사람이 검토하기 위한 Projection이다. �
 |---|---|---|---|
 | CEO | `ceo-agent` | `departments/00-ceo-office/notion_reporter.py` | adapter 존재; credential·HTTP 성공 별도 확인 |
 | Research | `research-department` | `departments/01-research/notion_reporter.py` | adapter 존재; credential·HTTP 성공 별도 확인 |
-| Trading | `trading-department` | `departments/02-trading/notion_reporter.py` | adapter 존재; OMS 결과와 분리 |
+| Trading | `trading-department` | `orchestration.adapters.department_notion_projection.DepartmentNotionProjection` | CEO supervisor terminal projection; OMS 결과와 분리 |
 | Risk | `risk-management` | `departments/03-risk/notion_reporter.py` | adapter 존재; Risk Engine 결과의 Projection |
 | Quant/Backtest | `quant-backtest-department` | 없음 | Reporter 미구현; 백테스트 발행 계약이 선행 |
 | Accounting/Portfolio | `accounting-portfolio-department` | `departments/05-accounting-portfolio/notion_reporter.py` | adapter 존재; Ledger/NAV Source of Truth 아님 |
 | AI QA/Audit | `qa-department` | `departments/06-ai-qa-audit/notion_reporter.py` | adapter 존재; Evidence QA 결과의 Projection |
-| HR | `hr-department` | `departments/07-agent-workforce/notion_reporter.py` | adapter 존재; 인사·Lifecycle 결과의 Projection |
+| HR | `hr-department` | `orchestration.adapters.department_notion_projection.DepartmentNotionProjection` | 중앙 Projection adapter; HR Workforce·Lifecycle 결과의 Projection |
 
 `adapter 존재`는 코드가 있다는 뜻일 뿐 업로드 성공을 의미하지 않는다. 실제 성공은 `credentials_configured`, HTTP 응답, `upload_succeeded`, `report_path`를 실행 로그에서 확인한다.
 

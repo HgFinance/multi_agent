@@ -22,7 +22,7 @@ from typing import Any
 from orchestration.adapters.ceo_supervisor import HermesKanbanClient
 from orchestration.ceo_workflow_scope import read_marker, workflow_mode_from_body
 from orchestration.discord_idempotency import DiscordIdempotencyStore
-from orchestration.langsmith_queries import query_runs
+from orchestration.langsmith_queries import close_query_client, query_runs
 
 _TERMINAL_TASK_STATES = frozenset(
     {"done", "completed", "archived", "blocked", "failed", "gave_up", "crashed", "timed_out"}
@@ -148,16 +148,19 @@ def reconcile_pending_langsmith(
             hide_metadata=False,
             omit_traced_runtime_info=True,
         )
-        runs = query_runs(
-            client,
-            project_name=langsmith_project("workflow"),
-            min_start_time=now - timedelta(days=max(1, min(lookback_days, 365))),
-            max_start_time=now,
-            is_root=True,
-            page_size=100,
-            max_results=500,
-            selects=["ID", "NAME", "STATUS", "ERROR", "START_TIME", "END_TIME", "EXTRA", "OUTPUTS"],
-        )
+        try:
+            runs = query_runs(
+                client,
+                project_name=langsmith_project("workflow"),
+                min_start_time=now - timedelta(days=max(1, min(lookback_days, 365))),
+                max_start_time=now,
+                is_root=True,
+                page_size=100,
+                max_results=500,
+                selects=["ID", "NAME", "STATUS", "ERROR", "START_TIME", "END_TIME", "EXTRA", "OUTPUTS"],
+            )
+        finally:
+            close_query_client(client)
         pending_runs = [run for run in runs if getattr(run, "end_time", None) is None]
         result["discovered"] = len(pending_runs)
         if not pending_runs:
@@ -190,7 +193,7 @@ def reconcile_pending_langsmith(
             for root_id in roots_by_request.get(request_id, ()):
                 try:
                     response = _response_candidate(kanban, root_id)
-                except Exception:
+                except Exception:  # noqa: BLE001 - isolate one candidate from provider errors.
                     result["errors"] += 1
                     continue
                 if response is None:
@@ -212,7 +215,7 @@ def reconcile_pending_langsmith(
                 )
                 try:
                     workflow_mode = workflow_mode_from_body(root_body)
-                except Exception:
+                except Exception:  # noqa: BLE001 - malformed historical marker uses default mode.
                     workflow_mode = "analysis"
                 try:
                     closed = close_root_trace(
@@ -234,7 +237,7 @@ def reconcile_pending_langsmith(
                             "observability_source": "ceo-pending-trace-reconciliation",
                         },
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 - isolate one candidate from provider errors.
                     # A provider/API failure is distinct from a safe refusal
                     # to claim closure.  Neither may abort other candidates.
                     result["errors"] += 1
@@ -249,7 +252,7 @@ def reconcile_pending_langsmith(
                 break
             else:
                 result["skipped"] += 1
-    except Exception:
+    except Exception:  # noqa: BLE001 - reconciliation must return a safe error summary.
         result["errors"] += 1
     return result
 

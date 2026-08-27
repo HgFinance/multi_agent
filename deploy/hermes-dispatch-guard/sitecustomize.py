@@ -1,4 +1,5 @@
 import inspect
+import logging
 import os
 import sqlite3
 import sys
@@ -23,6 +24,7 @@ _TERMINAL_RUN_STATES = frozenset({
     "crashed",
     "failed",
 })
+_OBSERVER_LOG = logging.getLogger("hgfinance.dispatch_observer")
 
 
 def _fail_closed_secret_scope(reason):
@@ -62,11 +64,125 @@ def _suppress_dispatcher_cwd_warning():
     _dispatcher_safe_cwd_warning._hgfinance_dispatcher_cwd = True
     hermes_config.warn_deprecated_cwd_env_vars = _dispatcher_safe_cwd_warning
 
+
 if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
     try:
         import hermes_cli.kanban_db as kb
 
         _suppress_dispatcher_cwd_warning()
+
+        # Hermes' turn finalizer can reach its iteration-budget fallback after
+        # a worker has already committed ``kanban_complete``.  The native
+        # failure recorder then appends a misleading ``timed_out`` event to a
+        # terminal card (the task itself remains done, but downstream
+        # observers render a false limited-result warning).  Keep the native
+        # fallback for running cards and make only this late terminal race a
+        # no-op.  A read failure deliberately delegates to Hermes so this
+        # observer guard can never become a new execution dependency.
+        try:
+            from agent import turn_finalizer as _turn_finalizer
+
+            _original_budget_exhausted = getattr(
+                _turn_finalizer, "_record_kanban_budget_exhausted", None
+            )
+            _terminal_budget_states = frozenset({
+                "done",
+                "completed",
+                "archived",
+                "blocked",
+                "gave_up",
+                "timed_out",
+                "crashed",
+                "failed",
+                "triage",
+            })
+            if callable(_original_budget_exhausted) and not getattr(
+                _original_budget_exhausted,
+                "_hgfinance_terminal_race_guard",
+                False,
+            ):
+
+                def _hgfinance_task_is_terminal(task_id):
+                    db_path = os.environ.get("HERMES_KANBAN_DB", "").strip()
+                    if not db_path:
+                        return False
+                    try:
+                        connection = sqlite3.connect(
+                            f"file:{Path(db_path).resolve()}?mode=ro",
+                            uri=True,
+                            timeout=1.0,
+                        )
+                        try:
+                            row = connection.execute(
+                                "SELECT status FROM tasks WHERE id = ?",
+                                (str(task_id),),
+                            ).fetchone()
+                        finally:
+                            connection.close()
+                        return bool(
+                            row
+                            and str(row[0] or "").casefold()
+                            in _terminal_budget_states
+                        )
+                    except (OSError, sqlite3.Error, TypeError, ValueError):
+                        return False
+
+                @wraps(_original_budget_exhausted)
+                def _hgfinance_budget_exhausted_guard(
+                    task_id, api_call_count, max_iterations, logger
+                ):
+                    if _hgfinance_task_is_terminal(task_id):
+                        return None
+                    return _original_budget_exhausted(
+                        task_id, api_call_count, max_iterations, logger
+                    )
+
+                _hgfinance_budget_exhausted_guard._hgfinance_terminal_race_guard = True
+                _turn_finalizer._record_kanban_budget_exhausted = (
+                    _hgfinance_budget_exhausted_guard
+                )
+
+                _original_finalize_turn = getattr(
+                    _turn_finalizer, "finalize_turn", None
+                )
+                if callable(_original_finalize_turn) and not getattr(
+                    _original_finalize_turn,
+                    "_hgfinance_terminal_race_guard",
+                    False,
+                ):
+
+                    @wraps(_original_finalize_turn)
+                    def _hgfinance_finalize_turn_guard(agent, *args, **kwargs):
+                        task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+                        final_response = kwargs.get("final_response")
+                        try:
+                            api_call_count = int(kwargs.get("api_call_count") or 0)
+                            max_iterations = int(getattr(agent, "max_iterations", 0) or 0)
+                        except (TypeError, ValueError):
+                            api_call_count = 0
+                            max_iterations = 0
+                        if (
+                            task_id
+                            and final_response is None
+                            and max_iterations > 0
+                            and api_call_count >= max_iterations
+                            and _hgfinance_task_is_terminal(task_id)
+                        ):
+                            # The terminal tool already persisted the complete
+                            # handoff. Avoid one extra summary-model call after
+                            # the budget was consumed by that final tool turn.
+                            kwargs["final_response"] = ""
+                            kwargs["_turn_exit_reason"] = (
+                                "text_response(kanban_terminal)"
+                            )
+                            kwargs["_pending_verification_response"] = None
+                            kwargs["_pending_verification_response_previewed"] = False
+                        return _original_finalize_turn(agent, *args, **kwargs)
+
+                    _hgfinance_finalize_turn_guard._hgfinance_terminal_race_guard = True
+                    _turn_finalizer.finalize_turn = _hgfinance_finalize_turn_guard
+        except Exception:  # noqa: BLE001, S110 - optional compatibility guard
+            pass
 
         # The shared dispatcher is the real process that runs CEO workers.
         # The CEO gateway image has the same validator, but it is not the
@@ -118,22 +234,21 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
         # tracking card is briefly visible in the ready lane, this dispatcher
         # can never claim or spawn it.  Keep the card durable for dashboard /
         # correlation and leave its state untouched.
+        def _is_strategy_tracking_body(body):
+            return "strategy_research_tracking_only=true" in str(body or "")
+
         def _is_strategy_tracking_task(conn, task_id):
             try:
                 row = conn.execute(
                     "SELECT body FROM tasks WHERE id = ?", (task_id,)
                 ).fetchone()
-                return bool(
-                    row is not None
-                    and "strategy_research_tracking_only=true" in str(
-                        row["body"] or ""
-                    )
-                )
+                return bool(row is not None and _is_strategy_tracking_body(row["body"]))
             except Exception:  # noqa: BLE001 - dispatcher guard fails open
                 return False
 
         _original_claim_task = getattr(kb, "claim_task", None)
         if callable(_original_claim_task):
+
             @wraps(_original_claim_task)
             def _hgfinance_guarded_claim_task(conn, task_id, *args, **kwargs):
                 if _is_strategy_tracking_task(conn, task_id):
@@ -144,6 +259,7 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
 
         _original_claim_review_task = getattr(kb, "claim_review_task", None)
         if callable(_original_claim_review_task):
+
             @wraps(_original_claim_review_task)
             def _hgfinance_guarded_claim_review_task(
                 conn, task_id, *args, **kwargs
@@ -153,6 +269,56 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                 return _original_claim_review_task(conn, task_id, *args, **kwargs)
 
             kb.claim_review_task = _hgfinance_guarded_claim_review_task
+
+        # Strategy Hermes owns these durable tracking cards. They stay visible
+        # in the shared board for correlation, but the generic dispatcher must
+        # not call them spawnable work; their claim hooks above already keep
+        # them unclaimed. Align the health probe with that ownership boundary
+        # so a legitimate tracking backlog does not report a false stall.
+        _original_has_spawnable_ready = getattr(kb, "has_spawnable_ready", None)
+        if callable(_original_has_spawnable_ready):
+
+            def _dispatcher_has_capacity(conn):
+                """Keep intentional concurrency backpressure out of stuck health."""
+
+                try:
+                    max_spawn = int(
+                        os.environ.get("KANBAN_DISPATCH_MAX_SPAWN", "")
+                    )
+                except (TypeError, ValueError):
+                    return True
+                if max_spawn < 1:
+                    return True
+                running = conn.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+                ).fetchone()[0]
+                return int(running) < max_spawn
+
+            def _hgfinance_has_spawnable_ready(conn, *args, **kwargs):
+                try:
+                    rows = conn.execute(
+                        "SELECT DISTINCT assignee, body FROM tasks "
+                        "WHERE status = 'ready' AND assignee IS NOT NULL "
+                        "AND claim_lock IS NULL"
+                    ).fetchall()
+                    rows = [
+                        row
+                        for row in rows
+                        if not _is_strategy_tracking_body(row[1])
+                    ]
+                    if not rows:
+                        return False
+                    if not _dispatcher_has_capacity(conn):
+                        return False
+                    try:
+                        from hermes_cli.profiles import profile_exists
+                    except (ImportError, AttributeError):
+                        return True
+                    return any(profile_exists(row[0]) for row in rows)
+                except Exception:  # noqa: BLE001 - preserve Hermes fallback
+                    return _original_has_spawnable_ready(conn, *args, **kwargs)
+
+            kb.has_spawnable_ready = _hgfinance_has_spawnable_ready
 
         _original_check_respawn_guard = kb.check_respawn_guard
         _original_guard_accepts_lane = (
@@ -276,7 +442,11 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                 assignee = str(getattr(task, "assignee", "") or "").strip()
                 try:
                     from hermes_worker_observability import _PROFILE_SPECS
-                except Exception:  # noqa: BLE001 - observer is fail-open
+                except Exception as exc:  # noqa: BLE001 - observer is fail-open
+                    _OBSERVER_LOG.warning(
+                        "department-worker-trace-import-failed error=%s",
+                        type(exc).__name__,
+                    )
                     return
                 if assignee not in _PROFILE_SPECS:
                     return
@@ -416,8 +586,13 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                             argv=["-p", assignee],
                             env=os.environ,
                         )
-                    except Exception:  # noqa: BLE001 - observability is fail open
+                    except Exception as exc:  # noqa: BLE001 - observability is fail open
                         # Observability must never change dispatcher behavior.
+                        _OBSERVER_LOG.warning(
+                            "department-worker-trace-failed assignee=%s error=%s",
+                            assignee,
+                            type(exc).__name__,
+                        )
                         return
 
                 threading.Thread(

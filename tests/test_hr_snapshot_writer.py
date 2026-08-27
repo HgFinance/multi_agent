@@ -20,13 +20,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "departments/07-agent-workforce/scorecard"))
 
-from observability import (  # noqa: E402
+from observability import (
     CapacityObservationStatus,
     DepartmentCapacityReport,
     WorkerUsageObservationStatus,
     WorkerUsageReport,
 )
-from snapshot_writer import (  # noqa: E402
+from snapshot_writer import (
     DEPARTMENT_CODE_BY_STAGE_KEY,
     MODEL_PRICING,
     RECORDED_BY,
@@ -80,11 +80,17 @@ class _Observability:
 def _capacity(
     department="research", status=CapacityObservationStatus.MEASURED, arrivals=69, **kw
 ) -> DepartmentCapacityReport:
-    base = dict(
-        department=department, window_start=_START, window_end=_END, status=status,
-        arrivals=arrivals, duration_p95_ms=1200.0, retry_rate=0.0, error_rate=0.02,
-        utilization=0.13,
-    )
+    base = {
+        "department": department,
+        "window_start": _START,
+        "window_end": _END,
+        "status": status,
+        "arrivals": arrivals,
+        "duration_p95_ms": 1200.0,
+        "retry_rate": 0.0,
+        "error_rate": 0.02,
+        "utilization": 0.13,
+    }
     base.update(kw)
     return DepartmentCapacityReport(**base)
 
@@ -94,11 +100,18 @@ def _usage(
     status=WorkerUsageObservationStatus.MEASURED, prompt=1732, completion=183,
     models=("qwen2.5-14b-instruct-awq",), arrivals=67, **kw
 ) -> WorkerUsageReport:
-    base = dict(
-        department=department, worker_id=worker_id, window_start=_START, window_end=_END,
-        status=status, arrivals=arrivals, llm_calls=70, prompt_tokens=prompt,
-        completion_tokens=completion, model_names=tuple(models),
-    )
+    base = {
+        "department": department,
+        "worker_id": worker_id,
+        "window_start": _START,
+        "window_end": _END,
+        "status": status,
+        "arrivals": arrivals,
+        "llm_calls": 70,
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "model_names": tuple(models),
+    }
     base.update(kw)
     return WorkerUsageReport(**base)
 
@@ -122,7 +135,7 @@ def test_unknown_department_key_fails_loudly() -> None:
 
 
 def test_bridge_covers_every_observed_department() -> None:
-    from observability import INVESTMENT_DEPARTMENT_STAGE  # noqa: PLC0415
+    from observability import INVESTMENT_DEPARTMENT_STAGE
 
     assert set(DEPARTMENT_CODE_BY_STAGE_KEY) == set(INVESTMENT_DEPARTMENT_STAGE), (
         "관측 부서와 다리 표가 갈렸다 - 빠진 부서는 Snapshot 이 조용히 안 적힌다"
@@ -192,8 +205,13 @@ def test_nonzero_priced_models_refuse_to_be_summed_without_token_split() -> None
 def test_unmeasured_capacity_is_never_written_as_zero(status) -> None:
     """관측 실패·대상 없음을 0 으로 적으면 "측정했더니 한가하다"가 된다."""
 
-    kw = dict(arrivals=None, duration_p95_ms=None, retry_rate=None,
-              error_rate=None, utilization=None)
+    kw = {
+        "arrivals": None,
+        "duration_p95_ms": None,
+        "retry_rate": None,
+        "error_rate": None,
+        "utilization": None,
+    }
     if status is CapacityObservationStatus.UNAVAILABLE:
         kw["reason"] = "langfuse_trace_list_failed:Error:http_400"
     repo = _FakeRepo()
@@ -323,7 +341,7 @@ def test_builders_refuse_unmeasured_reports_directly() -> None:
 
 
 def test_window_is_aligned_and_covers_only_completed_buckets() -> None:
-    from snapshot_writer import aligned_window  # noqa: PLC0415
+    from snapshot_writer import aligned_window
 
     start, end = aligned_window(now=datetime(2026, 8, 27, 12, 34, 56, tzinfo=timezone.utc))
     assert end == datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
@@ -337,7 +355,7 @@ def test_window_is_aligned_and_covers_only_completed_buckets() -> None:
 def test_reruns_within_the_same_hour_target_the_identical_window() -> None:
     """멱등 갱신의 전제 - 창이 조금이라도 다르면 unique index 를 비껴가 새 행이 된다."""
 
-    from snapshot_writer import aligned_window  # noqa: PLC0415
+    from snapshot_writer import aligned_window
 
     base = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
     windows = {
@@ -349,7 +367,7 @@ def test_reruns_within_the_same_hour_target_the_identical_window() -> None:
 def test_consecutive_buckets_do_not_overlap() -> None:
     """비용은 창 안의 행을 합산한다 - 겹치면 그만큼 이중 계상된다."""
 
-    from snapshot_writer import aligned_window  # noqa: PLC0415
+    from snapshot_writer import aligned_window
 
     base = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
     first = aligned_window(now=base)
@@ -358,16 +376,16 @@ def test_consecutive_buckets_do_not_overlap() -> None:
 
 
 def test_naive_datetime_is_rejected() -> None:
-    from snapshot_writer import aligned_window  # noqa: PLC0415
+    from snapshot_writer import aligned_window
 
     with pytest.raises(ValueError, match="timezone-aware"):
-        aligned_window(now=datetime(2026, 8, 27, 12))
+        aligned_window(now=datetime.fromisoformat("2026-08-27T12:00:00"))
 
 
 def test_run_once_observes_exactly_the_bucket_it_writes() -> None:
     """관측 창과 기록 창이 어긋나면 한 시간짜리 행에 다른 시간의 수치가 들어간다."""
 
-    import snapshot_writer as sw  # noqa: PLC0415
+    import snapshot_writer as sw
 
     captured: dict = {}
 
@@ -396,7 +414,7 @@ def test_run_once_observes_exactly_the_bucket_it_writes() -> None:
 def test_scheduler_survives_a_failing_cycle() -> None:
     """한 번 실패했다고 루프를 끝내면, 재시작 루프가 오히려 관측 공백을 만든다."""
 
-    import snapshot_writer as sw  # noqa: PLC0415
+    import snapshot_writer as sw
 
     calls = {"n": 0}
 
@@ -429,7 +447,7 @@ def test_scheduler_survives_a_failing_cycle() -> None:
 def test_heartbeat_is_written_even_when_nothing_was_recorded() -> None:
     """기록 0건(정상)과 writer 사망을 healthcheck 가 구분해야 한다."""
 
-    import snapshot_writer as sw  # noqa: PLC0415
+    import snapshot_writer as sw
 
     path = Path(_tmp_health())
     original, sw.run_once = sw.run_once, (
@@ -445,7 +463,7 @@ def test_heartbeat_is_written_even_when_nothing_was_recorded() -> None:
 
 
 def test_healthcheck_fails_when_the_heartbeat_goes_stale_or_missing() -> None:
-    import snapshot_writer as sw  # noqa: PLC0415
+    import snapshot_writer as sw
 
     missing = Path(_tmp_health())
     assert sw.healthcheck(missing) is False
@@ -460,7 +478,7 @@ def test_healthcheck_fails_when_the_heartbeat_goes_stale_or_missing() -> None:
 def test_backfill_fills_oldest_first_and_paces_between_buckets() -> None:
     """버킷당 Langfuse 왕복 2회 - 분당 15 상한이라 연달아 쏘면 스스로 429 를 만든다."""
 
-    import snapshot_writer as sw  # noqa: PLC0415
+    import snapshot_writer as sw
 
     seen: list[datetime] = []
     original = sw.run_once
@@ -492,9 +510,9 @@ def test_backfill_fills_oldest_first_and_paces_between_buckets() -> None:
 
 
 def _tmp_health() -> str:
-    import tempfile  # noqa: PLC0415
+    import tempfile
 
-    handle = tempfile.NamedTemporaryFile(delete=False, suffix=".health")
-    handle.close()
-    Path(handle.name).unlink(missing_ok=True)
-    return handle.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".health") as handle:
+        path = handle.name
+    Path(path).unlink(missing_ok=True)
+    return path

@@ -10,10 +10,11 @@ from orchestration.conditional_rules.worker_store import ConditionalRuleOutboxRo
 class _FakeRedis:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, str]]] = []
+        self.kwargs: list[dict[str, object]] = []
 
     def xadd(self, stream: str, fields: dict[str, str], **kwargs: object) -> str:
-        del kwargs
         self.calls.append((stream, fields))
+        self.kwargs.append(kwargs)
         return "1-0"
 
 
@@ -45,3 +46,4 @@ def test_conditional_rule_outbox_publisher_emits_one_canonical_stream_event() ->
     assert fields["aggregate_id"] == "rule-1"
     assert fields["event_type"] == "DIRECTIVE_SUBMITTED"
     assert '"directive_id":"directive-1"' in fields["payload"]
+    assert fake.kwargs == [{}]

@@ -86,9 +86,14 @@
 
 ### 🎩 Hermes 부서장 게이트웨이 (8)
 
-전부 같은 이미지, 같은 command(`gateway run`), 공용 kanban 볼륨(`/opt/kanban`) 마운트. **부서 페르소나·도구·인증은 각자의 프로필 마운트(`/opt/data`)가 결정한다.**
+전부 같은 Hermes lifecycle과 공용 kanban 볼륨(`/opt/kanban`) 마운트를 사용한다.
+CEO·QA·HR는 저장소 패치 이미지, 나머지는 upstream 이미지다. **부서 페르소나·도구·인증은
+각자의 프로필 마운트(`/opt/data`)가 결정한다.**
 
-> **[main] 이미지가 8개 전부 교체됐다**: `nousresearch/hermes-agent:latest` → `hgfinance/hermes-discord:discord-idempotency-v1` (빌드 `Dockerfile.hermes-discord`). Discord 게이트웨이 통합 + 멱등성 이미지다. 로컬에 떠 있는 8개는 아직 옛 이미지.
+> **2026-08-27 운영 상태**: `ceo-hermes`, `qa-hermes`, `workforce-hermes`는
+> `Dockerfile.hermes-discord` 기반 이미지와 `/opt/kanban` 공유 멱등성 원장을
+> 사용한다. 나머지 Gateway는 전환 전까지 upstream 이미지 경로다. 패치 대상의
+> `DISCORD_IDEMPOTENCY_SCOPE=global`이 프로필 간 단일 ingress claim을 보장한다.
 
 | 서비스 | 프로필(= 카드 assignee 정본) | 비고 |
 |---|---|---|
@@ -180,7 +185,7 @@
 
 ### 아직 배선 안 된 자리 (문서에만 있음)
 
-- 퀀트 `hiring_priority:` 의 `proposal-intake` / `experiment-design` / `outcome-lesson-worker` 3명 — `registration: pending_hr` 로 코드·workers: 정본 어디에도 없음. 그 역할은 현재 factory_autopilot 의 결정론 코드가 대신한다.
+- 퀀트의 폐지된 `proposal-intake` / `experiment-design` / `outcome-lesson-worker` worker 표면 — ✅ **2026-08-27 정리**. 결정론 pipeline이 소유하므로 profile allowlist/hiring priority에서 제거했고, 실제 worker는 strategy author/result interpretation 2명만 유지한다.
 - `pending_hr` 플래그 자체는 낡았다 — 이미 구현된 퀀트 워커 2명에도 붙어 있어 미배선 판별 기준이 못 됨.
 
 ---
@@ -324,9 +329,9 @@
 | 4 | 런타임 프로필 8개 전부 저장소 `hermes/config.yaml` 과 크기 불일치 (트레이딩은 47%) | 동기화 + 대조 검사 필요 |
 | 5 | CEO 페르소나의 부서 목록에 `workforce-management` — 유효명은 `hr-department` | 아직 안 터진 지뢰 |
 | 6 | 퀀트 공장 워커 3명(접수·설계·교훈) `pending_hr` 미구현 — 결정론 코드가 대행 중 | 편제 결정 필요 |
-| 7 | `ceo-kanban-supervisor` `canonical abort failed: exited 1` 반복 | [main] `55b956b`(parentless task projection 수정)이 관련 가능성 — 새 코드 반영 후 재관측 필요 |
+| 7 | CEO primary가 workflow root와 실제 parent edge 없이 marker에만 의존하고, summary-only 완료가 `tasks.result`를 비우던 경로 | ✅ **2026-08-27 수정** — primary root edge, canonical result installer, bounded Quant retrieval record를 적용하고 재검증 필요 |
 | 8 | ~~로컬 실행 스택 60커밋 지연~~ | ✅ **2026-08-13 해소** — origin/main 병합(`d20bfa1`) + 재기동, 38/38 실행. 8001 은 portfolio-bff 로 인계 완료 |
-| 9 | ~~`Dockerfile.hermes-discord` 부재~~ | ✅ **2026-08-13 해소** — `2ea7342` 로 Dockerfile 이 커밋됐고, 설계도 바뀌었다: **기본 compose 는 표준 이미지**(`nousresearch/hermes-agent`)로 돌고, Discord 멱등 이미지는 중복 전달이 실측될 때만 얹는 **선택 오버레이**(`docker-compose.discord-idempotency.yml`)가 됐다. 로컬 `.env` 핀도 제거함 — 현재 로컬 = GitHub 구성 그대로 |
+| 9 | ~~`Dockerfile.hermes-discord` 부재~~ | ✅ **2026-08-13 해소** — Dockerfile이 커밋됐다. **2026-08-27 현재 CEO·QA·HR는 패치 이미지와 공유 ingress claim을 사용**하고, 나머지 Gateway는 전환 전까지 표준 upstream 이미지를 사용한다. |
 | 10 | 팀원 소유 테스트 실패 2건 — `test_unavailable_aws_only_sources…`(하드코딩 목록), `test_task_status_route_reads_planning_projection`(origin/main 단독 재현) | 소유자 수리 대기 |
 
 ---

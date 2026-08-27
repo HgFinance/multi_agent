@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -11,7 +12,8 @@ RISK_API_DIR = Path(__file__).resolve().parents[2] / "departments" / "03-risk" /
 sys.path.insert(0, str(RISK_API_DIR))
 sys.modules.pop("app", None)
 
-from app import app
+risk_api_module = importlib.import_module("app")
+app = risk_api_module.app
 
 
 def _body() -> dict[str, object]:
@@ -41,7 +43,11 @@ def _body() -> dict[str, object]:
     }
 
 
-def test_domain_endpoint_dispatches_to_risk_head_and_two_employees() -> None:
+def test_domain_endpoint_dispatches_to_risk_head_and_two_employees(monkeypatch) -> None:
+    # This contract test exercises the pure dispatch response. The canonical
+    # Postgres audit ledger is an integration concern and is unavailable from
+    # the host pytest network namespace (its Docker DNS name is ``timescaledb``).
+    monkeypatch.setattr(risk_api_module, "_risk_control_repository", lambda: None)
     response = TestClient(app).post(
         "/risk/v1/mandates/MND-20260806-001/assess",
         json=_body(),

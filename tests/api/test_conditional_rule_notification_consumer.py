@@ -164,6 +164,7 @@ def test_consumer_waits_for_accounting_then_reports_terminal_state_once() -> Non
         "55555555-5555-4555-8555-555555555555",
     )
     assert orders.transitions[-1][1]["state"] == "ACCOUNTING_PENDING"
+    assert orders.transitions[-1][1]["event_id"] == "cro_test"
     assert discord.calls == []
 
     assert consumer.handle_event(event) is True

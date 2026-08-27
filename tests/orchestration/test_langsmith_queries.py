@@ -5,8 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-import orchestration.langsmith_queries as langsmith_queries
-from orchestration.langsmith_queries import query_runs
+from orchestration import langsmith_queries
+from orchestration.langsmith_queries import (
+    close_query_client,
+    query_correlated_trace_metadata,
+    query_runs,
+)
 
 
 class _Paginator:
@@ -137,3 +141,135 @@ def test_query_runs_keeps_rest_fallback_for_async_transport_compatibility(
     )
 
     assert [row.id for row in rows] == ["rest-run"]
+
+
+def test_query_runs_falls_back_for_pre_response_api_connection_error(monkeypatch) -> None:
+    class APIConnectionError(Exception):
+        pass
+
+    client = _ErrorClient(APIConnectionError("async transport could not connect"))
+    monkeypatch.setattr(
+        langsmith_queries,
+        "_direct_v2_query",
+        lambda *_args, **_kwargs: [SimpleNamespace(id="rest-run")],
+    )
+
+    rows = query_runs(
+        client,
+        project_name="API-Connection-Fallback",
+        min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
+        max_results=1,
+    )
+
+    assert [row.id for row in rows] == ["rest-run"]
+
+
+def test_query_runs_falls_back_for_wrapped_api_connection_error(monkeypatch) -> None:
+    class APIConnectionError(Exception):
+        pass
+
+    wrapped = APIConnectionError("request failed")
+    wrapped.__cause__ = OSError("httpx transport closed")
+    client = _ErrorClient(wrapped)
+    monkeypatch.setattr(
+        langsmith_queries,
+        "_direct_v2_query",
+        lambda *_args, **_kwargs: [SimpleNamespace(id="wrapped-rest-run")],
+    )
+
+    rows = query_runs(
+        client,
+        project_name="Wrapped-API-Connection-Fallback",
+        min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
+        max_results=1,
+    )
+
+    assert [row.id for row in rows] == ["wrapped-rest-run"]
+
+
+def test_close_query_client_closes_generated_async_transport() -> None:
+    class _AsyncTransport:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class _ClientWithTransport:
+        def __init__(self):
+            self._langsmith_api = _AsyncTransport()
+
+    client = _ClientWithTransport()
+    transport = client._langsmith_api
+
+    close_query_client(client)
+
+    assert transport.closed is True
+    assert client._langsmith_api is None
+
+
+def test_correlated_trace_metadata_is_bounded_and_redacted(monkeypatch) -> None:
+    class _Rows:
+        async def query(self, **_kwargs):
+            return _Paginator(
+                [
+                    SimpleNamespace(
+                        id="trace-1",
+                        name="research.worker",
+                        status="success",
+                        start_time=datetime(2026, 8, 27, tzinfo=timezone.utc),
+                        end_time=datetime(2026, 8, 27, 0, 0, 2, tzinfo=timezone.utc),
+                        extra={
+                            "metadata": {
+                                "root_id": "t_root",
+                                "task_id": "t_research",
+                                "request_id": "req-1",
+                                "stage": "research",
+                                "department": "research",
+                                "status": "COMPLETED",
+                                "latency_ms": 2000,
+                                "tool_error_count": 0,
+                                "raw_payloads_sent": False,
+                            }
+                        },
+                    ),
+                    SimpleNamespace(
+                        id="trace-foreign",
+                        name="foreign.worker",
+                        extra={"metadata": {"root_id": "t_other"}},
+                    ),
+                ]
+            )
+
+    client = _Client()
+    client.runs = _Rows()
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "test-key")
+    monkeypatch.setattr("langsmith.Client", lambda **_kwargs: client)
+
+    result = query_correlated_trace_metadata(
+        correlation_ids=("t_root", "t_research"),
+        min_start_time=datetime(2026, 8, 27, tzinfo=timezone.utc),
+        project_name="Correlated-Metadata-Test",
+        max_results=999,
+    )
+
+    assert result["status"] == "READY"
+    assert result["trace_count"] == 1
+    assert result["department_count"] == 1
+    assert result["traces"][0]["task_id"] == "t_research"
+    assert "inputs" not in result["traces"][0]
+    assert "outputs" not in result["traces"][0]
+
+
+def test_correlated_trace_metadata_fails_open_when_langsmith_is_unconfigured(monkeypatch) -> None:
+    monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+
+    result = query_correlated_trace_metadata(
+        correlation_ids=("t_root",),
+        min_start_time=datetime(2026, 8, 27, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "UNAVAILABLE"
+    assert result["error_code"] == "langsmith_not_configured"

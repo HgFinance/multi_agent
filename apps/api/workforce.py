@@ -27,9 +27,9 @@ router = APIRouter(tags=["workforce"])
 # compose.yaml). risk.py/qa.py와 같은 이유로 문서화된 로컬 2-프로세스 구성이
 # 별도 env 파일 없이 그대로 동작하게 기본값을 둔다.
 WORKFORCE_API_URL = os.getenv("WORKFORCE_API_URL", "http://127.0.0.1:8044").strip().rstrip("/")
-# observability는 workforce-api가 등록된 Worker마다 Langfuse API를 순차 호출한다
-# (observability.py collect_workforce_observability) - 통합으로 Worker당 왕복이
-# 5회에서 최대 2회로 줄었지만 여전히 순차라 8초를 넘길 수 있다.
+# observability는 workforce-api가 한 창의 독립적인 Langfuse 조회를 병렬 수행한다
+# (observability.py collect_workforce_observability). Worker당 실행/미발화 조회는
+# 최대 2회이며, 전체 요청은 이 timeout 예산 안에서 완료되어야 한다.
 # GOVERNANCE_API_TIMEOUT_SECONDS(30)와 같은 예산을 쓴다.
 WORKFORCE_API_TIMEOUT_SECONDS = float(os.getenv("WORKFORCE_API_TIMEOUT_SECONDS", "30"))
 
@@ -157,10 +157,10 @@ async def workforce_plans() -> Any:
 __all__ = [
     "WORKFORCE_API_URL",
     "router",
-    "workforce_observability",
-    "workforce_roster",
     "workforce_agent_access",
     "workforce_hiring_requests",
     "workforce_improvements",
+    "workforce_observability",
     "workforce_plans",
+    "workforce_roster",
 ]

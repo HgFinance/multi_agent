@@ -71,7 +71,9 @@ class CreateKanbanTaskCliContractTest(unittest.TestCase):
             stdout=json.dumps({"id": "t_root1", "status": "ready"}),
             stderr="",
         )
-        with patch.object(hermes_boundary.subprocess, "run", return_value=completed) as run:
+        with patch.object(
+            hermes_boundary.subprocess, "run", return_value=completed
+        ) as run:
             task = hermes_boundary.create_kanban_task(
                 assignee="ceo-agent",
                 title="title",
@@ -79,20 +81,24 @@ class CreateKanbanTaskCliContractTest(unittest.TestCase):
                 idempotency_key="idem-1",
             )
 
-        self.assertEqual(task, {"task_id": "t_root1", "status": "ready", "source": "hermes-kanban"})
+        self.assertEqual(
+            task, {"task_id": "t_root1", "status": "ready", "source": "hermes-kanban"}
+        )
         command = run.call_args.args[0]
         self.assertNotIn("--initial-status", command)
         self.assertNotIn("ready", command)
 
     def test_invalid_qa_primary_is_rejected_before_bff_cli(self) -> None:
-        with patch.object(hermes_boundary.subprocess, "run") as run:
-            with self.assertRaises(ValueError):
-                hermes_boundary.create_kanban_task(
-                    assignee="qa-department",
-                    title="QA primary",
-                    body="workflow_root_task_id=root\nworkflow_role=primary",
-                    idempotency_key="root:primary:qa-department",
-                )
+        with (
+            patch.object(hermes_boundary.subprocess, "run") as run,
+            self.assertRaises(ValueError),
+        ):
+            hermes_boundary.create_kanban_task(
+                assignee="qa-department",
+                title="QA primary",
+                body="workflow_root_task_id=root\nworkflow_role=primary",
+                idempotency_key="root:primary:qa-department",
+            )
 
         run.assert_not_called()
 
@@ -100,24 +106,31 @@ class CreateKanbanTaskCliContractTest(unittest.TestCase):
 class CeoRootTaskBoundaryTest(unittest.TestCase):
     def test_root_task_failure_does_not_call_ceo(self) -> None:
         request = ceo.CeoAsk(query="q", request_id="request-1")
-        with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=None):
-            with patch("apps.api.ceo_hermes_client.ask_ceo") as ask:
-                with self.assertRaises(HTTPException) as raised:
-                    ceo.ceo_query(request)
+        with (
+            patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=None),
+            patch("apps.api.ceo_hermes_client.ask_ceo") as ask,
+            self.assertRaises(HTTPException) as raised,
+        ):
+            ceo.ceo_query(request)
 
         self.assertEqual(raised.exception.status_code, 503)
         ask.assert_not_called()
 
     @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
     def test_root_task_is_enqueued_without_direct_ceo_call(self) -> None:
-        request = ceo.CeoAsk(query="q", request_id="request-2")
+        request = ceo.CeoAsk(query="삼성전자 시장 분석해줘", request_id="request-2")
         task = {"task_id": "t_root", "status": "ready"}
-        with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
-            with patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True) as comment, patch.object(
-                ceo.hermes_boundary, "show_kanban_task", return_value=None
-            ):
-                with patch("apps.api.ceo_hermes_client.ask_ceo") as ask:
-                    response = ceo.ceo_query(request)
+        with (
+            patch.object(
+                ceo.hermes_boundary, "create_kanban_task", return_value=task
+            ) as create,
+            patch.object(
+                ceo.hermes_boundary, "comment_root_scope", return_value=True
+            ) as comment,
+            patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None),
+            patch("apps.api.ceo_hermes_client.ask_ceo") as ask,
+        ):
+            response = ceo.ceo_query(request)
 
         create.assert_called_once()
         comment.assert_called_once_with(task_id="t_root", request_id="request-2")
@@ -129,14 +142,20 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         self.assertIsNone(response["session_id"])
 
     @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
-    def test_deterministic_bff_plan_is_persisted_without_a_second_ceo_plan(self) -> None:
+    def test_deterministic_bff_plan_is_persisted_without_a_second_ceo_plan(
+        self,
+    ) -> None:
         from orchestration.ceo_query_routing import build_deterministic_bff_plan
 
-        request = ceo.CeoAsk(query="삼성전자 시장 위험을 분석해줘", request_id="request-bff-plan")
+        request = ceo.CeoAsk(
+            query="삼성전자 시장 위험을 분석해줘", request_id="request-bff-plan"
+        )
         plan = build_deterministic_bff_plan(request.query)
         task = {"task_id": "t_bff_root", "status": "ready"}
         with (
-            patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create,
+            patch.object(
+                ceo.hermes_boundary, "create_kanban_task", return_value=task
+            ) as create,
             patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True),
             patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None),
         ):
@@ -151,17 +170,44 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         assert "analysis_mode=standard_analysis" in body
 
     @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
+    def test_quant_only_plan_omits_unrelated_accounting_snapshot(self) -> None:
+        from orchestration.ceo_query_routing import build_deterministic_bff_plan
+
+        request = ceo.CeoAsk(
+            query="Quant 부서가 069500.KS 데이터 품질을 점검해줘",
+            request_id="request-quant-scope",
+        )
+        plan = build_deterministic_bff_plan(request.query)
+        task = {"task_id": "t_quant_root", "status": "ready"}
+        with (
+            patch.object(
+                ceo.hermes_boundary, "create_kanban_task", return_value=task
+            ) as create,
+            patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True),
+            patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None),
+        ):
+            ceo.ceo_query(request, deterministic_routing_plan=plan)
+
+        body = create.call_args.kwargs["body"]
+        assert "selected_primary_profiles=quant-backtest-department" in body
+        assert "## Accounting Engine snapshot" not in body
+
+    @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
     def test_root_trace_context_is_optional_root_body_metadata(self) -> None:
         request = ceo.CeoAsk(
-            query="q",
+            query="삼성전자 시장 분석해줘",
             request_id="request-trace-context",
             source="discord",
         )
         task = {"task_id": "t_root", "status": "ready"}
         trace = MagicMock(context="trace-root.00000000-0000-0000-0000-000000000001")
         with (
-            patch("orchestration.llm_observability.start_root_trace", return_value=trace),
-            patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create,
+            patch(
+                "orchestration.llm_observability.start_root_trace", return_value=trace
+            ),
+            patch.object(
+                ceo.hermes_boundary, "create_kanban_task", return_value=task
+            ) as create,
             patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True),
             patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None),
         ):
@@ -173,7 +219,9 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
             "langsmith_trace_context=trace-root.00000000-0000-0000-0000-000000000001",
             body,
         )
-        self.assertNotIn("## User request\n", body.split("langsmith_trace_context=", 1)[0])
+        self.assertNotIn(
+            "## User request\n", body.split("langsmith_trace_context=", 1)[0]
+        )
 
     @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
     def test_mandate_snapshot_is_frozen_into_the_root_body(self) -> None:
@@ -191,12 +239,17 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
             "policy": {"risk_bounds": {"max_drawdown_pct": "0.15", "currency": "KRW"}},
         }
         task = {"task_id": "t_root", "status": "ready"}
-        with patch.object(ceo, "fetch_current_mandate_by_fund", return_value=mandate) as fetch:
-            with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
-                with patch.object(
-                    ceo.hermes_boundary, "comment_root_scope", return_value=True
-                ), patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None):
-                    ceo.ceo_query(request)
+        with (
+            patch.object(
+                ceo, "fetch_current_mandate_by_fund", return_value=mandate
+            ) as fetch,
+            patch.object(
+                ceo.hermes_boundary, "create_kanban_task", return_value=task
+            ) as create,
+            patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True),
+            patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None),
+        ):
+            ceo.ceo_query(request)
 
         fetch.assert_called_once_with("fund-1")
         body = create.call_args.kwargs["body"]
@@ -213,12 +266,15 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
 
         request = ceo.CeoAsk(query="q", request_id="request-4")
         task = {"task_id": "t_root", "status": "ready"}
-        with patch.object(ceo, "fetch_current_mandate_by_fund") as fetch:
-            with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
-                with patch.object(
-                    ceo.hermes_boundary, "comment_root_scope", return_value=True
-                ), patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None):
-                    ceo.ceo_query(request)
+        with (
+            patch.object(ceo, "fetch_current_mandate_by_fund") as fetch,
+            patch.object(
+                ceo.hermes_boundary, "create_kanban_task", return_value=task
+            ) as create,
+            patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True),
+            patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None),
+        ):
+            ceo.ceo_query(request)
 
         fetch.assert_not_called()
         self.assertNotIn("mandate-snapshot", create.call_args.kwargs["body"])
@@ -233,18 +289,21 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
 
         request = ceo.CeoAsk(query="q", request_id="request-5", fund_id="fund-1")
         task = {"task_id": "t_root", "status": "ready"}
-        with patch.object(ceo, "fetch_current_mandate_by_fund", return_value=None):
-            with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
-                with patch.object(
-                    ceo.hermes_boundary, "comment_root_scope", return_value=True
-                ), patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None):
-                    response = ceo.ceo_query(request)
+        with (
+            patch.object(ceo, "fetch_current_mandate_by_fund", return_value=None),
+            patch.object(
+                ceo.hermes_boundary, "create_kanban_task", return_value=task
+            ) as create,
+            patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True),
+            patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None),
+        ):
+            response = ceo.ceo_query(request)
 
         self.assertEqual(response["task_id"], "t_root")
         self.assertNotIn("mandate-snapshot", create.call_args.kwargs["body"])
 
     def test_planned_response_uses_only_current_root_departments(self) -> None:
-        request = ceo.CeoAsk(query="q", request_id="request-3")
+        request = ceo.CeoAsk(query="삼성전자 시장 분석해줘", request_id="request-3")
         root = {
             "id": "t_root",
             "status": "running",
@@ -267,12 +326,14 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
             ],
             "latest_summary": "Research와 Risk를 분석한 뒤 QA 검증을 진행합니다.",
         }
-        with patch.object(
-            ceo.hermes_boundary,
-            "create_kanban_task",
-            return_value={"task_id": "t_root", "status": "ready"},
-        ), patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True), patch.object(
-            ceo.hermes_boundary, "show_kanban_task", return_value=root
+        with (
+            patch.object(
+                ceo.hermes_boundary,
+                "create_kanban_task",
+                return_value={"task_id": "t_root", "status": "ready"},
+            ),
+            patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True),
+            patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=root),
         ):
             response = ceo.ceo_query(request)
 
@@ -299,7 +360,9 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         self.assertFalse(acknowledgement["planning"]["qa_required"])
         self.assertNotIn("QA", acknowledgement["answer"])
 
-    def test_planned_metadata_without_materialized_child_does_not_claim_delegation(self) -> None:
+    def test_planned_metadata_without_materialized_child_does_not_claim_delegation(
+        self,
+    ) -> None:
         # Regression for t_71e0df48: the CEO run metadata selected QA, but no
         # QA child was created.  A planning summary must not become a
         # user-facing delegation claim.
@@ -324,7 +387,9 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         acknowledgement = ceo._planning_acknowledgement(root)
 
         self.assertEqual(acknowledgement["status"], "accepted")
-        self.assertEqual(acknowledgement["planning"]["planned_departments"], ["qa-department"])
+        self.assertEqual(
+            acknowledgement["planning"]["planned_departments"], ["qa-department"]
+        )
         self.assertEqual(acknowledgement["planning"]["materialized_departments"], [])
         self.assertNotIn("QA에서", acknowledgement["answer"])
         self.assertIn("CEO가 직접 확인 중입니다", acknowledgement["answer"])
@@ -403,7 +468,10 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
             "id": "t_root",
             "status": "running",
             "children": [
-                {"assignee": "quant-backtest-department", "body": "workflow_role=primary"}
+                {
+                    "assignee": "quant-backtest-department",
+                    "body": "workflow_role=primary",
+                }
             ],
         }
         workflow = MagicMock()
@@ -413,8 +481,13 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         workflow.root.created_at = None
         workflow.root.completed_at = None
         workflow.query = None
+        workflow.completed_at = None
         workflow.selected_departments = ("quant-backtest-department",)
         workflow.qa_required = True
+        workflow.qa_enabled = True
+        workflow.qa_blocks_response = False
+        workflow.qa_materialized = False
+        workflow.qa_legacy_primary_present = False
         workflow.primary_nodes = (MagicMock(done=False),)
         workflow.qa_stage = "todo"
         workflow.synthesis_stage = "todo"
@@ -431,7 +504,10 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
 
     @patch.dict(
         "os.environ",
-        {"CEO_PLANNING_WAIT_SECONDS": "0.01", "CEO_PLANNING_READ_TIMEOUT_SECONDS": "0.1"},
+        {
+            "CEO_PLANNING_WAIT_SECONDS": "0.01",
+            "CEO_PLANNING_READ_TIMEOUT_SECONDS": "0.1",
+        },
         clear=False,
     )
     def test_planning_timeout_returns_accepted_fallback(self) -> None:

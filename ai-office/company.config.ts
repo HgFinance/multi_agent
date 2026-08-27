@@ -181,13 +181,8 @@ export const STAFF_LIST: StaffEntry[] = [
   staff("research", "member", "한소이", "evidence-rag-worker", 6),
 
   staff("strategy1", "lead", "박민성", "Hermes Head · Quant/Backtest", 1, "김퀀트"),
-  staff("strategy1", "member", "이현서", "strategy-hypothesis-worker", 2),
-  staff("strategy1", "member", "장정훈", "dataset-feature-worker", 3),
-  staff("strategy1", "member", "방시혁", "backtest-optimization-worker", 4),
-  staff("strategy1", "member", "진하율", "strategy-release-worker", 5),
-  staff("strategy1", "member", "최윤슬", "ml-quant-worker", 6),
-  staff("strategy1", "member", "오세훈", "execution-cost-worker", 7),
-  staff("strategy1", "member", "장도현", "regime-robustness-worker", 0),
+  staff("strategy1", "member", "이현서", "strategy-author-worker", 2),
+  staff("strategy1", "member", "장도현", "result-interpretation-worker", 0),
 
   staff("strategy2", "lead", "윤도현", "Hermes Head · Trading", 2, "윤트레", [
     "퀀트가 검증한 전략만 받아요. 여기서 전략을 만들지 않아요.",

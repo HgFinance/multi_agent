@@ -102,3 +102,19 @@ def test_priority_runtime_services_have_explicit_healthchecks() -> None:
     assert "--healthcheck" in services["accounting-ls-paper-reconciler"]["healthcheck"]["test"]
     assert "--healthcheck" in services["trading-directive-worker"]["healthcheck"]["test"]
     assert "--healthcheck" in services["portfolio-worker"]["healthcheck"]["test"]
+
+
+def test_research_mcp_has_loop_stall_restart_contract() -> None:
+    services = _services(ROOT / "docker-compose.yml")
+    for name in ("research-mcp", "research-liaison-mcp"):
+        environment = services[name]["environment"]
+        assert environment["RESEARCH_MCP_LOOP_STALL_SECONDS"] == (
+            "${RESEARCH_MCP_LOOP_STALL_SECONDS:-90}"
+        )
+        assert services[name]["restart"] == "unless-stopped"
+
+    source = (ROOT / "departments/01-research/api/mcp_server.py").read_text(
+        encoding="utf-8"
+    )
+    assert "class _LoopStallWatchdog" in source
+    assert "_with_loop_watchdog(" in source

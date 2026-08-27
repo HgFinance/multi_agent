@@ -140,6 +140,30 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         )
         self.assertNotIn(".hermes-accounting-portfolio-department", compose)
 
+    def test_ceo_discord_admission_defaults_to_shared_ceo_channel(self) -> None:
+        compose = (ROOT / "departments/00-ceo-office/compose.yaml").read_text(
+            encoding="utf-8"
+        )
+        example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "DISCORD_ALLOWED_CHANNELS: "
+            "${DISCORD_CEO_ALLOWED_CHANNELS:-1536997434507657261}",
+            compose,
+        )
+        self.assertIn(
+            "DISCORD_FREE_RESPONSE_CHANNELS: "
+            "${DISCORD_CEO_FREE_RESPONSE_CHANNELS:-1536997434507657261}",
+            compose,
+        )
+        self.assertIn(
+            "DISCORD_COMMAND_SYNC_POLICY: ${DISCORD_COMMAND_SYNC_POLICY:-off}",
+            compose,
+        )
+        self.assertIn("DISCORD_CEO_ALLOWED_CHANNELS=1536997434507657261", example)
+        self.assertIn("DISCORD_CEO_FREE_RESPONSE_CHANNELS=1536997434507657261", example)
+        self.assertIn("DISCORD_COMMAND_SYNC_POLICY=off", example)
+
     def test_kanban_dispatcher_uses_standalone_escape_hatch_without_s6_reconcile(self) -> None:
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         service = _service_block(compose, "kanban-dispatcher")
@@ -154,6 +178,12 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         self.assertIn(
             '--interval \\"$${KANBAN_DISPATCH_INTERVAL:-1}\\"', service
         )
+        self.assertIn(
+            '--max \\"$${KANBAN_DISPATCH_MAX_SPAWN:-3}\\"', service
+        )
+        self.assertIn(
+            '--failure-limit \\"$${KANBAN_DISPATCH_FAILURE_LIMIT:-2}\\"', service
+        )
         self.assertNotIn('command: ["gateway", "run"]', service)
         self.assertIn(
             "PYTHONPATH: /app/repo/deploy/hermes-dispatch-guard", service
@@ -164,6 +194,14 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         self.assertIn('HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"', service)
         self.assertIn(
             "KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-1}",
+            service,
+        )
+        self.assertIn(
+            "KANBAN_DISPATCH_MAX_SPAWN: ${KANBAN_DISPATCH_MAX_SPAWN:-3}",
+            service,
+        )
+        self.assertIn(
+            "KANBAN_DISPATCH_FAILURE_LIMIT: ${KANBAN_DISPATCH_FAILURE_LIMIT:-2}",
             service,
         )
         self.assertIn(

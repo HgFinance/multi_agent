@@ -17,7 +17,7 @@ its ``finally`` path after the Hermes process exits.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import json
 import os
@@ -36,7 +36,14 @@ from ls_client import LsEnvironment, LsRestClient  # noqa: E402  (local transpor
 
 
 CHART_PATH = "/stock/chart"
+THEME_PATH = "/stock/sector"
 PAGE_SIZE = 500
+# t8452 documents 500 rows per request.  The API schema does not publish a
+# universal calendar-span limit, but long intraday requests are service/data
+# source dependent. Keep each request bounded and aggregate the windows in the
+# adapter so callers cannot silently mistake a truncated response for a full
+# multi-year history.
+MAX_INTRADAY_WINDOW_DAYS = 90
 RATE_LIMIT_PER_SECOND = 1.0
 DEFAULT_MAX_PAGES = 200
 ALLOWED_TR_CODES = frozenset({
@@ -48,6 +55,7 @@ RANKING_TR_CODES = frozenset({
     "t1441", "t1444", "t1452", "t1463", "t1466", "t1481", "t1482",
     "t1489", "t1492",
 })
+THEME_TR_CODES = frozenset({"t1531", "t1532", "t1533", "t1537", "t8425"})
 
 _DATE_RE = re.compile(r"^\d{8}$")
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9]{6}$")
@@ -151,6 +159,7 @@ class DataReceipt:
     data_sha256: str
     first_row_date: str | None
     last_row_date: str | None
+    query_windows: tuple[tuple[str, str], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -165,6 +174,10 @@ class DataReceipt:
             "data_sha256": self.data_sha256,
             "first_row_date": self.first_row_date,
             "last_row_date": self.last_row_date,
+            "query_windows": [
+                {"start_date": start, "end_date": end}
+                for start, end in self.query_windows
+            ],
             "raw_data_persisted": False,
         }
 
@@ -206,6 +219,40 @@ class RankingBatch:
 
     rows: tuple[dict[str, Any], ...]
     receipt: RankingReceipt
+
+
+@dataclass(frozen=True)
+class ThemeReceipt:
+    """Safe lineage metadata for one point-in-time theme/universe snapshot."""
+
+    tr_code: str
+    as_of: str
+    request_sha256: str
+    pages: int
+    row_count: int
+    data_sha256: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "source": "ls-openapi",
+            "path": THEME_PATH,
+            "tr_code": self.tr_code,
+            "as_of": self.as_of,
+            "request_sha256": self.request_sha256,
+            "pages": self.pages,
+            "row_count": self.row_count,
+            "data_sha256": self.data_sha256,
+            "raw_data_persisted": False,
+        }
+
+
+@dataclass(frozen=True)
+class ThemeBatch:
+    """Rows and safe receipt for one Hermes theme/universe lookup."""
+
+    rows: tuple[dict[str, Any], ...]
+    receipt: ThemeReceipt
+    summary: Mapping[str, Any]
 
 
 class OnDemandMarketDataClient:
@@ -290,13 +337,24 @@ class OnDemandMarketDataClient:
             })
         if integrated:
             block["exchgubun"] = exchange_text
+        has_time = timeframe_text in {"minute", "tick"}
+        if has_time and (date(int(end[:4]), int(end[4:6]), int(end[6:8]))
+                         - date(int(start[:4]), int(start[4:6]), int(start[6:8]))).days + 1 > MAX_INTRADAY_WINDOW_DAYS:
+            return self._fetch_intraday_windows(
+                tr_code=tr_code,
+                request_block=block,
+                start_date=start,
+                end_date=end,
+                symbol=symbol_text,
+                has_time=True,
+            )
         return self._fetch_pages(
             tr_code=tr_code,
             request_block=block,
             start_date=start,
             end_date=end,
             symbol=symbol_text,
-            has_time=timeframe_text in {"minute", "tick"},
+            has_time=has_time,
         )
 
     def fetch_investor_trend(
@@ -423,6 +481,133 @@ class OnDemandMarketDataClient:
         )
         return RankingBatch(tuple(rows), receipt)
 
+    def fetch_theme(
+        self,
+        tr_code: str,
+        request_block: Mapping[str, Any],
+        *,
+        as_of: str | date | None = None,
+    ) -> ThemeBatch:
+        """Fetch one allow-listed LS theme or theme-universe snapshot.
+
+        The five sector TRs have different request/response blocks, so the
+        caller must supply the documented block explicitly. This method only
+        selects the endpoint, enforces the TR boundary, handles continuation
+        headers, and records a non-sensitive receipt.
+        """
+
+        code = str(tr_code or "").strip().lower()
+        if code not in THEME_TR_CODES:
+            raise ValueError(f"theme TR code is not allow-listed: {tr_code}")
+        if not isinstance(request_block, Mapping):
+            raise ValueError("request_block must be a mapping")
+        request = dict(request_block)
+        if not request:
+            raise ValueError("request_block must not be empty")
+        block_name = f"{code}InBlock"
+        as_of_text = _date_text(as_of or date.today(), "as_of")
+        request_hash = hashlib.sha256(
+            json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        rows: list[dict[str, Any]] = []
+        seen_rows: set[str] = set()
+        pages = 0
+        tr_cont = "N"
+        tr_cont_key = ""
+        summary: Mapping[str, Any] = {}
+        for _ in range(self.max_pages):
+            pages += 1
+            response, headers = self._client.call_tr(
+                path=THEME_PATH,
+                tr_cd=code,
+                in_block={block_name: dict(request)},
+                rate_limit_per_sec=RATE_LIMIT_PER_SECOND,
+                tr_cont=tr_cont,
+                tr_cont_key=tr_cont_key,
+                return_headers=True,
+            )
+            if not isinstance(response, Mapping) or not isinstance(headers, Mapping):
+                raise ValueError("LS transport must return (mapping, headers) for theme lookup")
+
+            # t1531/t1532/t8425 document the array in OutBlock; t1533/t1537
+            # put the members in OutBlock1. Accept both documented and
+            # observed forms, but never silently accept a scalar payload.
+            out_block = _out_block(response, code)
+            if not summary and isinstance(out_block, Mapping):
+                summary = dict(out_block)
+            page_rows: object = response.get(f"{code}OutBlock1")
+            if page_rows is None:
+                page_rows = response.get(f"{code}OutBlock")
+            if isinstance(page_rows, Mapping):
+                page_rows = [page_rows]
+            if not isinstance(page_rows, list):
+                raise ValueError(f"{code} theme response rows must be an array")
+            for row in page_rows:
+                if not isinstance(row, Mapping):
+                    continue
+                normalized = dict(row)
+                identity = _row_key(normalized)
+                if identity not in seen_rows:
+                    seen_rows.add(identity)
+                    rows.append(normalized)
+
+            header_more = _text(headers.get("tr_cont")).upper() == "Y"
+            next_key = _text(headers.get("tr_cont_key"))
+            if not page_rows or not header_more:
+                break
+            if not next_key or next_key == tr_cont_key:
+                raise ValueError(f"LS theme continuation key repeated for {code}")
+            tr_cont, tr_cont_key = "Y", next_key
+        else:
+            raise ValueError(f"LS theme continuation exceeded max_pages={self.max_pages}")
+
+        receipt = ThemeReceipt(
+            tr_code=code,
+            as_of=as_of_text,
+            request_sha256=request_hash,
+            pages=pages,
+            row_count=len(rows),
+            data_sha256=_canonical_hash(rows),
+        )
+        return ThemeBatch(tuple(rows), receipt, summary)
+
+    def fetch_all_themes(self, *, as_of: str | date | None = None) -> ThemeBatch:
+        return self.fetch_theme("t8425", {"dummy": " "}, as_of=as_of)
+
+    def fetch_themes_for_symbol(self, symbol: str, *, as_of: str | date | None = None) -> ThemeBatch:
+        return self.fetch_theme("t1532", {"shcode": _symbol(symbol)}, as_of=as_of)
+
+    def fetch_symbols_for_theme(
+        self, theme_code: str, *, as_of: str | date | None = None
+    ) -> ThemeBatch:
+        code = str(theme_code or "").strip()
+        if len(code) != 4:
+            raise ValueError("theme_code must be four characters")
+        return self.fetch_theme("t1537", {"tmcode": code}, as_of=as_of)
+
+    def fetch_theme_detail(
+        self, theme_name: str, theme_code: str, *, as_of: str | date | None = None
+    ) -> ThemeBatch:
+        name = str(theme_name or "").strip()
+        code = str(theme_code or "").strip()
+        if not name or len(name) > 36 or len(code) != 4:
+            raise ValueError("theme_name must be 1-36 characters and theme_code four characters")
+        return self.fetch_theme("t1531", {"tmname": name, "tmcode": code}, as_of=as_of)
+
+    def fetch_special_themes(
+        self, gubun: str, chgdate: int | str, *, as_of: str | date | None = None
+    ) -> ThemeBatch:
+        category = str(gubun or "").strip()
+        try:
+            compare_days = int(chgdate)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("chgdate must be an integer") from exc
+        if len(category) != 1 or not 0 <= compare_days <= 99:
+            raise ValueError("gubun must be one character and chgdate must be 0-99")
+        return self.fetch_theme(
+            "t1533", {"gubun": category, "chgdate": compare_days}, as_of=as_of
+        )
+
     def _fetch_pages(
         self,
         *,
@@ -499,6 +684,73 @@ class OnDemandMarketDataClient:
             data_sha256=_canonical_hash(rows),
             first_row_date=first or None,
             last_row_date=last or None,
+            query_windows=((start_date, end_date),),
+        )
+        self.last_receipt = receipt
+        return MarketDataBatch(tuple(rows), receipt)
+
+    def _fetch_intraday_windows(
+        self,
+        *,
+        tr_code: str,
+        request_block: Mapping[str, Any],
+        start_date: str,
+        end_date: str,
+        symbol: str | None,
+        has_time: bool,
+    ) -> MarketDataBatch:
+        """Fetch a wide intraday range as bounded, independently paged windows.
+
+        Continuation is still used inside every window.  Windowing is an
+        additional guard for broker-side row/date limits; it does not claim
+        that the provider has historical data for every requested date.
+        """
+
+        start_day = date(int(start_date[:4]), int(start_date[4:6]), int(start_date[6:8]))
+        end_day = date(int(end_date[:4]), int(end_date[4:6]), int(end_date[6:8]))
+        rows: list[dict[str, Any]] = []
+        seen_rows: set[str] = set()
+        query_windows: list[tuple[str, str]] = []
+        pages = 0
+        cursor = start_day
+        while cursor <= end_day:
+            window_end = min(cursor + timedelta(days=MAX_INTRADAY_WINDOW_DAYS - 1), end_day)
+            window_start_text = cursor.strftime("%Y%m%d")
+            window_end_text = window_end.strftime("%Y%m%d")
+            block = dict(request_block)
+            block["sdate"] = window_start_text
+            block["edate"] = window_end_text
+            batch = self._fetch_pages(
+                tr_code=tr_code,
+                request_block=block,
+                start_date=window_start_text,
+                end_date=window_end_text,
+                symbol=symbol,
+                has_time=has_time,
+            )
+            pages += batch.receipt.pages
+            query_windows.append((window_start_text, window_end_text))
+            for row in batch.rows:
+                identity = _row_key(row)
+                if identity not in seen_rows:
+                    seen_rows.add(identity)
+                    rows.append(row)
+            cursor = window_end + timedelta(days=1)
+
+        rows.sort(key=_row_sort_key)
+        first = _text(rows[0].get("date")) if rows else None
+        last = _text(rows[-1].get("date")) if rows else None
+        receipt = DataReceipt(
+            tr_code=tr_code,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            pages=pages,
+            row_count=len(rows),
+            data_sha256=_canonical_hash(rows),
+            first_row_date=first or None,
+            last_row_date=last or None,
+            query_windows=tuple(query_windows),
         )
         self.last_receipt = receipt
         return MarketDataBatch(tuple(rows), receipt)
@@ -533,11 +785,16 @@ def write_temp_json(batch: MarketDataBatch, filename: str) -> Path:
 __all__ = [
     "ALLOWED_TR_CODES",
     "RANKING_TR_CODES",
+    "THEME_TR_CODES",
     "CHART_PATH",
+    "MAX_INTRADAY_WINDOW_DAYS",
+    "THEME_PATH",
     "DataReceipt",
     "MarketDataBatch",
     "RankingBatch",
     "RankingReceipt",
+    "ThemeBatch",
+    "ThemeReceipt",
     "OnDemandMarketDataClient",
     "write_temp_json",
 ]

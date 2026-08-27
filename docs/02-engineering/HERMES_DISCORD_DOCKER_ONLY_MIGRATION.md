@@ -1,5 +1,11 @@
 # Hermes Discord Docker-only migration
 
+> 운영 상태 (2026-08-27): 이 문서는 Docker 전환 절차를 보존한 기록이다. 현재
+> 운영 경로에서는 `ceo-hermes`, `qa-hermes`, `workforce-hermes`가
+> `Dockerfile.hermes-discord` 기반 패치 이미지와 `/opt/kanban` 공유 멱등성 원장을
+> 명시적으로 사용한다. 나머지 Gateway는 이 문서의 전환 절차에 따라 별도로 전환하기
+> 전까지 upstream 이미지 경로를 유지한다.
+
 AWS에서 Discord Gateway 소유권을 Host systemd에서 Docker Compose로 단계적으로 넘긴다. Host systemd unit 파일은 삭제하지 않고, CEO canary와 8개 bot 검증이 끝난 뒤에만 stop/disable한다. 한 단계가 실패하면 다음 단계로 진행하지 않는다.
 
 ## 목표와 불변식
@@ -15,7 +21,12 @@ AWS에서 Discord Gateway 소유권을 Host systemd에서 Docker Compose로 단�
 | risk-management | risk-hermes | hermes-gateway-risk-management |
 | qa-department | qa-hermes | hermes-gateway-qa-department |
 
-기본 Compose의 8개 Gateway는 모두 upstream `nousresearch/hermes-agent:latest` image-only 서비스다. Compose는 `command: ["sleep", "infinity"]`를 사용해 s6 main program을 유지하며, `command: ["gateway", "run"]`은 지정하지 않는다. pinned Hermes image의 `/opt/hermes/docker/entrypoint-dispatch.sh`가 PID 1에서 s6 `/init`을 실행하고, Discord Gateway는 s6가 관리한다. 인자를 생략하면 main-wrapper가 `hermes`를 실행한 뒤 종료할 수 있으므로 no-args Compose는 사용하지 않는다.
+Gateway Compose는 `command: ["sleep", "infinity"]`를 사용해 s6 main program을
+유지하며, `command: ["gateway", "run"]`은 지정하지 않는다. upstream 경로의
+Hermes image는 `/opt/hermes/docker/entrypoint-dispatch.sh`가 PID 1에서 s6
+`/init`을 실행하고, 패치 대상 CEO·QA·HR image는 여기에 저장소의 adapter shim을
+추가한다. 인자를 생략하면 main-wrapper가 `hermes`를 실행한 뒤 종료할 수 있으므로
+no-args Compose는 사용하지 않는다.
 
 따라서 Gateway lifecycle은 다음 하나뿐이다.
 
@@ -38,7 +49,13 @@ container
 - shared Kanban mount와 profile/skill mount 유지
 - Compose restart: unless-stopped
 - kanban-dispatcher는 별도 standalone daemon
-- 기본 production path에서 idempotency patch는 비활성
+- 패치 이미지를 사용하는 Gateway는 `DISCORD_IDEMPOTENCY_SCOPE=global`과
+  `DISCORD_IDEMPOTENCY_HOME=/opt/kanban`을 사용해 단일 ingress claim을 공유
+- 패치 대상 Gateway는 `DISCORD_COMMAND_SYNC_POLICY=off`를 기본으로 사용한다.
+  메시지 ingress는 slash-command 등록에 의존하지 않으며, 여러 Gateway가 같은
+  Discord application을 재기동할 때 command-management rate limit으로 사용자
+  응답이 지연되지 않게 한다. 명령 등록이 필요할 때만 별도 유지보수 창에서
+  `safe`를 명시적으로 사용한다.
 
 ## Hermes gateway state 처리
 
@@ -48,7 +65,9 @@ Hermes는 빈 volume의 최초 부팅에 한해 HERMES_GATEWAY_BOOTSTRAP_STATE=r
 
 새로운 빈 profile volume을 별도로 provision할 때만 해당 변수를 검토한다. 그 경우에도 기존 state file을 먼저 확인하고, 기존 파일이 있으면 변수로 덮어쓰지 않는다.
 
-Dockerfile.hermes-discord, gateway_patch.py, discord_idempotency.py는 별도 docker-compose.discord-idempotency.yml override에만 남겨둔다. 기본 Compose에서는 upstream image를 사용하며 이 override를 함께 지정하지 않는다.
+`Dockerfile.hermes-discord`, `gateway_patch.py`, `discord_idempotency.py`는
+패치가 활성화된 Gateway의 이미지 빌드 경로에서 사용한다. 현재 활성 대상은
+CEO·QA·HR이며, 나머지 프로필은 전환 전까지 upstream 경로를 유지한다.
 
 ## AWS 공통 변수
 
@@ -86,14 +105,18 @@ profile, auth.json, .env, gateway_state.json, shared Kanban DB는 이동·삭제
 
 ## C. PULL / IMAGE WIRING
 
-기본 production path는 image-only이므로 build가 아니라 pull을 사용한다.
+upstream Gateway는 image-only이므로 build가 아니라 pull을 사용한다. 패치 대상
+Gateway는 저장소의 Dockerfile을 빌드한 뒤 해당 서비스만 recreate한다.
 
 ```bash
 docker compose pull $GATEWAY_SERVICES
 docker image inspect nousresearch/hermes-agent:latest >/dev/null
 ```
 
-기본 path에서는 Dockerfile.hermes-discord를 build하지 않는다. idempotency defense-in-depth가 실제 필요하다는 별도 증거가 있을 때만 override를 사용한다. 그 경우 이후 모든 Compose 명령에 동일한 두 -f 옵션을 붙인다.
+현재 패치 대상 서비스는 `docker compose build`가 필요하다. 과거의 선택
+override 절차는 아래 명령처럼 보존하지만, 현재 기본 운영 구성의 CEO·QA·HR
+서비스 정의가 이미 패치 이미지를 가리키는지 먼저 `docker compose config --quiet`로
+확인한다.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.discord-idempotency.yml config --quiet
@@ -101,7 +124,8 @@ docker compose -f docker-compose.yml -f docker-compose.discord-idempotency.yml b
 docker image inspect hgfinance/hermes-discord:discord-idempotency-v1 >/dev/null
 ```
 
-이번 migration에서는 위 override를 실행하지 않는다.
+위 override 명령은 과거 마이그레이션 호환 절차이며, 현재 활성 서비스의 기본
+구성을 덮어쓰는 용도로 사용하지 않는다.
 
 ## D. CEO Host Gateway stop
 

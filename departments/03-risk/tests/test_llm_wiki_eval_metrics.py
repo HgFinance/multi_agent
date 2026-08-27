@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "llm_wiki"))
 
-from eval_metrics import exact_match, f1_score, normalize_answer  # noqa: E402
+from eval_metrics import exact_match, f1_score, normalize_answer
 
 
 def test_normalize_answer_strips_punctuation_and_extra_whitespace() -> None:

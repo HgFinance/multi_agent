@@ -1,3 +1,5 @@
+_config_version: 37
+
 model:
   provider: openai-codex
   default: gpt-5.6-luna

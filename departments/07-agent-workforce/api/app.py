@@ -36,8 +36,8 @@ Snapshot을 직접 실어 보냄)만 그대로 동작한다.
 """
 from __future__ import annotations
 
-import os
 import importlib.util
+import os
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -85,8 +85,18 @@ from access import (
 from access import (
     SelfApprovalError as AccessSelfApprovalError,
 )
+from action import (
+    ActionReviewMismatchError,
+    ActionStatus,
+    ActionType,
+    MissingVerificationError,
+    PerformanceAction,
+    open_action,
+)
+from action import IllegalTransition as ActionIllegalTransition
+from action import transition as action_transition
+from activation_evidence import InMemoryActivationEvidenceRepository
 from candidate import ImprovementCandidate
-from observation import CandidateScorecard
 from cost import (
     CapacitySnapshot,
     CostSnapshot,
@@ -102,22 +112,13 @@ from hiring_request import (
     InMemoryHiringRequestRepository,
 )
 from hiring_request import transition as hiring_transition
+from lifecycle_event import MissingActivationApprovalsError, activation_approvals
 from observability import (
     INVESTMENT_DEPARTMENT_STAGE,
     WorkerRegistryUnavailable,
     collect_workforce_observability,
 )
-from scorecard_brief import build_scorecard_brief
-from action import (
-    ActionReviewMismatchError,
-    ActionStatus,
-    ActionType,
-    MissingVerificationError,
-    PerformanceAction,
-    open_action,
-)
-from action import IllegalTransition as ActionIllegalTransition
-from action import transition as action_transition
+from observation import CandidateScorecard
 from probation import (
     MissingSuccessMetricsError,
     ProbationAlreadyClosedError,
@@ -128,7 +129,6 @@ from probation import (
     open_probation,
 )
 from quality import QualitySnapshot, aggregate_quality, collect_quality_references
-from lifecycle_event import MissingActivationApprovalsError, activation_approvals
 from review import MissingRoleMetricsError, PerformanceReview, ReviewDecision
 from roster import (
     AgentNotFoundError,
@@ -143,7 +143,7 @@ from roster import (
     validate_status_change,
     verify_activation_evidence,
 )
-from activation_evidence import InMemoryActivationEvidenceRepository
+from scorecard_brief import build_scorecard_brief
 from workflow import (
     Approval,
     CandidateStatus,
@@ -159,6 +159,9 @@ from workflow import (
     SelfApprovalError as CandidateSelfApprovalError,
 )
 from workforce_plan import (
+    IllegalTransition as PlanIllegalTransition,
+)
+from workforce_plan import (
     InMemoryPlanApprovalEvidenceRepository,
     InMemoryPlanRepository,
     UnverifiedPlanApprovalError,
@@ -166,9 +169,6 @@ from workforce_plan import (
     activate_plan,
     approve_plan,
     retire_plan,
-)
-from workforce_plan import (
-    IllegalTransition as PlanIllegalTransition,
 )
 
 try:
@@ -375,7 +375,7 @@ class CostSnapshotRecordIn(BaseModel):
     currency: str = "USD"
 
     @model_validator(mode="after")
-    def _window_is_forward(self) -> "CostSnapshotRecordIn":
+    def _window_is_forward(self) -> CostSnapshotRecordIn:
         """역전된 창은 DB 유무와 무관하게 422 로 막는다.
 
         append_cost_snapshot 도 같은 것을 검사하지만, DATABASE_URL 이 없으면 그 전에
@@ -411,7 +411,7 @@ class CapacitySnapshotRecordIn(BaseModel):
     utilization: str | None = None
 
     @model_validator(mode="after")
-    def _window_is_forward_and_subject_present(self) -> "CapacitySnapshotRecordIn":
+    def _window_is_forward_and_subject_present(self) -> CapacitySnapshotRecordIn:
         """CostSnapshotRecordIn._window_is_forward와 같은 이유 - DB 유무와 무관하게
         먼저 막는다. department_id/agent_id 둘 다 없는 것도 여기서 같이 막는다 -
         DDL check까지 안 가고 422로 끝나야 "DB 안 붙었다"가 본문 결함을 가리지 않는다."""
@@ -452,7 +452,7 @@ class PerformanceReviewIn(BaseModel):
     findings: list = []
 
     @model_validator(mode="after")
-    def _period_is_forward_and_action_has_basis(self) -> "PerformanceReviewIn":
+    def _period_is_forward_and_action_has_basis(self) -> PerformanceReviewIn:
         """CostSnapshotRecordIn._window_is_forward 와 같은 이유 - DB 유무와 무관하게
         본문 결함을 먼저 422 로 돌려준다.
 
@@ -478,7 +478,7 @@ class PerformanceActionIn(BaseModel):
     review_id: str | None = None
 
     @model_validator(mode="after")
-    def _plan_is_present(self) -> "PerformanceActionIn":
+    def _plan_is_present(self) -> PerformanceActionIn:
         """action.py 불변식 2를 요청 계층에서도 지킨다 - 저장소가 없을 때 501 이
         "계획 없는 조치"를 가리지 않도록(PerformanceReviewIn 과 같은 이유)."""
         if not self.plan:
@@ -505,7 +505,7 @@ class ProbationOpenIn(BaseModel):
     success_metrics: dict
 
     @model_validator(mode="after")
-    def _has_success_metrics(self) -> "ProbationOpenIn":
+    def _has_success_metrics(self) -> ProbationOpenIn:
         """저장소가 없을 때 501 이 "기준 없이 수습을 열었다"를 가리지 않도록
         요청 계층에서도 지킨다(PerformanceReviewIn 과 같은 이유)."""
         if not self.success_metrics:
@@ -1582,7 +1582,7 @@ def _real_department_scorecard(department_code: str, window_start: datetime, win
 def get_department_scorecard_brief(
     window_start: datetime,
     window_end: datetime,
-    department_code: list[str] = Query(...),
+    department_code: list[str] = Query(...),  # noqa: B008 - FastAPI dependency declaration
 ):
     """부서 Scorecard 를 부서장(LLM) 컨텍스트용 마크다운 브리프로 인코딩해 돌려준다.
 
@@ -1624,9 +1624,8 @@ def _cost_snapshot_dict(s: CostSnapshot) -> dict:
 def record_cost_snapshot(agent_id: str, body: CostSnapshotRecordIn):
     """플랫폼 과금 계측이 보고한 비용 1건을 기록한다.
 
-    이 엔드포인트가 생기기 전까지 workforce.cost_snapshots 에는 writer 가 없었고
-    (자체 점검용 INSERT 뿐이었다), 그래서 GET .../scorecard 의 cost 블록과
-    budget-assessment 는 항상 "Snapshot 없음"으로 떨어졌다 - reader 만 있는 지표였다.
+    snapshot writer가 원천 계측을 이 기록 창구로 전달하며, 이 API는 수치를
+    자체 산출하지 않고 플랫폼 보고를 저장한다.
 
     수치는 여기서 만들지 않는다(F27 담당 분리: 토큰 측정·과금은 플랫폼 소유).
     같은 창을 다시 보고하면 행이 늘지 않고 갱신된다 - reader 가 창 안의 행을
@@ -1684,10 +1683,8 @@ def _capacity_snapshot_dict(s: CapacitySnapshot) -> dict:
 def record_capacity_snapshot(body: CapacitySnapshotRecordIn):
     """플랫폼 관측이 보고한 용량 계측 1건을 기록한다.
 
-    record_cost_snapshot과 같은 이유 - 이 엔드포인트가 생기기 전까지
-    workforce.capacity_snapshots 에는 writer 가 없었고, GET .../departments/observability 의 capacity
-    는 Langfuse 실행 이벤트를 직접 집계해 그 자리를 메웠다(2026-08-24). 그 우회 경로는
-    그대로 둔다 - 여기서는 DB Snapshot 이라는 두 번째 경로를 추가할 뿐이다.
+    snapshot writer가 DB Snapshot을 채우고, 통합 observability GET은 최신 진단용
+    외부 관측을 제공한다.
 
     같은 창을 다시 보고하면 행이 늘지 않고 갱신된다 - get_capacity_snapshot 이 창
     안에서 가장 늦은 행 1개를 고르므로, 중복 행은 재보고 이력만 무한히 늘린다

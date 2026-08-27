@@ -27,7 +27,7 @@ for path in (_RISK_ROOT, _AGENTIC_RAG_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from src.resilience import CircuitBreaker, RedisJsonCache, emit_metric  # noqa: E402
+from src.resilience import CircuitBreaker, RedisJsonCache, emit_metric
 
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 WIKI_DIR = Path(__file__).resolve().parent / "data" / "wiki"
@@ -188,7 +188,7 @@ def render_wiki_page(doc: RawDoc, links: list[OutgoingLink]) -> str:
         f"clause_id: {doc.clause_id}",
         f"authority: {doc.authority}",
         f"effective_from: {doc.effective_from or ''}",
-        f"jurisdiction: KR",
+        "jurisdiction: KR",
         f"source_sha256: {doc.source_sha256}",
         f"origin_url: {doc.origin_url}",
         "---",

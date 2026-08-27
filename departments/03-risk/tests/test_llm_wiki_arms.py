@@ -6,15 +6,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "llm_wiki"))
 
-from arms import (  # noqa: E402
-    _LLM_WIKI_GENERATE_SYSTEM,
+from arms import (
     _LEGAL_VERDICT_SCHEMA,
+    _LLM_WIKI_GENERATE_SYSTEM,
     PERSONA,
     _generate_verdict,
     build_flat_corpus,
 )
+from src.nodes import PERSONA_PROMPTS
+
 from departments import worker_model_gateway
-from src.nodes import PERSONA_PROMPTS  # noqa: E402
 
 
 def test_build_flat_corpus_matches_retriever_frontmatter_contract(tmp_path: Path) -> None:

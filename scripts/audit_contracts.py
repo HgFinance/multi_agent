@@ -33,17 +33,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from orchestration.canonical_profiles import (  # noqa: E402
+from orchestration.canonical_profiles import (
     CANONICAL_PROFILES,
     LEGACY_PROFILE_ALIASES,
 )
-from orchestration.skill_contract import (  # noqa: E402
+from orchestration.skill_contract import (
     CANONICAL_PROFILES as SKILL_CONTRACT_PROFILES,
 )
-from orchestration.skill_contract import (  # noqa: E402
+from orchestration.skill_contract import (
     CANONICAL_SKILLS,
     PENDING_SOURCE_SKILLS,
     SKILL_OWNER_BY_NAME,
+    STRATEGY_RUNTIME_PROFILES,
 )
 
 DISPATCHER = "hedgefund-kanban-dispatcher"
@@ -80,6 +81,41 @@ def _docker(container: str, command: list[str], timeout: int = 60) -> str:
     return proc.stdout if proc.returncode == 0 else ""
 
 
+def _runtime_config_probe(path: str) -> str:
+    """Build a side-effect-free probe using Hermes' own YAML loader.
+
+    Department profiles that use repository-owned shared skills expose
+    ``skills.external_dirs``; the direct HR/Trading profiles intentionally
+    expose a simple skills list. Calling ``.get`` on that list caused a false
+    parse failure.
+    """
+
+    return f"""from pathlib import Path
+try:
+    from hermes_cli.config import fast_safe_load
+except Exception as exc:
+    print("CONFIG_LOADER_UNAVAILABLE:" + type(exc).__name__)
+else:
+    try:
+        config = fast_safe_load(Path({path!r}).read_text(encoding="utf-8")) or {{}}
+        skills = config.get("skills") if isinstance(config, dict) else None
+        if isinstance(config, dict):
+            if isinstance(skills, dict) and skills.get("external_dirs"):
+                skill_status = "EXTERNAL"
+            elif isinstance(skills, list):
+                skill_status = "DIRECT"
+            elif isinstance(skills, dict):
+                skill_status = "NO_EXTERNAL_DIRS"
+            else:
+                skill_status = "INVALID"
+            print("CONFIG_OK:" + skill_status)
+        else:
+            print("CONFIG_NOTDICT")
+    except Exception as exc:
+        print("CONFIG_ERROR:" + type(exc).__name__)
+"""
+
+
 # ── 1. 저장소 안에서 닫히는 검사 (컨테이너 불요) ──────────────────────────────
 def audit_repository(f: Findings) -> None:
     # 프로필 계약이 한 곳인가. 두 모듈이 각자 목록을 들면 조용히 갈라진다.
@@ -96,9 +132,12 @@ def audit_repository(f: Findings) -> None:
         if target not in CANONICAL_PROFILES:
             f.fail("profiles", f"legacy 별칭 {alias!r} 의 목적지 {target!r} 가 정본이 아니다")
 
-    # 스킬 소유자가 정본 프로필인가.
+    # 스킬 소유자가 정본 프로필인가. Strategy Hermes는 Kanban assignee
+    # 정본에는 들어가지 않는 direct runtime profile이므로 별도 허용한다.
     for skill, owners in SKILL_OWNER_BY_NAME.items():
-        unknown = set(owners) - set(CANONICAL_PROFILES)
+        unknown = set(owners) - (
+            set(CANONICAL_PROFILES) | set(STRATEGY_RUNTIME_PROFILES)
+        )
         if unknown:
             f.fail("skills", f"스킬 {skill!r} 의 소유 프로필이 정본이 아니다: {sorted(unknown)}")
 
@@ -154,19 +193,19 @@ def audit_runtime(f: Findings) -> None:
         if profile not in runtime_profiles:
             continue
         path = f"/opt/data/profiles/{profile}/config.yaml"
-        probe = (
-            "import yaml; "
-            "d = yaml.safe_load(open(%r, encoding='utf-8')); "
-            "print('OK' if isinstance(d, dict) else 'NOTDICT'); "
-            "print('EXT' if (d.get('skills') or {}).get('external_dirs') else 'NOEXT')"
-        ) % path
-        ok = _docker(DISPATCHER, ["python3", "-c", probe])
-        if "OK" not in ok:
-            f.fail("runtime", f"{profile}: config.yaml 이 파싱되지 않는다 - hermes 가 "
-                              "기본 설정으로 조용히 후퇴한다(모델·프로바이더 무시)")
-        elif "NOEXT" in ok:
+        result = _docker(DISPATCHER, ["python3", "-c", _runtime_config_probe(path)])
+        marker = next((line.strip() for line in result.splitlines() if line.strip()), "")
+        if marker == "CONFIG_LOADER_UNAVAILABLE:ModuleNotFoundError":
+            f.fail("runtime", f"{profile}: Hermes config loader에서 yaml 모듈을 찾지 못했다")
+        elif marker.startswith("CONFIG_LOADER_UNAVAILABLE:"):
+            f.fail("runtime", f"{profile}: Hermes config loader를 불러오지 못했다")
+        elif marker.startswith("CONFIG_ERROR:"):
+            f.fail("runtime", f"{profile}: Hermes config loader가 config.yaml을 읽지 못했다")
+        elif marker == "CONFIG_OK:NO_EXTERNAL_DIRS":
             f.fail("runtime", f"{profile}: skills.external_dirs 없음 - "
                               "--skill 카드가 'Unknown skill(s)' 로 죽는다")
+        elif marker != "CONFIG_OK:EXTERNAL" and marker != "CONFIG_OK:DIRECT":
+            f.fail("runtime", f"{profile}: config.yaml이 Hermes 형식으로 파싱되지 않는다")
 
 
 # ── 3. 보드 대조 (카드가 실제로 정본 이름을 쓰는가) ───────────────────────────

@@ -4,6 +4,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import ClassVar
 
 import orchestration.qa_feedback_benchmarks as qa_benchmarks
 from orchestration.ceo_workflow_scope import (
@@ -100,11 +101,14 @@ def test_qa_discord_retention_deletes_only_old_resolved_cards(tmp_path) -> None:
     assert request.get_header("Authorization") == "Bot qa-token"
     assert timeout == 10
     with ledger._connect() as db:
-        assert db.execute(
-            "SELECT discord_deleted_at IS NOT NULL "
-            "FROM langsmith_feedback_discord_deliveries WHERE artifact_id=?",
-            (artifact_id,),
-        ).fetchone()[0] == 1
+        assert (
+            db.execute(
+                "SELECT discord_deleted_at IS NOT NULL "
+                "FROM langsmith_feedback_discord_deliveries WHERE artifact_id=?",
+                (artifact_id,),
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_qa_discord_retention_preserves_pending_cards(tmp_path) -> None:
@@ -147,12 +151,12 @@ def test_qa_discord_retention_preserves_pending_cards(tmp_path) -> None:
 
 
 class _Run:
-    id = "run-1"
-    name = "worker.qa"
-    status = "success"
-    start_time = datetime.now(timezone.utc)
-    end_time = datetime.now(timezone.utc)
-    extra = {
+    id: ClassVar[str] = "run-1"
+    name: ClassVar[str] = "worker.qa"
+    status: ClassVar[str] = "success"
+    start_time: ClassVar[datetime] = datetime.now(timezone.utc)
+    end_time: ClassVar[datetime] = datetime.now(timezone.utc)
+    extra: ClassVar[dict[str, object]] = {
         "metadata": {
             "request_id": "discord:1",
             "root_id": "t_root",
@@ -167,8 +171,8 @@ class _Run:
         },
         "runtime": {"secret": "must never be copied"},
     }
-    inputs = {"prompt": "must never be read"}
-    outputs = {"answer": "must never be read"}
+    inputs: ClassVar[dict[str, str]] = {"prompt": "must never be read"}
+    outputs: ClassVar[dict[str, str]] = {"answer": "must never be read"}
 
 
 def _actionable_result(
@@ -209,13 +213,13 @@ def test_observation_allowlists_metadata_and_never_reads_payload() -> None:
 
 def test_observation_uses_terminal_output_when_initial_metadata_is_accepted() -> None:
     class FailedRun:
-        id = "run-http-error"
-        name = "hgfinance.user-query"
-        status = "error"
-        error = "HTTPException"
-        start_time = datetime.now(timezone.utc)
-        end_time = start_time
-        extra = {
+        id: ClassVar[str] = "run-http-error"
+        name: ClassVar[str] = "hgfinance.user-query"
+        status: ClassVar[str] = "error"
+        error: ClassVar[str] = "HTTPException"
+        start_time: ClassVar[datetime] = datetime.now(timezone.utc)
+        end_time: ClassVar[datetime] = start_time
+        extra: ClassVar[dict[str, object]] = {
             "metadata": {
                 "request_id": "discord:1",
                 "root_id": "discord:1",
@@ -224,7 +228,7 @@ def test_observation_uses_terminal_output_when_initial_metadata_is_accepted() ->
                 "latency_scope": "end_to_end",
             }
         }
-        outputs = {
+        outputs: ClassVar[dict[str, object]] = {
             "status": "error",
             "terminal_status": "error",
             "terminal_reason": "HTTPException",
@@ -240,6 +244,32 @@ def test_observation_uses_terminal_output_when_initial_metadata_is_accepted() ->
     assert observation.metadata["http_status"] == 401
     assert observation.metadata["error_class"] == "HTTPException"
     assert "answer" not in observation.metadata
+
+
+def test_missing_redaction_marker_is_unverified_and_requires_review() -> None:
+    class UnmarkedRun:
+        id: ClassVar[str] = "run-unmarked"
+        name: ClassVar[str] = "worker.research"
+        status: ClassVar[str] = "success"
+        start_time: ClassVar[datetime] = datetime.now(timezone.utc)
+        end_time: ClassVar[datetime] = start_time
+        extra: ClassVar[dict[str, object]] = {
+            "metadata": {"stage": "research", "status": "success"}
+        }
+        outputs: ClassVar[dict[str, object]] = {}
+
+    observation = observation_from_run(UnmarkedRun())
+    assert "raw_payloads_sent" not in observation.metadata
+
+    result = evaluate_observation(observation)
+
+    assert result.decision == "REVIEW_REQUIRED"
+    assert "REDACTION_MARKER_MISSING" in result.finding_codes
+    assert result.metadata["raw_payloads_sent"] is None
+    assert result.metadata["redaction_status"] == "UNVERIFIED"
+    assert result.metadata["observation_category"] == "workflow"
+    assert result.metadata["department_key"] == "research"
+    assert result.metadata["stage_status"] == "PRESENT"
 
 
 def test_evaluator_passes_structured_success_without_model_content() -> None:
@@ -336,7 +366,10 @@ def test_root_latency_is_attributed_to_longest_primary_kanban_task(tmp_path) -> 
 
     assert attributed.department == "trading-department"
     assert attributed.metadata["primary_bottleneck_duration_ms"] == 61_000
-    assert attributed.metadata["joint_improvement_targets"] == "ceo-workflow / observability"
+    assert (
+        attributed.metadata["joint_improvement_targets"]
+        == "ceo-workflow / observability"
+    )
     assert attributed.metadata["observation_point"] == "ceo-ingress"
     assert attributed.metadata["latency_attribution_status"] == "MEASURED"
 
@@ -368,6 +401,15 @@ def test_semantic_answer_contract_is_redacted_and_evaluated() -> None:
     assert result.decision == "OBSERVED_PASS"
     assert result.metadata["semantic_qa_score"] == 1.0
     assert result.metadata["semantic_qa_verdict"] == "PASS"
+
+
+def test_semantic_answer_contract_recognizes_explicit_limited_conclusion() -> None:
+    quality = evaluate_answer(
+        "최근 자료는 외국인 매수 우위를 보이지만 기관 확인이 부족해 "
+        "추격 신호로 확정하기는 어렵습니다. 기준 시각 2026-08-27, TR t1717.",
+    )
+    assert quality.verdict == "PASS"
+    assert quality.uncertainty_honesty == 1.0
 
 
 def test_semantic_failure_becomes_qa_review_signal_without_answer_text() -> None:
@@ -450,7 +492,10 @@ def test_privacy_violation_is_review_required() -> None:
     result = evaluate_observation(observation)
 
     assert result.decision == "REVIEW_REQUIRED"
-    assert result.finding_codes == ("PRIVACY_PAYLOAD_PRESENT", "CORRELATION_METADATA_MISSING")
+    assert result.finding_codes == (
+        "PRIVACY_PAYLOAD_PRESENT",
+        "CORRELATION_METADATA_MISSING",
+    )
 
 
 def test_ledger_is_idempotent_and_approval_creates_bounded_hint(tmp_path) -> None:
@@ -465,32 +510,41 @@ def test_ledger_is_idempotent_and_approval_creates_bounded_hint(tmp_path) -> Non
     artifact_id = ledger.complete("source-1", "eval-1", result)
 
     assert ledger.pending(10)[0]["artifact_id"] == artifact_id
-    assert ledger.approve(
-        artifact_id,
-        "APPROVED",
-        "qa-user",
-        "reviewed",
-        improvement_type="PROMPT_POLICY",
-    ) is True
-    assert ledger.approve(
-        artifact_id,
-        "APPROVED",
-        "qa-user",
-        "duplicate",
-        improvement_type="PROMPT_POLICY",
-    ) is False
+    assert (
+        ledger.approve(
+            artifact_id,
+            "APPROVED",
+            "qa-user",
+            "reviewed",
+            improvement_type="PROMPT_POLICY",
+        )
+        is True
+    )
+    assert (
+        ledger.approve(
+            artifact_id,
+            "APPROVED",
+            "qa-user",
+            "duplicate",
+            improvement_type="PROMPT_POLICY",
+        )
+        is False
+    )
     assert ledger.approved_hints(None, limit=3, max_chars=1200) is None
     candidates = ledger.benchmark_candidates(10)
     assert candidates[0]["artifact_id"] == artifact_id
     assert candidates[0]["benchmark_status"] == "PENDING"
-    assert ledger.update_benchmark(
-        artifact_id,
-        status="PASSED",
-        benchmark_id="offline-v1",
-        score=0.91,
-        report_ref="sha256:report",
-        result_summary="offline gate passed",
-    ) is True
+    assert (
+        ledger.update_benchmark(
+            artifact_id,
+            status="PASSED",
+            benchmark_id="offline-v1",
+            score=0.91,
+            report_ref="sha256:report",
+            result_summary="offline gate passed",
+        )
+        is True
+    )
     hint = ledger.approved_hints("risk", limit=3, max_chars=1200)
     assert hint is not None
     assert hint["items"][0]["department"] == "risk"
@@ -560,12 +614,22 @@ def test_benchmark_suite_exception_isolated_from_sibling_suite(monkeypatch) -> N
     assert "BROKEN_SUITE:suite_exception" in summary
 
 
-def test_benchmark_candidate_exception_does_not_stop_later_candidates(monkeypatch) -> None:
+def test_benchmark_candidate_exception_does_not_stop_later_candidates(
+    monkeypatch,
+) -> None:
     class FakeLedger:
         def __init__(self):
             self.candidates = [
-                {"artifact_id": "feedback-bad", "benchmark_status": "PENDING", "improvement_type": "CODE_FIX"},
-                {"artifact_id": "feedback-good", "benchmark_status": "PENDING", "improvement_type": "CODE_FIX"},
+                {
+                    "artifact_id": "feedback-bad",
+                    "benchmark_status": "PENDING",
+                    "improvement_type": "CODE_FIX",
+                },
+                {
+                    "artifact_id": "feedback-good",
+                    "benchmark_status": "PENDING",
+                    "improvement_type": "CODE_FIX",
+                },
             ]
             self.updated = []
 
@@ -663,13 +727,19 @@ def test_ledger_merges_same_request_department_and_finding(tmp_path) -> None:
 
     assert second_id == first_id
     with sqlite3.connect(ledger.path) as db:
-        assert db.execute(
-            "SELECT count(*) FROM langsmith_feedback_artifacts"
-        ).fetchone()[0] == 1
-        assert db.execute(
-            "SELECT count(*) FROM langsmith_feedback_artifact_sources WHERE artifact_id=?",
-            (first_id,),
-        ).fetchone()[0] == 2
+        assert (
+            db.execute("SELECT count(*) FROM langsmith_feedback_artifacts").fetchone()[
+                0
+            ]
+            == 1
+        )
+        assert (
+            db.execute(
+                "SELECT count(*) FROM langsmith_feedback_artifact_sources WHERE artifact_id=?",
+                (first_id,),
+            ).fetchone()[0]
+            == 2
+        )
     assert ledger.claim_discord_delivery(first_id) is True
     assert ledger.claim_discord_delivery(second_id) is False
 
@@ -704,12 +774,17 @@ def test_concurrent_semantic_completions_merge_without_lock_failures(tmp_path) -
 
     assert len(set(artifact_ids)) == 1
     with sqlite3.connect(ledger.path) as db:
-        assert db.execute(
-            "SELECT count(*) FROM langsmith_feedback_artifact_sources"
-        ).fetchone()[0] == 24
+        assert (
+            db.execute(
+                "SELECT count(*) FROM langsmith_feedback_artifact_sources"
+            ).fetchone()[0]
+            == 24
+        )
 
 
-def test_active_hint_is_local_only_and_requires_passed_benchmark(tmp_path, monkeypatch) -> None:
+def test_active_hint_is_local_only_and_requires_passed_benchmark(
+    tmp_path, monkeypatch
+) -> None:
     path = tmp_path / "feedback.sqlite3"
     ledger = FeedbackLedger(str(path))
     assert ledger.enqueue("source-active", "First") is True
@@ -719,31 +794,39 @@ def test_active_hint_is_local_only_and_requires_passed_benchmark(tmp_path, monke
         "eval-active",
         _actionable_result("source-active", request_id="discord:active"),
     )
-    assert ledger.approve(
-        artifact_id,
-        "APPROVED",
-        "qa-user",
-        "reviewed",
-        improvement_type="PROMPT_POLICY",
-    ) is True
+    assert (
+        ledger.approve(
+            artifact_id,
+            "APPROVED",
+            "qa-user",
+            "reviewed",
+            improvement_type="PROMPT_POLICY",
+        )
+        is True
+    )
 
     monkeypatch.setenv("LANGSMITH_FEEDBACK_MODE", "active")
     monkeypatch.setenv("LANGSMITH_FEEDBACK_STATE_PATH", str(path))
     monkeypatch.setattr("orchestration.langsmith_feedback._HINT_CACHE", None)
     monkeypatch.setattr(
         "langsmith.Client",
-        lambda **_: (_ for _ in ()).throw(AssertionError("active hint must not call LangSmith")),
+        lambda **_: (_ for _ in ()).throw(
+            AssertionError("active hint must not call LangSmith")
+        ),
     )
 
     from orchestration.langsmith_feedback import approved_feedback_hint
 
     assert approved_feedback_hint() is None
-    assert ledger.update_benchmark(
-        artifact_id,
-        status="PASSED",
-        benchmark_id="offline-active-v1",
-        score=0.9,
-    ) is True
+    assert (
+        ledger.update_benchmark(
+            artifact_id,
+            status="PASSED",
+            benchmark_id="offline-active-v1",
+            score=0.9,
+        )
+        is True
+    )
     monkeypatch.setattr("orchestration.langsmith_feedback._HINT_CACHE", None)
     hint = approved_feedback_hint()
     assert hint is not None
@@ -760,17 +843,24 @@ def test_ledger_cleanup_removes_expired_artifacts_and_decisions(tmp_path) -> Non
         "eval-old",
         _actionable_result("source-old", request_id="discord:old"),
     )
-    assert ledger.approve(
-        artifact_id,
-        "APPROVED",
-        "qa-user",
-        "reviewed",
-        improvement_type="PROMPT_POLICY",
-    ) is True
+    assert (
+        ledger.approve(
+            artifact_id,
+            "APPROVED",
+            "qa-user",
+            "reviewed",
+            improvement_type="PROMPT_POLICY",
+        )
+        is True
+    )
 
     with sqlite3.connect(path) as db:
-        db.execute("UPDATE langsmith_feedback_artifacts SET created_at='2000-01-01T00:00:00+00:00'")
-        db.execute("UPDATE langsmith_feedback_jobs SET updated_at='2000-01-01T00:00:00+00:00'")
+        db.execute(
+            "UPDATE langsmith_feedback_artifacts SET created_at='2000-01-01T00:00:00+00:00'"
+        )
+        db.execute(
+            "UPDATE langsmith_feedback_jobs SET updated_at='2000-01-01T00:00:00+00:00'"
+        )
 
     assert ledger.cleanup(1) == 2
     assert ledger.pending(10) == []
@@ -790,17 +880,25 @@ def test_unanswered_artifact_expires_without_becoming_rejected(tmp_path) -> None
 
     assert len(ledger.pending(10)) == 1
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT COUNT(*) FROM langsmith_feedback_decisions").fetchone() == (0,)
+        assert db.execute(
+            "SELECT COUNT(*) FROM langsmith_feedback_decisions"
+        ).fetchone() == (0,)
         assert db.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='langsmith_feedback_reviews'"
         ).fetchone() == (0,)
-        db.execute("UPDATE langsmith_feedback_artifacts SET created_at='2000-01-01T00:00:00+00:00'")
-        db.execute("UPDATE langsmith_feedback_jobs SET updated_at='2000-01-01T00:00:00+00:00'")
+        db.execute(
+            "UPDATE langsmith_feedback_artifacts SET created_at='2000-01-01T00:00:00+00:00'"
+        )
+        db.execute(
+            "UPDATE langsmith_feedback_jobs SET updated_at='2000-01-01T00:00:00+00:00'"
+        )
 
     assert ledger.cleanup(1) == 2
     assert ledger.pending(10) == []
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT COUNT(*) FROM langsmith_feedback_decisions").fetchone() == (0,)
+        assert db.execute(
+            "SELECT COUNT(*) FROM langsmith_feedback_decisions"
+        ).fetchone() == (0,)
 
 
 def test_metric_windows_share_one_six_hour_incident_artifact(tmp_path) -> None:
@@ -832,13 +930,18 @@ def test_metric_windows_share_one_six_hour_incident_artifact(tmp_path) -> None:
             ),
             source_project="HgFinance-Metrics",
         )
-        artifact_ids.append(ledger.complete(source_run, f"eval-metrics-{number}", result))
+        artifact_ids.append(
+            ledger.complete(source_run, f"eval-metrics-{number}", result)
+        )
 
     assert len(set(artifact_ids)) == 1
     with sqlite3.connect(ledger.path) as db:
-        assert db.execute(
-            "SELECT count(*) FROM langsmith_feedback_artifact_sources"
-        ).fetchone()[0] == 2
+        assert (
+            db.execute(
+                "SELECT count(*) FROM langsmith_feedback_artifact_sources"
+            ).fetchone()[0]
+            == 2
+        )
 
 
 def test_evaluation_run_id_is_stable_and_stale_jobs_are_reclaimable(tmp_path) -> None:
@@ -883,7 +986,9 @@ def test_root_body_feedback_is_advisory_and_contract_is_unchanged() -> None:
     assert "workflow_mode=analysis" in body
     assert "qa_enabled=true" in body
 
-    assert "LATENCY_ABOVE_THRESHOLD" in approved_feedback_section_from_root(body, "qa-department")
+    assert "LATENCY_ABOVE_THRESHOLD" in approved_feedback_section_from_root(
+        body, "qa-department"
+    )
     assert approved_feedback_section_from_root(body, "risk-management") == ""
 
 
@@ -904,7 +1009,9 @@ def test_feedback_config_bounds_concurrency_inputs(monkeypatch) -> None:
     assert config.discord_retention_interval_seconds == 60.0
 
 
-def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_path, monkeypatch) -> None:
+def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(
+    tmp_path, monkeypatch
+) -> None:
     class _Paginator:
         def __init__(self, rows):
             self.rows = rows
@@ -939,7 +1046,10 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_
 
     fake_client = _Client()
     monkeypatch.setattr("langsmith.Client", lambda **kwargs: fake_client)
-    monkeypatch.setattr("orchestration.langsmith_feedback.publish_evaluation", lambda result, project: "eval-1")
+    monkeypatch.setattr(
+        "orchestration.langsmith_feedback.publish_evaluation",
+        lambda result, project: "eval-1",
+    )
     config = FeedbackConfig(
         mode="shadow",
         workflow_project="First",
@@ -959,7 +1069,9 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_
     )
 
     service = LangSmithFeedbackService(config=config)
-    monkeypatch.setattr("orchestration.llm_observability.langsmith_enabled", lambda: True)
+    monkeypatch.setattr(
+        "orchestration.llm_observability.langsmith_enabled", lambda: True
+    )
     result = service.run_once()
 
     assert result["completed"] == 1
@@ -972,7 +1084,9 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_
 
 
 def test_service_is_noop_when_langsmith_is_disabled(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("orchestration.llm_observability.langsmith_enabled", lambda: False)
+    monkeypatch.setattr(
+        "orchestration.llm_observability.langsmith_enabled", lambda: False
+    )
 
     service = LangSmithFeedbackService(
         config=FeedbackConfig(
@@ -994,7 +1108,42 @@ def test_service_is_noop_when_langsmith_is_disabled(tmp_path, monkeypatch) -> No
         )
     )
 
-    assert service.run_once() == {"discovered": 0, "completed": 0, "failed": 0, "dropped": 0}
+    assert service.run_once() == {
+        "discovered": 0,
+        "completed": 0,
+        "failed": 0,
+        "dropped": 0,
+    }
+
+
+def test_feedback_poll_backoff_recovers_after_success(tmp_path) -> None:
+    service = LangSmithFeedbackService(
+        config=FeedbackConfig(
+            mode="shadow",
+            workflow_project="First",
+            metrics_project="HgFinance-Metrics",
+            evals_project="HgFinance-Evals",
+            state_path=str(tmp_path / "feedback.sqlite3"),
+            poll_seconds=5,
+            lookback_seconds=60,
+            batch_size=1,
+            max_pending=10,
+            retention_days=30,
+            latency_warn_ms=60_000,
+            max_feedback_items=1,
+            max_feedback_chars=100,
+            metrics_window_seconds=300,
+            metrics_max_runs=10,
+        )
+    )
+
+    service._record_poll_failure(RuntimeError("langsmith_v2_query_http_500"))
+    assert service._last_poll_error_code == "langsmith_v2_query_http_500"
+    assert service._poll_wait_seconds(0) == 10
+
+    service._record_poll_success()
+    assert service._poll_failure_streak == 0
+    assert service._poll_wait_seconds(0) == 5
 
 
 def test_feedback_ignores_legacy_metric_and_test_roots() -> None:

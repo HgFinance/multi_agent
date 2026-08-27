@@ -822,9 +822,8 @@ subject to mandate, risk, liquidity, operational, legal and cost constraints
 
 - Kafka/Redpanda, Flink, ClickHouse, Neo4j와 Kubernetes
 - Agent 강화학습과 자동 조직 재편
-- 인물 정체성·문체 Persona Fine-tuning. 이름을 제거한 Doctrine Adapter는
-  [Investment Doctrine Model Factory](../02-engineering/INVESTMENT_DOCTRINE_MODEL_FACTORY.md)의
-  Dataset·Frozen Eval·QA Trigger 통과 후에만 허용
+- 인물 정체성·문체 Persona Fine-tuning. 이름을 제거한 Doctrine Adapter는 별도 승인·Dataset·
+  Frozen Eval·QA Trigger가 구현되기 전까지 보류
 - 외부 투자자 대상 자동 자문·일임·Fund 기능
 
 ## 13. 연구 근거와 공개 자료

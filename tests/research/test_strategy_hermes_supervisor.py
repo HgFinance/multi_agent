@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 import threading
 import time
 from argparse import Namespace
@@ -68,6 +69,48 @@ def test_blocked_retry_requires_an_explicit_operator_flag(tmp_path: Path, monkey
     report = supervisor.run_once(_args(root, retry_blocked=True))
 
     assert report["labs"] == [{"lab_id": "research-02", "status": "RETRIED"}]
+
+
+def test_completed_lab_is_not_replayed_on_the_next_supervisor_cycle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "research"
+    intake = ResearchIntake(root)
+    intake.submit(
+        {
+            "request_id": "research-completed",
+            "goal": "Keep a completed research result durable",
+            "source": "web",
+        }
+    )
+    lab_path = intake.materialize("research-completed", repo_root=tmp_path)
+    lab = supervisor.ResearchLab(lab_path)
+    lab.update_state(cycle=1, last_action="HERMES_RUNNING")
+
+    monkeypatch.setattr(
+        supervisor.ResearchLab,
+        "results",
+        lambda _lab: [SimpleNamespace(status="COMPLETED", plan_id="plan-1")],
+    )
+
+    def fail_if_replayed(*_args, **_kwargs):
+        raise AssertionError("completed labs must not start Hermes again")
+
+    monkeypatch.setattr(supervisor, "StrategyHermesAgent", fail_if_replayed)
+
+    report = supervisor.run_once(_args(root))
+
+    assert report["labs"] == [
+        {
+            "lab_id": "research-completed",
+            "status": "COMPLETED",
+            "cycle": 1,
+            "last_result": "plan-1",
+            "decisions": [],
+            "result_available": True,
+        }
+    ]
+    assert lab.state()["last_action"] == "RESULT_RECORDED"
 
 
 def test_independent_active_labs_execute_concurrently_in_stable_order(

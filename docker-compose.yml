@@ -260,6 +260,12 @@ services:
       # 페이퍼 전략 컨테이너 상태·전원. docker 소켓은 이 서비스가 아니라
       # `strategy-runtime-control` sidecar가 쥔다(그 서비스 정의 주석 참고).
       STRATEGY_RUNTIME_API_URL: ${STRATEGY_RUNTIME_API_URL:-http://strategy-runtime-control:8000}
+      # Shared opaque service proof; never expose this to the browser or child
+      # PAPER containers. Empty keeps the control boundary fail-closed.
+      STRATEGY_RUNTIME_SERVICE_TOKEN: ${STRATEGY_RUNTIME_SERVICE_TOKEN:-}
+      # PIVOT/REVIEW_REQUIRED 예외 PAPER 배포를 승인할 최상위 사람 ID.
+      # 비워두면 예외 경로는 fail-closed이며, 로컬 호환 기본값은 QA 승인자 목록이다.
+      STRATEGY_TOP_LEVEL_APPROVER_USER_IDS: ${STRATEGY_TOP_LEVEL_APPROVER_USER_IDS:-${QA_DISCORD_APPROVER_USER_IDS:-}}
       KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
       KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
       # Discord 연동(2026-08-18). 셋 다 비어 있으면 관련 기능만 조용히 꺼지고
@@ -282,6 +288,12 @@ services:
       DISCORD_BOT_TOKEN_RISK: ${DISCORD_BOT_TOKEN_RISK:-}
       DISCORD_BOT_TOKEN_QA: ${DISCORD_BOT_TOKEN_QA:-}
       DISCORD_CEO_CHANNEL_ID: ${DISCORD_CEO_CHANNEL_ID:-}
+      # discord_read.py resolves department channels through the explicit
+      # DISCORD_<DEPARTMENT>_CHANNEL_ID convention. Reuse HR's existing
+      # allowlist value here so the read API does not silently fall back to
+      # the shared CEO channel.
+      DISCORD_HR_CHANNEL_ID: ${HR_DISCORD_ALLOWED_CHANNELS:-1542405626531942432}
+      QA_DISCORD_CHANNEL_ID: ${QA_DISCORD_CHANNEL_ID:-}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
       DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
       # 결과물 창고(apps/api/notion_read.py)가 CEO 오피스 리포트를 읽는다.
@@ -555,7 +567,10 @@ services:
       CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
-      CONDITIONAL_RULE_EVENT_STREAM_MAXLEN: ${CONDITIONAL_RULE_EVENT_STREAM_MAXLEN:-10000}
+      # Empty/0 keeps the Redis stream lossless; PostgreSQL outbox retention is
+      # the replay boundary. Set an explicit value only with an independent
+      # stream replay/retention policy.
+      CONDITIONAL_RULE_EVENT_STREAM_MAXLEN: ${CONDITIONAL_RULE_EVENT_STREAM_MAXLEN:-}
       CONDITIONAL_RULE_OUTBOX_POLL_SECONDS: ${CONDITIONAL_RULE_OUTBOX_POLL_SECONDS:-1}
       CONDITIONAL_RULE_OUTBOX_BATCH_SIZE: ${CONDITIONAL_RULE_OUTBOX_BATCH_SIZE:-100}
     healthcheck:
@@ -1174,6 +1189,7 @@ services:
       # 도구 면 인증(2026-08-02). 비면 무인증으로 열리고 기동 로그에 경고가
       # 찍힌다 - '잊은 것'과 '일부러 연 것'을 구분되게 한다.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      RESEARCH_MCP_LOOP_STALL_SECONDS: ${RESEARCH_MCP_LOOP_STALL_SECONDS:-90}
       <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
@@ -1240,6 +1256,17 @@ services:
     cpus: 2.0
     pids_limit: 256
     stop_grace_period: 30s
+    # 2026-08-27: 호스트 메모리 압박 때 uvicorn 이벤트 루프가 응답불가로
+    # 빠져도 프로세스는 안 죽어 restart:unless-stopped 가 못 걸렸다(로그를
+    # 뒤져야만 알 수 있었다). 루프백 호출 하나로 생존만 본다 - 외부
+    # API 예산은 안 쓴다. status=unhealthy 가 보이면 수동 재기동 신호다
+    # (Compose 는 unhealthy 를 자동 재시작하지 않는다).
+    healthcheck:
+      test: ["CMD", "python", "api/mcp_server.py", "--healthcheck"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ── research-liaison-mcp: 리서치 응대 창구(도서관) 도구 면 (2026-08-13) ──
   # 같은 이미지·같은 코드가 RESEARCH_MCP_SURFACE=liaison 으로 뜬다 - 파이프라인
@@ -1323,6 +1350,7 @@ services:
       RESEARCH_MCP_SURFACE: liaison
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      RESEARCH_MCP_LOOP_STALL_SECONDS: ${RESEARCH_MCP_LOOP_STALL_SECONDS:-90}
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
       OLLAMA_BASE_URL: http://host.docker.internal:11434
@@ -1349,6 +1377,12 @@ services:
     cpus: 1.0
     pids_limit: 128
     stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "api/mcp_server.py", "--healthcheck"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ▶ **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개** (계획서 3.1~3.2)
   #   Credential·Memory Namespace 분리는 이름이 아니라 저장소 분리다.
@@ -1951,6 +1985,11 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      DISCORD_IDEMPOTENCY_HOME: /opt/kanban
+      DISCORD_IDEMPOTENCY_SCOPE: global
+      # Slash-command registration is disabled for the patched gateway path;
+      # message ingress does not depend on command synchronization.
+      DISCORD_COMMAND_SYNC_POLICY: ${DISCORD_COMMAND_SYNC_POLICY:-off}
       HERMES_BIN: /opt/hgfinance/scripts/qa_hermes_worker.py
       # QA terminal work is evidence-bound and must finish within the
       # dispatcher lease; retain high reasoning but cap runaway tool loops.
@@ -1961,6 +2000,7 @@ services:
       HGFINANCE_QA_PRIMARY_MAX_TURNS: ${HGFINANCE_QA_PRIMARY_MAX_TURNS:-6}
       HGFINANCE_QA_PRIMARY_REASONING: ${HGFINANCE_QA_PRIMARY_REASONING:-high}
       QA_DISCORD_CHANNEL_ID: ${QA_DISCORD_CHANNEL_ID:-1541636723006775477}
+      DISCORD_ALLOWED_CHANNELS: ${QA_DISCORD_ALLOWED_CHANNELS:-1541636723006775477}
       # This is the dedicated QA room. It lets the exact self-authored
       # observability marker reach Hermes without creating an extra bot.
       DISCORD_FREE_RESPONSE_CHANNELS: ${QA_DISCORD_FREE_RESPONSE_CHANNELS:-1541636723006775477}
@@ -2098,7 +2138,10 @@ services:
   #   (`hermes kanban --board <slug>`; 보드마다 DB·workspace·dispatcher 루프가 독립).
   #   그때 이 상한은 공장 쪽만 낮추면 된다.
   kanban-dispatcher:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.agent-runtime
+    image: hedgefund-agent-runtime:latest
     container_name: hedgefund-kanban-dispatcher
     # Hermes claim ownership is ``hostname:pid``. Keep the hostname stable
     # across Compose replacement so the replacement daemon can immediately
@@ -2123,7 +2166,7 @@ services:
     # DEPRECATED standalone escape hatch. 이 컨테이너는 gateway가 아니라
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
-      ["/bin/sh", "-c", "python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py && exec hermes kanban daemon --force --interval \"$${KANBAN_DISPATCH_INTERVAL:-1}\" --pidfile /opt/data/shared-kanban/dispatcher.pid --verbose"]
+      ["/bin/sh", "-c", "python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py && exec hermes kanban daemon --force --interval \"$${KANBAN_DISPATCH_INTERVAL:-1}\" --max \"$${KANBAN_DISPATCH_MAX_SPAWN:-3}\" --failure-limit \"$${KANBAN_DISPATCH_FAILURE_LIMIT:-2}\" --pidfile /opt/data/shared-kanban/dispatcher.pid --verbose"]
     # Hermes 최신 s6 이미지에서는 Docker `user:` 고정을 사용하지 않는다.
     # 컨테이너는 root로 bootstrap한 뒤 HERMES_UID/HERMES_GID=1000으로
     # runtime user와 /opt/data 소유권을 host UID/GID에 맞춘다.
@@ -2168,6 +2211,12 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_TOOL_TRACE_MODE: ${LANGSMITH_TOOL_TRACE_MODE:-aggregate}
+      # Risk ordinary successful worker traces are sampled; errors, legal-Wiki
+      # calls and slow executions remain 100% observable. The dispatcher is
+      # the single canonical publisher for this policy.
+      LANGSMITH_RISK_TRACE_SAMPLE_RATE: ${LANGSMITH_RISK_TRACE_SAMPLE_RATE:-0.10}
+      LANGSMITH_RISK_TRACE_SLOW_MS: ${LANGSMITH_RISK_TRACE_SLOW_MS:-45000}
       # ▶ 부서장 카드 span (2026-08-27). 여기가 **유일한** 계측 지점이다 -
       #   사용자 질의는 CEO 루트 카드만 만들고(apps/api/ceo.py), 거기서 갈라지는
       #   CEO·부서·QA·종합 턴을 전부 이 컨테이너가 띄운다.
@@ -2183,11 +2232,19 @@ services:
       # keep that latency behavior on fresh deployments too. Hermes still
       # enforces the board-wide max_in_progress cap on every daemon tick.
       KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-1}
+      # Explicitly pass the intended board-wide worker budget to the legacy
+      # standalone daemon. Without this flag the daemon's optional max_spawn
+      # remains unset, so this container can consume every available worker
+      # slot while user-facing CEO cards remain ready.
+      KANBAN_DISPATCH_MAX_SPAWN: ${KANBAN_DISPATCH_MAX_SPAWN:-3}
+      KANBAN_DISPATCH_FAILURE_LIMIT: ${KANBAN_DISPATCH_FAILURE_LIMIT:-2}
       # Fast user-facing control-plane tasks only; standard analysis and
       # experiments keep profile budgets. The wrapper preserves explicit
       # per-task overrides and clamps these defaults to bounded ranges.
       HGFINANCE_FAST_ADVISORY_MAX_TURNS: ${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-8}
       HGFINANCE_USER_RESPONSE_MAX_TURNS: ${HGFINANCE_USER_RESPONSE_MAX_TURNS:-12}
+      KANBAN_USER_QUERY_PRIORITY: ${KANBAN_USER_QUERY_PRIORITY:-100}
+      KANBAN_RESEARCH_QUERY_PRIORITY: ${KANBAN_RESEARCH_QUERY_PRIORITY:-110}
       HGFINANCE_USER_RESPONSE_REASONING: ${HGFINANCE_USER_RESPONSE_REASONING:-medium}
       # Post-response QA is already evidence-bound and asynchronous. Keep a
       # short hard ceiling so an audit loop cannot consume the worker lease.
@@ -2231,6 +2288,11 @@ services:
     image: hedgefund-ceo-supervisor:latest
     container_name: hedgefund-ceo-kanban-supervisor
     restart: unless-stopped
+    entrypoint: ["/usr/local/bin/ceo-supervisor-entrypoint"]
+    # The shared SQLite ledger is root:root 0660. Hermes still runs as its
+    # configured non-root uid, but needs root's group for the journal/WAL.
+    group_add:
+      - "0"
     logging:
       driver: "json-file"
       options:
@@ -2241,6 +2303,11 @@ services:
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - .:/opt/hgfinance:ro
+      # MemoHarness D5 approval/benchmark state is a local bounded ledger.
+      # Keep it on the same durable runtime volume used by the BFF and QA
+      # feedback worker; an in-container default path would disappear on
+      # supervisor recreation.
+      - portfolio_runtime_data:/var/lib/portfolio
     environment:
       HERMES_HOME: /opt/data
       HERMES_UID: 1000
@@ -2275,6 +2342,8 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_RISK_TRACE_SAMPLE_RATE: ${LANGSMITH_RISK_TRACE_SAMPLE_RATE:-0.10}
+      LANGSMITH_RISK_TRACE_SLOW_MS: ${LANGSMITH_RISK_TRACE_SLOW_MS:-45000}
       # Hermes enforces SIGTERM -> SIGKILL for each worker task. The supervisor
       # also passes these values to primary/QA/synthesis cards and applies the
       # end-to-end root deadline independently.
@@ -2285,6 +2354,7 @@ services:
       MEMOHARNESS_D5_DATABASE_URL: ${MEMOHARNESS_D5_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
+      LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
       NOTION_TOKEN: ${NOTION_TOKEN:-}
       NOTION_CEO_DB: ${NOTION_CEO_DB:-}
       NOTION_RESEARCH_DB: ${NOTION_RESEARCH_DB:-}
@@ -2294,6 +2364,10 @@ services:
       NOTION_ACCOUNTING_DB: ${NOTION_ACCOUNTING_DB:-}
       NOTION_QA_DB: ${NOTION_QA_DB:-}
       NOTION_HR_DB: ${NOTION_HR_DB:-}
+      # The explicit CEO secret wins over a stale mounted profile token after
+      # a Discord token rotation. The value is never logged or copied to
+      # manager-facing output.
+      DISCORD_BOT_TOKEN_CEO: ${DISCORD_BOT_TOKEN_CEO:-}
       # The supervisor's legacy generic DB slot is kept for compatibility,
       # but it must point at the same private control database as D5.
       DATABASE_URL: ${CEO_SUPERVISOR_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
@@ -2537,17 +2611,29 @@ services:
         max-size: "10m"
         max-file: "3"
     command: ["python", "-m", "uvicorn", "strategy_runtime_server:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
     environment:
       PYTHONPATH: /app:/app/apps/api
       MLPIPE_PAPER_HOME: /mlpipe-paper
       # 기본은 꺼져 있다 - 운영자가 명시적으로 켜야 전원 조작이 된다
       # (`apps/api/strategy_runtime.py` 머리말의 기본값 정책).
       ENABLE_STRATEGY_CONTAINER_CONTROL: ${ENABLE_STRATEGY_CONTAINER_CONTROL:-false}
+      STRATEGY_PAPER_IMAGE: ${STRATEGY_PAPER_IMAGE:-hedgefund-operations-runtime:latest}
+      STRATEGY_LAB_VOLUME: ${STRATEGY_LAB_VOLUME:-hedgefund_autonomous_research_lab}
+      STRATEGY_RUNTIME_STATE_VOLUME: ${STRATEGY_RUNTIME_STATE_VOLUME:-hedgefund_strategy_runtime_data}
+      STRATEGY_RUNTIME_STATE_ROOT: /var/lib/strategy-runtime
+      STRATEGY_RUNTIME_SERVICE_TOKEN: ${STRATEGY_RUNTIME_SERVICE_TOKEN:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # 읽기 전용 - 이 서비스는 원장·팩 파일을 읽기만 한다. 쓰기는 컨테이너
       # 자신(mlpipe-paper)만 한다.
       - /home/ubuntu/mlpipe-paper:/mlpipe-paper:ro
+      - autonomous_research_lab:/var/lib/autonomous-research:ro
+      - strategy_runtime_data:/var/lib/strategy-runtime
 
 volumes:
   redis_data:
@@ -2557,3 +2643,4 @@ volumes:
   autonomous_research_lab:
   strategy_hermes_home:
   strategy_discord_notifier_state:
+  strategy_runtime_data:

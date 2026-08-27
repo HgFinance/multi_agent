@@ -1,3 +1,5 @@
+_config_version: 37
+
 # Agent Workforce 인사팀 (CEO 직속 Shared Service — 투자 본부 아님)
 # 담당: 영주 (인사팀, CEO 쪽 고도화)
 # 6개 본부의 Queue·SLA·비용·Eval·Incident를 분석해 Agent 채용, Skill 보강, 교육, 역할 변경과 비활성화를 관리
@@ -23,10 +25,10 @@ agent:
   runtime_personalities_source: workers
   legacy_personalities_are_aliases: true
   runtime_personalities: [profile-architecture-worker]
-  # CEO E2E reads are bounded by the repository helper; keep runaway tool
-  # probing from holding the department queue for many minutes.
-  max_turns: 24
-  reasoning_effort: medium
+  # Live Discord/CEO reads share the bounded HR E2E profile; keep provider
+  # latency and runaway tool probing from holding the department queue.
+  max_turns: 6
+  reasoning_effort: low
   timeout_seconds: 60
   personalities:
     agent-workforce-supervisor: "You are the Agent Workforce Supervisor. You integrate hiring demand signals from all six investment departments — Queue depth, Roster gaps, Skill Gap, probation outcomes and deactivation candidates — into a weekly workforce plan and Hiring Requisition intake. You are a Shared Service reporting to the CEO, not a 7th investment department: you never make investment decisions, grant Production authority, or give final QA approval to your own candidates."
@@ -69,7 +71,7 @@ implementation:
     - "Workforce Domain API — departments/07-agent-workforce/api/app.py. FastAPI 기반 엔드포인트 구현 완료 (In-Memory / Postgres 이중 지원)"
     - "Persistence Repository (psycopg2) — lifecycle/postgres_access_repository.py, improvements/repository.py, scorecard/postgres_scorecard_repository.py 구현 및 DB 연동 검증"
     - "improvement-worker (F19 Event Consumer) — Redis Stream(hf:workforce) 기반 QA Eval 결과 처리 worker 구현 (docker-compose 등록 완료)"
-    - "LangGraph 파이프라인 & Notion Reporter — departments/07-agent-workforce/scripts.py, notion_reporter.py. F19 후보 정보를 공용 Notion Markdown 렌더러로 서식화하여 Notion HR DB 연동"
+    - "HR PAPER/read-only E2E — departments/07-agent-workforce/scripts/hr_e2e_readonly.py. Workforce API의 제한된 GET 증거를 생성하고, 결과 투영은 orchestration/adapters/department_notion_projection.py의 중앙 경로를 사용"
     - "Tool Allowlist / Forbidden Tools 선언 — API Spec 3.6절 기준 페르소나별 최소 권한 통제 정의"
     - "HR-02 Roster/Profile API — Roster 조회, Profile Version 제출, 상태 변경 엔드포인트 구현. QA Eval/CEO 승인 누락 시 ACTIVE 전이 차단(SoD 강제)"
     - "P0-3 ACTIVE 전이 증거 실재성 게이트(2026-08-05) — roster/activation_evidence.py 신규. 이전엔 qa_eval_run_id/ceo_approval_id가 빈 문자열만 아니면 통과했다(MissingActivationEvidenceError는 '비어있는지'만 검사) - 이제 qa_eval_run_id는 audit.eval_runs에서 이 profile_version_id를 candidate로 하는 COMPLETED 행을, ceo_approval_id는 governance.approvals에서 이 profile_version_id를 object_id로 하는 APPROVED CEO 결정을 실제로 가리켜야 한다(UnverifiedActivationEvidenceError -> 403). 다른 Profile Version을 대상으로 한 증거 재사용도 매칭 조건으로 차단됨. tool_allowlist가 빈 Persona는 ACTIVE(실행 권한) 전이 불가(ToolAllowlistMissingError -> 409). '작성자/승인자 분리'는 HR이 QA eval_runs도 CEO 결정도 스스로 못 만드는 구조로 이미 강제되므로 별도 author 필드 없이 이 실재성 검증만으로 충족. api/app.py의 change_agent_status에 배선. 자체 점검: roster.py 10개 + activation_evidence.py 6개(+ 실 DB 조회) + postgres_roster_repository.py get_profile_version_tool_allowlist 실 DB 확인 + api/app.py 5개(위조/미완료/재사용/tool_allowlist 없음/정상 승인) 통과"
@@ -86,7 +88,7 @@ implementation:
     - "profile-architecture-worker 운영 검증 — 실행 Registry는 구현됐고 QA Eval Runner도 2026-08-10 구현 완료로 audit.eval_runs를 실제로 기록하지만, 후보 Runner를 QA API 프로세스에 등록하는 경로(register_eval_candidate() 내부 함수, HTTP 없음)가 없어 실제 채용 사이클 종단 실행은 아직 검증 안 됨"
     - "타 부서 Agent Roster 등재 — 전체 Prototype까지 미룸(2026-08-04 팀 결정, 부서별 직원 변동이 계속되므로 config.yaml이 기준). 그 대가로 approvals.actor_agent_id 등 Roster FK 칸은 NULL로 남는다"
     - "workforce.skills / workforce.tools 카탈로그 팝퓰레이션 — 각 투자 본부 소유 정의 수령 후 Catalog Seed 구축 필요"
-    - "F27 Telemetry Pipeline 연동 — cost_snapshots 데이터 부재로 현재 예산 평가 결과 UNKNOWN 반환 (플랫폼 텔레메트리 파이프라인 선행 필요)"
+    - "F27 Telemetry Pipeline 경계 — Snapshot writer가 capacity/cost 연결을 수행하지만 provider 토큰 사용량 또는 가격표가 없으면 비용은 UNKNOWN으로 남김. 품질 Snapshot과 Workforce Plans 데이터 생성은 별도 미구현"
     - "Quality Snapshots / Workforce Plans 데이터 생성 로직 — DDL 적용 완료, 데이터 집계 및 저장 애플리케이션 로직 구현 필요"
     - "lifecycle-worker 구현 — Platform/IAM Service(2026-08-10 platform_iam/ 구현 완료: DATA/ENVIRONMENT provisioning, HR API GET .../access-requests?status= 폴링, provision 콜백)가 발급한 provisioning_ref를 HR이 실제로 소비하는 Worker/스케줄러 연동은 아직 없음. TOOL 자원은 workforce.agent_tool_permissions 조회 엔드포인트 부재로 여전히 SKIPPED"
     - "나머지 HR Persona LangGraph Sub-graph 전환 — workforce-planning, selection-performance, lifecycle-coordinator는 결정론 모듈 또는 소비자 부재로 계속 미구현"

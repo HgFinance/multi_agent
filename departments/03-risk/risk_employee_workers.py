@@ -72,6 +72,7 @@ from orchestration.llm_observability import (
     record_llm_call,
     redacted_current_worker_generation,
     redacted_langfuse_worker_span,
+    suppress_langsmith_automatic_tracing,
     trace_correlation_metadata,
     worker_graph_trace_config,
 )
@@ -887,23 +888,24 @@ def _run_employee_workers_sequential(
             not_executed.append(spec.worker_id)
             continue
         worker_trace = SkillTrace()
-        state = build_worker_graph(
-            spec, tools[spec.worker_id], llm, trace=worker_trace
-        ).invoke(
-            {"worker_id": spec.worker_id, "input": payload},
-            config=worker_graph_trace_config(
-                stage="risk",
-                worker_id=spec.worker_id,
-                role=spec.role,
-                correlation=trace_correlation_metadata(
-                    payload,
-                    input_hash=input_hash,
-                    case_id=case_id,
-                    task_id=task_id,
-                    trace_id=trace_id,
+        with suppress_langsmith_automatic_tracing():
+            state = build_worker_graph(
+                spec, tools[spec.worker_id], llm, trace=worker_trace
+            ).invoke(
+                {"worker_id": spec.worker_id, "input": payload},
+                config=worker_graph_trace_config(
+                    stage="risk",
+                    worker_id=spec.worker_id,
+                    role=spec.role,
+                    correlation=trace_correlation_metadata(
+                        payload,
+                        input_hash=input_hash,
+                        case_id=case_id,
+                        task_id=task_id,
+                        trace_id=trace_id,
+                    ),
                 ),
-            ),
-        )
+            )
         reports.append(
             {
                 "worker_id": spec.worker_id,
@@ -983,26 +985,27 @@ async def run_employee_workers_async(
     async def _execute_one(spec: WorkerSpec) -> dict[str, Any]:
         worker_trace = SkillTrace()
         try:
-            state = await build_worker_graph(
-                spec,
-                tools[spec.worker_id],
-                llm,
-                trace=worker_trace,
-            ).ainvoke(
-                {"worker_id": spec.worker_id, "input": payload},
-                config=worker_graph_trace_config(
-                    stage="risk",
-                    worker_id=spec.worker_id,
-                    role=spec.role,
-                    correlation=trace_correlation_metadata(
-                        payload,
-                        input_hash=input_hash,
-                        case_id=case_id,
-                        task_id=task_id,
-                        trace_id=trace_id,
+            with suppress_langsmith_automatic_tracing():
+                state = await build_worker_graph(
+                    spec,
+                    tools[spec.worker_id],
+                    llm,
+                    trace=worker_trace,
+                ).ainvoke(
+                    {"worker_id": spec.worker_id, "input": payload},
+                    config=worker_graph_trace_config(
+                        stage="risk",
+                        worker_id=spec.worker_id,
+                        role=spec.role,
+                        correlation=trace_correlation_metadata(
+                            payload,
+                            input_hash=input_hash,
+                            case_id=case_id,
+                            task_id=task_id,
+                            trace_id=trace_id,
+                        ),
                     ),
-                ),
-            )
+                )
             return {
                 "worker_id": spec.worker_id,
                 "role": spec.role,

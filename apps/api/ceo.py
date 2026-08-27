@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from hashlib import sha256
 
+from orchestration.discord_delivery import humanize_user_facing_text
 from orchestration.kanban_retention import (
     AuditStore,
     DiscordLedgerReader,
@@ -131,6 +132,7 @@ from orchestration.canonical_profiles import (
     CANONICAL_PROFILES,
     canonical_profile_for_department,
 )
+from orchestration.ceo_query_routing import is_read_only_hr_e2e_query
 from orchestration.ceo_workflow_scope import (
     UserPaperOrderScope,
     build_root_body,
@@ -148,7 +150,10 @@ from orchestration.compound_paper_orders import (
     parse_analysis_then_conditional_paper_order,
     parse_compound_paper_order,
 )
-from orchestration.experience_bank import ExperienceBank
+from orchestration.experience_bank import (
+    ExperienceBank,
+    discord_experience_case_type,
+)
 from orchestration.qa_contract import (
     canonical_qa_contract,
     split_planner_selection,
@@ -179,6 +184,54 @@ def _trace_error_metadata(exc: BaseException) -> dict[str, object]:
         if re.fullmatch(r"[A-Za-z0-9_.:-]{1,96}", candidate):
             metadata["error_code"] = candidate
     return metadata
+
+
+def _paper_order_terminal_trace(
+    response: Mapping[str, object],
+    *,
+    request_id: str,
+) -> tuple[str, dict[str, object], dict[str, object]] | None:
+    """Build one safe terminal envelope for the existing PAPER root trace."""
+
+    execution = response.get("execution")
+    if not isinstance(execution, Mapping):
+        # The asynchronous Hermes lane has not produced a terminal result yet.
+        return None
+    state = (
+        str(execution.get("request_state") or execution.get("decision") or "UNKNOWN")
+        .strip()
+        .upper()
+    )
+    terminal = state in {"COMPLETED", "FAILED", "UNKNOWN", "ACCOUNTING_PENDING"}
+    status = "completed" if state == "COMPLETED" else "degraded"
+    metadata: dict[str, object] = {
+        "schema_version": "paper-order-observability.v1",
+        "worker_id": "trading-deterministic",
+        "role": "primary",
+        "stage": "trading",
+        "department": "trading",
+        "workflow_role": "primary",
+        "workflow_mode": "binding",
+        "trace_kind": "deterministic_paper_order",
+        "latency_scope": "paper_order_execution",
+        "status": status if terminal else "running",
+        "terminal_status": state,
+        "tool_calls": 1,
+        "tool_error_count": int(state in {"FAILED", "UNKNOWN"}),
+        "error_count": int(state in {"FAILED", "UNKNOWN"}),
+        "raw_payloads_sent": False,
+        "request_id": request_id,
+        "root_id": str(response.get("task_id") or ""),
+        "task_id": str(response.get("trading_task_id") or ""),
+    }
+    output_summary: dict[str, object] = {
+        "execution_path": "deterministic_paper",
+        "mode": "PAPER",
+        "request_state": state,
+        "decision": str(execution.get("decision") or ""),
+        "order_submitted": bool(execution.get("order_submitted")),
+    }
+    return status, metadata, output_summary
 
 
 def _compound_leg_request_id(request_id: str, suffix: str) -> str:
@@ -256,9 +309,11 @@ def _deterministic_paper_order_fast_path_enabled() -> bool:
     unless explicitly enabled, which keeps local workflows inspectable.
     """
 
-    configured = os.getenv(
-        "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", ""
-    ).strip().casefold()
+    configured = (
+        os.getenv("USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "")
+        .strip()
+        .casefold()
+    )
     if configured:
         return configured in {"1", "true", "yes", "on"}
     return os.getenv("APP_ENV", "development").strip().casefold() in {
@@ -268,32 +323,9 @@ def _deterministic_paper_order_fast_path_enabled() -> bool:
 
 
 def _is_read_only_hr_e2e_request(raw_query: str) -> bool:
-    """Keep an HR verification request out of the high-recall order router.
+    """Compatibility alias for the canonical CEO routing predicate."""
 
-    The order detector intentionally recognizes negated/example language so
-    the trading boundary can reject it safely.  That is appropriate for
-    ordinary trading chat, but a cross-system HR E2E prompt can mention the
-    prohibited order boundary while asking only for diagnostics.  An explicit
-    HR + E2E/read-only marker is enough to preserve that request's analysis
-    lane without weakening normal order verification.
-    """
-
-    text = str(raw_query or "").casefold()
-    has_hr_scope = "hr-department" in text or (
-        "hr" in text and "부서" in text
-    )
-    has_read_only_scope = any(
-        marker in text
-        for marker in (
-            "e2e",
-            "읽기 전용",
-            "read-only",
-            "workforce api",
-            "연결 확인",
-            "통합 검증",
-        )
-    )
-    return has_hr_scope and has_read_only_scope
+    return is_read_only_hr_e2e_query(raw_query)
 
 
 def _is_read_only_risk_e2e_request(raw_query: str) -> bool:
@@ -330,6 +362,7 @@ def _is_read_only_risk_e2e_request(raw_query: str) -> bool:
         )
     )
     return has_risk_scope and has_e2e_scope and has_no_execution
+
 
 _PLANNING_SCHEMA_VERSION = "ceo.query-accepted.v2"
 _PRIMARY_PROFILE_ORDER = (
@@ -397,9 +430,13 @@ def _load(
             known_root=known_root,
         )
     except KanbanTaskNotFound as exc:
-        raise HTTPException(status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}") from exc
+        raise HTTPException(
+            status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}"
+        ) from exc
     except KanbanUnavailable as exc:
-        raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
+        raise HTTPException(
+            status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}"
+        ) from exc
 
 
 _TASK_LIST_STATUS = {
@@ -442,9 +479,11 @@ def _task_list_item_from_row(row: Mapping[str, object]) -> TaskListItem | None:
     created_iso: str | None = None
     if isinstance(created_at, (int, float)) and not isinstance(created_at, bool):
         try:
-            created_iso = datetime.fromtimestamp(
-                float(created_at), tz=timezone.utc
-            ).isoformat().replace("+00:00", "Z")
+            created_iso = (
+                datetime.fromtimestamp(float(created_at), tz=timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
         except (OverflowError, OSError, ValueError):
             created_iso = None
     elif isinstance(created_at, str) and created_at.strip():
@@ -653,7 +692,9 @@ def _planning_summary(
     body = str(task.get("body") or "").casefold()
     binding = bool(re.search(r"(?:^|\n)workflow_mode=binding(?:\n|$)", body))
     if not binding:
-        labels = [_PROFILE_LABEL[profile] for profile in selected if profile in _PROFILE_LABEL]
+        labels = [
+            _PROFILE_LABEL[profile] for profile in selected if profile in _PROFILE_LABEL
+        ]
         if labels:
             subject = "와 ".join(labels)
             return (
@@ -713,7 +754,9 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
     qa_contract = canonical_qa_contract(
         workflow_mode=workflow_mode,
         body=body,
-        metadata=task.get("metadata") if isinstance(task.get("metadata"), Mapping) else None,
+        metadata=task.get("metadata")
+        if isinstance(task.get("metadata"), Mapping)
+        else None,
         planner_qa_requested=planned_qa,
     )
     actions = [f"{_PROFILE_LABEL[p]}에서 {_PROFILE_COPY[p]}" for p in selected]
@@ -770,6 +813,95 @@ def _accepted_fallback() -> dict[str, object]:
     }
 
 
+def _clarification_required_response(
+    req: CeoAsk,
+    *,
+    owner_id: str | None,
+    mandate: Mapping[str, object] | None,
+    discord_channel_id: str | None,
+    discord_message_id: str | None,
+    discord_guild_id: str | None,
+    discord_thread_id: str | None,
+    routing_plan: Mapping[str, object],
+) -> dict[str, object]:
+    """Record an input clarification without creating executable children."""
+
+    answer = (
+        "요청 대상이나 원하는 작업이 불명확합니다. 종목·계좌·전략 등 대상과 "
+        "분석, 조회, 위험 검토 같은 목적을 함께 적어 주세요."
+    )
+    body = build_root_body(
+        req.query,
+        req.request_id,
+        workflow_mode="analysis",
+        source=getattr(req, "source", None),
+        mandate=mandate,
+        requested_by=owner_id,
+        discord_channel_id=discord_channel_id,
+        discord_message_id=discord_message_id,
+        discord_guild_id=discord_guild_id,
+        discord_thread_id=discord_thread_id,
+        selected_primary_profiles=(),
+        routing_basis="insufficient_query_intent",
+        routing_category=str(
+            routing_plan.get("category") or "PORTFOLIO_RECOMMENDATION"
+        ),
+        producer="portfolio-bff-deterministic",
+    )
+    task = hermes_boundary.create_kanban_task(
+        assignee=canonical_profile_for_department("ceo"),
+        title=f"입력 확인 필요: {req.query[:120]}",
+        body=body,
+        idempotency_key=req.request_id,
+        initial_status="blocked",
+    )
+    if not task or not task.get("task_id"):
+        raise HTTPException(
+            status_code=503, detail="ceo_clarification_task_unavailable"
+        )
+    task_id = str(task["task_id"])
+    if not hermes_boundary.comment_root_scope(
+        task_id=task_id, request_id=req.request_id
+    ):
+        raise HTTPException(
+            status_code=503, detail="ceo_clarification_scope_unavailable"
+        )
+    completed = hermes_boundary.complete_kanban_task(task_id=task_id, result=answer)
+    if not completed:
+        logger.warning(
+            "ceo-clarification status=blocked task_id=%s request_id=%s",
+            task_id,
+            req.request_id,
+        )
+    task_payload = {
+        **task,
+        "task_id": task_id,
+        "status": "completed" if completed else "blocked",
+        "latest_summary": answer,
+    }
+    return _accepted_response(
+        task_payload,
+        {
+            "status": "accepted",
+            "answer": answer,
+            "planning": {
+                "selected_departments": [],
+                "planned_departments": [],
+                "materialized_departments": [],
+                "steps": [],
+                "qa_required": False,
+                "planned_qa_required": False,
+                "qa_enabled": True,
+                "qa_blocks_response": False,
+                "qa_materialized": False,
+                "qa_legacy_primary_present": False,
+                "planned_synthesis": False,
+                "summary": "추가 입력이 필요해 부서 위임을 보류했습니다.",
+            },
+        },
+    )
+
+
 def _planning_read_timeout() -> float:
     try:
         return max(0.1, float(os.getenv("CEO_PLANNING_READ_TIMEOUT_SECONDS", "2")))
@@ -805,7 +937,9 @@ def _wait_for_planning(task_id: str) -> dict[str, object]:
         time.sleep(min(0.2, remaining))
 
 
-def _accepted_response(task: Mapping[str, object], planning: Mapping[str, object]) -> dict[str, object]:
+def _accepted_response(
+    task: Mapping[str, object], planning: Mapping[str, object]
+) -> dict[str, object]:
     return {
         "schema_version": _PLANNING_SCHEMA_VERSION,
         "department": "ceo-agent",
@@ -865,7 +999,9 @@ def _paper_order_accepted_response(
         },
         "session_id": None,
         "order_request_id": order_request_id,
-        "order_state": "RULE_INTERPRETATION_QUEUED" if conditional_rule else "KANBAN_QUEUED",
+        "order_state": "RULE_INTERPRETATION_QUEUED"
+        if conditional_rule
+        else "KANBAN_QUEUED",
         "order_mode": "PAPER",
         "conditional_rule": conditional_rule,
         "trading_task_id": str(
@@ -912,7 +1048,10 @@ def _paper_order_execution_response(
             "steps": (
                 ["Deterministic source verification", "Durable PAPER rule activation"]
                 if conditional_rule
-                else ["Deterministic source verification", "PAPER OMS submission and tracking"]
+                else [
+                    "Deterministic source verification",
+                    "PAPER OMS submission and tracking",
+                ]
             ),
             "qa_required": False,
             "summary": answer,
@@ -1187,7 +1326,9 @@ def _route_analysis_then_conditional_paper_order(
     if not req.book_id:
         raise HTTPException(status_code=422, detail="portfolio_book_id_required")
     if not _user_paper_order_workflow_enabled():
-        raise HTTPException(status_code=503, detail="paper_order_hermes_runtime_unavailable")
+        raise HTTPException(
+            status_code=503, detail="paper_order_hermes_runtime_unavailable"
+        )
 
     access = require_trading_book_access(owner_id, req.fund_id, req.book_id)
     repository = user_order_repository()
@@ -1200,14 +1341,20 @@ def _route_analysis_then_conditional_paper_order(
             raw_instruction=req.query,
         )
     except UserOrderRequestConflict as exc:
-        raise HTTPException(status_code=409, detail="paper_order_request_id_conflict") from exc
+        raise HTTPException(
+            status_code=409, detail="paper_order_request_id_conflict"
+        ) from exc
     except UserOrderWorkflowUnavailable as exc:
-        raise HTTPException(status_code=503, detail="paper_order_workflow_unavailable") from exc
+        raise HTTPException(
+            status_code=503, detail="paper_order_workflow_unavailable"
+        ) from exc
 
     if record.ceo_root_task_id:
         existing_root = hermes_boundary.show_kanban_task(record.ceo_root_task_id)
         if existing_root is None:
-            raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+            raise HTTPException(
+                status_code=503, detail="paper_order_kanban_unavailable"
+            )
         existing_body = str(existing_root.get("body") or "")
         if (
             read_marker(existing_body, "deferred_conditional") == "true"
@@ -1270,12 +1417,16 @@ def _route_analysis_then_conditional_paper_order(
             idempotency_key=req.request_id,
         )
         if not root or not root.get("task_id"):
-            raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+            raise HTTPException(
+                status_code=503, detail="paper_order_kanban_unavailable"
+            )
         root_task_id = str(root["task_id"])
         if not hermes_boundary.comment_root_scope(
             task_id=root_task_id, request_id=req.request_id
         ):
-            raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+            raise HTTPException(
+                status_code=503, detail="paper_order_kanban_unavailable"
+            )
         record = repository.bind_root(record.order_request_id, root_task_id)
     except HTTPException:
         _mark_paper_order_failed(
@@ -1292,7 +1443,9 @@ def _route_analysis_then_conditional_paper_order(
             error_code="ANALYSIS_ROOT_BIND_FAILED",
             error_message=str(exc),
         )
-        raise HTTPException(status_code=503, detail="paper_order_workflow_unavailable") from exc
+        raise HTTPException(
+            status_code=503, detail="paper_order_workflow_unavailable"
+        ) from exc
     except Exception as exc:
         _mark_paper_order_failed(
             repository,
@@ -1300,7 +1453,9 @@ def _route_analysis_then_conditional_paper_order(
             error_code="ANALYSIS_ROOT_CREATE_FAILED",
             error_message=type(exc).__name__,
         )
-        raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable") from exc
+        raise HTTPException(
+            status_code=503, detail="paper_order_kanban_unavailable"
+        ) from exc
 
     return _analysis_then_conditional_accepted_response(
         root,
@@ -1363,7 +1518,9 @@ def _route_compound_user_paper_order(
     if not req.book_id:
         raise HTTPException(status_code=422, detail="portfolio_book_id_required")
     if not _user_paper_order_workflow_enabled():
-        raise HTTPException(status_code=503, detail="paper_order_hermes_runtime_unavailable")
+        raise HTTPException(
+            status_code=503, detail="paper_order_hermes_runtime_unavailable"
+        )
 
     # These imports stay local so the normal CEO analysis path does not acquire
     # conditional-rule dependencies when it is not an order request.
@@ -1527,7 +1684,9 @@ def _route_compound_user_paper_order(
                 target=RuleState.CANCELLED,
             )
         except Exception:
-            logger.exception("compound PAPER cleanup failed bundle=%s", bundle.bundle_id)
+            logger.exception(
+                "compound PAPER cleanup failed bundle=%s", bundle.bundle_id
+            )
         raise
 
     return {
@@ -1633,7 +1792,9 @@ def _route_user_paper_order(
             or record.fund_id != str(access["fund_id"])
             or record.book_id != str(access["book_id"])
         ):
-            raise HTTPException(status_code=409, detail="paper_order_admission_mismatch")
+            raise HTTPException(
+                status_code=409, detail="paper_order_admission_mismatch"
+            )
     admitted_at = time.monotonic()
     delayed_candidate = (
         build_delayed_order_candidate(delayed_plan, admitted_at=record.created_at)
@@ -1764,9 +1925,7 @@ def _route_user_paper_order(
                 )
             )
         ),
-        idempotency_key=primary_idempotency_key(
-            root_task_id, "trading-department"
-        ),
+        idempotency_key=primary_idempotency_key(root_task_id, "trading-department"),
         # Keep every primary blocked while its authority binding is assembled.
         # The asynchronous interpreter is explicitly released below. A future
         # synchronous deterministic lane must also execute from this parked
@@ -1966,11 +2125,12 @@ def _route_traced_user_paper_order(
             request_id=req.request_id,
             workflow_mode="binding",
             source=getattr(req, "source", None),
+            query=req.query,
         )
     except Exception:  # noqa: BLE001 - observability remains fail-open.
         root_trace = None
     try:
-        return _route_user_paper_order(
+        response = _route_user_paper_order(
             req,
             owner_id=owner_id,
             mandate=mandate,
@@ -1979,15 +2139,42 @@ def _route_traced_user_paper_order(
                 root_trace.context if root_trace is not None else None
             ),
             langsmith_trace_run_id=(
-                getattr(root_trace, "run_id", None)
-                if root_trace is not None
-                else None
+                getattr(root_trace, "run_id", None) if root_trace is not None else None
             ),
             discord_channel_id=discord_channel_id,
             discord_message_id=discord_message_id,
             discord_guild_id=discord_guild_id,
             discord_thread_id=discord_thread_id,
         )
+        if root_trace is not None:
+            terminal_trace = _paper_order_terminal_trace(
+                response,
+                request_id=req.request_id,
+            )
+            if terminal_trace is not None:
+                status, metadata, output_summary = terminal_trace
+                try:
+                    from orchestration.llm_observability import close_root_trace
+
+                    close_root_trace(
+                        root_trace.context,
+                        run_id=getattr(root_trace, "run_id", None),
+                        request_id=req.request_id,
+                        root_id=str(response.get("task_id") or "") or None,
+                        task_id=str(response.get("trading_task_id") or "") or None,
+                        department="trading",
+                        workflow_mode="binding",
+                        source=getattr(req, "source", None),
+                        status=status,
+                        terminal_metadata=metadata,
+                        output_summary=output_summary,
+                    )
+                except Exception as exc:  # noqa: BLE001 - tracing remains fail-open.
+                    logger.debug(
+                        "paper_root_trace_close_failed error=%s",
+                        type(exc).__name__,
+                    )
+        return response
     except Exception as exc:
         if root_trace is not None:
             try:
@@ -2069,6 +2256,31 @@ def ceo_query(
     fund_id = getattr(req, "fund_id", None)
     mandate = fetch_current_mandate_by_fund(fund_id) if fund_id else None
 
+    if deterministic_routing_plan is None:
+        from orchestration.ceo_query_routing import build_deterministic_bff_plan
+
+        deterministic_routing_plan = build_deterministic_bff_plan(req.query)
+    # The strict PAPER lane is itself deterministic and fail-closed.  Let its
+    # verifier handle short imperative language such as ``팔아줘`` before the
+    # generic analysis router labels the same request as underspecified.
+    order_route_requested = looks_like_conditional_paper_rule(req.query) or (
+        looks_like_user_order_request(req.query)
+    )
+    if (
+        deterministic_routing_plan.get("mode") == "clarification_required"
+        and not order_route_requested
+    ):
+        return _clarification_required_response(
+            req,
+            owner_id=owner_id if isinstance(owner_id, str) else None,
+            mandate=mandate,
+            discord_channel_id=discord_channel_id,
+            discord_message_id=discord_message_id,
+            discord_guild_id=discord_guild_id,
+            discord_thread_id=discord_thread_id,
+            routing_plan=deterministic_routing_plan,
+        )
+
     read_only_hr_e2e = _is_read_only_hr_e2e_request(req.query)
     read_only_risk_e2e = _is_read_only_risk_e2e_request(req.query)
     analysis_then_conditional_plan = (
@@ -2142,16 +2354,25 @@ def ceo_query(
     # they must not inherit a generic research/risk fallback from free text.
     bff_routing_plan = (
         deterministic_routing_plan
-        if workflow_mode == "analysis"
-        and not read_only_hr_e2e
-        and not read_only_risk_e2e
+        if workflow_mode == "analysis" and not read_only_risk_e2e
         else None
     )
+    selected_bff_profiles = {
+        str(profile).strip()
+        for profile in (
+            bff_routing_plan.get("selected_primary_profiles", ())
+            if isinstance(bff_routing_plan, Mapping)
+            else ()
+        )
+        if str(profile).strip()
+    }
     d5_bank = ExperienceBank.from_env()
     d5_lookup = None
     if d5_bank.enabled:
         d5_lookup = d5_bank.lookup(
-            case_type="discord_ceo",
+            case_type=discord_experience_case_type(
+                deterministic_routing_plan.get("category")
+            ),
             binding=workflow_mode == "binding",
             correlation_id=req.request_id,
         )
@@ -2170,6 +2391,21 @@ def ceo_query(
         approved_feedback = approved_feedback_hint()
     except Exception:  # noqa: BLE001 - advisory feedback is fail-open.
         approved_feedback = None
+    ceo_self_improvement = None
+    try:
+        # CEO self-improvement is a local, payload-free read of the verified
+        # D5 ledger. It does not call LangSmith and cannot mutate routing,
+        # skills, mandates, or authority gates on the CEO hot path.
+        from orchestration.d5_improvement_pipeline import (
+            build_ceo_self_improvement_hint,
+            d5_feedback_ledger_from_env,
+        )
+
+        ceo_self_improvement = build_ceo_self_improvement_hint(
+            d5_feedback_ledger_from_env()
+        )
+    except Exception:  # noqa: BLE001 - self-improvement is advisory/fail-open.
+        ceo_self_improvement = None
     root_trace = None
     try:
         from orchestration.llm_observability import start_root_trace
@@ -2178,6 +2414,7 @@ def ceo_query(
             request_id=req.request_id,
             workflow_mode=workflow_mode,
             source=getattr(req, "source", None),
+            query=req.query,
         )
     except Exception:  # noqa: BLE001 - observability remains fail-open.
         root_trace = None
@@ -2210,14 +2447,10 @@ def ceo_query(
                 # root: it needlessly enlarges every CEO/QA prompt and can
                 # expose irrelevant portfolio detail to an HR worker.
                 advisory_fund_id=(
-                    None
-                    if read_only_hr_e2e
-                    else getattr(req, "fund_id", None)
+                    None if read_only_hr_e2e else getattr(req, "fund_id", None)
                 ),
                 advisory_book_id=(
-                    None
-                    if read_only_hr_e2e
-                    else getattr(req, "book_id", None)
+                    None if read_only_hr_e2e else getattr(req, "book_id", None)
                 ),
                 previous_question_context=getattr(
                     req, "previous_question_context", None
@@ -2227,8 +2460,15 @@ def ceo_query(
                 ),
                 experience_hint=d5_hint,
                 approved_feedback_hint=approved_feedback,
+                ceo_self_improvement_hint=ceo_self_improvement,
                 include_accounting_advisory=(
-                    not read_only_hr_e2e and not read_only_risk_e2e
+                    not read_only_hr_e2e
+                    and not read_only_risk_e2e
+                    and (
+                        not selected_bff_profiles
+                        or canonical_profile_for_department("accounting")
+                        in selected_bff_profiles
+                    )
                 ),
                 producer=(
                     str(bff_routing_plan.get("producer") or "")
@@ -2358,6 +2598,18 @@ def ceo_query(
             str(task["task_id"]),
             req.request_id,
         )
+        guardrails = (
+            ceo_self_improvement.get("guardrails")
+            if isinstance(ceo_self_improvement, Mapping)
+            else ()
+        )
+        logger.info(
+            "event=ceo_self_review_guardrails root_id=%s present=%s count=%d "
+            "source=verified_d5 raw_payloads_sent=false",
+            str(task["task_id"]),
+            str(bool(guardrails)).lower(),
+            min(len(guardrails), 8) if isinstance(guardrails, list) else 0,
+        )
     else:
         logger.info(
             "ceo-planning root=%s request_id=%s producer=portfolio-bff",
@@ -2399,7 +2651,9 @@ def _planning_status_payload(task_id: str) -> dict[str, object]:
 
     raw = hermes_boundary.show_kanban_task(task_id, timeout=_planning_read_timeout())
     if not raw:
-        raise HTTPException(status_code=404, detail="CEO Kanban task를 찾을 수 없습니다.")
+        raise HTTPException(
+            status_code=404, detail="CEO Kanban task를 찾을 수 없습니다."
+        )
     projection = _scoped_planning_projection(raw, timeout=_planning_read_timeout())
     return _accepted_response(
         {"task_id": str(projection.get("id") or task_id), **projection},
@@ -2415,7 +2669,7 @@ def _status_payload(workflow: Workflow) -> dict[str, object]:
         assignee=workflow.root.profile,
         query=workflow.query,
         created_at=workflow.root.created_at,
-        completed_at=workflow.root.completed_at,
+        completed_at=workflow.completed_at,
         workflow=TaskWorkflow(
             selected_departments=list(workflow.selected_departments),
             qa_required=workflow.qa_required,
@@ -2467,7 +2721,9 @@ def ceo_task_list(
             with_board_rows=True,
         )
     except KanbanUnavailable as exc:
-        raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
+        raise HTTPException(
+            status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}"
+        ) from exc
     if isinstance(listing, tuple):
         rows, board_rows = listing
     else:
@@ -2489,9 +2745,7 @@ def ceo_task_list(
     # detailed task/graph endpoints retain their full workflow semantics.
     projected: dict[str, TaskListItem] = {}
     fallback: list[tuple[str, str]] = []
-    row_by_id = {
-        str(row.get("id") or row.get("task_id") or ""): row for row in rows
-    }
+    row_by_id = {str(row.get("id") or row.get("task_id") or ""): row for row in rows}
     for task_id, body in identified:
         item = _task_list_item_from_row(row_by_id.get(task_id, {}))
         if item is None:
@@ -2528,7 +2782,9 @@ def ceo_task_list(
     return TaskListResponse(items=[projected[task_id] for task_id, _body in identified])
 
 
-@router.get("/kanban", operation_id="ceo_kanban_board", response_model=KanbanBoardResponse)
+@router.get(
+    "/kanban", operation_id="ceo_kanban_board", response_model=KanbanBoardResponse
+)
 def ceo_kanban_board(
     _authenticated_owner_id: str | None = Depends(current_user),
 ) -> KanbanBoardResponse:
@@ -2573,7 +2829,11 @@ def ceo_kanban_board(
     )
 
 
-@router.get("/tasks/{task_id}", operation_id="ceo_task_status", response_model=TaskStatusResponse)
+@router.get(
+    "/tasks/{task_id}",
+    operation_id="ceo_task_status",
+    response_model=TaskStatusResponse,
+)
 def ceo_task_status(
     task_id: str = _TASK_ID_PATH,
     authenticated_owner_id: str | None = Depends(current_user),
@@ -2587,12 +2847,12 @@ def ceo_task_status(
         # for runtimes where the normalized reader is not installed yet.
         if exc.status_code != 503:
             raise
-        raw = hermes_boundary.show_kanban_task(task_id, timeout=_planning_read_timeout())
+        raw = hermes_boundary.show_kanban_task(
+            task_id, timeout=_planning_read_timeout()
+        )
         if not raw:
             raise
-        _require_ceo_task_owner(
-            str(raw.get("body") or ""), authenticated_owner_id
-        )
+        _require_ceo_task_owner(str(raw.get("body") or ""), authenticated_owner_id)
         projection = _scoped_planning_projection(raw, timeout=_planning_read_timeout())
         acknowledgement = _planning_acknowledgement(projection)
         selected = acknowledgement["planning"]["selected_departments"]
@@ -2624,7 +2884,9 @@ def ceo_task_status(
     _require_ceo_workflow_owner(workflow, authenticated_owner_id)
     payload = _status_payload(workflow)
     try:
-        raw = hermes_boundary.show_kanban_task(task_id, timeout=_planning_read_timeout())
+        raw = hermes_boundary.show_kanban_task(
+            task_id, timeout=_planning_read_timeout()
+        )
         if raw:
             payload["planning"] = _planning_acknowledgement(
                 _scoped_planning_projection(raw, timeout=_planning_read_timeout())
@@ -2634,7 +2896,11 @@ def ceo_task_status(
     return payload
 
 
-@router.get("/tasks/{task_id}/graph", operation_id="ceo_task_graph", response_model=TaskGraphResponse)
+@router.get(
+    "/tasks/{task_id}/graph",
+    operation_id="ceo_task_graph",
+    response_model=TaskGraphResponse,
+)
 def ceo_task_graph(
     task_id: str = _TASK_ID_PATH,
     authenticated_owner_id: str | None = Depends(current_user),
@@ -2669,7 +2935,7 @@ def ceo_task_result(
     result = None
     if synthesis is not None and synthesis.done and synthesis.summary:
         result = TaskResult(
-            summary=synthesis.summary,
+            summary=humanize_user_facing_text(synthesis.summary),
             decision=workflow.decision,
             qa_verdict=workflow.qa_verdict,
         )
@@ -2682,7 +2948,7 @@ def ceo_task_result(
         # synthesis만 안 끝난 진행 중 상태(root의 "접수했다" 문구)를 답으로
         # 잘못 노출하면 안 된다 - 자식이 하나도 없을 때만 root가 곧 답이다.
         result = TaskResult(
-            summary=workflow.root.summary,
+            summary=humanize_user_facing_text(workflow.root.summary),
             decision=workflow.decision,
             qa_verdict=workflow.qa_verdict,
         )
@@ -2690,9 +2956,16 @@ def ceo_task_result(
         task_id=task_id,
         status="completed" if terminal else "processing",
         result=result,
-        departments=workflow.department_summaries,
+        departments={
+            department: humanize_user_facing_text(summary)
+            for department, summary in workflow.department_summaries.items()
+        },
         qa_verdict=workflow.qa_verdict,
-        block_reason=workflow.block_reason,
+        block_reason=(
+            humanize_user_facing_text(workflow.block_reason)
+            if workflow.block_reason
+            else None
+        ),
     )
 
 
@@ -2712,7 +2985,9 @@ def ceo_task_archive(
         delivery = DiscordLedgerReader().state(workflow)
         decision = evaluate_workflow(workflow, delivery=delivery)
     except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail="Retention 상태를 확인하지 못했습니다.") from exc
+        raise HTTPException(
+            status_code=503, detail="Retention 상태를 확인하지 못했습니다."
+        ) from exc
     if not decision.eligible:
         raise HTTPException(
             status_code=409,
@@ -2730,9 +3005,13 @@ def ceo_task_archive(
         ):
             raise KanbanUnavailable("root workflow archive CAS failed")
     except KanbanTaskNotFound as exc:
-        raise HTTPException(status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}") from exc
+        raise HTTPException(
+            status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}"
+        ) from exc
     except KanbanUnavailable as exc:
-        raise HTTPException(status_code=503, detail=f"Archive에 실패했습니다: {exc}") from exc
+        raise HTTPException(
+            status_code=503, detail=f"Archive에 실패했습니다: {exc}"
+        ) from exc
     return TaskArchiveResponse(task_id=task_id, archived_task_ids=target_ids)
 
 

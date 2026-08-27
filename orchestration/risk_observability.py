@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import re
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -20,7 +21,11 @@ from uuid import NAMESPACE_URL, uuid5
 
 logger = logging.getLogger(__name__)
 
-from orchestration.llm_observability import langsmith_project
+from orchestration.llm_observability import (
+    _mark_langsmith_quota_pause,
+    langsmith_enabled,
+    langsmith_project,
+)
 
 RISK_SPANS = frozenset(
     {
@@ -49,6 +54,7 @@ _SAFE_KEYS = frozenset(
         "algorithm_version",
         "status",
         "stage",
+        "raw_payloads_sent",
         "target",
         "payload_hash",
         "duration_ms",
@@ -82,6 +88,94 @@ _TOOL_RE = re.compile(
     r"\((?P<latency>[0-9.]+)s"
 )
 _LOG_TIME_RE = re.compile(r"^(?P<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
+_REQUEST_ID_RE = re.compile(
+    r"(?:^|\n)(?:request_id|discord_request_id)=(?P<id>[^\s\n]+)",
+    re.IGNORECASE,
+)
+
+_RISK_TRACE_SUCCESS_STATUSES = frozenset(
+    {"completed", "success", "succeeded", "done", "ok"}
+)
+_DEFAULT_RISK_TRACE_SAMPLE_RATE = 0.10
+_DEFAULT_RISK_TRACE_SLOW_MS = 45_000
+
+
+def _bounded_float(
+    environment: Mapping[str, str], key: str, default: float
+) -> float:
+    try:
+        return min(max(float(environment.get(key, default)), 0.0), 1.0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _bounded_int(environment: Mapping[str, str], key: str, default: int) -> int:
+    try:
+        return max(int(environment.get(key, default)), 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_legal_wiki_tool(name: Any) -> bool:
+    normalized = str(name or "").casefold()
+    return "query_risk_legal_wiki" in normalized or "legal_wiki" in normalized
+
+
+def risk_trace_should_publish(
+    *,
+    task_id: str,
+    request_id: str = "",
+    status: str,
+    error_code: str | None = None,
+    return_code: int | None = None,
+    tool_names: Sequence[str] = (),
+    tool_error_count: int = 0,
+    legal_wiki_call_count: int = 0,
+    latency_ms: int = 0,
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Apply Risk's one sampling policy to every canonical trace observer.
+
+    Successful ordinary work is sampled deterministically by task/request ID.
+    Non-success states, errors, legal-Wiki work, and slow work are always kept
+    for diagnosis. A missing identity is kept too: dropping an uncorrelated
+    trace would make incident reconstruction impossible.
+    """
+
+    normalized_status = str(status or "").strip().casefold()
+    if (
+        normalized_status not in _RISK_TRACE_SUCCESS_STATUSES
+        or error_code
+        or (return_code is not None and int(return_code) != 0)
+        or int(tool_error_count or 0) > 0
+        or int(legal_wiki_call_count or 0) > 0
+        or any(_is_legal_wiki_tool(name) for name in tool_names)
+    ):
+        return True
+
+    env = environment or os.environ
+    slow_ms = _bounded_int(
+        env, "LANGSMITH_RISK_TRACE_SLOW_MS", _DEFAULT_RISK_TRACE_SLOW_MS
+    )
+    if int(latency_ms or 0) >= slow_ms:
+        return True
+
+    sample_rate = _bounded_float(
+        env,
+        "LANGSMITH_RISK_TRACE_SAMPLE_RATE",
+        _DEFAULT_RISK_TRACE_SAMPLE_RATE,
+    )
+    if sample_rate >= 1.0:
+        return True
+    if sample_rate <= 0.0:
+        return False
+
+    identity = str(task_id or request_id or "").strip()
+    if not identity:
+        return True
+    digest = hashlib.sha256(f"risk-trace:{identity}".encode()).digest()
+    bucket = int.from_bytes(digest[:8], "big") / float(1 << 64)
+    return bucket < sample_rate
 
 
 def _log_epoch_ms(line: str) -> int | None:
@@ -127,6 +221,13 @@ def _langsmith_project_id(environment: Mapping[str, str]) -> str | None:
         return None
     project_id = payload[0].get("id") if isinstance(payload[0], Mapping) else None
     return str(project_id or "").strip() or None
+
+
+def _request_id_from_task_body(*, root_id: str, task_body: str) -> str:
+    """Keep Risk's auxiliary profile on the same request correlation key."""
+
+    match = _REQUEST_ID_RE.search(str(task_body or ""))
+    return str(match.group("id") if match else root_id).strip()[:160]
 
 
 def profile_risk_hermes_session(
@@ -243,6 +344,8 @@ def profile_risk_hermes_session(
 def publish_risk_hermes_profile(
     *,
     task_id: str,
+    task_body: str,
+    run_id: str,
     root_id: str,
     session_id: str,
     log_dir: str | os.PathLike[str],
@@ -251,7 +354,12 @@ def publish_risk_hermes_profile(
     status: str,
     environment: Mapping[str, str] | None = None,
 ) -> bool:
-    """Publish one idempotent, redacted Risk worker profile to LangSmith."""
+    """Publish one redacted Risk profile under the canonical worker trace.
+
+    The dispatcher worker already owns the Risk root. This profile remains a
+    useful bounded child for token/context and tool timing, but it must never
+    become a second root for the same task.
+    """
 
     env = environment or os.environ
     if not (
@@ -259,10 +367,50 @@ def publish_risk_hermes_profile(
         and str(env.get("LANGSMITH_API_KEY", "")).strip()
     ):
         return False
+    if not str(run_id or "").strip():
+        return False
     profile = profile_risk_hermes_session(log_dir, session_id)
     if not profile:
         return False
-    run_id = uuid5(NAMESPACE_URL, f"hgfinance:risk-hermes:{task_id}:{session_id}")
+    request_id = _request_id_from_task_body(root_id=root_id, task_body=task_body)
+    if not risk_trace_should_publish(
+        task_id=task_id,
+        request_id=request_id,
+        status=status,
+        tool_error_count=int(profile.get("tool_error_count", 0) or 0),
+        legal_wiki_call_count=int(profile.get("legal_wiki_call_count", 0) or 0),
+        latency_ms=max(int(ended_ms) - int(started_ms), 0),
+        environment=env,
+    ):
+        logger.info(
+            "langsmith-risk-profile-sampled task=%s sample_rate=%s",
+            str(task_id)[:160],
+            env.get("LANGSMITH_RISK_TRACE_SAMPLE_RATE", "0.10"),
+        )
+        return False
+    try:
+        from scripts.hermes_worker_observability import (
+            department_worker_trace_identity,
+        )
+
+        worker_identity = department_worker_trace_identity(
+            task_id=task_id,
+            task_body=task_body,
+            profile="risk-management",
+            run_id=run_id,
+            started_ms=started_ms,
+        )
+        parent_run_id = worker_identity["worker_run_id"]
+        trace_id = worker_identity["trace_id"]
+        parent_dotted_order = worker_identity["worker_dotted_order"]
+    except (ImportError, TypeError, ValueError):
+        # A missing canonical identity is unsafe: publishing a standalone
+        # profile would recreate the duplicate root this observer is meant to
+        # avoid.
+        return False
+    profile_run_id = uuid5(
+        NAMESPACE_URL, f"hgfinance:risk-hermes:{task_id}:{session_id}"
+    )
     started = max(int(started_ms), 0)
     ended = max(int(ended_ms), started)
     stamp = datetime.fromtimestamp(started / 1000, tz=timezone.utc).strftime(
@@ -273,12 +421,14 @@ def publish_risk_hermes_profile(
         "schema_version": "risk.hermes-worker-profile.v1",
         "trace_kind": "department_worker_profile",
         "source": "risk-hermes-agent-log",
-        "department": "risk-management",
+        "department": "risk",
+        "stage": "risk",
         "profile": "risk-management",
         "task_id": str(task_id)[:160],
-        "request_id": str(root_id)[:160],
+        "request_id": request_id,
         "root_id": str(root_id)[:160],
-        "trace_id": str(run_id)[:160],
+        "trace_id": str(trace_id)[:160],
+        "parent_run_id": str(parent_run_id)[:160],
         "status": safe_status,
         "latency_ms": ended - started,
         "latency_scope": "worker_execution",
@@ -297,17 +447,17 @@ def publish_risk_hermes_profile(
         **profile,
     }
     payload = {
-        "id": str(run_id),
-        "trace_id": str(run_id),
-        "dotted_order": f"{stamp}{run_id}",
+        "id": str(profile_run_id),
+        "trace_id": str(trace_id),
+        "dotted_order": f"{parent_dotted_order}.{stamp}{profile_run_id}",
         "name": "risk.hermes-worker-profile",
         "run_type": "chain",
         "session_name": str(env.get("LANGSMITH_PROJECT", "First"))[:120] or "First",
         "inputs": {
             "task_id": str(task_id)[:160],
-            "request_id": str(root_id)[:160],
+            "request_id": request_id,
             "root_id": str(root_id)[:160],
-            "trace_id": str(run_id)[:160],
+            "trace_id": str(trace_id)[:160],
             "session_id": str(session_id)[:160],
         },
         "outputs": profile,
@@ -315,6 +465,7 @@ def publish_risk_hermes_profile(
         "end_time": ended,
         "extra": {"metadata": metadata},
         "tags": ["hgfinance", "risk", "hermes", "redacted", "worker-profile"],
+        "parent_run_id": str(parent_run_id),
     }
     project_id = _langsmith_project_id(env)
     if project_id:
@@ -342,12 +493,7 @@ def publish_risk_hermes_profile(
 
 
 def _enabled() -> bool:
-    return os.getenv("LANGSMITH_TRACING", "").casefold() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    } and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
+    return langsmith_enabled()
 
 
 def _safe(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -366,7 +512,13 @@ def _client():
     # risk_span accepts only the scalar allowlist above. Keeping these safe
     # structural fields visible makes the trace useful to QA without sending
     # raw questions, answers, portfolio payloads, or credentials.
-    return Client(hide_inputs=False, hide_outputs=False, hide_metadata=False)
+    return Client(
+        hide_inputs=False,
+        hide_outputs=False,
+        hide_metadata=False,
+        omit_traced_runtime_info=True,
+        tracing_error_callback=_mark_langsmith_quota_pause,
+    )
 
 
 def set_risk_span_outputs(run: Any, outputs: Mapping[str, Any]) -> None:
@@ -394,13 +546,16 @@ def risk_span(
     try:
         from langsmith import trace
 
+        safe_metadata = _safe(
+            {**dict(metadata or {}), "raw_payloads_sent": False}
+        )
         context = trace(
             name,
             run_type="chain",
             inputs=_safe(inputs),
             project_name=langsmith_project("workflow"),
             tags=["hgfinance", "risk", "redacted"],
-            metadata=_safe(metadata),
+            metadata=safe_metadata,
             client=_client(),
         )
         run = context.__enter__()

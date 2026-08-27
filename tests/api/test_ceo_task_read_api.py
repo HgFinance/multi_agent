@@ -128,7 +128,9 @@ def _board(
             assignee="ceo-agent",
             status=synthesis_status,
             body=f"{SUPERVISOR_MARKER} action=SYNTHESIZE",
-            parents=(RESEARCH_ID, RISK_ID, QA_ID) if include_qa else (RESEARCH_ID, RISK_ID),
+            parents=(RESEARCH_ID, RISK_ID, QA_ID)
+            if include_qa
+            else (RESEARCH_ID, RISK_ID),
             latest_summary=synthesis_summary,
         )
     return board
@@ -163,6 +165,31 @@ class WorkflowReadModelTest(unittest.TestCase):
             ("research-department", "risk-management"),
         )
 
+    def test_bff_root_uses_linked_membership_without_scanning_the_board(self) -> None:
+        board = _board()
+        board[ROOT_ID]["body"] = build_root_body(
+            "엔비디아 최신 사업 리스크만 분석해줘.",
+            "req-linked-read-model",
+            producer="portfolio-bff-deterministic",
+            selected_primary_profiles=("research-department", "risk-management"),
+            delegation_instructions={
+                "research-department": "research",
+                "risk-management": "risk",
+            },
+        )
+
+        with patch.object(
+            ceo_kanban_read,
+            "list_tasks",
+            side_effect=AssertionError("linked BFF roots must not scan the board"),
+        ):
+            workflow = load_workflow(ROOT_ID, fetch=_fetch_from(board))
+
+        self.assertEqual(len(workflow.nodes), 5)
+        self.assertEqual(
+            workflow.selected_departments, ("research-department", "risk-management")
+        )
+
     def test_child_id_resolves_to_the_same_workflow(self) -> None:
         workflow = load_workflow(QA_ID, fetch=_fetch_from(_board()))
 
@@ -192,6 +219,27 @@ class WorkflowReadModelTest(unittest.TestCase):
         self.assertEqual(workflow.synthesis_stage, "todo")
 
     def test_status_is_completed_once_synthesis_is_done(self) -> None:
+        board = _board(
+            risk_status="done",
+            qa_status="done",
+            qa_summary="QA 완료",
+            synthesis_status="done",
+            synthesis_summary="종합 결과. decision: HOLD",
+        )
+        board[QA_ID]["runs"] = [
+            {"metadata": {"qa_verdict": "PASS", "canonical_decision": "PASS"}}
+        ]
+        board[SYNTHESIS_ID]["completed_at"] = _CREATED_AT + 300
+        workflow = load_workflow(ROOT_ID, fetch=_fetch_from(board))
+
+        self.assertEqual(workflow.status, "completed")
+        # QA terminal metadata is the canonical structured verdict.
+        self.assertEqual(workflow.qa_verdict, "PASS")
+        self.assertEqual(workflow.decision, "HOLD")
+        self.assertEqual(workflow.completed_at, "2026-08-12T01:30:45Z")
+        self.assertIsNone(workflow.block_reason)
+
+    def test_status_does_not_complete_when_synthesis_has_no_result(self) -> None:
         workflow = load_workflow(
             ROOT_ID,
             fetch=_fetch_from(
@@ -200,16 +248,26 @@ class WorkflowReadModelTest(unittest.TestCase):
                     qa_status="done",
                     qa_summary="verdict: PASS",
                     synthesis_status="done",
-                    synthesis_summary="종합 결과. decision: HOLD",
+                    synthesis_summary=None,
                 )
             ),
         )
 
-        self.assertEqual(workflow.status, "completed")
-        # qa_summary에 "verdict: PASS" 라벨이 명시되면 그대로 PASS
-        self.assertEqual(workflow.qa_verdict, "PASS")
-        self.assertEqual(workflow.decision, "HOLD")
-        self.assertIsNone(workflow.block_reason)
+        self.assertEqual(workflow.status, "running")
+        self.assertIsNone(workflow.completed_at)
+
+    def test_status_does_not_complete_when_root_and_primary_are_done(self) -> None:
+        board = _board(
+            risk_status="done",
+            qa_status="done",
+            qa_summary="verdict: PASS",
+            include_synthesis=False,
+        )
+        board[ROOT_ID]["status"] = "done"
+        workflow = load_workflow(ROOT_ID, fetch=_fetch_from(board))
+
+        self.assertEqual(workflow.status, "running")
+        self.assertIsNone(workflow.completed_at)
 
     def test_blocked_qa_produces_the_blocked_decision_verdict(self) -> None:
         board = _board(risk_status="done", qa_status="blocked")
@@ -539,7 +597,10 @@ class CeoRootFilterTest(unittest.TestCase):
 
     def test_limit_is_applied(self) -> None:
         rows = [
-            {"id": f"t_root{index:04d}", "body": build_root_body("질의", f"req-{index}")}
+            {
+                "id": f"t_root{index:04d}",
+                "body": build_root_body("질의", f"req-{index}"),
+            }
             for index in range(5)
         ]
         with patch.object(ceo_kanban_read, "list_tasks", return_value=rows):
@@ -551,8 +612,14 @@ class CeoRootFilterTest(unittest.TestCase):
         """계정별 이력은 서버가 거른다. 다른 계정의 질의 텍스트는 응답에 실리지 않는다."""
 
         rows = [
-            {"id": "t_mine", "body": build_root_body("내 질의", "req-a", requested_by="user-a")},
-            {"id": "t_theirs", "body": build_root_body("남의 질의", "req-b", requested_by="user-b")},
+            {
+                "id": "t_mine",
+                "body": build_root_body("내 질의", "req-a", requested_by="user-a"),
+            },
+            {
+                "id": "t_theirs",
+                "body": build_root_body("남의 질의", "req-b", requested_by="user-b"),
+            },
         ]
         with patch.object(ceo_kanban_read, "list_tasks", return_value=rows):
             roots = ceo_kanban_read.list_ceo_roots(limit=20, owner_id="user-a")
@@ -564,7 +631,9 @@ class CeoRootFilterTest(unittest.TestCase):
 
         rows = [{"id": "t_legacy", "body": build_root_body("옛 질의", "req-old")}]
         with patch.object(ceo_kanban_read, "list_tasks", return_value=rows):
-            self.assertEqual(ceo_kanban_read.list_ceo_roots(limit=20, owner_id="user-a"), [])
+            self.assertEqual(
+                ceo_kanban_read.list_ceo_roots(limit=20, owner_id="user-a"), []
+            )
             # 필터를 안 걸면 그대로 보인다 - 데이터를 숨기는 게 아니라 귀속만 안 한다.
             self.assertEqual(len(ceo_kanban_read.list_ceo_roots(limit=20)), 1)
 
@@ -572,10 +641,18 @@ class CeoRootFilterTest(unittest.TestCase):
         """다른 계정 Root가 `limit` 자리를 차지해 진짜 대상이 잘려나가면 안 된다."""
 
         rows = [
-            {"id": f"t_other{index}", "body": build_root_body("남", f"req-o{index}", requested_by="user-b")}
+            {
+                "id": f"t_other{index}",
+                "body": build_root_body("남", f"req-o{index}", requested_by="user-b"),
+            }
             for index in range(5)
         ]
-        rows.append({"id": "t_mine", "body": build_root_body("내 질의", "req-a", requested_by="user-a")})
+        rows.append(
+            {
+                "id": "t_mine",
+                "body": build_root_body("내 질의", "req-a", requested_by="user-a"),
+            }
+        )
         with patch.object(ceo_kanban_read, "list_tasks", return_value=rows):
             roots = ceo_kanban_read.list_ceo_roots(limit=2, owner_id="user-a")
 
@@ -666,7 +743,11 @@ class CeoTaskApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_status_endpoint_reports_progress(self) -> None:
-        with patch.object(ceo, "load_workflow", return_value=load_workflow(ROOT_ID, fetch=_fetch_from(_board()))):
+        with patch.object(
+            ceo,
+            "load_workflow",
+            return_value=load_workflow(ROOT_ID, fetch=_fetch_from(_board())),
+        ):
             response = self.client.get(f"/ui/ceo/tasks/{ROOT_ID}")
 
         self.assertEqual(response.status_code, 200)
@@ -689,7 +770,11 @@ class CeoTaskApiTest(unittest.TestCase):
         )
 
     def test_graph_endpoint_returns_nodes_and_edges(self) -> None:
-        with patch.object(ceo, "load_workflow", return_value=load_workflow(ROOT_ID, fetch=_fetch_from(_board()))):
+        with patch.object(
+            ceo,
+            "load_workflow",
+            return_value=load_workflow(ROOT_ID, fetch=_fetch_from(_board())),
+        ):
             response = self.client.get(f"/ui/ceo/tasks/{ROOT_ID}/graph")
 
         body = response.json()
@@ -703,7 +788,11 @@ class CeoTaskApiTest(unittest.TestCase):
         self.assertIn([QA_ID, SYNTHESIS_ID], body["edges"])
 
     def test_result_is_null_while_processing(self) -> None:
-        with patch.object(ceo, "load_workflow", return_value=load_workflow(ROOT_ID, fetch=_fetch_from(_board()))):
+        with patch.object(
+            ceo,
+            "load_workflow",
+            return_value=load_workflow(ROOT_ID, fetch=_fetch_from(_board())),
+        ):
             response = self.client.get(f"/ui/ceo/tasks/{ROOT_ID}/result")
 
         body = response.json()
@@ -720,7 +809,11 @@ class CeoTaskApiTest(unittest.TestCase):
                     qa_status="done",
                     qa_summary="verdict: PASS",
                     synthesis_status="done",
-                    synthesis_summary="엔비디아의 최신 사업 리스크를 종합하면 ... decision: DEFER",
+                    synthesis_summary=(
+                        "엔비디아의 최신 사업 리스크를 종합하면 ... "
+                        "authoritative=false WARN OrderIntent "
+                        "REQUIRES_USER_REVIEW decision: DEFER"
+                    ),
                 )
             ),
         )
@@ -732,9 +825,12 @@ class CeoTaskApiTest(unittest.TestCase):
         self.assertEqual(body["result"]["decision"], "DEFER")
         self.assertEqual(body["result"]["qa_verdict"], "PASS")
         self.assertEqual(body["qa_verdict"], "PASS")
-        self.assertEqual(
-            set(body["departments"]), {"research", "risk", "qa"}
-        )
+        self.assertIn("공식 확정 자료 아님", body["result"]["summary"])
+        self.assertIn("주문 후보", body["result"]["summary"])
+        self.assertIn("사용자 확인 필요", body["result"]["summary"])
+        self.assertNotIn("authoritative=false", body["result"]["summary"])
+        self.assertNotIn("OrderIntent", body["result"]["summary"])
+        self.assertEqual(set(body["departments"]), {"research", "risk", "qa"})
 
     def test_qa_verdict_requires_explicit_label_not_completed_status(self) -> None:
         """QA가 완료되었어도 'verdict: VALUE' 라벨 형식 없으면 None.
@@ -757,6 +853,12 @@ class CeoTaskApiTest(unittest.TestCase):
 
         board = _board(risk_status="done", qa_status="done")
         board[QA_ID]["latest_summary"] = "... verdict: PASS"
+        workflow = load_workflow(ROOT_ID, fetch=_fetch_from(board))
+
+        self.assertEqual(workflow.qa_verdict, "PASS")
+
+        board[QA_ID]["latest_summary"] = None
+        board[QA_ID]["runs"] = [{"metadata": {"overall_decision": "PASS"}}]
         workflow = load_workflow(ROOT_ID, fetch=_fetch_from(board))
 
         self.assertEqual(workflow.qa_verdict, "PASS")
@@ -812,7 +914,9 @@ class CeoTaskApiTest(unittest.TestCase):
             "현재 Kanban을 읽기 전용으로 점검해 차단·대기 업무와 원인을 분류했다.",
         )
 
-    def test_result_does_not_fall_back_while_departments_are_still_working(self) -> None:
+    def test_result_does_not_fall_back_while_departments_are_still_working(
+        self,
+    ) -> None:
         """자식이 있는 워크플로는 root 자체가 done이어도(planning 종료) 이 경로를
         타지 않는다 - root의 "접수했다"류 planning 문구가 최종 답으로 잘못
         노출되면 안 된다. root가 `done`인데 자식(research)은 아직 `running`인
@@ -856,13 +960,17 @@ class CeoTaskApiTest(unittest.TestCase):
         self.assertIn("archive", response.json()["detail"])
 
     def test_unknown_task_is_404(self) -> None:
-        with patch.object(ceo, "load_workflow", side_effect=KanbanTaskNotFound("no such task")):
+        with patch.object(
+            ceo, "load_workflow", side_effect=KanbanTaskNotFound("no such task")
+        ):
             response = self.client.get("/ui/ceo/tasks/t_missing1")
 
         self.assertEqual(response.status_code, 404)
 
     def test_kanban_outage_is_503_not_500(self) -> None:
-        with patch.object(ceo, "load_workflow", side_effect=KanbanUnavailable("CLI 없음")):
+        with patch.object(
+            ceo, "load_workflow", side_effect=KanbanUnavailable("CLI 없음")
+        ):
             response = self.client.get(f"/ui/ceo/tasks/{ROOT_ID}")
 
         self.assertEqual(response.status_code, 503)
@@ -877,18 +985,27 @@ class CeoTaskApiTest(unittest.TestCase):
     def test_delete_route_does_not_exist(self) -> None:
         """감사 추적은 지우지 않는다. 정리는 Archive로만 한다."""
 
-        self.assertEqual(self.client.delete(f"/ui/ceo/tasks/{ROOT_ID}").status_code, 405)
+        self.assertEqual(
+            self.client.delete(f"/ui/ceo/tasks/{ROOT_ID}").status_code, 405
+        )
 
 
 class CeoTaskListApiTest(unittest.TestCase):
     def test_list_returns_query_and_departments(self) -> None:
         client = _client()
-        rows = [{"id": ROOT_ID, "body": build_root_body("엔비디아 최신 사업 리스크", "req-1")}]
+        rows = [
+            {
+                "id": ROOT_ID,
+                "body": build_root_body("엔비디아 최신 사업 리스크", "req-1"),
+            }
+        ]
         workflow = load_workflow(ROOT_ID, fetch=_fetch_from(_board()))
 
-        with patch.object(ceo, "list_ceo_roots", return_value=rows):
-            with patch.object(ceo, "load_workflow", return_value=workflow):
-                response = client.get("/ui/ceo/tasks", params={"limit": 20})
+        with (
+            patch.object(ceo, "list_ceo_roots", return_value=rows),
+            patch.object(ceo, "load_workflow", return_value=workflow),
+        ):
+            response = client.get("/ui/ceo/tasks", params={"limit": 20})
 
         body = response.json()
         self.assertEqual(body["schema_version"], "ceo.task-list.v1")
@@ -903,8 +1020,12 @@ class CeoTaskListApiTest(unittest.TestCase):
 
     def test_limit_is_bounded(self) -> None:
         client = _client()
-        self.assertEqual(client.get("/ui/ceo/tasks", params={"limit": 0}).status_code, 422)
-        self.assertEqual(client.get("/ui/ceo/tasks", params={"limit": 101}).status_code, 422)
+        self.assertEqual(
+            client.get("/ui/ceo/tasks", params={"limit": 0}).status_code, 422
+        )
+        self.assertEqual(
+            client.get("/ui/ceo/tasks", params={"limit": 101}).status_code, 422
+        )
 
 
 class HermesKanbanBoardApiTest(unittest.TestCase):
@@ -925,11 +1046,36 @@ class HermesKanbanBoardApiTest(unittest.TestCase):
     def test_statuses_are_projected_to_four_read_only_columns(self) -> None:
         client = _client()
         rows = [
-            {"id": "t_todo", "title": "대기 작업", "assignee": "research-department", "status": "todo"},
-            {"id": "t_ready", "title": "실행 준비", "assignee": "risk-management", "status": "ready"},
-            {"id": "t_running", "title": "실행 중", "assignee": "trading-department", "status": "running"},
-            {"id": "t_blocked", "title": "차단됨", "assignee": "qa-department", "status": "blocked"},
-            {"id": "t_done", "title": "완료 작업", "assignee": "ceo-agent", "status": "done"},
+            {
+                "id": "t_todo",
+                "title": "대기 작업",
+                "assignee": "research-department",
+                "status": "todo",
+            },
+            {
+                "id": "t_ready",
+                "title": "실행 준비",
+                "assignee": "risk-management",
+                "status": "ready",
+            },
+            {
+                "id": "t_running",
+                "title": "실행 중",
+                "assignee": "trading-department",
+                "status": "running",
+            },
+            {
+                "id": "t_blocked",
+                "title": "차단됨",
+                "assignee": "qa-department",
+                "status": "blocked",
+            },
+            {
+                "id": "t_done",
+                "title": "완료 작업",
+                "assignee": "ceo-agent",
+                "status": "done",
+            },
         ]
 
         with patch.object(ceo, "list_tasks", return_value=rows) as list_tasks:
@@ -941,16 +1087,20 @@ class HermesKanbanBoardApiTest(unittest.TestCase):
         self.assertEqual(body["schema_version"], "hermes.agent-kanban.v1")
         self.assertEqual(body["source"], "hermes-kanban")
         self.assertTrue(body["read_only"])
+        self.assertEqual(set(body["columns"]), {"todo", "ready", "inprogress", "done"})
         self.assertEqual(
-            set(body["columns"]), {"todo", "ready", "inprogress", "done"}
+            [item["task_id"] for item in body["columns"]["todo"]], ["t_todo"]
         )
-        self.assertEqual([item["task_id"] for item in body["columns"]["todo"]], ["t_todo"])
-        self.assertEqual([item["task_id"] for item in body["columns"]["ready"]], ["t_ready"])
+        self.assertEqual(
+            [item["task_id"] for item in body["columns"]["ready"]], ["t_ready"]
+        )
         self.assertEqual(
             [item["task_id"] for item in body["columns"]["inprogress"]],
             ["t_running", "t_blocked"],
         )
-        self.assertEqual([item["task_id"] for item in body["columns"]["done"]], ["t_done"])
+        self.assertEqual(
+            [item["task_id"] for item in body["columns"]["done"]], ["t_done"]
+        )
 
     def test_kanban_route_is_read_only_and_fails_closed(self) -> None:
         client = _client()
@@ -977,21 +1127,33 @@ class HermesKanbanColumnMappingTest(unittest.TestCase):
 
 class KanbanCliErrorMappingTest(unittest.TestCase):
     def test_missing_task_message_becomes_not_found(self) -> None:
-        completed = type("P", (), {"returncode": 1, "stdout": "no such task: t_x", "stderr": ""})()
-        with patch.object(ceo_kanban_read.subprocess, "run", return_value=completed):
-            with self.assertRaises(KanbanTaskNotFound):
-                ceo_kanban_read.run_kanban(("show", "t_x", "--json"))
+        completed = type(
+            "P", (), {"returncode": 1, "stdout": "no such task: t_x", "stderr": ""}
+        )()
+        with (
+            patch.object(ceo_kanban_read.subprocess, "run", return_value=completed),
+            self.assertRaises(KanbanTaskNotFound),
+        ):
+            ceo_kanban_read.run_kanban(("show", "t_x", "--json"))
 
     def test_other_failures_become_unavailable(self) -> None:
-        completed = type("P", (), {"returncode": 2, "stdout": "", "stderr": "database is locked"})()
-        with patch.object(ceo_kanban_read.subprocess, "run", return_value=completed):
-            with self.assertRaises(KanbanUnavailable):
-                ceo_kanban_read.run_kanban(("list", "--json"))
+        completed = type(
+            "P", (), {"returncode": 2, "stdout": "", "stderr": "database is locked"}
+        )()
+        with (
+            patch.object(ceo_kanban_read.subprocess, "run", return_value=completed),
+            self.assertRaises(KanbanUnavailable),
+        ):
+            ceo_kanban_read.run_kanban(("list", "--json"))
 
     def test_missing_cli_becomes_unavailable(self) -> None:
-        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=FileNotFoundError):
-            with self.assertRaises(KanbanUnavailable):
-                ceo_kanban_read.run_kanban(("list", "--json"))
+        with (
+            patch.object(
+                ceo_kanban_read.subprocess, "run", side_effect=FileNotFoundError
+            ),
+            self.assertRaises(KanbanUnavailable),
+        ):
+            ceo_kanban_read.run_kanban(("list", "--json"))
 
 
 class KanbanReadCacheTest(unittest.TestCase):
@@ -1029,7 +1191,9 @@ class KanbanReadCacheTest(unittest.TestCase):
 
         def run(command, **_kwargs):
             attempts.append(command)
-            return type("P", (), {"returncode": 2, "stdout": "", "stderr": "database is locked"})()
+            return type(
+                "P", (), {"returncode": 2, "stdout": "", "stderr": "database is locked"}
+            )()
 
         with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
             for _ in range(3):
@@ -1055,12 +1219,12 @@ class KanbanReadCacheTest(unittest.TestCase):
 
         self.assertEqual(subcommands, ["list", "archive", "list"])
 
-    def _show_stdout(self, status: str) -> str:
+    def _show_stdout(self, status: str, body: str = "b") -> str:
         import json as _json
 
-        return _json.dumps({"task": {"id": "t_a", "status": status, "body": "b"}})
+        return _json.dumps({"task": {"id": "t_a", "status": status, "body": body}})
 
-    def _count_calls_across_base_ttl(self, status: str) -> int:
+    def _count_calls_across_base_ttl(self, status: str, body: str = "b") -> int:
         """기본 TTL을 실제로 넘긴 뒤 CLI가 다시 불리는지 센다."""
 
         import time as _time
@@ -1070,7 +1234,13 @@ class KanbanReadCacheTest(unittest.TestCase):
         def run(command, **_kwargs):
             calls.append(command)
             return type(
-                "P", (), {"returncode": 0, "stdout": self._show_stdout(status), "stderr": ""}
+                "P",
+                (),
+                {
+                    "returncode": 0,
+                    "stdout": self._show_stdout(status, body),
+                    "stderr": "",
+                },
             )()
 
         env = {
@@ -1078,11 +1248,13 @@ class KanbanReadCacheTest(unittest.TestCase):
             "KANBAN_DONE_CACHE_TTL_SECONDS": "60",
         }
         ceo_kanban_read.clear_kanban_cache()
-        with patch.dict(ceo_kanban_read.os.environ, env):
-            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
-                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
-                _time.sleep(0.45)
-                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+        with (
+            patch.dict(ceo_kanban_read.os.environ, env),
+            patch.object(ceo_kanban_read.subprocess, "run", side_effect=run),
+        ):
+            ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+            _time.sleep(0.45)
+            ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
         return len(calls)
 
     def test_finished_tasks_are_cached_longer(self) -> None:
@@ -1094,6 +1266,17 @@ class KanbanReadCacheTest(unittest.TestCase):
         """
 
         self.assertEqual(self._count_calls_across_base_ttl("done"), 1)
+
+    def test_finished_ceo_workflow_tasks_keep_graph_fresh(self) -> None:
+        """완료된 primary 뒤에 synthesis/QA가 붙는 동안 stale graph를 만들지 않는다."""
+
+        body = (
+            "hgfinance.ceo-workflow-scope.v1\n"
+            "workflow_root_task_id=t_root\n"
+            "workflow_role=primary"
+        )
+
+        self.assertEqual(self._count_calls_across_base_ttl("done", body), 2)
 
     def test_unfinished_tasks_keep_the_short_ttl(self) -> None:
         """진행 중이거나 막힌 Task는 Retry/Replan으로 다시 바뀔 수 있다."""
@@ -1111,17 +1294,21 @@ class KanbanReadCacheTest(unittest.TestCase):
 
         def run(command, **_kwargs):
             calls.append(command)
-            return type("P", (), {"returncode": 0, "stdout": "not json", "stderr": ""})()
+            return type(
+                "P", (), {"returncode": 0, "stdout": "not json", "stderr": ""}
+            )()
 
         env = {
             "KANBAN_READ_CACHE_TTL_SECONDS": "0.3",
             "KANBAN_DONE_CACHE_TTL_SECONDS": "60",
         }
-        with patch.dict(ceo_kanban_read.os.environ, env):
-            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
-                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
-                _time.sleep(0.45)
-                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+        with (
+            patch.dict(ceo_kanban_read.os.environ, env),
+            patch.object(ceo_kanban_read.subprocess, "run", side_effect=run),
+        ):
+            ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+            _time.sleep(0.45)
+            ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
 
         self.assertEqual(len(calls), 2)
 
@@ -1132,10 +1319,14 @@ class KanbanReadCacheTest(unittest.TestCase):
             calls.append(command)
             return self._ok()
 
-        with patch.dict(ceo_kanban_read.os.environ, {"KANBAN_READ_CACHE_TTL_SECONDS": "0"}):
-            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
-                for _ in range(4):
-                    ceo_kanban_read.run_kanban(("list", "--json"))
+        with (
+            patch.dict(
+                ceo_kanban_read.os.environ, {"KANBAN_READ_CACHE_TTL_SECONDS": "0"}
+            ),
+            patch.object(ceo_kanban_read.subprocess, "run", side_effect=run),
+        ):
+            for _ in range(4):
+                ceo_kanban_read.run_kanban(("list", "--json"))
 
         self.assertEqual(len(calls), 4, "TTL=0이면 매번 실행한다")
 

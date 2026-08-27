@@ -178,6 +178,21 @@ def _run_lab(args: argparse.Namespace, lab_path: Path) -> dict[str, Any]:
             "last_result": existing_results[-1].plan_id,
             "decisions": decisions,
         }
+    if existing_results and existing_results[-1].status == "COMPLETED":
+        # A completed result is durable evidence, not a polling trigger.  The
+        # previous loop would start Hermes again on every supervisor cycle
+        # because it only special-cased BLOCKED results.  That could overwrite
+        # the visible state with HERMES_RUNNING and make one finished request
+        # look perpetually active (and spend model/API budget repeatedly).
+        lab.update_state(active_plan_id=None, last_action="RESULT_RECORDED")
+        return {
+            "lab_id": lab_path.name,
+            "status": "COMPLETED",
+            "cycle": state.get("cycle", 0),
+            "last_result": existing_results[-1].plan_id,
+            "decisions": [],
+            "result_available": True,
+        }
 
     cycle = int(state.get("cycle", 0) or 0) + 1
     lab.update_state(cycle=cycle, last_action="HERMES_RUNNING")

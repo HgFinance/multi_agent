@@ -1924,6 +1924,12 @@ if __name__ == "__main__":
         # session surfaces and never create CEO/Kanban/order state.
         "/ui/strategy-research/ask",
         "/ui/strategy-research/requests/{request_id}",
+        "/ui/strategy-research/requests/{request_id}/deploy",
+        "/ui/strategy-research/requests/{request_id}/deployments",
+        "/ui/strategy-research/requests/{request_id}/deployments/{deployment_id}",
+        "/ui/strategy-research/requests/{request_id}/deployments/{deployment_id}/approve",
+        "/ui/strategy-research/requests/{request_id}/deployments/{deployment_id}/power",
+        "/ui/strategy-research/requests/{request_id}/deployments/{deployment_id}/remove",
         # 준비 상태 조회. /health와 달리 의존성까지 확인한다.
         "/health/ready",
         # 대시보드 Domain Read Model(문서 10.4). 전부 읽기 전용 projection이다.

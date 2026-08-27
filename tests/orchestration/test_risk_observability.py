@@ -52,6 +52,7 @@ def test_risk_span_uses_sdk_compatible_tags_and_closes_successfully(monkeypatch)
     assert recorded["tags"] == ["hgfinance", "risk", "redacted"]
     assert run.outputs == {"status": "OK", "page_count": 1}
     assert run.metadata["status"] == "success"
+    assert run.metadata["raw_payloads_sent"] is False
     assert isinstance(run.metadata["duration_ms"], int)
     assert recorded["exit"] == (None, None, None)
 
@@ -86,6 +87,72 @@ def test_risk_span_preserves_business_status(monkeypatch):
         run.metadata["status"] = "DEFER"
 
     assert run.metadata["status"] == "DEFER"
+
+
+def test_risk_trace_sampling_keeps_diagnostic_work_and_samples_normal_work():
+    environment = {
+        "LANGSMITH_RISK_TRACE_SAMPLE_RATE": "0",
+        "LANGSMITH_RISK_TRACE_SLOW_MS": "45000",
+    }
+
+    assert not risk_observability.risk_trace_should_publish(
+        task_id="t_normal",
+        status="completed",
+        latency_ms=1_000,
+        environment=environment,
+    )
+    assert not risk_observability.risk_trace_should_publish(
+        task_id="t_normal",
+        status="completed",
+        latency_ms=1_000,
+        environment=environment,
+    )
+    assert risk_observability.risk_trace_should_publish(
+        task_id="t_error",
+        status="completed",
+        tool_error_count=1,
+        latency_ms=1_000,
+        environment=environment,
+    )
+    assert risk_observability.risk_trace_should_publish(
+        task_id="t_legal",
+        status="completed",
+        legal_wiki_call_count=1,
+        latency_ms=1_000,
+        environment=environment,
+    )
+    assert risk_observability.risk_trace_should_publish(
+        task_id="t_slow",
+        status="completed",
+        latency_ms=45_000,
+        environment=environment,
+    )
+    assert risk_observability.risk_trace_should_publish(
+        task_id="t_blocked",
+        status="blocked",
+        latency_ms=1_000,
+        environment=environment,
+    )
+
+
+def test_risk_span_is_fail_open_when_langsmith_is_unavailable(monkeypatch):
+    class UnavailableLangSmith:
+        @staticmethod
+        def trace(*_args, **_kwargs):
+            raise RuntimeError("429 usage limit exceeded")
+
+    monkeypatch.setitem(sys.modules, "langsmith", UnavailableLangSmith)
+    monkeypatch.setattr(risk_observability, "_client", lambda: object())
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "test-key")
+
+    with risk_observability.risk_span(
+        "risk.advisory", {"task_id": "task-429", "status": "running"}
+    ) as run:
+        assert run is None
+        business_result = {"status": "DEFER"}
+
+    assert business_result == {"status": "DEFER"}
 
 
 def test_profiles_one_risk_hermes_session_without_payloads(tmp_path):
@@ -179,6 +246,8 @@ def test_publishes_idempotent_redacted_risk_worker_profile(monkeypatch, tmp_path
 
     assert risk_observability.publish_risk_hermes_profile(
         task_id="t_risk",
+        task_body="workflow_root_task_id=t_root\nrequest_id=request-41",
+        run_id="41",
         root_id="t_root",
         session_id=session,
         log_dir=tmp_path,
@@ -189,12 +258,26 @@ def test_publishes_idempotent_redacted_risk_worker_profile(monkeypatch, tmp_path
     )
 
     payload = captured["payload"]["post"][0]
+    from scripts.hermes_worker_observability import department_worker_trace_identity
+
+    identity = department_worker_trace_identity(
+        task_id="t_risk",
+        task_body="workflow_root_task_id=t_root",
+        profile="risk-management",
+        run_id="41",
+        started_ms=1_787_732_201_000,
+    )
     assert payload["name"] == "risk.hermes-worker-profile"
     assert payload["outputs"]["llm_call_count"] == 1
     assert payload["outputs"]["legal_wiki_call_count"] == 1
     assert payload["extra"]["metadata"]["raw_payloads_sent"] is False
-    assert payload["extra"]["metadata"]["request_id"] == "t_root"
-    assert payload["extra"]["metadata"]["trace_id"] == payload["id"]
+    assert payload["extra"]["metadata"]["department"] == "risk"
+    assert payload["extra"]["metadata"]["request_id"] == "request-41"
+    assert payload["inputs"]["request_id"] == "request-41"
+    assert payload["extra"]["metadata"]["trace_id"] == payload["trace_id"]
+    assert payload["parent_run_id"] == identity["worker_run_id"]
+    assert payload["trace_id"] == identity["trace_id"]
+    assert payload["extra"]["metadata"]["parent_run_id"] == payload["parent_run_id"]
     assert payload["extra"]["metadata"]["latency_scope"] == "worker_execution"
     assert payload["extra"]["metadata"]["tool_latency_available"] is True
     assert "secret-not-sent" not in json.dumps(payload)

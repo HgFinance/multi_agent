@@ -1768,7 +1768,7 @@ flowchart LR
 투자자 Persona는 인물의 문체와 정체성을 모방하지 않고 `InvestmentDoctrine`으로 변환한다. 조건부
 `QNT-08`이 Prompt/RAG Baseline보다 개선 필요성이 입증된 경우에만 Fine-tuned Model Candidate를
 만들며, 자세한 계약과 독립 평가 기준은
-[Investment Doctrine Model Factory](02-engineering/INVESTMENT_DOCTRINE_MODEL_FACTORY.md)를 따른다.
+Doctrine Model 경로는 별도 Dataset·독립 Eval·승인 경로가 구현되기 전까지 보류한다.
 
 ### 18.4 전략 가설 계약
 

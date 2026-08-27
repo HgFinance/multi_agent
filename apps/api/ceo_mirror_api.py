@@ -42,9 +42,18 @@ try:
     from .discord_mirror import post_question
     from .governance_client import fetch_fund_id_by_user
     from .strategy_research import (
+        StrategyDeploymentAccepted,
         StrategyResearchAccepted,
         accept_strategy_research_query,
         looks_like_strategy_research,
+        looks_like_strategy_deployment,
+        looks_like_strategy_deployment_approval,
+        looks_like_strategy_deployment_power,
+        looks_like_strategy_deployment_removal,
+        approve_strategy_deployment_from_text,
+        power_strategy_deployment_from_text,
+        remove_strategy_deployment_from_text,
+        request_strategy_deployment_from_text,
     )
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo import CeoAsk  # type: ignore[no-redef]
@@ -78,9 +87,18 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from discord_mirror import post_question  # type: ignore[no-redef]
     from governance_client import fetch_fund_id_by_user  # type: ignore[no-redef]
     from strategy_research import (  # type: ignore[no-redef]
+        StrategyDeploymentAccepted,
         StrategyResearchAccepted,
         accept_strategy_research_query,
         looks_like_strategy_research,
+        looks_like_strategy_deployment,
+        looks_like_strategy_deployment_approval,
+        looks_like_strategy_deployment_power,
+        looks_like_strategy_deployment_removal,
+        approve_strategy_deployment_from_text,
+        power_strategy_deployment_from_text,
+        remove_strategy_deployment_from_text,
+        request_strategy_deployment_from_text,
     )
 
 
@@ -201,6 +219,41 @@ def _strategy_query(request: CanonicalIngress) -> StrategyResearchAccepted:
         discord_message_id=request.discord_message_id,
         discord_guild_id=request.discord_guild_id,
         discord_thread_id=request.discord_thread_id,
+    )
+
+
+def _strategy_deployment_query(request: CanonicalIngress) -> StrategyDeploymentAccepted:
+    return request_strategy_deployment_from_text(
+        query=request.query,
+        actor_id=request.actor_id,
+        source=request.source,
+    )
+
+
+def _strategy_deployment_approval_query(
+    request: CanonicalIngress,
+) -> StrategyDeploymentAccepted:
+    return approve_strategy_deployment_from_text(
+        query=request.query,
+        actor_id=request.actor_id,
+    )
+
+
+def _strategy_deployment_power_query(
+    request: CanonicalIngress,
+) -> StrategyDeploymentAccepted:
+    return power_strategy_deployment_from_text(
+        query=request.query,
+        actor_id=request.actor_id,
+    )
+
+
+def _strategy_deployment_removal_query(
+    request: CanonicalIngress,
+) -> StrategyDeploymentAccepted:
+    return remove_strategy_deployment_from_text(
+        query=request.query,
+        actor_id=request.actor_id,
     )
 
 
@@ -340,7 +393,7 @@ def _execute(request: CanonicalIngress):
     "/ask",
     status_code=202,
     operation_id="ceo_query_mirror_compat",
-    response_model=CeoQueryAcceptedResponse | StrategyResearchAccepted,
+    response_model=CeoQueryAcceptedResponse | StrategyResearchAccepted | StrategyDeploymentAccepted,
 )
 def mirror_ask(
     request: CeoAsk,
@@ -371,6 +424,57 @@ def mirror_ask(
     # Central routing belongs to the BFF.  The strategy lane has its own
     # ownership/intake contract. Its Kanban root is tracking-only and cannot be
     # claimed as an execution task.
+    # Approval must be checked first because "전략 배포 승인" also contains the
+    # ordinary deployment words. The approval lane is a separate, explicit
+    # human action and never falls through to a new deployment request.
+    if looks_like_strategy_deployment_approval(request.query):
+        return _strategy_deployment_approval_query(
+            CanonicalIngress(
+                query=request.query,
+                request_id=request.request_id,
+                source="web",
+                source_message_id=x_source_message_id or request.request_id,
+                actor_id=owner_id or x_actor_id or "web-user",
+                actor_type="user",
+            )
+        ).model_dump()
+
+    if looks_like_strategy_deployment_removal(request.query):
+        return _strategy_deployment_removal_query(
+            CanonicalIngress(
+                query=request.query,
+                request_id=request.request_id,
+                source="web",
+                source_message_id=x_source_message_id or request.request_id,
+                actor_id=owner_id or x_actor_id or "web-user",
+                actor_type="user",
+            )
+        ).model_dump()
+
+    if looks_like_strategy_deployment_power(request.query):
+        return _strategy_deployment_power_query(
+            CanonicalIngress(
+                query=request.query,
+                request_id=request.request_id,
+                source="web",
+                source_message_id=x_source_message_id or request.request_id,
+                actor_id=owner_id or x_actor_id or "web-user",
+                actor_type="user",
+            )
+        ).model_dump()
+
+    if looks_like_strategy_deployment(request.query):
+        return _strategy_deployment_query(
+            CanonicalIngress(
+                query=request.query,
+                request_id=request.request_id,
+                source="web",
+                source_message_id=x_source_message_id or request.request_id,
+                actor_id=owner_id or x_actor_id or "web-user",
+                actor_type="user",
+            )
+        ).model_dump()
+
     if looks_like_strategy_research(request.query):
         return _strategy_query(
             CanonicalIngress(
@@ -426,6 +530,50 @@ def mirror_ingress(
         if request.fund_id is not None:
             require_fund_membership(owner, request.fund_id)
         canonical = request.model_copy(update={"actor_id": owner, "actor_type": "user"})
+    if looks_like_strategy_deployment_approval(canonical.query):
+        accepted = _strategy_deployment_approval_query(canonical)
+        return MirrorIngressResponse(
+            accepted=True,
+            duplicate=False,
+            reason="strategy_deployment_approved",
+            request_id=canonical.request_id,
+            source=canonical.source,
+            execution_count=1,
+            ceo=accepted.model_dump(),
+        )
+    if looks_like_strategy_deployment_removal(canonical.query):
+        accepted = _strategy_deployment_removal_query(canonical)
+        return MirrorIngressResponse(
+            accepted=True,
+            duplicate=False,
+            reason="strategy_deployment_removed",
+            request_id=canonical.request_id,
+            source=canonical.source,
+            execution_count=1,
+            ceo=accepted.model_dump(),
+        )
+    if looks_like_strategy_deployment_power(canonical.query):
+        accepted = _strategy_deployment_power_query(canonical)
+        return MirrorIngressResponse(
+            accepted=True,
+            duplicate=False,
+            reason="strategy_deployment_power_changed",
+            request_id=canonical.request_id,
+            source=canonical.source,
+            execution_count=1,
+            ceo=accepted.model_dump(),
+        )
+    if looks_like_strategy_deployment(canonical.query):
+        accepted = _strategy_deployment_query(canonical)
+        return MirrorIngressResponse(
+            accepted=True,
+            duplicate=False,
+            reason="strategy_deployment_requested",
+            request_id=canonical.request_id,
+            source=canonical.source,
+            execution_count=1,
+            ceo=accepted.model_dump(),
+        )
     if looks_like_strategy_research(canonical.query):
         accepted = _strategy_query(canonical)
         return MirrorIngressResponse(

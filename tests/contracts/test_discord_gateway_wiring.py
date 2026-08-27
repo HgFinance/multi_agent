@@ -117,6 +117,21 @@ class DiscordGatewayWiringTests(unittest.TestCase):
         self.assertIn("gateway_state.json", runbook)
         self.assertIn("HERMES_GATEWAY_BOOTSTRAP_STATE", runbook)
 
+    def test_active_gateways_do_not_sync_slash_commands_on_restart(self) -> None:
+        sources = {
+            path: path.read_text(encoding="utf-8")
+            for path in set(GATEWAY_SERVICES.values())
+        }
+        for service in ("ceo-hermes", "qa-hermes", "workforce-hermes"):
+            block = _service_block(
+                sources[GATEWAY_SERVICES[service]], service
+            )
+            self.assertIn(
+                "DISCORD_COMMAND_SYNC_POLICY: ${DISCORD_COMMAND_SYNC_POLICY:-off}",
+                block,
+                service,
+            )
+
     def test_compose_definitions_do_not_start_host_gateways(self) -> None:
         compose_paths = set(GATEWAY_SERVICES.values()) | {
             ROOT / "docker-compose.yml",
@@ -153,11 +168,12 @@ class DiscordGatewayWiringTests(unittest.TestCase):
         self.assertIn("systemctl --user enable --now", runbook)
         self.assertIn("docker compose stop ceo-hermes", runbook)
 
-    def test_dispatcher_and_supervisor_keep_official_runtime_image(self) -> None:
+    def test_dispatcher_and_supervisor_keep_official_runtime_base(self) -> None:
         source = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         dispatcher_block = source[source.index("kanban-dispatcher:") : source.index("ceo-kanban-supervisor:")]
         supervisor_block = _service_block(source, "ceo-kanban-supervisor")
-        self.assertIn("image: nousresearch/hermes-agent:latest", dispatcher_block)
+        self.assertIn("image: hedgefund-agent-runtime:latest", dispatcher_block)
+        self.assertIn("FROM nousresearch/hermes-agent:latest", (ROOT / "Dockerfile.agent-runtime").read_text(encoding="utf-8"))
         self.assertIn("image: hedgefund-ceo-supervisor:latest", supervisor_block)
         self.assertIn("dockerfile: Dockerfile.ceo-supervisor", supervisor_block)
         self.assertNotIn("HERMES_GATEWAY_IMAGE", dispatcher_block)

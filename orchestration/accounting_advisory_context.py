@@ -63,6 +63,7 @@ def _compact_snapshot(payload: Any) -> str | None:
                     "symbol",
                     "display_name",
                     "quantity",
+                    "trade_basis_quantity",
                     "market_value",
                     "unrealized_pnl",
                     "weight",

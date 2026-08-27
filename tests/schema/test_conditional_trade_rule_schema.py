@@ -14,6 +14,12 @@ TRADING_EVALUATION_READ_MIGRATION = (
     / "migrations"
     / "20260824000700_conditional_trading_evaluation_read.sql"
 )
+OUTBOX_CLAIM_MIGRATION = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260827000200_conditional_rule_outbox_claim_lease.sql"
+)
 
 
 def compact() -> str:
@@ -80,3 +86,15 @@ def test_lifecycle_trigger_rejects_unsafe_transitions() -> None:
     assert "invalid conditional rule transition" in sql
     assert "old.state='active' and new.state in" in sql
     assert "'paused','triggered','expired','cancelled','failed'" in sql
+
+
+def test_outbox_claim_lease_is_worker_writable_and_pairwise() -> None:
+    sql = " ".join(
+        OUTBOX_CLAIM_MIGRATION.read_text(encoding="utf-8").lower().split()
+    )
+
+    assert "add column if not exists claim_token text" in sql
+    assert "add column if not exists claim_expires_at timestamptz" in sql
+    assert "conditional_rule_outbox_claim_pair_check" in sql
+    assert "grant update (claim_token,claim_expires_at)" in sql
+    assert "conditional_rule_outbox_claim_idx" in sql

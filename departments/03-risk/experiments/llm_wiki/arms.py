@@ -32,13 +32,12 @@ for path in (_RISK_ROOT, _AGENTIC_RAG_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from src.graph import run_compliance_check  # noqa: E402
-from src.nodes import MAX_CONTEXT_CHARS, PERSONA_PROMPTS  # noqa: E402
-from src.resilience import CircuitBreaker, RedisJsonCache, emit_metric  # noqa: E402
-
-from bm25 import BM25Index  # noqa: E402
-from grep_seed import grep_seed, keyword_seed  # noqa: E402
-from wiki_reader import read_bounded  # noqa: E402
+from bm25 import BM25Index
+from grep_seed import grep_seed, keyword_seed
+from src.graph import run_compliance_check
+from src.nodes import MAX_CONTEXT_CHARS, PERSONA_PROMPTS
+from src.resilience import CircuitBreaker, RedisJsonCache, emit_metric
+from wiki_reader import read_bounded
 
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 WIKI_DIR = Path(__file__).resolve().parent / "data" / "wiki"

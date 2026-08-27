@@ -183,6 +183,13 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
+    # 이 주소는 배포된 Streamable HTTP MCP 정본이다. Hermes의 HEAD/GET
+    # 사전 점검은 서버에 불필요한 세션을 만든 뒤 버려, 재연결 때 세션
+    # 누수와 Session not found를 키웠다. 실제 MCP 핸드셰이크가 정본이므로
+    # 중복 왕복은 생략하고, 세션이 오래 유휴 상태가 되지 않게 60초마다
+    # 가볍게 확인한다.
+    skip_preflight: true
+    keepalive_interval: 60
   # LS 증권 조회면 (2026-08-13) - TR 카탈로그 검색 + 수급 큐레이션.
   # 키는 ls-mcp 컨테이너에만 있다(2026-08-02 자격 격리 결정 유지).
   ls-securities:

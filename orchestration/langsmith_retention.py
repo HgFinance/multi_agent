@@ -22,9 +22,13 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
-from orchestration.langsmith_queries import query_runs, resolve_project_id
+from orchestration.langsmith_queries import (
+    close_query_client,
+    query_runs,
+    resolve_project_id,
+)
 
 LOG = logging.getLogger(__name__)
 TRACE_DELETE_BATCH_SIZE = 100
@@ -86,8 +90,21 @@ class LangSmithRetentionSummary:
     scanned: int = 0
     eligible: int = 0
     deleted: int = 0
+    pending_visible: int = 0
+    visible_overflow: int = 0
     skipped: int = 0
     error_code: str | None = None
+
+    @property
+    def queued(self) -> int:
+        """Compatibility name for requests accepted by LangSmith.
+
+        The delete endpoint acknowledges a request before the provider has
+        physically removed the trace. Keep ``deleted`` for existing callers,
+        but expose the truthful operational term too.
+        """
+
+        return self.deleted
 
 
 class LangSmithRetentionRateLimited(RuntimeError):
@@ -150,7 +167,7 @@ class LangSmithRetentionWorker:
         self.opener = opener or urllib.request.urlopen
 
     @classmethod
-    def from_env(cls) -> "LangSmithRetentionWorker":
+    def from_env(cls) -> LangSmithRetentionWorker:
         return cls()
 
     def _projects(self) -> tuple[tuple[str, str, int], ...]:
@@ -281,7 +298,9 @@ class LangSmithRetentionWorker:
 
         current = now or datetime.now(timezone.utc)
         scanned = eligible = deleted = skipped = 0
+        pending_visible = visible_overflow = 0
         pending = self._load_pending()
+        client: Any | None = None
         try:
             from langsmith import Client
 
@@ -321,6 +340,7 @@ class LangSmithRetentionWorker:
                 # still visible in the bounded scan so a completed deletion
                 # leaves the pending ledger naturally.
                 project_pending.intersection_update(current_ids)
+                visible_overflow += max(0, len(current_ids) - self.max_traces)
                 excess = ordered[
                     self.max_traces : self.max_traces + self.max_delete_per_pass
                 ]
@@ -335,6 +355,7 @@ class LangSmithRetentionWorker:
                 ]
                 eligible += len(trace_ids)
                 if effective_dry_run:
+                    pending_visible += len(project_pending)
                     continue
                 queued = self._delete_trace_ids(
                     project_id=project_id,
@@ -342,13 +363,16 @@ class LangSmithRetentionWorker:
                 )
                 deleted += queued
                 project_pending.update(trace_ids[:queued])
+                pending_visible += len(project_pending)
                 self._save_pending(pending)
             LOG.info(
-                "langsmith-retention enabled=true dry_run=%s scanned=%d eligible=%d queued=%d skipped=%d",
+                "langsmith-retention enabled=true dry_run=%s scanned=%d eligible=%d queued=%d pending_visible=%d visible_overflow=%d skipped_pending=%d",
                 str(effective_dry_run).lower(),
                 scanned,
                 eligible,
                 deleted,
+                pending_visible,
+                visible_overflow,
                 skipped,
             )
             return LangSmithRetentionSummary(
@@ -358,9 +382,11 @@ class LangSmithRetentionWorker:
                 scanned=scanned,
                 eligible=eligible,
                 deleted=deleted,
+                pending_visible=pending_visible,
+                visible_overflow=visible_overflow,
                 skipped=skipped,
             )
-        except Exception as exc:  # maintenance must not stop other retention jobs
+        except Exception as exc:  # noqa: BLE001 - maintenance must not stop other retention jobs
             LOG.warning("langsmith-retention failed error=%s", type(exc).__name__)
             error_code = (
                 "TRACE_DELETE_HOURLY_LIMIT"
@@ -374,9 +400,14 @@ class LangSmithRetentionWorker:
                 scanned=scanned,
                 eligible=eligible,
                 deleted=deleted,
+                pending_visible=pending_visible,
+                visible_overflow=visible_overflow,
                 skipped=skipped,
                 error_code=error_code,
             )
+        finally:
+            if client is not None:
+                close_query_client(client)
 
 
 __all__ = [

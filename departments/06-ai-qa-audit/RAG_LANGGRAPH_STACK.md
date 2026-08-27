@@ -1,9 +1,10 @@
 # AI-QA 부서 LangGraph·RAG·Graph Stack
 
-검토일: 2026-08-04  
-상태: 설계 제안. 현재 구현·운영 활성화와 향후 확장을 구분한다.
+검토일: 2026-08-27
+상태: 현재 구현과 향후 확장을 구분한다. CEO post-response QA는 LangSmith
+metadata-only trace를 단일 실행 근거 경계로 사용한다.
 
-AI-QA 부서는 Risk·Research·Trading·Quant·Accounting의 결과를 독립 검증한다. Head/Worker 모델은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md)를 따르며 이 설계 문서에 버전값을 복사하지 않는다. Worker 결과는 `qa.worker-context.v1` advisory이고 `EvidenceQaEngine`, `ModelRiskEngine`, `InternalAuditEngine`, Permission Engine, Incident 상태 머신이 최종 통제한다.
+AI-QA 부서는 Risk·Research·Trading·Quant·Accounting의 결과를 독립 검증한다. Head/Worker 모델은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md)를 따르며 이 설계 문서에 버전값을 복사하지 않는다. Worker 결과는 `qa.worker-context.v1` advisory이고, 도메인 QA API의 결정론 엔진은 claim·permission·incident 판정을 통제한다. CEO post-response QA의 실행성·연결성 판정은 `orchestration/langsmith_queries.py`의 공통 metadata-only reader가 제공하는 LangSmith 근거를 사용한다.
 
 **2026-08-06 tool 강등**: `evidence-qa-worker`·`model-and-internal-audit-worker`·`ops-and-permission-worker`는
 결정론 `qa-runner` 하나로 합쳐졌다(`WORKER_SPECS` LLM Registry 밖, 매 케이스 항상 실행). 아래 표의 세
@@ -193,20 +194,18 @@ QA 판정·Audit Trail(`audit.rag_runs` 등)의 Source of Truth는 계속 Supaba
 
 `rag.hyper_extract.v1`은 Incident 데이터가 충분히 쌓인 뒤 `incident-postmortem-worker`에만 추가한다. Hyperedge를 자동 Root Cause나 Finding close의 근거로 사용하지 않는다.
 
-## 12. QA Python 구현 단위
+## 12. 현재 QA Python 구현 단위
 
 | 구현 단위 | 우선 파일 | 책임 |
 |---|---|---|
-| Input/Output DTO | `departments/06-ai-qa-audit/skills/contracts.py` | `QASkillContext`, `QASkillResult`, `EvidenceRef`, `InferenceRecord` Schema |
-| Guard Nodes | `departments/06-ai-qa-audit/skills/guards.py` | scope, PIT, redaction, artifact schema, source authority 확인 |
-| Evidence RAG | `departments/06-ai-qa-audit/skills/evidence_rag.py` | hybrid/PIKE/LightRAG Retriever Adapter와 citation Context 생성 |
-| Lineage Graph | `departments/06-ai-qa-audit/skills/lineage_graph.py` | `artifact_lineage`, model/prompt/dataset/tool 관계 조회 |
-| Incident Graph | `departments/06-ai-qa-audit/skills/incident_graph.py` | Timeline에서 Hyperedge 후보를 만들고 `INFERENCE`로 표시 |
-| QA Gate Adapter | `departments/06-ai-qa-audit/skills/qa_gate.py` | 기존 `evidence_qa_engine.py`, `model_risk.py`, `internal_audit.py` 호출 |
-| Worker Graph Factory | `departments/06-ai-qa-audit/skills/graph_nodes.py` | Worker별 조건부 topology와 signal routing |
-| Trace/Replay | `departments/06-ai-qa-audit/skills/trace.py` | `audit.agent_runs/tool_calls`, input/output hash, replay manifest |
+| 공통 LangSmith reader | `orchestration/langsmith_queries.py` | 상관 ID로 bounded metadata-only trace를 조회하고 SDK transport fallback을 한 곳에서 처리 |
+| CEO post-response QA 입력 | `orchestration/adapters/ceo_supervisor.py` | root·request·primary task ID로 LangSmith 근거를 수집해 QA task에 한 번 전달 |
+| QA terminal projection | `orchestration/adapters/qa_audit_projection.py` | 명시적 verdict와 LangSmith coverage를 결합해 audit/eval 결과를 저장 |
+| QA worker 경계 | `scripts/qa_hermes_worker.py` | post-response QA를 비위임·읽기 전용·bounded review로 실행 |
+| 결정론 QA 엔진 | `departments/06-ai-qa-audit/evidence/evidence_qa_engine.py` | claim/evidence의 PASS/WARN/FAIL 판정과 재현성 검사 |
+| Worker/Trace 계약 | `departments/06-ai-qa-audit/qa_employee_workers.py`, `audit/trace_recorder.py` | QA domain worker와 audit trace 계약 |
 
-기존 결정론적 Engine은 이 모듈에서 재구현하지 않고 Adapter로 호출한다. QA Worker가 `audit.qa_decisions`, `findings`, `corrective_actions`의 상태를 직접 바꾸지 않도록 API Tool을 별도로 제한한다.
+기존 결정론적 Engine은 이 모듈에서 재구현하지 않고 기존 경계에서 호출한다. CEO post-response QA는 LangSmith reader를 다시 구현하지 않으며, QA Worker는 `audit.qa_decisions`, `findings`, `corrective_actions`의 상태를 직접 바꾸지 않도록 API Tool을 제한한다.
 
 ## 13. QA별 Graph Acceptance
 
@@ -217,16 +216,16 @@ QA 판정·Audit Trail(`audit.rag_runs` 등)의 Source of Truth는 계속 Supaba
 - Incident: FACT와 INFERENCE를 분리하고, Hyperedge에는 근거 Event ID와 extraction version을 남긴다.
 - 모든 Worker: `audit.agent_runs/tool_calls` 기록에 실패하면 QA PASS로 승격하지 않는다.
 
-## 14. Skill 구현 우선순위
+## 14. 향후 확장 우선순위
 
-1. `contracts.py`, `guards.py`, `trace.py`, `fallback`을 먼저 구현한다.
+1. 운영 Evidence corpus/pgvector를 연결하고 placeholder corpus를 제거한다.
 2. Evidence Worker에 `rag.route`, `rag.hybrid_retrieve`, `verify.citation`을 연결한다.
 3. Hallucination Critic에 `verify.contradiction`과 제한된 재검색만 연결한다.
 4. Model/Internal Audit에 관계형 Lineage Graph Adapter를 연결한다.
 5. Incident 데이터가 축적된 후 `rag.hyper_extract`를 human-review 흐름에 추가한다.
 
-## 11. 현재 구현 상태 (2026-08-04)
+## 15. 현재 구현 상태 (2026-08-27)
 
 - 구현됨: `SkillContext`/`SkillResult`, 입력·scope·PIT 가드, allow-listed Tool 경계, bounded RAG Router, retry·escalation 결과, trace/replay manifest.
-- 구현됨: 다섯 명의 Worker Graph가 evidence boundary를 통과한 뒤에만 Qwen 요약을 호출하고, Worker report에 `skills`, `rag_plan`, `skill_results`, `trace`를 반환한다.
+- 구현됨: CEO post-response QA의 LangSmith 상관 trace 수집, metadata-only redaction, 명시적 verdict와 coverage binding, 비동기 terminal projection.
 - 아직 비활성: 실제 Evidence Retriever·pgvector/Graph projection 연결, 내부 HTTP API 운영 URL, 실제 corpus와 golden set. `SAMPLE_PLACEHOLDER` 근거는 운영 QA PASS에 사용할 수 없다.

@@ -48,16 +48,86 @@ _ACTIONABLE_FINDINGS = frozenset(
         "STRUCTURED_EVAL_SCORE_LOW",
         "SEMANTIC_QA_FAILED",
         "SEMANTIC_QA_SCORE_LOW",
+        "REDACTION_MARKER_MISSING",
     }
 )
 
 _MANAGER_TERMS = (
+    (
+        "Independent verification of correlated department execution, retries, tool errors, latency, and trace coverage is unavailable; the QA result cannot be",
+        "상관된 부서 실행·재시도·도구 오류·지연 시간·추적 범위의 독립 검증을 확인할 수 없어 QA 결과를 확정할 수 없습니다",
+    ),
+    (
+        "The bounded Research 재현성 contract is only partially met, even though the CEO response prints several URL/date labels.",
+        "제한된 리서치 재현성 계약은 부분 충족 상태입니다. CEO 응답에 일부 URL·날짜 표기가 포함되었지만 출처 계보를 일관되게 확인해야 합니다.",
+    ),
+    ("Independent verification", "독립 검증"),
+    ("correlated department execution", "상관된 부서 실행"),
+    ("tool errors", "도구 오류"),
+    ("trace coverage", "추적 범위"),
+    ("retries", "재시도"),
+    ("latency", "지연 시간"),
+    ("is unavailable", "확인할 수 없습니다"),
+    ("reproducibility contract", "재현성 계약"),
+    ("is only partially met", "은 부분 충족 상태입니다"),
+    (
+        "even though the CEO response prints several URL/date labels",
+        "CEO 응답에 일부 URL·날짜 표기가 포함되었지만",
+    ),
+    ("The bounded Research", "제한된 리서치"),
+    ("QA result cannot be", "QA 결과를 확정할 수 없습니다"),
+    ("delivery/readback", "전달/재확인"),
+    ("projection_after_terminal", "완료 후 QA 기록"),
+    ("summary_hash", "요약 무결성 값"),
+    (
+        "langsmith_evidence.status=NOT_FOUND",
+        "LangSmith 실행 기록: 확인 불가",
+    ),
+    # Bounded Quant retrieval fields can appear in a QA finding's evidence
+    # sentence. Translate the complete field names before the generic
+    # ``snapshot`` mapping so manager-facing cards never expose runtime keys.
+    ("requested_window", "요청 기간"),
+    ("snapshot_hash", "자료 해시"),
+    ("queried_at", "조회 시각"),
+    ("extracted_at", "추출 시각"),
+    ("ceo_response.response_task_id", "CEO 응답 업무 ID"),
+    ("workflow_root_task_id", "업무 root ID"),
+    ("delivery_status", "전달 상태"),
+    ("trace_closed", "추적 종료"),
+    ("terminal_status", "종료 상태"),
+    ("duplicate", "중복 여부"),
+    ("bounded", "제한된"),
+    ("status=NOT_FOUND", "상태=실행 기록 없음"),
+    ("trace_count=0", "추적 수=0"),
+    ("department_count=0", "부서 수=0"),
+    (" with ", "이며 "),
+    (
+        "therefore execution trace coverage, latency, retries, tool errors, and correlated department trace results cannot be independently verified from the authoritative trace source.",
+        "따라서 실행 기록 범위·처리 시간·재시도·도구 오류·연결된 부서 실행 결과를 공식 관측 자료에서 독립적으로 확인할 수 없습니다.",
+    ),
+    ("langsmith_evidence", "LangSmith 실행 증거"),
+    ("trace_count", "추적 수"),
+    ("department_count", "부서 수"),
+    ("NOT_FOUND", "추적 기록 없음"),
+    ("Research handoff", "리서치 전달 자료"),
     ("HTTPException", "HTTP 요청 오류"),
     ("http_status=", "HTTP 상태코드="),
     (
         "end-to-end latency exceeded the configured observation threshold",
         "전체 처리 시간이 설정된 기준을 초과했습니다.",
     ),
+    (
+        "worker execution latency exceeded the configured observation threshold",
+        "부서 실행 시간이 설정된 기준을 초과했습니다.",
+    ),
+    ("answer contract semantic QA failed", "최종 응답 형식·의미 검증 실패"),
+    ("worker_execution", "부서 실행"),
+    ("hgfinance.user-query", "사용자 요청 실행"),
+    ("hgfinance.research.worker", "리서치 부서 실행"),
+    ("hgfinance.risk.worker", "리스크 부서 실행"),
+    ("hgfinance.accounting.worker", "회계·포트폴리오 부서 실행"),
+    ("accounting-portfolio", "회계·포트폴리오"),
+    ("First", "기본 관측 프로젝트"),
     ("risk-management", "리스크 부서"),
     ("trading-department", "트레이딩 부서"),
     ("research-department", "리서치 부서"),
@@ -80,7 +150,10 @@ _MANAGER_TERMS = (
         "ledger/cash/valuation/fee-tax reconciliation evidence agrees",
         "원장·현금·평가·수수료·세금 대사 근거가 일치할 때까지",
     ),
-    ("snapshot and broker independent reconciliation absent", "스냅샷과 브로커 독립 대사가 없음"),
+    (
+        "snapshot and broker independent reconciliation absent",
+        "스냅샷과 브로커 독립 대사가 없음",
+    ),
     (
         "No investment/trading eligibility decision until evidence is independently verified",
         "근거를 독립적으로 확인하기 전에는 투자·거래 적격성을 결정하지 않음",
@@ -101,6 +174,10 @@ _MANAGER_TERMS = (
     ("제공 snapshot", "제공된 조회 자료"),
     ("payload", "제공 자료"),
     ("Preliminary", "예비"),
+    ("ceo_input_is_identical", "CEO 입력 일치 여부"),
+    ("response_delivered", "CEO 응답 전달 여부"),
+    ("qa_blocks_response", "QA 응답 차단 여부"),
+    ("workflow_observations", "업무 흐름 관측 정보"),
     ("gross/net exposure", "총·순 익스포저"),
     ("PnL", "손익"),
     ("side", "포지션 방향"),
@@ -121,6 +198,7 @@ _FINDING_LABELS = {
     "STRUCTURED_EVAL_SCORE_LOW": "구조화 평가 점수 미달",
     "WORKER_OR_WORKFLOW_DEGRADED": "부서 또는 업무 흐름 성능 저하",
     "PRIVACY_PAYLOAD_PRESENT": "민감 원문 포함 감지",
+    "REDACTION_MARKER_MISSING": "원문 비전송 여부 확인 불가",
     "LANGFUSE_OBSERVABILITY_UNAVAILABLE": "Langfuse 관측 연결 불가",
     "CORRELATION_METADATA_MISSING": "호출 연결 정보 누락",
     "DEPARTMENT_METADATA_MISSING": "부서·단계 정보 누락",
@@ -171,7 +249,6 @@ QA_CHECK_LABELS = {
     "citations": "출처 인용",
     "reproducibility": "재현성",
     "completeness": "응답 완전성",
-    "paper_read_only_safety": "PAPER 읽기 전용 준수",
     "response_delivery_nonblocking": "CEO 응답 비차단",
     # Post-response QA receipts use these explicit check identifiers. Keep
     # them in the same manager-facing dictionary so Notion and Discord do not
@@ -190,6 +267,17 @@ QA_CHECK_LABELS = {
     "fail_checks": "결정 차단 여부",
     "evidence_and_scope": "근거·검토 범위",
     "ceo_input_identity": "CEO 입력 동일성",
+    "ceo_input_is_identical": "CEO 입력 일치 여부",
+    "response_delivered": "CEO 응답 전달 여부",
+    "qa_blocks_response": "QA 응답 차단 여부",
+    "workflow_observations": "업무 흐름 관측 정보",
+    "workflow_scope_and_async_timing": "업무 범위·사후 QA 시점",
+    "ceo_input_identity_and_root_binding": "CEO 입력·업무 연결",
+    "frozen_mandate_boundary": "동결 투자지침 경계",
+    "evidence_and_citation_grounding": "근거·인용 충실성",
+    "unsupported_claim_audit": "근거 없는 주장 점검",
+    "e2e_reproducibility_contract": "전체 흐름 재현성",
+    "delivery_and_terminal_lifecycle_consistency": "응답 전달·종료 상태 일관성",
     "evidence_consistency": "근거 내부 일관성",
     "citations_and_provenance": "인용·자료 출처",
     "scope_and_claims": "검토 범위·주장",
@@ -219,7 +307,6 @@ QA_CHECK_LABELS = {
     "workflow_scope_and_identity": "업무 범위·식별성",
     "post_response_nonblocking": "사후 QA 비차단",
     "response_delivery_connectivity": "응답 전달 연결성",
-    "claim_grounding": "주장 근거성",
     "evidence_and_citation_completeness": "근거·인용 완전성",
     "backtest_reproducibility": "백테스트 재현성",
     "internal_consistency": "내부 일관성",
@@ -237,6 +324,76 @@ QA_CHECK_LABELS = {
     "short_leg_status": "숏 포지션 상태",
     "mandate_scope_readiness": "투자지침 범위 적격성",
     "data_quality": "자료 품질",
+    # QA Hermes emits these descriptive post-response check names in its
+    # durable run metadata. Keep the operations card readable even when the
+    # audit record uses the long-form names rather than compact aliases.
+    "workflow_identity_and_scope": "업무 식별·범위",
+    "evidence_grounding": "근거 충실성",
+    "unsupported_claims_and_contradictions": "근거 없는 주장·모순 점검",
+    "citation_traceability": "인용 추적성",
+    "reproducibility_and_observability": "재현성·관측성",
+    "async_governance_behavior": "사후 QA 운영 방식",
+    "authoritative_evidence_boundary": "권위 자료 범위",
+    "langsmith_execution_evidence": "LangSmith 실행 증거",
+    "response_content_grounding": "응답 근거 일치",
+    "unknowns_and_limitations": "미확인 사항·한계",
+    "delivery_and_async_contract": "전달·비동기 계약",
+    "citation_reproducibility": "인용·재현성",
+    "numerical_and_reconciliation_handling": "수치·대사 처리",
+    "paper_read_only_safety": "PAPER 읽기 전용 준수",
+    "input_identity": "입력 동일성",
+    "workflow_scope_and_timing": "업무 범위·처리 시점",
+    "evidence_boundary": "근거 범위",
+    "langsmith_authoritative_execution": "권위 LangSmith 실행 기록",
+    "trace_receipt_consistency": "실행 기록·전달 영수증 일관성",
+    "ceo_response_delivery": "CEO 응답 전달 여부",
+    "e2e_receipt_contract": "전체 흐름 전달 영수증",
+    "research_evidence_and_reproducibility": "리서치 근거·재현성",
+    "claim_scope_and_metrics": "주장 범위·수치 처리",
+    "accounting_risk_representation": "회계·리스크 표현",
+    "response_consistency": "응답 일관성",
+    "core_numeric_consistency": "핵심 수치 일관성",
+    "uncertainty_preservation": "불확실성 보존",
+    "claim_grounding": "주장 근거성",
+    "unsupported_or_overstated_claims": "근거 없는·과장된 주장 점검",
+    "scope_and_advisory_boundary": "검토 범위·자문 경계",
+    "delivery_and_observability_contract": "전달·관측 계약",
+    "response_integrity": "응답 무결성",
+    "post_response_async_contract": "응답 후 QA 계약",
+    "core_factual_grounding": "핵심 사실 근거성",
+    "coverage_of_primary_work": "주요 부서 결과 반영",
+    "transcription_accuracy": "전달 정확성",
+    "scope_and_action_safety": "검토 범위·행위 안전성",
+    "delivery_receipt_consistency": "전달 확인 일관성",
+    "scope_and_authority": "검토 범위·권한",
+    "uncertainty_and_limitations": "불확실성·제한사항",
+    "delivery_integrity": "응답 전달 무결성",
+    "evidence_support": "근거 뒷받침",
+    "metadata_consistency": "메타데이터 일관성",
+    "scope_and_citations_boundary": "검토 범위·인용 경계",
+    "reproducibility_and_e2e": "전체 흐름 재현성",
+    "workflow_input_identity": "업무 입력 동일성",
+    "response_delivery_and_async_contract": "응답 전달·비동기 QA",
+    "trace_lifecycle_connectivity": "추적 흐름 연결성",
+    "unsupported_claims_and_hallucination": "근거 없는 주장·환각 점검",
+    "mandate_and_risk_limits": "투자지침·위험 한도",
+    "details": "검토 세부사항",
+    "scope_and_mandate": "검토 범위·투자지침",
+    "limitations_and_unknowns": "제한사항·미확인 사항",
+    "lifecycle_and_connectivity": "업무 흐름·연결성",
+    "async_non_gating": "비차단 사후 QA",
+    "evidence_basis": "근거 설명",
+    "citation_basis": "인용 설명",
+    "unsupported_claims_basis": "주장 점검 설명",
+    "scope_basis": "범위 점검 설명",
+    "reproducibility_basis": "재현성 설명",
+    "workflow_lifecycle_basis": "업무 흐름 설명",
+    "langsmith_evidence": "LangSmith 실행 증거",
+    "trace_coverage": "추적 범위",
+    "response_delivery_timing": "응답 전달 시점",
+    "delivery_receipt_integrity": "전달 기록 무결성",
+    "numerical_consistency": "수치 일관성",
+    "fail_closed_behavior": "문제 발생 시 안전 정지",
 }
 
 _OWNER_LABELS = {
@@ -250,6 +407,14 @@ _OWNER_LABELS = {
     "accounting": "회계·포트폴리오 부서",
     "accounting-portfolio-department": "회계·포트폴리오 부서",
     "accounting-portfolio": "회계·포트폴리오 부서",
+    "payload_boundary": "자료 범위·경계",
+    "ceo_input_final_response_consistency": "CEO 입력·최종 응답 일치",
+    "accounting_evidence_and_citations": "회계 근거·인용",
+    "scope_and_unsupported_claims": "범위·근거 없는 주장",
+    "reproducibility_and_langsmith_trace_coverage": "재현성·LangSmith 실행 기록",
+    "delivery_receipt_and_post_response_contract": "전달 영수증·사후 점검",
+    "async_non_blocking_behavior": "비동기 처리",
+    "paper_read_only_safety": "PAPER 읽기 전용 안전",
     "ceo-workflow": "CEO 업무 흐름",
     "observability": "관측 시스템",
 }
@@ -270,7 +435,12 @@ def qa_check_label(value: Any) -> str:
     rendered = str(value or "").strip()
     if rendered and not re.fullmatch(r"[a-z0-9_.:/ -]+", rendered.casefold()):
         return rendered[:120]
-    return "추가 점검 항목"
+    if rendered:
+        # A new machine key must remain identifiable until its Korean label is
+        # registered. Hiding it behind a generic label makes QA triage
+        # impossible and was the source of the live Discord ambiguity.
+        return f"검증 항목({rendered[:96]})"
+    return "검증 항목(이름 없음)"
 
 
 def qa_owner_label(value: Any) -> str:
@@ -287,18 +457,32 @@ def qa_owner_label(value: Any) -> str:
 
 
 def _qa_result_label(value: Any) -> str:
-    return {
+    labels = {
         "PASS": "통과",
+        "PASS_WITH_LIMITATION": "제한부 통과",
         "WARN": "주의",
+        "WARN_UNVERIFIABLE": "확인 불가(주의)",
         "FAIL": "실패",
         "DEFER": "보류",
-    }.get(str(value or "").strip().upper(), _manager_label(value, 32) or "확인 필요")
+    }
+    normalized = str(value or "").strip()
+    leading = re.match(
+        r"^(PASS_WITH_LIMITATION|PASS|WARN_UNVERIFIABLE|WARN|FAIL|DEFER)\b",
+        normalized,
+        re.IGNORECASE,
+    )
+    if leading:
+        return labels[leading.group(1).upper()]
+    return labels.get(normalized.upper(), _manager_label(value, 32) or "확인 필요")
 
 
 def _manager_label(value: Any, limit: int = 160) -> str:
     rendered = _bounded(value, limit)
     for internal, friendly in _MANAGER_TERMS:
-        rendered = rendered.replace(internal, friendly)
+        if internal == "NAV":
+            rendered = re.sub(r"(?<![A-Za-z])NAV(?![A-Za-z])", friendly, rendered)
+        else:
+            rendered = rendered.replace(internal, friendly)
     for internal, friendly in QA_CHECK_LABELS.items():
         rendered = re.sub(
             rf"(?<![A-Za-z0-9]){re.escape(internal)}(?![A-Za-z0-9])",
@@ -311,6 +495,8 @@ def _manager_label(value: Any, limit: int = 160) -> str:
         r"\1원",
         rendered,
     )
+    rendered = re.sub(r"(?<![A-Za-z])true(?![A-Za-z])", "확인", rendered)
+    rendered = re.sub(r"(?<![A-Za-z])false(?![A-Za-z])", "미확인", rendered)
     return rendered
 
 
@@ -346,9 +532,41 @@ def qa_feedback_channel_id() -> str:
 
 
 def hr_langfuse_channel_id() -> str:
-    return os.getenv(
-        "HR_LANGFUSE_CHANNEL_ID", HR_LANGFUSE_CHANNEL_DEFAULT
-    ).strip()
+    return os.getenv("HR_LANGFUSE_CHANNEL_ID", HR_LANGFUSE_CHANNEL_DEFAULT).strip()
+
+
+def _post_discord_message(
+    content: str,
+    *,
+    token: str,
+    channel_id: str,
+    user_agent: str,
+    timeout: float = 8.0,
+) -> str:
+    """Post one bounded internal card and return its Discord identity."""
+
+    if not token.strip() or not channel_id.strip():
+        raise ValueError("Discord transport is not configured")
+    request = Request(
+        f"https://discord.com/api/v10/channels/{channel_id}/messages",
+        data=json.dumps(
+            {"content": content[:1900], "allowed_mentions": {"parse": []}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        headers={
+            "Authorization": f"Bot {token.strip()}",
+            "Content-Type": "application/json",
+            "User-Agent": user_agent,
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    message_id = str(payload.get("id") or "") if isinstance(payload, Mapping) else ""
+    if not message_id:
+        raise RuntimeError("discord_message_id_missing")
+    return message_id
 
 
 def post_qa_discord_message(
@@ -360,28 +578,13 @@ def post_qa_discord_message(
 ) -> str:
     """Post one bounded QA card and return its Discord message identity."""
 
-    if not token.strip() or not channel_id.strip():
-        raise ValueError("QA Discord transport is not configured")
-    request = Request(
-        f"https://discord.com/api/v10/channels/{channel_id}/messages",
-        data=json.dumps(
-            {"content": content[:1900], "allowed_mentions": {"parse": []}},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8"),
-        headers={
-            "Authorization": f"Bot {token.strip()}",
-            "Content-Type": "application/json",
-            "User-Agent": "HgFinance-QA-Feedback/1.0",
-        },
-        method="POST",
+    return _post_discord_message(
+        content,
+        token=token,
+        channel_id=channel_id,
+        user_agent="HgFinance-QA-Feedback/1.0",
+        timeout=timeout,
     )
-    with urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    message_id = str(payload.get("id") or "") if isinstance(payload, Mapping) else ""
-    if not message_id:
-        raise RuntimeError("discord_message_id_missing")
-    return message_id
 
 
 def post_hr_langfuse_discord_message(
@@ -393,28 +596,51 @@ def post_hr_langfuse_discord_message(
 ) -> str:
     """Post one bounded HR/Langfuse card with the HR transport identity."""
 
-    if not token.strip() or not channel_id.strip():
-        raise ValueError("HR Langfuse Discord transport is not configured")
+    return _post_discord_message(
+        content,
+        token=token,
+        channel_id=channel_id,
+        user_agent="HgFinance-HR-Langfuse/1.0",
+        timeout=timeout,
+    )
+
+
+def verify_discord_message_delivery(
+    content: str,
+    *,
+    token: str,
+    channel_id: str,
+    message_id: str,
+    timeout: float = 8.0,
+) -> bool:
+    """Verify the posted message exists in the intended channel.
+
+    The readback checks only Discord identifiers and the already-redacted card
+    content.  It never logs or forwards the response payload.
+    """
+
+    if not token.strip() or not channel_id.strip() or not message_id.strip():
+        return False
     request = Request(
-        f"https://discord.com/api/v10/channels/{channel_id}/messages",
-        data=json.dumps(
-            {"content": content[:1900], "allowed_mentions": {"parse": []}},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8"),
+        f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}",
         headers={
             "Authorization": f"Bot {token.strip()}",
-            "Content-Type": "application/json",
-            "User-Agent": "HgFinance-HR-Langfuse/1.0",
+            "User-Agent": "HgFinance-Discord-Delivery-Readback/1.0",
         },
-        method="POST",
+        method="GET",
     )
-    with urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    message_id = str(payload.get("id") or "") if isinstance(payload, Mapping) else ""
-    if not message_id:
-        raise RuntimeError("discord_message_id_missing")
-    return message_id
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, TimeoutError, ValueError, OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, Mapping):
+        return False
+    return (
+        str(payload.get("id") or "") == str(message_id)
+        and str(payload.get("channel_id") or "") == str(channel_id)
+        and str(payload.get("content") or "") == content[:1900]
+    )
 
 
 def edit_qa_discord_message(
@@ -465,9 +691,12 @@ def format_qa_terminal_report(record: Any) -> str:
         "CONDITIONAL": "조건부 통과",
         "FAIL": "실패·투자 결정 차단",
     }.get(decision, "확인 필요")
-    numerical = _manager_label(
-        evidence.get("numerical_posture") or evidence.get("numeric_posture"), 40
-    ) or "확인 필요"
+    numerical = (
+        _manager_label(
+            evidence.get("numerical_posture") or evidence.get("numeric_posture"), 40
+        )
+        or "확인 필요"
+    )
     if numerical.upper() == "DEFER":
         numerical = "판단 보류"
 
@@ -476,12 +705,71 @@ def format_qa_terminal_report(record: Any) -> str:
     if isinstance(raw_checks, (list, tuple)):
         for item in raw_checks[:8]:
             if isinstance(item, Mapping):
-                name = qa_check_label(item.get("check") or item.get("name"))
+                name = qa_check_label(
+                    item.get("check")
+                    or item.get("name")
+                    or item.get("key")
+                    or item.get("code")
+                    or item.get("label")
+                    or item.get("title")
+                    or item.get("id")
+                )
                 result = _qa_result_label(item.get("result") or item.get("status"))
                 checks.append(f"- {name}: {result or '확인 필요'}")
+            elif isinstance(item, str) and item.strip():
+                # Older QA workers persisted a compact string list instead of
+                # ``[{"check": ..., "result": ...}]``.  Keep that legacy
+                # shape identifiable as well; silently dropping it produces
+                # an empty/generic checklist in the manager-facing card.
+                rendered = item.strip()
+                match = re.match(
+                    r"^([a-zA-Z0-9_.:/ -]+?)\s*(?:=|:|—|-)\s*"
+                    r"(PASS_WITH_LIMITATION|PASS|WARN_UNVERIFIABLE|WARN|FAIL|DEFER)\b",
+                    rendered,
+                    re.IGNORECASE,
+                )
+                if match:
+                    name = qa_check_label(match.group(1).strip())
+                    result = _qa_result_label(match.group(2))
+                else:
+                    name = qa_check_label(rendered)
+                    result = "확인 필요"
+                checks.append(f"- {name}: {result}")
     elif isinstance(raw_checks, Mapping):
-        for key, value in list(raw_checks.items())[:8]:
-            checks.append(f"- {qa_check_label(key)}: {_qa_result_label(value)}")
+        emitted = 0
+        for key, value in raw_checks.items():
+            if emitted >= 8:
+                break
+            key_text = str(key)
+            if key_text.endswith("_basis") and key_text[: -len("_basis")] in raw_checks:
+                continue
+            if isinstance(value, Mapping):
+                result = _qa_result_label(value.get("result") or value.get("status"))
+                basis = _manager_label(
+                    value.get("basis")
+                    or value.get("detail")
+                    or value.get("details")
+                    or value.get("reason"),
+                    180,
+                )
+                suffix = f" ({basis})" if basis else ""
+                checks.append(f"- {qa_check_label(key)}: {result}{suffix}")
+            else:
+                rendered = str(value or "").strip()
+                match = re.match(
+                    r"^(PASS_WITH_LIMITATION|PASS|WARN_UNVERIFIABLE|WARN|FAIL|DEFER)\s*(?:[—:-]\s*(.*))?$",
+                    rendered,
+                    re.IGNORECASE,
+                )
+                if match:
+                    result = _qa_result_label(match.group(1))
+                    basis_value = match.group(2) or raw_checks.get(f"{key_text}_basis")
+                    basis = _manager_label(basis_value, 180) if basis_value else ""
+                    suffix = f" ({basis})" if basis else ""
+                    checks.append(f"- {qa_check_label(key)}: {result}{suffix}")
+                else:
+                    checks.append(f"- {qa_check_label(key)}: {_qa_result_label(value)}")
+            emitted += 1
     findings: list[str] = []
     raw_findings = getattr(record, "findings", ())
     if isinstance(raw_findings, (list, tuple)):
@@ -492,9 +780,12 @@ def format_qa_terminal_report(record: Any) -> str:
                     _manager_label(item.get("severity") or "확인 필요", 24),
                 )
                 issue = _manager_label(
-                    item.get("summary")
+                    item.get("title")
+                    or item.get("summary")
                     or item.get("statement")
                     or item.get("description")
+                    or item.get("details")
+                    or item.get("finding")
                     or item.get("issue")
                     or item.get("message")
                     or "근거 보완 필요",
@@ -503,9 +794,13 @@ def format_qa_terminal_report(record: Any) -> str:
                 owner = qa_owner_label(
                     item.get("owner") or item.get("responsible_party")
                 )
-                impact = _manager_label(item.get("block_condition") or item.get("impact"), 150)
-                finding_id = _manager_label(item.get("finding_id") or item.get("id"), 48)
-                status = _manager_label(item.get("status"), 32)
+                impact = _manager_label(
+                    item.get("block_condition") or item.get("impact"), 150
+                )
+                finding_id = _manager_label(
+                    item.get("finding_id") or item.get("id"), 48
+                )
+                status = _qa_result_label(item.get("status"))
                 due_date = _manager_label(item.get("due_date") or item.get("due"), 32)
                 prefix = f"{finding_id}: " if finding_id else ""
                 suffix = f" 담당: {owner}" if owner else ""
@@ -516,7 +811,8 @@ def format_qa_terminal_report(record: Any) -> str:
                 if due_date:
                     suffix += f" 기한: {due_date}"
                 recommended_action = _manager_label(
-                    item.get("recommended_action"), 220
+                    item.get("recommended_action") or item.get("corrective_action"),
+                    220,
                 )
                 if recommended_action:
                     suffix += f" 조치: {recommended_action}"
@@ -616,6 +912,9 @@ def format_qa_feedback_request(
     )
     evidence_values = [
         ("관측 프로젝트", metadata.get("source_project")),
+        ("관측 범주", metadata.get("observation_category")),
+        ("표준 부서 키", metadata.get("department_key")),
+        ("관측 단계", metadata.get("stage")),
         ("실행 기록 유형", metadata.get("source_name")),
         ("실행 기록 ID", metadata.get("source_run_id")),
         ("연결 추적 ID", metadata.get("trace_id")),
@@ -624,7 +923,7 @@ def format_qa_feedback_request(
         ("부서 업무 ID", metadata.get("task_id")),
     ]
     evidence = [
-        f"- {label}: {_bounded(value, 160)}"
+        f"- {label}: {_manager_label(value, 160)}"
         for label, value in evidence_values
         if value
     ]
@@ -635,15 +934,26 @@ def format_qa_feedback_request(
             f"{_bounded(metadata.get('window_end'), 64) or '?'}"
         )
     evidence_text = "\n".join(evidence) or "- artifact metadata 참조"
-    code_text = ", ".join(
-        _FINDING_LABELS.get(code, "추가 확인 신호") for code in codes[:8]
-    ) or "없음"
-    primary_bottleneck = qa_owner_label(
-        metadata.get("primary_bottleneck_department")
+    code_text = (
+        ", ".join(_FINDING_LABELS.get(code, "추가 확인 신호") for code in codes[:8])
+        or "없음"
     )
+    primary_bottleneck = qa_owner_label(metadata.get("primary_bottleneck_department"))
     joint_targets = _manager_label(metadata.get("joint_improvement_targets"), 120)
-    observation_point = _manager_label(
-        metadata.get("observation_point") or metadata.get("stage"), 64
+    observation_point_raw = metadata.get("observation_point") or metadata.get("stage")
+    observation_point = (
+        qa_owner_label(observation_point_raw)
+        if str(observation_point_raw or "").casefold()
+        in {
+            "research",
+            "research-department",
+            "risk",
+            "risk-management",
+            "accounting",
+            "accounting-portfolio",
+            "accounting-portfolio-department",
+        }
+        else _manager_label(observation_point_raw, 64)
     )
     if primary_bottleneck:
         attribution_text = (
@@ -714,9 +1024,7 @@ def format_hr_langfuse_feedback_request(
     window_start = _bounded(metadata.get("window_start"), 64)
     window_end = _bounded(metadata.get("window_end"), 64)
     if window_start or window_end:
-        observations.append(
-            f"관측 구간: {window_start or '?'} ~ {window_end or '?'}"
-        )
+        observations.append(f"관측 구간: {window_start or '?'} ~ {window_end or '?'}")
     report_count = metadata.get("report_count")
     if report_count:
         observations.append(f"관측 보고서: {int(report_count)}건")
@@ -727,7 +1035,9 @@ def format_hr_langfuse_feedback_request(
             f"측정 완료 {int(measured_count or 0)}건 / 확인 불가 {int(unavailable_count or 0)}건"
         )
     if metadata.get("langfuse_queries") is not None:
-        observations.append(f"Langfuse 조회 횟수: {int(metadata['langfuse_queries'])}회")
+        observations.append(
+            f"Langfuse 조회 횟수: {int(metadata['langfuse_queries'])}회"
+        )
     if metadata.get("llm_calls") is not None:
         observations.append(f"모델 호출: {int(metadata['llm_calls'])}회")
     latency_ms = metadata.get("latency_ms") or metadata.get("p95_latency_ms")
@@ -756,9 +1066,10 @@ def format_hr_langfuse_feedback_request(
     ]
     evidence.append("- 원문 입력·출력 전송: 없음")
     evidence_text = "\n".join(evidence)
-    code_text = ", ".join(
-        _FINDING_LABELS.get(code, "추가 확인 신호") for code in codes[:8]
-    ) or "없음"
+    code_text = (
+        ", ".join(_FINDING_LABELS.get(code, "추가 확인 신호") for code in codes[:8])
+        or "없음"
+    )
     bottleneck = qa_owner_label(metadata.get("primary_bottleneck_department"))
     bottleneck_text = bottleneck or "미확정"
     if bottleneck and metadata.get("primary_bottleneck_duration_ms"):
@@ -1045,13 +1356,14 @@ __all__ = [
     "format_qa_feedback_request",
     "format_skill_activation_notice",
     "format_skill_proposal_request",
+    "hr_langfuse_channel_id",
     "is_actionable_feedback",
     "parse_qa_feedback_command",
     "post_hr_langfuse_discord_message",
     "post_qa_discord_message",
     "proposal_id_from_text",
     "qa_feedback_channel_id",
-    "hr_langfuse_channel_id",
     "submit_qa_feedback_decision",
     "submit_skill_proposal_decision",
+    "verify_discord_message_delivery",
 ]

@@ -8,8 +8,6 @@ Hermes Profile은 `quant-backtest-department`이고 직원은 독립 LangGraph W
 실제 실행 상태와 재일님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
 Research Evidence를 전략 가설과 독립 검증으로 연결하는 목표 Graph와 계약은
 [Research-Quant Evidence-to-Strategy Framework](../../docs/02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를 따른다.
-투자자 Persona를 측정 가능한 투자 원칙과 조건부 Fine-tuned Reviewer로 만드는 설계는
-[Investment Doctrine Model Factory](../../docs/02-engineering/INVESTMENT_DOCTRINE_MODEL_FACTORY.md)를 따른다.
 
 ## Mission
 
@@ -69,7 +67,6 @@ walk-forward·DSR·PBO·국면·릴리스 관문)은 **이미 `pipeline/`의 결
 
 | 경로 | 역할 | 상태 |
 |---|---|---|
-| `agents/strategy_hypothesis_agent.py` | 관측 근거에서 가설 생성·등록 | **은퇴 예정.** 가설 생성은 리서치 소관이다 — 스스로 낸 가설을 스스로 검증하면 생성자·검증자 분리가 무너진다 |
 | **`pipeline/factory_bridge.py`** | 기존 DB 실행·감사 기록이 참조하는 **보존된 레거시 브리지**. 새 자율 연구실의 입력·출력 계약에는 연결하지 않는다 | 의존성 이관 전 삭제 금지 |
 | **`pipeline/data_resolution.py`** | 원천 테이블 -> 데이터셋 매니페스트 사상. 사상표를 코드에 박지 않고 `source_versions` 에서 유도하고, **로컬 DB 를 조회해 커버리지를 실측**한다 | 자체 점검 11/11 |
 | **`pipeline/strategy_templates.py`** | 시그널 템플릿 8종 + `PITView`(기준일 초과 데이터를 꺼낼 접근자가 **없다**) | 자체 점검 10개 영역 |
@@ -116,7 +113,7 @@ Optional Doctrine Branch
   -> 필요할 때만 격리 SFT/LoRA Training
   -> Independent Frozen Eval
   -> DoctrineReviewV1
-  -> QNT-01 Hypothesis Seed
+  -> Research Methodology Lead / Experiment Proposal
 ```
 
 핵심 규칙:
@@ -133,9 +130,6 @@ Optional Doctrine Branch
 Repository Root에서 실행한다.
 
 ```bash
-quant-backtest-department chat -q 'Backtest [전략 가설]'
-
-python departments/04-quant-backtest/agents/strategy_hypothesis_agent.py
 python departments/04-quant-backtest/pipeline/pit_dataset.py
 python departments/04-quant-backtest/pipeline/backtest_runner.py
 python departments/04-quant-backtest/pipeline/walk_forward.py
@@ -144,6 +138,18 @@ python departments/04-quant-backtest/pipeline/experiment_orchestrator.py
 
 실 DB 작업은 각 파일의 `--build`, `--run`, `--register` 옵션과 `DATABASE_URL`,
 `TIMESCALE_DATABASE_URL`이 필요하다. 출력 Dataset 파일은 `quant-data/`에 생성되며 Git에 올리지 않는다.
+
+## Hermes 분석 카드 계약
+
+표준·신속 시장 분석은 Quant primary 카드가 단독으로 종료한다. native `delegate_task`와
+하위 카드 생성은 노출하지 않으며, CEO가 만든 primary는 workflow root에 실제 Kanban parent
+edge를 가진다. 완료 시 전체 사용자 답변은 `result`에 저장하고 `summary`는 짧은 handoff로만
+사용한다.
+
+원본을 읽지 못한 경우에도 다음 필드를 포함한 단일 `retrieval_attempt`를 남긴다:
+`instrument`, `requested_window`, `source`, `tr`, `status`, `queried_at`, `extracted_at`,
+`snapshot_hash`. `source`·`tr`·`snapshot_hash`가 없으면 `UNAVAILABLE`로 기록하고, 수익률·
+변동성·Sharpe·MDD를 계산하지 않은 채 `HOLD` 또는 `NOT_VERIFIABLE`로 종료한다.
 
 ## 남은 작업
 
@@ -166,8 +172,8 @@ python departments/04-quant-backtest/pipeline/experiment_orchestrator.py
 4. Strategy Registry에 Capability·QA·Risk·CEO 승인과 Shadow/Paper 상태를 연결한다.
 5. Dataset·Code·Dependency·Seed·Cost Model을 CI에서 같은 결과로 재현한다.
 6. AI Office에는 Tick 원문이 아니라 Experiment·Candidate Read Model만 제공한다.
-7. `QNT-08` Doctrine Profile — `InvestmentDoctrineV1` Fixture부터 구현하고 Fine-tuning은
-   Need Gate 통과 후 실행한다.
+7. Doctrine sourcing and model training remain Research-owned; Quant only consumes a
+   registered experiment proposal and validates its deterministic result.
 
 ## Handoff
 

@@ -5,6 +5,27 @@ from types import SimpleNamespace
 from apps.api import accounting, hermes_boundary
 
 
+def test_accounting_alias_scopes_ceo_plan_to_accounting_hermes(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_ceo_query(req, owner_id=None, *, deterministic_routing_plan=None, **_kwargs):
+        captured["request"] = req
+        captured["owner_id"] = owner_id
+        captured["plan"] = deterministic_routing_plan
+        return {"task_id": "t_accounting", "status": "accepted"}
+
+    monkeypatch.setattr("apps.api.ceo.ceo_query", fake_ceo_query)
+
+    result = accounting._enqueue_accounting_via_ceo(
+        hermes_boundary.AgentAsk(query="원장과 현금의 PAPER 상태를 검토해줘")
+    )
+
+    assert result["task_id"] == "t_accounting"
+    plan = captured["plan"]
+    assert plan["selected_primary_profiles"] == ("accounting-portfolio-department",)
+    assert plan["requested_departments"] == ["accounting"]
+
+
 def test_model_accounting_query_is_enqueued_on_canonical_ceo_path(monkeypatch) -> None:
     routing = SimpleNamespace(
         calls_model=True,

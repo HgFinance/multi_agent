@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import unittest
+from tempfile import TemporaryDirectory
+from typing import ClassVar
 from unittest.mock import patch
 
 from apps.api import ceo
 from orchestration.adapters.ceo_supervisor import CeoSupervisorService
-from orchestration.ceo_workflow_scope import build_root_body
+from orchestration.ceo_workflow_scope import (
+    build_root_body,
+    ceo_self_improvement_section_from_root,
+    user_query_from_body,
+)
 from orchestration.experience_bank import ExperienceLookup, ExperienceWrite
+from orchestration.langsmith_feedback import FeedbackLedger
 
 
 class _FakeBank:
@@ -64,7 +71,7 @@ class DiscordD5IngressTest(unittest.TestCase):
             ceo.hermes_boundary, "show_kanban_task", return_value=None
         ), patch.object(ceo.logger, "warning") as warning:
             ceo.ceo_query(
-                ceo.CeoAsk(query="raw prompt must not be logged", request_id="req-shadow")
+                ceo.CeoAsk(query="삼성전자 시장 분석해줘", request_id="req-shadow")
             )
 
         messages = [str(call.args[0]) for call in warning.call_args_list]
@@ -75,7 +82,7 @@ class DiscordD5IngressTest(unittest.TestCase):
         self.assertIn("error_category=%s", lookup)
         self.assertIn("root_id=%s", hint)
         self.assertIn("hint_build_ms=%d", hint)
-        self.assertNotIn("raw prompt must not be logged", " ".join(messages))
+        self.assertNotIn("삼성전자 시장 분석해줘", " ".join(messages))
 
     def test_off_shadow_active_have_one_existing_root_boundary(self):
         bodies = {}
@@ -109,6 +116,11 @@ class DiscordD5IngressTest(unittest.TestCase):
                 self.assertEqual(len(bank.lookup_calls), expected_lookup)
                 body = create.call_args.kwargs["body"]
                 bodies[mode] = body
+                if mode == "active":
+                    self.assertEqual(
+                        bank.lookup_calls[0]["case_type"],
+                        "discord_ceo_verified:portfolio_recommendation",
+                    )
                 self.assertEqual("## D5 advisory" in body, expected_hint)
                 self.assertNotIn("analyze Samsung", body.split("## User request\n", 1)[0])
 
@@ -139,34 +151,152 @@ class DiscordD5IngressTest(unittest.TestCase):
         self.assertIn("non-authoritative", body)
         self.assertIn("analysis_parallel", body)
 
+    def test_ceo_self_improvement_is_scoped_to_synthesis_guardrails(self):
+        hint = {
+            "schema_version": "hgfinance.memo-harness.ceo-self-improvement.v1",
+            "owner": "ceo",
+            "mode": "corrective_guardrails_only",
+            "verified_qa_required": True,
+            "raw_payloads_sent": False,
+            "guardrails": [
+                {
+                    "id": "CEO_TRACE_EVIDENCE_RECHECK",
+                    "rule": (
+                        "Treat an unavailable authoritative execution trace as unverified. "
+                        "A published receipt or metadata-only record is not proof that a "
+                        "trace exists."
+                    ),
+                }
+            ],
+        }
+        body = build_root_body(
+            "삼성전자 분석",
+            "req-ceo-self-improvement",
+            ceo_self_improvement_hint=hint,
+        )
+
+        section = ceo_self_improvement_section_from_root(body)
+        self.assertIn("CEO_TRACE_EVIDENCE_RECHECK", section)
+        self.assertIn("CEO self-improvement guardrails", section)
+        self.assertEqual(user_query_from_body(body), "삼성전자 분석")
+        self.assertNotIn("execute QA command", section)
+        self.assertNotIn("D5_CHECK_", section)
+
 
 class DiscordD5FinalizationTest(unittest.TestCase):
     def test_same_discord_root_records_once(self):
         root_id = "t_root1234"
-        root_body = build_root_body("analyze Samsung", "req-1")
+        root_body = build_root_body(
+            "analyze Samsung",
+            "req-1",
+            selected_primary_profiles=("research-department", "risk-management"),
+            delegation_instructions={
+                "research-department": "research",
+                "risk-management": "risk",
+            },
+        )
 
         class Client:
-            environment = {}
-
-            def workflow(self, task_id):
-                return task_id, (
-                    {
-                        "id": "t_research",
-                        "assignee": "research-department",
-                        "status": "done",
-                        "body": "workflow_role=primary\n",
-                    },
-                )
+            environment: ClassVar[dict[str, object]] = {}
 
         bank = _FakeBank("shadow")
         service = CeoSupervisorService(Client(), experience_bank=bank)
         root = {"id": root_id, "body": root_body, "status": "done"}
+        workflow_tasks = (
+            root,
+            {
+                "id": "t_research",
+                "assignee": "research-department",
+                "status": "done",
+                "body": "workflow_role=primary\n",
+            },
+            {
+                "id": "t_risk",
+                "assignee": "risk-management",
+                "status": "done",
+                "body": "workflow_role=primary\n",
+            },
+        )
+        projection_result = {
+            "status": "persisted",
+            "canonical_decision": "PASS",
+            "findings": [],
+        }
 
-        service._record_discord_experience_once(root_id=root_id, root_payload=root)
-        service._record_discord_experience_once(root_id=root_id, root_payload=root)
+        service._record_discord_experience_after_qa(
+            root_id=root_id,
+            root_payload=root,
+            qa_task={"id": "t_qa"},
+            workflow_tasks=workflow_tasks,
+            projection_result=projection_result,
+        )
+        service._record_discord_experience_after_qa(
+            root_id=root_id,
+            root_payload=root,
+            qa_task={"id": "t_qa"},
+            workflow_tasks=workflow_tasks,
+            projection_result=projection_result,
+        )
 
         self.assertEqual(len(bank.records), 1)
-        self.assertEqual(bank.records[0].experience_identity, "kanban:t_root1234")
+        self.assertEqual(
+            bank.records[0].experience_identity,
+            "kanban:t_root1234:qa:t_qa",
+        )
+        self.assertTrue(bank.records[0].success)
+
+    def test_verified_qa_finding_enters_d5_improvement_ledger(self):
+        root_id = "t_root_d5_candidate"
+        root_body = build_root_body(
+            "매매손익 알려줘",
+            "req-d5-candidate",
+            selected_primary_profiles=("accounting-portfolio-department",),
+            delegation_instructions={
+                "accounting-portfolio-department": "accounting",
+            },
+        )
+
+        class Client:
+            environment: ClassVar[dict[str, object]] = {}
+
+        bank = _FakeBank("active")
+        with TemporaryDirectory() as directory:
+            ledger = FeedbackLedger(f"{directory}/feedback.sqlite3")
+            service = CeoSupervisorService(
+                Client(), experience_bank=bank, d5_feedback_ledger=ledger
+            )
+            root = {"id": root_id, "body": root_body, "status": "done"}
+            workflow_tasks = (
+                root,
+                {
+                    "id": "t_accounting",
+                    "assignee": "accounting-portfolio-department",
+                    "status": "done",
+                    "body": "workflow_role=primary\n",
+                },
+            )
+            projection_result = {
+                "status": "persisted",
+                "canonical_decision": "WARN",
+                "checks": {
+                    "langsmith_authoritative_execution": {"result": "WARN"},
+                },
+                "findings": [{"id": "QA-F-001", "severity": "HIGH"}],
+            }
+
+            service._record_discord_experience_after_qa(
+                root_id=root_id,
+                root_payload=root,
+                qa_task={"id": "t_qa_candidate"},
+                workflow_tasks=workflow_tasks,
+                projection_result=projection_result,
+            )
+
+            pending = ledger.pending(10)
+            self.assertEqual(len(pending), 2)
+            self.assertTrue(
+                all(item["metadata"]["source"] == "memo_harness_d5" for item in pending)
+            )
 
 
 if __name__ == "__main__":

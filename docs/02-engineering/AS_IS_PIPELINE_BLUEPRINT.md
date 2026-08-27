@@ -165,7 +165,7 @@ flowchart TB
 | `risk-api` | `departments/03-risk/Dockerfile` | 기본 CMD | `127.0.0.1:8041` | 리스크 엔진 API |
 | `audit-api` | `departments/06-ai-qa-audit/Dockerfile` | 기본 CMD | `127.0.0.1:8042` | QA/감사 API |
 | `qa-worker` | 동일 | `qa_events/worker.py` | — | 리스크 결정 이벤트 소비 |
-| `kanban-dispatcher` | hermes 이미지 (로컬은 `Dockerfile.agent-runtime`) | `kanban daemon --force --interval 60` | **없음(설계)** | ★ 에이전트 스포너. 최고 권한 컨테이너 |
+| `kanban-dispatcher` | `Dockerfile.agent-runtime` 빌드 (`hedgefund-agent-runtime:latest`) | `kanban daemon --force --interval 60` | **없음(설계)** | ★ 에이전트 스포너. Quant completion-result contract 포함 |
 | `ceo-kanban-supervisor` | hermes 이미지 | `run_ceo_supervisor.py --interval 1` | — | 종료 이벤트 상태기계 |
 | `factory-autopilot` | **레거시 보존 소스** (전용 이미지·Compose 서비스 제거) | `factory_autopilot.py --loop --interval-min 15` (역사 기록) | — | 과거 공장 사이클 드라이버 |
 | `factory-experiment-worker` | **레거시 보존 소스** (전용 이미지·Compose 서비스 제거) | `experiment_worker.py --serve` (역사 기록) | — | 과거 백테스트 실행 워커 |
@@ -202,7 +202,7 @@ flowchart TB
 | | 로컬 (Windows + override) | AWS EC2 (루트 compose 그대로) | AWS Elastic Beanstalk (`deploy/eb/`) |
 |---|---|---|---|
 | Hermes 프로필 경로 | `${USERPROFILE}/.hermes-<부서>` (`override:29-106`) | `/home/ubuntu/.hermes/profiles/<부서>` | **Hermes 자체가 없음** |
-| dispatcher 이미지 | `Dockerfile.agent-runtime` 빌드 (quant-py, agent-reach, gh, mcporter 포함) | `nousresearch/hermes-agent:latest` **맨몸** | — |
+| dispatcher 이미지 | `Dockerfile.agent-runtime` 빌드 (Quant 도구 + canonical result installer) | `Dockerfile.agent-runtime` 동일 빌드 | — |
 | dispatcher 메모리 | 8g + `--max 3` 스폰 캡 | **1g** (`docker-compose.yml:1081` — 과거 OOM 유발값) | — |
 | 직원 워커 LLM | Ollama `qwen3:1.7b` (8초 타임아웃) | 당시 vLLM `qwen2.5-14b` FP8 | — |
 | 서비스 구성 | 전체 스택 | 전체 스택 | 7개만: portfolio-bff/worker, trading-api/relay, accounting-api/consumer, 전용 redis |
@@ -235,7 +235,7 @@ Hermes는 이 저장소의 코드가 아니다. 업스트림 **NousResearch `her
 | a | **dispatcher 스폰 (주 생산 경로)** | dispatcher가 자기 컨테이너 안에서 `hermes -p <부서> ... chat -q work kanban task <id>` | 카드 assignee → `$HERMES_HOME/profiles/<assignee>` 라우팅 (`docker-compose.yml:1027-1032`, `override:156-160`) |
 | b | BFF 부서 질의 | `hermes -p <프로필> chat -Q -q <질의>` (local 모드) 또는 `docker exec -u hermes -i <컨테이너> hermes ...` (docker 모드) | `apps/api/hermes_boundary.py:85-107`, 호출당 프로세스 신규 (~20초, `:374-375`) |
 | c | 오케스트레이션 어댑터 | `hermes --profile ceo-agent -z <프롬프트>` (헤드리스 1턴 JSON) | `orchestration/adapters/ceo.py:82`, `ceo_task_planner.py:103` |
-| d | 인프로세스 Python (취약) | `from run_agent import AIAgent` — **이 모듈은 저장소에 없음** (업스트림 체크아웃 전용) | `departments/00-ceo-office/scripts.py:134-141`, `07-agent-workforce/scripts.py:108-114` — lazy import라 실제 호출 시점에만 터짐 |
+| d | 레거시 인프로세스 Python (취약, 운영 경로 아님) | `from run_agent import AIAgent` — **이 모듈은 저장소에 없음** (업스트림 체크아웃 전용) | CEO의 구형 `departments/00-ceo-office/scripts.py:134-141`에만 잔존. HR 구형 경로는 제거했고 현재 HR 검증은 dispatcher가 `scripts/hr_e2e_readonly.py`를 제한 실행 |
 
 부서 게이트웨이 8개가 `sleep infinity`인 이유: 업스트림 s6가 Discord 게이트웨이를 소유하게 하되, 임베디드 디스패치는 전부 끈다(`HERMES_KANBAN_DISPATCH_IN_GATEWAY=false` ×9). 게이트웨이의 `/opt/data` 자체가 프로필이라 `profiles/` 하위 디렉터리가 없어 스폰이 `skipped_nonspawnable`로 떨어지기 때문 (`docker-compose.yml:678-686`).
 
@@ -287,7 +287,13 @@ qa-department ← 06-ai-qa-audit     hr-department ← 07-agent-workforce
 
 ### 4.7 Discord 통합
 
-Discord 봇 = 각 게이트웨이 컨테이너의 s6가 띄우는 업스트림 게이트웨이. 토큰/채널은 프로필 상태(`gateway_state.json`)에 있고 저장소에는 없다. 저장소가 가진 것은 **중복 전달 방어 패치**뿐: `Dockerfile.hermes-discord`가 빌드 시 업스트림 `DiscordAdapter`에 `deploy/hermes-discord/gateway_patch.py`를 주입(어댑터 미발견 시 빌드 거부, `install_patch.py:12-19`), 인바운드/아웃바운드 클레임을 프로필별 SQLite(`discord_message_recovery.db`, 30일 보존)로 관리, 원장 불가 시 **fail-closed** (`gateway_patch.py:147-164`). 단 이 이미지는 `docker-compose.discord-idempotency.yml`을 명시 적용할 때만 쓰이는 **기본 OFF 방어층**이다.
+Discord 봇 = 각 게이트웨이 컨테이너의 s6가 띄우는 게이트웨이다. 토큰/채널은
+프로필 상태(`gateway_state.json`)에 있고 저장소에는 없다. `Dockerfile.hermes-discord`는
+빌드 시 업스트림 `DiscordAdapter`에 `deploy/hermes-discord/gateway_patch.py`를
+주입하며(어댑터 미발견 시 빌드 거부, `install_patch.py:12-19`), 인바운드/아웃바운드
+클레임은 `DISCORD_IDEMPOTENCY_HOME`의 SQLite 원장으로 관리한다. 현재 CEO·QA·HR는
+`DISCORD_IDEMPOTENCY_SCOPE=global`로 `/opt/kanban` 원장을 공유하고, 원장 불가 시
+**fail-closed**한다. 나머지 프로필은 전환 전까지 upstream 경로를 유지한다.
 
 ---
 
@@ -751,8 +757,8 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 | `apps/api/fact_router.py` | 12KB, import 0 |
 | `apps/api/ceo_hermes_client.py` | 테스트만 import — ceo-hermes:8642 API 서버는 돌지만 부르는 생산 코드 없음 |
 | 04-quant `pipeline/experiment_card.py` | **QA 핸드오프 산출물(ExperimentCardV1)의 유일한 생산자 — 아무도 호출 안 함.** `result-interpretation-worker`는 영원히 안 오는 트리거를 기다린다 |
-| 04-quant `pipeline/feature_catalog.py`(500줄), `research_bridge.py`, `agents/strategy_*.py`(1,100줄+) | 8/10 재편으로 고아화 |
-| 04-quant `api/` | 소스 삭제, `__pycache__`만 잔존 — 주석들은 여전히 "quant-api /jobs/stuck"을 살아있는 것처럼 언급 |
+| 04-quant `pipeline/feature_catalog.py`(500줄) | 8/10 재편 이후 결정론 계층의 보존·테스트 호환면으로 남아 있음 — 새 자율 연구 생성 경로와는 분리 |
+| 04-quant `api/` | `quant-api`가 실험 제출·조회면으로 운영 중이며, `research_bridge.py`를 통해 기존 연구 스키마와 호환된다 — Hermes에 DB 쓰기 권한을 직접 노출하지 않는다 |
 | 02-trading `contracts/risk_gate.py`, `packet_gate.py`, `skills/`, `multileg/`(DB 영속 NotImplemented) | 생산 호출자 0 |
 | 03-risk `risk_events/projection_worker.py`, `harness/`, `experiments/llm_wiki/` | compose 서비스/호출자 없음 |
 | 01-research Line B (`scripts.py` 2,687줄 + analysts 10종) | **의도적 은퇴**(8/10 재편, 코드 보존 명시) — 당시 MCP `run_research_packet`으로 여전히 실행 가능, 최종 산출물 8/4 |

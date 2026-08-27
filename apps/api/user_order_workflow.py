@@ -86,7 +86,7 @@ def canonical_payload_sha256(value: Mapping[str, Any]) -> str:
 
 
 def directive_execution_event_payload(
-    record: "UserOrderRequestRecord", response: Any
+    record: UserOrderRequestRecord, response: Any
 ) -> dict[str, Any]:
     """Project one Trading response into a correlation-safe audit payload.
 
@@ -326,6 +326,7 @@ class UserOrderRequestRepository(Protocol):
         error_message: str | None = None,
         event_type: str | None = None,
         event_payload: Mapping[str, Any] | None = None,
+        event_id: str | None = None,
     ) -> UserOrderRequestRecord: ...
 
 
@@ -347,6 +348,25 @@ def _same_admission(
         and record.raw_instruction_sha256 == raw_instruction_sha256(raw_instruction)
         and record.mode == PAPER_ORDER_MODE
     )
+
+
+def _conditional_audit_event_id(
+    event_id: str | None, *, event_type: str | None, state: str
+) -> str | None:
+    """Map one outbox delivery to one state-specific order-journal event.
+
+    A conditional notification can be retried after the authoritative
+    directive advances from ACCOUNTING_PENDING to COMPLETED.  Including the
+    resulting state keeps that legitimate transition while making a replay of
+    the same state a no-op in the existing order event journal.
+    """
+
+    normalized = str(event_id or "").strip()
+    if not normalized:
+        return None
+    event_name = event_type or f"STATE_{state}"
+    identity = f"{normalized}\0{event_name}\0{state}"
+    return "conditional:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 class InMemoryUserOrderRequestRepository:
@@ -505,6 +525,7 @@ class InMemoryUserOrderRequestRepository:
         error_message: str | None = None,
         event_type: str | None = None,
         event_payload: Mapping[str, Any] | None = None,
+        event_id: str | None = None,
     ) -> UserOrderRequestRecord:
         if state not in ORDER_REQUEST_STATES:
             raise UserOrderRequestStateError(f"unsupported order request state: {state}")
@@ -517,6 +538,13 @@ class InMemoryUserOrderRequestRepository:
             record = self._required(order_request_id)
             if record.directive_id and directive_id and record.directive_id != directive_id:
                 raise UserOrderRequestConflict("order request is bound to another directive")
+            audit_event_id = _conditional_audit_event_id(
+                event_id, event_type=event_type, state=state
+            )
+            if audit_event_id and record.state == state and any(
+                event.get("event_id") == audit_event_id for event in self._events
+            ):
+                return record
             completed_at = (
                 datetime.now(timezone.utc)
                 if state in {"COMPLETED", "FAILED", "REJECTED", "NOT_ORDER"}
@@ -545,6 +573,7 @@ class InMemoryUserOrderRequestRepository:
             payload.update(dict(event_payload or {}))
             self._events.append(
                 {
+                    "event_id": audit_event_id,
                     "event_type": event_type or f"STATE_{state}",
                     "to_state": state,
                     "payload": payload,
@@ -959,6 +988,7 @@ class PostgresUserOrderRequestRepository:
         error_message: str | None = None,
         event_type: str | None = None,
         event_payload: Mapping[str, Any] | None = None,
+        event_id: str | None = None,
     ) -> UserOrderRequestRecord:
         if state not in ORDER_REQUEST_STATES:
             raise UserOrderRequestStateError(f"unsupported order request state: {state}")
@@ -981,6 +1011,22 @@ class PostgresUserOrderRequestRepository:
                     raise UserOrderRequestStateError("order request not found")
                 if record.directive_id and directive_id and record.directive_id != directive_id:
                     raise UserOrderRequestConflict("order request is bound to another directive")
+                audit_event_id = _conditional_audit_event_id(
+                    event_id, event_type=event_type, state=state
+                )
+                if audit_event_id:
+                    cursor.execute(
+                        """
+                        select 1
+                          from execution.user_order_request_events
+                         where event_id=%s
+                           and order_request_id=%s
+                         limit 1
+                        """,
+                        (audit_event_id, UUID(record.order_request_id)),
+                    )
+                    if cursor.fetchone() is not None and record.state == state:
+                        return record
                 cursor.execute(
                     f"""
                     update execution.user_order_requests
@@ -1041,6 +1087,7 @@ class PostgresUserOrderRequestRepository:
                     event_type or f"STATE_{state}",
                     state,
                     audit_payload,
+                    event_id=audit_event_id,
                 )
                 return updated
         except UserOrderWorkflowError:
@@ -1055,9 +1102,11 @@ class PostgresUserOrderRequestRepository:
         event_type: str,
         to_state: str,
         payload: Mapping[str, Any],
+        event_id: str | None = None,
     ) -> None:
-        identity = f"{record.order_request_id}:{event_type}:{record.version}"
-        event_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+        if event_id is None:
+            identity = f"{record.order_request_id}:{event_type}:{record.version}"
+            event_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
         cursor.execute(
             """
             insert into execution.user_order_request_events (
@@ -1157,10 +1206,10 @@ def user_order_repository() -> UserOrderRequestRepository:
 
 
 __all__ = [
-    "BrokerOrderCorrelation",
-    "InMemoryUserOrderRequestRepository",
     "ORDER_REQUEST_STATES",
     "PAPER_ORDER_MODE",
+    "BrokerOrderCorrelation",
+    "InMemoryUserOrderRequestRepository",
     "PostgresUserOrderRequestRepository",
     "UserOrderRequestConflict",
     "UserOrderRequestRecord",

@@ -46,9 +46,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from enum import Enum
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 try:
     from reporting import md_cell
@@ -247,14 +248,22 @@ def build_scorecard_brief(
         lines.append("- 관측 창: **부서마다 다르다** — 아래 창 표 참고")
 
     lines.extend([
-        f"- 셀 표기: `{MISSING}` 는 값 없음(미집계·미관측)이고 `0` 은 실제로 관측된 0이다. "
-        "둘을 같은 뜻으로 읽지 않는다.",
-        "- 관측 컬럼의 NO_SNAPSHOT 은 그 블록의 Snapshot 자체가 없다는 뜻이다. "
-        "사용량이 0이라는 뜻이 아니다.",
-        "- status·recommended_action 은 결정론 코드(scorecard/cost.py assess_budget)가 이미 "
-        "판정한 값이다. 다시 판정하지 말고 서술과 우선순위 근거로만 쓴다.",
-        "- eval_score 는 QA/감사본부(audit.eval_runs) 소유라 이 표에 값이 오지 않는다. "
-        f"`{MISSING}` 를 품질 문제로 읽지 말고 eval_run 참조를 열어 확인한다.",
+        (
+            f"- 셀 표기: `{MISSING}` 는 값 없음(미집계·미관측)이고 `0` 은 실제로 관측된 0이다. "
+            "둘을 같은 뜻으로 읽지 않는다."
+        ),
+        (
+            "- 관측 컬럼의 NO_SNAPSHOT 은 그 블록의 Snapshot 자체가 없다는 뜻이다. "
+            "사용량이 0이라는 뜻이 아니다."
+        ),
+        (
+            "- status·recommended_action 은 결정론 코드(scorecard/cost.py assess_budget)가 이미 "
+            "판정한 값이다. 다시 판정하지 말고 서술과 우선순위 근거로만 쓴다."
+        ),
+        (
+            "- eval_score 는 QA/감사본부(audit.eval_runs) 소유라 이 표에 값이 오지 않는다. "
+            f"`{MISSING}` 를 품질 문제로 읽지 말고 eval_run 참조를 열어 확인한다."
+        ),
         "- 이 표에 없는 수치는 만들지 않는다. 없으면 없다고 쓴다.",
         "",
     ])
@@ -292,7 +301,7 @@ def _load_payloads(source: str) -> list[dict[str, Any]]:
     if isinstance(data, dict):
         data = data.get("scorecards", [data])
     if not isinstance(data, list):
-        raise ValueError("scorecard payload 목록을 읽지 못했다")
+        raise TypeError("scorecard payload 목록을 읽지 못했다")
     return data
 
 
@@ -316,7 +325,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         payloads = _load_payloads(args.input)
         print(build_scorecard_brief(payloads))
-    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"브리프를 만들지 못했다: {exc}", file=sys.stderr)
         return 2
     return 0
@@ -360,8 +369,8 @@ if __name__ == "__main__":
     def capacity(**overrides: Any) -> CapacitySnapshot:
         values: dict[str, Any] = {
             "window_start": t0, "window_end": t1, "arrivals": 120,
-            "queue_p95_ms": Decimal("840"), "duration_p95_ms": Decimal("2100"),
-            "retry_rate": Decimal("0.02"), "error_rate": Decimal("0"),
+            "queue_p95_ms": Decimal(840), "duration_p95_ms": Decimal(2100),
+            "retry_rate": Decimal("0.02"), "error_rate": Decimal(0),
             "utilization": Decimal("0.61"),
         }
         values.update(overrides)
@@ -371,7 +380,7 @@ if __name__ == "__main__":
         return CostSnapshot(
             agent_id=agent, profile_version_id="pv1", window_start=t0, window_end=t1,
             input_tokens=1200, output_tokens=800, model_cost=Decimal("3.5"),
-            tool_cost=Decimal("0"), infra_cost=Decimal("0"), case_count=12,
+            tool_cost=Decimal(0), infra_cost=Decimal(0), case_count=12,
         )
 
     observed = build_department_scorecard(
@@ -416,7 +425,7 @@ if __name__ == "__main__":
     # 5) 판정은 옮기기만 한다 — 통제 부서 초과는 축소 권고가 아니라 CEO Escalation.
     # 통제 부서 코드는 cost.py 소유다 — 여기서 문자열을 복제하면 그쪽이 정본을
     # 고칠 때 이 점검만 조용히 옛 값을 붙들게 된다.
-    control_code = sorted(CONTROL_DEPARTMENTS)[0]
+    control_code = min(CONTROL_DEPARTMENTS)
     control = assess_budget(
         agent_id="agent-9", employee_code="RISK-01", department_code=control_code,
         budget=TokenBudget(per_case_tokens=100, daily_tokens=1000),
@@ -439,7 +448,6 @@ if __name__ == "__main__":
     assert "trading-department \\| 임시" in build_scorecard_brief([piped])
 
     # 7) CLI 왕복.
-    import io
     import tempfile
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:

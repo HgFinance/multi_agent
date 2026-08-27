@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """외부 정보원(DART·네이버) 질의 도구 - 정성 데이터의 에이전트 MCP 검색 통합.
 
 소유: 재일 (리서치본부)
@@ -31,6 +30,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import hashlib
 import io
@@ -43,9 +43,11 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from functools import wraps
 from html.parser import HTMLParser
 from threading import Lock
+from typing import ClassVar
 
 KST = timezone(timedelta(hours=9))
 
@@ -75,7 +77,7 @@ def spend(source: str, cap: int) -> None:
     """정보원 하나의 일일 호출을 1 소비한다. 다른 모듈(macro·ls)도 이걸 쓴다."""
     with _budget_lock:
         _caps[source] = cap
-        today = date.today().isoformat()
+        today = datetime.now(KST).date().isoformat()
         if _budget.get("day") != today:
             _budget.clear()
             _budget["day"] = today
@@ -237,7 +239,7 @@ def dart_search_disclosures(corp: str = "", days: int = 3,
                             page: int = 1) -> dict:
     """최근 N일 공시 목록. corp 비우면 전시장. 원문은 viewer_url 로 열람."""
     days = max(1, min(int(days), 30))
-    end = date.today()
+    end = datetime.now(KST).date()
     start = end - timedelta(days=days)
     params = {"bgn_de": start.strftime("%Y%m%d"), "end_de": end.strftime("%Y%m%d"),
               "page_no": max(1, int(page)), "page_count": 30}
@@ -326,7 +328,7 @@ _READ_MAX_BYTES = 3 * 1024 * 1024
 
 class _TextExtract(HTMLParser):
     """script/style 을 버리고 본문 텍스트와 <title> 만 모은다 (stdlib 전용)."""
-    _SKIP = {"script", "style", "noscript", "svg", "iframe"}
+    _SKIP: ClassVar[set[str]] = {"script", "style", "noscript", "svg", "iframe"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -381,7 +383,12 @@ def _assert_public_host(url: str) -> None:
                 f"전용 도구를 쓸 것")
 
 
-def read_url(url: str, max_chars: int = 8000, start: int = 0) -> dict:
+def read_url(
+    url: str,
+    max_chars: int = 8000,
+    start: int = 0,
+    timeout_seconds: float = 20,
+) -> dict:
     """웹 페이지 본문을 텍스트로 읽는다 - 뉴스 link·공시 viewer_url 열람용.
 
     news_search 는 제목·요약만 주므로, 깊이 읽어야 할 때 이 도구로 본문을
@@ -393,7 +400,11 @@ def read_url(url: str, max_chars: int = 8000, start: int = 0) -> dict:
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (compatible; hgfinance-research/1.0)",
         "Accept-Language": "ko, en"})
-    with urllib.request.urlopen(req, timeout=20) as r:
+    try:
+        timeout = max(1.0, min(float(timeout_seconds), 30.0))
+    except (TypeError, ValueError):
+        timeout = 20.0
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         final = r.geturl()
         if final != url:
             _assert_public_host(final)   # 리다이렉트 후 재검사
@@ -415,6 +426,92 @@ def read_url(url: str, max_chars: int = 8000, start: int = 0) -> dict:
            "fetched_at": datetime.now(KST).isoformat()}
     out["citation"] = _snapshot("read_url", {"url": url, "start": s}, out)
     return out
+
+
+async def read_sources(
+    urls: list[str],
+    max_chars: int = 8000,
+    timeout_seconds: float = 12,
+) -> dict:
+    """Read at most two independent public sources concurrently.
+
+    This is a composition boundary, not a second fetch implementation:
+    every item reuses :func:`read_url`, including its host guard, daily budget,
+    redirect check, text extraction, and citation hash.  The bounded gather
+    keeps an official source and a secondary source from waiting on each
+    other, while each source has its own timeout and exactly one attempt.
+    """
+    requested: list[str] = []
+    for raw_url in urls or []:
+        url = str(raw_url or "").strip()
+        if url and url not in requested:
+            requested.append(url)
+        if len(requested) >= 2:
+            break
+    try:
+        timeout = max(1.0, min(float(timeout_seconds), 30.0))
+    except (TypeError, ValueError):
+        timeout = 12.0
+    try:
+        bounded_chars = max(500, min(int(max_chars), 20000))
+    except (TypeError, ValueError):
+        bounded_chars = 8000
+
+    async def fetch_one(index: int, url: str) -> dict:
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    read_url,
+                    url,
+                    max_chars=bounded_chars,
+                    timeout_seconds=timeout,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "url": url,
+                "source_index": index + 1,
+                "status": "TIMEOUT",
+                "timeout_seconds": timeout,
+                "attempts": 1,
+                "retries": 0,
+            }
+        except Exception as exc:  # noqa: BLE001 - preserve per-source failure.
+            return {
+                "url": url,
+                "source_index": index + 1,
+                "status": "FAILED",
+                "reason": f"{type(exc).__name__}: {exc}",
+                "timeout_seconds": timeout,
+                "attempts": 1,
+                "retries": 0,
+            }
+        return {
+            **result,
+            "source_index": index + 1,
+            "status": "OK",
+            "timeout_seconds": timeout,
+            "attempts": 1,
+            "retries": 0,
+        }
+
+    results = list(
+        await asyncio.gather(
+            *(fetch_one(index, url) for index, url in enumerate(requested))
+        )
+    )
+    return {
+        "status": "OK" if results and all(item["status"] == "OK" for item in results) else (
+            "PARTIAL" if results else "EMPTY"
+        ),
+        "source_count": len(results),
+        "max_sources": 2,
+        "timeout_seconds": timeout,
+        "attempts": len(results),
+        "retries": 0,
+        "results": results,
+    }
 
 
 TAVILY_DAILY_CAP = int(os.environ.get("MCP_TAVILY_DAILY_CAP", "30"))
@@ -465,29 +562,49 @@ def record_citations(citations: list, note: str = "") -> dict:
     return rec
 
 
+def _non_blocking_tool(fn):
+    """Run a blocking external-source function off the MCP event loop.
+
+    The source functions remain synchronous for direct callers and existing
+    evidence composition. Only the MCP registration boundary is asynchronous,
+    so concurrent Hermes tool calls cannot stall the streamable HTTP server.
+    ``wraps`` preserves the original signature and tool schema.
+    """
+    @wraps(fn)
+    async def invoke(**kwargs):
+        return await asyncio.to_thread(fn, **kwargs)
+
+    return invoke
+
+
 def register_external_tools(server) -> None:
     """mcp_server.build_server() 가 부른다. 여기 도구는 전부 읽기 전용이다."""
     server.tool(
         name="dart_resolve_corp",
         description="기업명(부분일치) 또는 6자리 종목코드로 DART corp_code 를 찾는다. "
-                    "다른 dart_* 도구를 부르기 전 모호하면 먼저 쓴다.")(dart_resolve_corp)
+                    "다른 dart_* 도구를 부르기 전 모호하면 먼저 쓴다.")(
+                        _non_blocking_tool(dart_resolve_corp))
     server.tool(
         name="dart_search_disclosures",
         description="전자공시 목록 조회(최근 N일, 기업 지정 가능). 각 건에 원문 "
                     "viewer_url 과 rcept_no 가 붙는다 - 인용할 때 rcept_no 를 남겨라. "
-                    "지금 이 순간의 공시 현황이며 과거 재현용이 아니다.")(dart_search_disclosures)
+                    "지금 이 순간의 공시 현황이며 과거 재현용이 아니다.")(
+                        _non_blocking_tool(dart_search_disclosures))
     server.tool(
         name="dart_financials",
         description="재무 주요계정(BS/IS). report=q1|half|q3|annual. 미제출 기간은 "
-                    "status 013 으로 온다 - '없다'를 지어내지 말고 013 을 그대로 말하라.")(dart_financials)
+                    "status 013 으로 온다 - '없다'를 지어내지 말고 013 을 그대로 말하라.")(
+                        _non_blocking_tool(dart_financials))
     server.tool(
         name="dart_company",
-        description="기업개황(대표자·업종코드·설립일). 업종 비교 전 문맥 확인용.")(dart_company)
+        description="기업개황(대표자·업종코드·설립일). 업종 비교 전 문맥 확인용.")(
+            _non_blocking_tool(dart_company))
     server.tool(
         name="news_search",
         description="네이버 뉴스 검색(최신순 기본, 발행시각 pubDate 동봉). 분 단위 "
                     "신선도. 인용하면 link 를 남겨라. 제목·요약만 오므로 본문이 "
-                    "필요하면 link 를 열어 읽어라.")(news_search)
+                    "필요하면 link 를 열어 읽어라.")(
+                        _non_blocking_tool(news_search))
     server.tool(
         name="external_budget",
         description="오늘 외부 조회 예산 사용량(DART·네이버). 소진되면 호출이 거부된다.")(budget_state)
@@ -495,15 +612,27 @@ def register_external_tools(server) -> None:
         name="record_citations",
         description="답변에 실제로 인용한 조회의 citation 해시 목록을 표시한다. "
                     "답변을 마치기 직전 한 번 호출 - QA 재검증의 근거가 된다.")(record_citations)
-    server.tool(
-        name="tavily_search",
-        description="범용 웹 검색(전체 웹) - 네이버·DART 로 안 될 때의 폴백. "
-                    "일일 상한이 빡빡하니(무료 월 1k) 아껴 쓸 것. 본문은 read_url.")(tavily_search)
+    # Tavily is an optional fallback. Do not advertise an unusable tool to
+    # Hermes: without its credential the model can select it, spend a turn,
+    # and receive a predictable configuration error even when the primary
+    # DART/NAVER evidence path is healthy.
+    if os.environ.get("TAVILY_API_KEY", "").strip():
+        server.tool(
+            name="tavily_search",
+            description="범용 웹 검색(전체 웹) - 네이버·DART 로 안 될 때의 폴백. "
+                        "일일 상한이 빡빡하니(무료 월 1k) 아껴 쓸 것. 본문은 read_url.")(
+                            _non_blocking_tool(tavily_search))
     server.tool(
         name="read_url",
         description="웹 페이지 본문을 텍스트로 읽는다 - news_search 의 link, "
                     "dart 의 viewer_url 을 깊이 읽을 때. 길면 start 로 이어 읽기. "
-                    "내부/사설 주소는 차단된다.")(read_url)
+                    "내부/사설 주소는 차단된다.")(
+                        _non_blocking_tool(read_url))
+    server.tool(
+        name="read_sources",
+        description="공식 자료·보조 자료처럼 서로 독립적인 공개 URL을 최대 2개 "
+                    "동시에 읽는다. 자료별 제한시간·1회 시도이며 재시도하지 않는다. "
+                    "기존 read_url과 같은 보안·예산·인용 규칙을 적용한다.")(read_sources)
 
 
 # ── 자체 점검 (네트워크 없음) ───────────────────────────────────────────────
@@ -511,7 +640,7 @@ if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     # 예산이 캡에서 실제로 거부하나
-    _budget.update({"day": date.today().isoformat(), "dart": DART_DAILY_CAP})
+    _budget.update({"day": datetime.now(KST).date().isoformat(), "dart": DART_DAILY_CAP})
     try:
         spend("dart", DART_DAILY_CAP)
         raise AssertionError("예산 소진인데 통과했다")

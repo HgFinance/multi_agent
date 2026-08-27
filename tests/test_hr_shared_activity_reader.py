@@ -19,13 +19,14 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "departments/07-agent-workforce/scorecard"))
 
-from observability import (  # noqa: E402
+from observability import (
     DEFAULT_ACTIVITY_PAGE_LIMIT,
     INVESTMENT_DEPARTMENT_STAGE,
     LANGFUSE_MAX_PAGE_LIMIT,
@@ -237,7 +238,7 @@ class _TooBigError(Exception):
     """
 
     status_code = 400
-    body = {
+    body: ClassVar[dict[str, object]] = {
         "message": "Invalid request data",
         "error": [{"origin": "number", "code": "too_big", "maximum": 100,
                    "inclusive": True, "path": ["limit"],
@@ -378,7 +379,7 @@ def test_zero_worker_department_is_not_reported_as_measured_zero() -> None:
     MEASURED/0 이었고, 화면에서 그 행이 "관측됐고 한가하다"로 읽혔다.
     """
 
-    from observability import (  # noqa: PLC0415
+    from observability import (
         CapacityObservationStatus,
         LlmUsageObservationStatus,
         compute_department_capacity,
@@ -411,7 +412,9 @@ def test_zero_worker_department_is_not_reported_as_measured_zero() -> None:
 
 
 def _registry_workers():
-    from orchestration.contracts.worker_registry import load_worker_registry  # noqa: PLC0415
+    from orchestration.contracts.worker_registry import (
+        load_worker_registry,
+    )
 
     return load_worker_registry(ROOT)
 

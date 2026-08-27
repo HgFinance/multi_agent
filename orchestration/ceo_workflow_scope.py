@@ -26,6 +26,7 @@ CONTINUOUS_RESEARCH_MARKER = "hgfinance.continuous-research.v1"
 CONTINUOUS_RESEARCH_PLANE = "continuous_research"
 BACKGROUND_RESEARCH_ROLE = "background_research"
 PRIMARY_SELECTION_FIELD = "selected_primary_profiles"
+USER_REQUEST_HEADING = "## User request"
 WORKFLOW_MODES = frozenset({"analysis", "binding"})
 LANGSMITH_TRACE_CONTEXT_MARKER = "langsmith_trace_context"
 LANGSMITH_TRACE_RUN_ID_MARKER = "langsmith_trace_run_id"
@@ -64,10 +65,10 @@ WORKFLOW_ROLES = frozenset({"primary", "qa", "synthesis", "control"})
 #   `(?m)^k=(\S+)\s*$` 두 벌, `(?:^|\n)k=(\w+)` 한 벌, 그리고 단순 문자열 포함
 #   (`"origin=user-query" in body`). 마지막 것은 본문 산문에 그 문자열이 있으면
 #   그대로 오인한다. 패턴이 갈리면 같은 카드가 읽는 쪽마다 다르게 해석된다.
-_MARKER_CACHE: dict[str, "re.Pattern[str]"] = {}
+_MARKER_CACHE: dict[str, re.Pattern[str]] = {}
 
 
-def _marker_re(key: str) -> "re.Pattern[str]":
+def _marker_re(key: str) -> re.Pattern[str]:
     if key not in _MARKER_CACHE:
         _MARKER_CACHE[key] = re.compile(rf"(?m)^{re.escape(key)}=(\S+)\s*$")
     return _MARKER_CACHE[key]
@@ -81,6 +82,15 @@ def read_marker(body: str, key: str) -> str:
 
     match = _marker_re(key).search(str(body or ""))
     return match.group(1).strip() if match else ""
+
+
+def user_query_from_body(body: str) -> str:
+    """Return only the request section from one CEO root body."""
+
+    text = str(body or "")
+    if USER_REQUEST_HEADING not in text:
+        return ""
+    return text.split(USER_REQUEST_HEADING, 1)[1].strip()
 
 
 def is_user_query_body(body: str) -> bool:
@@ -720,6 +730,7 @@ def build_root_body(
     advisory_book_id: str | None = None,
     experience_hint: Mapping[str, Any] | None = None,
     approved_feedback_hint: Mapping[str, Any] | None = None,
+    ceo_self_improvement_hint: Mapping[str, Any] | None = None,
     user_paper_order_include_primary_selection: bool = True,
     deferred_conditional_analysis: bool = False,
     include_accounting_advisory: bool = True,
@@ -896,8 +907,17 @@ def build_root_body(
                 advisory_lines += f"{marker}={normalized}\n"
     experience_lines = _experience_hint_section(experience_hint)
     feedback_lines = _approved_feedback_section(approved_feedback_hint)
+    self_improvement_lines = _ceo_self_improvement_section(
+        ceo_self_improvement_hint
+    )
     accounting_section = (
-        _accounting_snapshot_section(advisory_fund_id, advisory_book_id)
+        _accounting_snapshot_section(
+            advisory_fund_id,
+            advisory_book_id,
+            prefer_accounting_evidence=(
+                "accounting-portfolio-department" in selected_profiles
+            ),
+        )
         if include_accounting_advisory
         else ""
     )
@@ -918,6 +938,7 @@ def build_root_body(
         f"{advisory_lines}"
         f"{experience_lines}"
         f"{feedback_lines}"
+        f"{self_improvement_lines}"
         f"workflow_timeout_seconds={configured_workflow_timeout_seconds()}\n"
         f"qa_enabled={str(canonical_qa_enabled).lower()}\n"
         f"qa_blocks_response={str(canonical_qa_blocks).lower()}\n"
@@ -942,7 +963,7 @@ def build_root_body(
         # `## User request` 뒤만 잘라내므로 이 블록이 질의에 섞이지 않는다.
         f"{_mandate_section(mandate)}"
         f"{accounting_section}"
-        "\n## User request\n"
+        f"\n{USER_REQUEST_HEADING}\n"
         f"{query}"
     )
 
@@ -1023,6 +1044,70 @@ def _approved_feedback_section(
     )
 
 
+def _ceo_self_improvement_section(
+    hint: Mapping[str, Any] | None,
+) -> str:
+    """Render only static CEO-owned corrective guardrails.
+
+    The allow-list lives in ``d5_improvement_pipeline``.  Re-validate here at
+    the prompt boundary as a defense against a caller passing arbitrary QA or
+    skill content into a root body.
+    """
+
+    try:
+        from orchestration.d5_improvement_pipeline import (
+            bounded_ceo_self_improvement_hint,
+        )
+        bounded = bounded_ceo_self_improvement_hint(hint)
+    except Exception:  # noqa: BLE001 - this is advisory prompt decoration.
+        return ""
+    if not bounded:
+        return ""
+    encoded = json.dumps(
+        {
+            "schema_version": bounded["schema_version"],
+            "owner": "ceo",
+            "mode": "corrective_guardrails_only",
+            "verified_qa_required": True,
+            "raw_payloads_sent": False,
+            "guardrails": bounded["guardrails"],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )[:3200]
+    return (
+        "## CEO self-improvement guardrails (CEO-owned, non-authoritative)\n"
+        f"{encoded}\n"
+        "These are bounded self-review checks derived from verified QA findings. "
+        "QA does not command or mutate the CEO. Do not modify deterministic routing, "
+        "mandate, authority, Risk, PAPER, or fail-closed rules; if evidence is "
+        "insufficient, disclose the limitation or DEFER.\n"
+    )
+
+
+def ceo_self_improvement_section_from_root(root_body: str) -> str:
+    """Return the already-sanitized CEO guardrail section from a root.
+
+    Synthesis cards use this explicit projection so the CEO receives the
+    corrective checks at the response boundary.  Other departments do not
+    receive a new instruction from QA; their task contracts remain unchanged.
+    """
+
+    text = str(root_body or "")
+    marker = "## CEO self-improvement guardrails (CEO-owned, non-authoritative)"
+    scope_text = text.split(USER_REQUEST_HEADING, 1)[0]
+    if marker not in scope_text:
+        return ""
+    section = scope_text.split(marker, 1)[1].strip()
+    encoded = section.splitlines()[0] if section else ""
+    try:
+        payload = json.loads(encoded)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    return _ceo_self_improvement_section(payload)
+
+
 def approved_feedback_section_from_root(
     root_body: str,
     department: str,
@@ -1068,6 +1153,8 @@ CEO_ACCOUNTING_SNAPSHOT_MARKER = "hgfinance.accounting-snapshot.v1"
 def _accounting_snapshot_section(
     advisory_fund_id: str | None,
     advisory_book_id: str | None,
+    *,
+    prefer_accounting_evidence: bool = False,
 ) -> str:
     """Confirmed Accounting Engine snapshot, embedded root-side.
 
@@ -1081,11 +1168,25 @@ def _accounting_snapshot_section(
 
     block = None
     exact_book_requested = bool(str(advisory_book_id or "").strip())
+    if prefer_accounting_evidence:
+        try:
+            from orchestration.accounting_advisory_context import (
+                fetch_accounting_advisory_context,
+            )
+
+            # Accounting QA and CEO synthesis must see the same bounded
+            # read-only evidence as the accounting primary, including PnL,
+            # fees/taxes, and any available broker reconciliation block.
+            # Risk's similarly named portfolio projection intentionally omits
+            # those fields and is not a substitute for this contract.
+            block = fetch_accounting_advisory_context(advisory_fund_id)
+        except Exception:  # noqa: BLE001 - optional exact-book enrichment.
+            block = None
     try:
         # Prefer the canonical Accounting API projection for the exact Book.
         # The old BFF-wide /ui/snapshot fallback can silently select a demo
         # book when its DB session has no request-scoped membership context.
-        if advisory_book_id:
+        if advisory_book_id and not block:
             from orchestration.risk_advisory_context import (
                 fetch_risk_advisory_context,
             )
@@ -1320,8 +1421,9 @@ def validate_workflow_scope(
             )
 
     # A descendant discovered through root.children must not secretly point
-    # at a different root.  QA and synthesis legitimately have multiple
-    # parents, but every parent must still be inside this graph.
+    # at a different root.  Primary, QA, and synthesis cards may use the
+    # active workflow root as their execution parent; every parent must still
+    # be inside this graph.
     for payload in descendants:
         parent_ids = _task_ids(payload.get("parents"))
         outside_parents = set(parent_ids) - graph_ids
@@ -1331,52 +1433,49 @@ def validate_workflow_scope(
                 f"task {task_id} has parent IDs outside active root "
                 f"{root_task_id}: {sorted(outside_parents)}"
             )
-        if extract_scope_references(payload).root_ids and root_task_id in parent_ids:
-            task_id = payload.get("id") or payload.get("task_id") or "unknown"
-            raise WorkflowScopeViolation(
-                f"scoped task {task_id} must not use workflow root "
-                f"{root_task_id} as an execution parent"
-            )
 
 
 __all__ = [
     "BACKGROUND_RESEARCH_ROLE",
-    "CEO_MANDATE_SNAPSHOT_MARKER",
     "CEO_ACCOUNTING_SNAPSHOT_MARKER",
+    "CEO_MANDATE_SNAPSHOT_MARKER",
     "CEO_WORKFLOW_REUSE_POLICY",
     "CEO_WORKFLOW_SCOPE_MARKER",
     "CEO_WORKFLOW_SCOPE_POLICY",
-    "LANGSMITH_TRACE_CONTEXT_MARKER",
     "CONTINUOUS_RESEARCH_MARKER",
     "CONTINUOUS_RESEARCH_PLANE",
+    "LANGSMITH_TRACE_CONTEXT_MARKER",
     "PRIMARY_SELECTION_FIELD",
     "USER_PAPER_ORDER_MODE",
     "USER_PAPER_ORDER_SCOPE_MARKER",
+    "USER_REQUEST_HEADING",
     "WORKFLOW_MODES",
-    "UserPaperOrderScope",
-    "workflow_root_from_body",
-    "workflow_role_from_body",
-    "is_user_query_body",
-    "langsmith_trace_context_from_body",
-    "read_marker",
     "WORKFLOW_ROLES",
+    "UserPaperOrderScope",
     "WorkflowScopeReferences",
     "WorkflowScopeViolation",
+    "approved_feedback_section_from_root",
+    "ceo_self_improvement_section_from_root",
     "build_mandate_reference_line",
     "build_mandate_snapshot_block",
     "build_root_body",
     "build_root_comment",
     "build_scoped_task_body",
-    "approved_feedback_section_from_root",
     "build_user_paper_order_scope",
     "extract_scope_references",
     "infer_workflow_mode",
+    "is_user_query_body",
+    "langsmith_trace_context_from_body",
     "mandate_snapshot_present",
     "primary_idempotency_key",
+    "read_marker",
     "requested_by_from_body",
     "selected_primary_profiles_from_body",
     "selected_primary_profiles_from_task",
     "user_paper_order_scope_from_body",
+    "user_query_from_body",
     "validate_workflow_scope",
     "workflow_mode_from_body",
+    "workflow_role_from_body",
+    "workflow_root_from_body",
 ]

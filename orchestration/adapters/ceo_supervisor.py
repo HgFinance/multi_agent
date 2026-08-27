@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from orchestration.accounting_advisory_context import fetch_accounting_advisory_context
 from orchestration.adapters.department_notion_projection import (
@@ -37,6 +38,8 @@ from orchestration.adapters.terminal_projection_utils import (
     is_background_research,
     merged_run_metadata,
     strip_internal_handoff,
+    task_id,
+    terminal_success,
 )
 from orchestration.adapters.terminal_projection_utils import (
     workflow_role as terminal_workflow_role,
@@ -44,8 +47,16 @@ from orchestration.adapters.terminal_projection_utils import (
 from orchestration.adapters.terminal_projection_utils import (
     workflow_root as terminal_workflow_root,
 )
-from orchestration.answer_contract import grade_answer
+from orchestration.answer_contract import (
+    bounded_retrieval_attempt,
+    bounded_retrieval_attempt_from_metadata,
+    format_bounded_retrieval_attempt,
+    grade_answer,
+    strip_bounded_retrieval_attempt,
+)
 from orchestration.canonical_profiles import (
+    CANONICAL_PROFILE_BY_DEPARTMENT,
+    RESEARCH_QUERY_PRIORITY,
     USER_QUERY_PRIORITY,
     CanonicalKanbanTaskRequest,
     CanonicalProfileError,
@@ -58,6 +69,7 @@ from orchestration.ceo_workflow_scope import (
     WorkflowScopeViolation,
     approved_feedback_section_from_root,
     build_scoped_task_body,
+    ceo_self_improvement_section_from_root,
     extract_scope_references,
     is_user_query_body,
     langsmith_trace_context_from_body,
@@ -75,6 +87,10 @@ from orchestration.ceo_workflow_scope import (
 from orchestration.compound_paper_orders import (
     parse_analysis_then_conditional_paper_order,
 )
+from orchestration.d5_improvement_pipeline import (
+    d5_feedback_ledger_from_env,
+    record_verified_d5_candidates,
+)
 from orchestration.discord_delivery import DiscordFinalDelivery
 from orchestration.discord_idempotency import DiscordIdempotencyStore
 from orchestration.experience_bank import (
@@ -88,6 +104,7 @@ from orchestration.kanban_root_index import (
     SQLiteRootScopedIndex,
     kanban_db_path,
 )
+from orchestration.langsmith_feedback import FeedbackLedger
 from orchestration.primary_task_idempotency import (
     REQUEST_USER_INPUT_ACTION_BODY,
     is_analysis_primary_eligible,
@@ -189,9 +206,7 @@ TERMINAL_STATUSES = frozenset(
 FAILURE_OUTCOMES = frozenset(
     {"gave_up", "crashed", "timed_out", "spawn_failed", "failed", "triage"}
 )
-PRIMARY_DEPARTMENTS = frozenset(
-    {"research", "quant", "trading", "risk", "accounting"}
-)
+PRIMARY_DEPARTMENTS = frozenset({"research", "quant", "trading", "risk", "accounting"})
 SUPERVISOR_MARKER = "hgfinance.ceo-supervisor.v1"
 SUPERVISOR_WAKE_MARKER = "hgfinance.ceo-supervisor.wakeup.v1"
 
@@ -350,13 +365,9 @@ class ChildTaskState:
             or run_metadata.get("summary")
             or run_metadata.get("result")
         )
-        result = _text(
-            payload.get("result")
-            or run_metadata.get("result")
-        )
+        result = _text(payload.get("result") or run_metadata.get("result"))
         final_answer = _text(
-            payload.get("final_answer")
-            or run_metadata.get("final_answer")
+            payload.get("final_answer") or run_metadata.get("final_answer")
         )
         error = _text(
             payload.get("error")
@@ -370,11 +381,11 @@ class ChildTaskState:
             or payload.get("reason")
             or run_metadata.get("block_reason")
         )
-        block_kind = str(payload.get("block_kind") or payload.get("kind") or "").casefold()
+        block_kind = str(
+            payload.get("block_kind") or payload.get("kind") or ""
+        ).casefold()
         outcome = str(
-            payload.get("outcome")
-            or run_payload.get("outcome")
-            or ""
+            payload.get("outcome") or run_payload.get("outcome") or ""
         ).casefold()
         raw_missing_dependencies = (
             payload.get("missing_dependencies")
@@ -519,7 +530,10 @@ class ChildTaskState:
 
     @property
     def done(self) -> bool:
-        return self.status in {"done", "completed", "archived"} or self.outcome == "completed"
+        return (
+            self.status in {"done", "completed", "archived"}
+            or self.outcome == "completed"
+        )
 
     @property
     def blocked(self) -> bool:
@@ -530,7 +544,9 @@ class ChildTaskState:
         return self.status in FAILURE_OUTCOMES or self.outcome in FAILURE_OUTCOMES
 
 
-def _normalize_hr_api_check_result(metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
+def _normalize_hr_api_check_result(
+    metadata: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
     """Normalize the compact HR terminal envelope used by the live worker."""
 
     result = metadata.get("result")
@@ -540,16 +556,15 @@ def _normalize_hr_api_check_result(metadata: Mapping[str, Any]) -> Mapping[str, 
         if isinstance(endpoint_receipts, Sequence) and not isinstance(
             endpoint_receipts, (str, bytes)
         ):
-            receipts = [
-                item for item in endpoint_receipts if isinstance(item, Mapping)
-            ]
+            receipts = [item for item in endpoint_receipts if isinstance(item, Mapping)]
 
             def _receipt(fragment: str) -> Mapping[str, Any]:
                 return next(
                     (
                         item
                         for item in receipts
-                        if fragment in str(item.get("path") or item.get("endpoint") or "")
+                        if fragment
+                        in str(item.get("path") or item.get("endpoint") or "")
                     ),
                     {},
                 )
@@ -621,33 +636,38 @@ def _normalize_hr_api_check_result(metadata: Mapping[str, Any]) -> Mapping[str, 
             return start.strip(" `"), end.strip(" `")
 
         observation_start, observation_end = _window(
-            observability.get("window")
-            or summary_metadata.get("observability_window")
+            observability.get("window") or summary_metadata.get("observability_window")
         )
         scorecard_start, scorecard_end = _window(
             scorecard.get("window") or summary_metadata.get("scorecard_window")
         )
-        departments = scorecard.get("departments") or summary_metadata.get(
-            "scorecard_scope"
-        ) or []
+        departments = (
+            scorecard.get("departments")
+            or summary_metadata.get("scorecard_scope")
+            or []
+        )
         departments = (
             list(departments)
-            if isinstance(departments, Sequence) and not isinstance(departments, (str, bytes))
+            if isinstance(departments, Sequence)
+            and not isinstance(departments, (str, bytes))
             else []
         )
         scorecard_source = (
-            "GET http://workforce-api:8000/workforce/v1/departments/"
-            "scorecard-brief"
+            "GET http://workforce-api:8000/workforce/v1/departments/scorecard-brief"
         )
         query = []
         if scorecard_start and scorecard_end:
             query.extend(
                 [f"window_start={scorecard_start}", f"window_end={scorecard_end}"]
             )
-        query.extend(f"department_code={item}" for item in departments if str(item).strip())
+        query.extend(
+            f"department_code={item}" for item in departments if str(item).strip()
+        )
         if query:
             scorecard_source += "?" + "&".join(query)
-        states = observability.get("states") or observability.get("idle_state_counts") or {}
+        states = (
+            observability.get("states") or observability.get("idle_state_counts") or {}
+        )
         proposal = metadata.get("proposal_only_job_profile")
         evaluation = metadata.get("evaluation_plan")
         return {
@@ -691,8 +711,12 @@ def _normalize_hr_api_check_result(metadata: Mapping[str, Any]) -> Mapping[str, 
             },
             "proposal": {"job_profile": proposal},
             "evaluation_suite": {
-                "golden": evaluation.get("golden") if isinstance(evaluation, Mapping) else [],
-                "adversarial": evaluation.get("adversarial") if isinstance(evaluation, Mapping) else [],
+                "golden": evaluation.get("golden")
+                if isinstance(evaluation, Mapping)
+                else [],
+                "adversarial": evaluation.get("adversarial")
+                if isinstance(evaluation, Mapping)
+                else [],
             },
         }
     if not isinstance(api_checks, Sequence) or isinstance(api_checks, (str, bytes)):
@@ -731,9 +755,7 @@ def _normalize_hr_api_check_result(metadata: Mapping[str, Any]) -> Mapping[str, 
     observation_start, observation_end = _window(
         summary_metadata.get("observability_window")
     )
-    scorecard_start, scorecard_end = _window(
-        summary_metadata.get("scorecard_window")
-    )
+    scorecard_start, scorecard_end = _window(summary_metadata.get("scorecard_window"))
 
     idle_state_counts: dict[str, int] = {}
     idle_agents = result.get("idle_agents")
@@ -913,8 +935,7 @@ def _handoff_provenance(
                     else 200,
                     "window_start": metadata.get("scorecard_window_start")
                     or scorecard_start,
-                    "window_end": metadata.get("scorecard_window_end")
-                    or scorecard_end,
+                    "window_end": metadata.get("scorecard_window_end") or scorecard_end,
                     "departments": scorecard_read.get("departments")
                     if isinstance(scorecard_read, Mapping)
                     else [],
@@ -997,21 +1018,28 @@ def _handoff_provenance(
                 "observability": {
                     "endpoint": _read_endpoint("/observability"),
                     "http_status": 200,
-                    "window_start": _read_query_value(scorecard_endpoint, "window_start"),
+                    "window_start": _read_query_value(
+                        scorecard_endpoint, "window_start"
+                    ),
                     "window_end": _read_query_value(scorecard_endpoint, "window_end"),
                     "states": metadata.get("idle_state_counts") or {},
                 },
                 "scorecard": {
                     "endpoint": scorecard_endpoint,
                     "http_status": 200,
-                    "window_start": _read_query_value(scorecard_endpoint, "window_start"),
+                    "window_start": _read_query_value(
+                        scorecard_endpoint, "window_start"
+                    ),
                     "window_end": _read_query_value(scorecard_endpoint, "window_end"),
                     "departments": list(scorecard_metadata)
                     if isinstance(scorecard_metadata, Mapping)
                     else [],
                 },
             }
-    if isinstance(structured_result, Mapping) and "candidate_snapshot" not in structured_result:
+    if (  # noqa: SIM102 - nested normalization keeps the source envelope readable.
+        isinstance(structured_result, Mapping)
+        and "candidate_snapshot" not in structured_result
+    ):
         # Current HR terminal envelope names the aggregate count directly.
         # Normalize it here only for the bounded QA/CEO handoff projection;
         # the worker's original machine result remains unchanged.
@@ -1054,11 +1082,11 @@ def _handoff_provenance(
                 },
             }
     sources = metadata.get("current_state_sources")
-    source_endpoints = [
-        str(item).strip()
-        for item in sources
-        if str(item).strip()
-    ] if isinstance(sources, Sequence) and not isinstance(sources, (str, bytes)) else []
+    source_endpoints = (
+        [str(item).strip() for item in sources if str(item).strip()]
+        if isinstance(sources, Sequence) and not isinstance(sources, (str, bytes))
+        else []
+    )
 
     windows: dict[str, Any] = {}
     for name, key in (("observability", "observability"), ("scorecard", "scorecard")):
@@ -1076,7 +1104,9 @@ def _handoff_provenance(
     artifacts: list[dict[str, str]] = []
     evidence_path: Path | None = None
     artifact_refs = metadata.get("artifacts")
-    if isinstance(artifact_refs, Sequence) and not isinstance(artifact_refs, (str, bytes)):
+    if isinstance(artifact_refs, Sequence) and not isinstance(
+        artifact_refs, (str, bytes)
+    ):
         for ref in artifact_refs[:5]:
             raw_path = (
                 ref.get("path") or ref.get("name") or ""
@@ -1107,7 +1137,9 @@ def _handoff_provenance(
     if child.department == "hr" and evidence_path is None:
         evidence_candidates = []
         if child.workspace_path:
-            evidence_candidates.append(Path(child.workspace_path) / "hr_e2e_evidence.json")
+            evidence_candidates.append(
+                Path(child.workspace_path) / "hr_e2e_evidence.json"
+            )
         # Hermes stores task attachments on the shared Kanban volume, while
         # workspace paths are profile-local.  This exact task-scoped path is
         # the only fallback; never scan attachments or workspaces broadly.
@@ -1162,7 +1194,11 @@ def _handoff_provenance(
                         if isinstance(evidence_summary, Mapping)
                         else {}
                     )
-                    for fragment in ("/improvements", "/observability", "/scorecard-brief"):
+                    for fragment in (
+                        "/improvements",
+                        "/observability",
+                        "/scorecard-brief",
+                    ):
                         receipt = next(
                             (
                                 item
@@ -1178,6 +1214,101 @@ def _handoff_provenance(
             pass
 
     provenance: dict[str, Any] = {}
+    if child.department == "research":
+        raw_sources = metadata.get("sources")
+        if isinstance(raw_sources, Sequence) and not isinstance(
+            raw_sources, (str, bytes, bytearray)
+        ):
+            answer_text = child.final_answer or child.result
+            answer_urls = _https_urls(answer_text)
+            source_references: list[dict[str, str]] = []
+            for source_index, raw_source in enumerate(raw_sources[:8]):
+                if not isinstance(raw_source, Mapping):
+                    if not isinstance(raw_source, str):
+                        continue
+                    title = raw_source.strip()[:240]
+                    label = raw_source.casefold()
+                    if any(token in label for token in ("naver", "서울경제", "dnews")):
+                        matching_urls = [
+                            item
+                            for item in answer_urls
+                            if urlsplit(item).netloc == "n.news.naver.com"
+                        ]
+                    elif any(
+                        token in label for token in ("samsung", "삼성", "newsroom")
+                    ):
+                        matching_urls = [
+                            item
+                            for item in answer_urls
+                            if urlsplit(item).netloc == "news.samsung.com"
+                        ]
+                    else:
+                        matching_urls = []
+                    url = (
+                        matching_urls[0]
+                        if matching_urls
+                        else answer_urls[source_index]
+                        if source_index < len(answer_urls)
+                        else ""
+                    )
+                    published_match = re.search(r"\b20\d{2}-\d{2}-\d{2}\b", raw_source)
+                    reference = {"title": title} if title else {}
+                    if published_match:
+                        reference["published"] = published_match.group(0)
+                    if url:
+                        reference["url"] = url
+                    if reference.get("url"):
+                        source_references.append(reference)
+                    continue
+                url = str(raw_source.get("url") or "").strip()
+                if not url.startswith("https://"):
+                    continue
+                reference = {
+                    key: str(raw_source.get(key) or "").strip()
+                    for key in ("title", "published", "accessed", "citation", "url")
+                    if str(raw_source.get(key) or "").strip()
+                }
+                if reference:
+                    source_references.append(reference)
+            if source_references:
+                provenance["source_references"] = source_references
+        if "source_references" not in provenance:
+            # Research fast-advisory workers may put source coordinates in the
+            # bounded answer only. Promote those coordinates into the same
+            # structured handoff field used by richer workers so QA can audit
+            # them without receiving raw source bodies.
+            answer_text = child.final_answer or child.result
+            answer_urls = _https_urls(answer_text)
+            source_references: list[dict[str, str]] = []
+            for url in answer_urls[:12]:
+                line = next(
+                    (item.strip() for item in answer_text.splitlines() if url in item),
+                    "",
+                )
+                published_match = re.search(r"\b20\d{2}-\d{2}-\d{2}\b", line)
+                title_match = re.search(
+                    r"(?:출처|source)\s*:\s*([^,;()]+)", line, re.IGNORECASE
+                )
+                title = (
+                    title_match.group(1).strip()
+                    if title_match
+                    else "Research 답변 출처"
+                )
+                reference = {"title": title[:240], "url": url}
+                if published_match:
+                    reference["published"] = published_match.group(0)
+                source_references.append(reference)
+            if source_references:
+                provenance["source_references"] = source_references
+        limitations = metadata.get("limitations")
+        if isinstance(limitations, Sequence) and not isinstance(
+            limitations, (str, bytes, bytearray)
+        ):
+            bounded_limitations = [
+                str(item).strip()[:400] for item in limitations[:8] if str(item).strip()
+            ]
+            if bounded_limitations:
+                provenance["limitations"] = bounded_limitations
     declared_artifact_hashes: list[str] = []
     declared_artifacts = metadata.get("artifacts")
     declared_artifacts = (
@@ -1193,7 +1324,9 @@ def _handoff_provenance(
         if digest:
             declared_artifact_hashes.append(digest)
     if declared_artifact_hashes:
-        provenance["declared_artifact_sha256"] = list(dict.fromkeys(declared_artifact_hashes))
+        provenance["declared_artifact_sha256"] = list(
+            dict.fromkeys(declared_artifact_hashes)
+        )
     if child.department == "risk":
         legal_metadata = _risk_legal_metadata(metadata)
         if legal_metadata is not None:
@@ -1244,8 +1377,7 @@ def _handoff_provenance(
                 else []
             )
             legal_evidence: dict[str, Any] = {
-                "status": str(legal_metadata.get("tool_status") or "").strip()
-                or None,
+                "status": str(legal_metadata.get("tool_status") or "").strip() or None,
                 "verdict": str(legal_metadata.get("verdict") or "").strip() or None,
                 "escalate": bool(legal_metadata.get("escalate", True)),
                 "cited_documents": cited_documents,
@@ -1331,9 +1463,7 @@ def _handoff_provenance(
                         )
                         candidate = normalized.get("candidate_snapshot")
                         candidate = (
-                            dict(candidate)
-                            if isinstance(candidate, Mapping)
-                            else {}
+                            dict(candidate) if isinstance(candidate, Mapping) else {}
                         )
                         candidate_read = _evidence_read("/improvements")
                         candidate_response = candidate_read.get("response")
@@ -1373,9 +1503,7 @@ def _handoff_provenance(
                                 value = evidence_observation_response.get(field_name)
                                 if value:
                                     observability[field_name] = value
-                        authoritative_states = evidence_summary.get(
-                            "idle_state_counts"
-                        )
+                        authoritative_states = evidence_summary.get("idle_state_counts")
                         if isinstance(authoritative_states, Mapping):
                             for state_name in (
                                 "ACTIVE",
@@ -1394,9 +1522,7 @@ def _handoff_provenance(
 
                         scorecard = normalized.get("scorecard")
                         scorecard = (
-                            dict(scorecard)
-                            if isinstance(scorecard, Mapping)
-                            else {}
+                            dict(scorecard) if isinstance(scorecard, Mapping) else {}
                         )
                         scorecard_read = _evidence_read("/scorecard-brief")
                         scorecard["http_status"] = (
@@ -1488,7 +1614,9 @@ def _handoff_provenance(
         # The receipt is the source of truth for status and timing.  A failed
         # observability response must also clear any stale window inherited
         # from an older/partial worker envelope.
-        normalized = dict(structured_result) if isinstance(structured_result, Mapping) else {}
+        normalized = (
+            dict(structured_result) if isinstance(structured_result, Mapping) else {}
+        )
         for key, fragment in (
             ("candidate_snapshot", "/improvements"),
             ("observability", "/observability"),
@@ -1512,7 +1640,9 @@ def _handoff_provenance(
                     target[field_name] = receipt.get(field_name)
             response = receipt.get("response")
             response = response if isinstance(response, Mapping) else {}
-            if key == "candidate_snapshot" and isinstance(response.get("candidates"), list):
+            if key == "candidate_snapshot" and isinstance(
+                response.get("candidates"), list
+            ):
                 target["candidate_count"] = len(response.get("candidates") or [])
             elif key == "candidate_snapshot" and "candidate_count" in response:
                 target["candidate_count"] = response.get("candidate_count")
@@ -1521,15 +1651,17 @@ def _handoff_provenance(
                     target["window_start"] = None
                     target["window_end"] = None
                 else:
-                    target["window_start"] = response.get("window_start") or evidence_summary.get(
-                        "observability_window_start"
-                    )
-                    target["window_end"] = response.get("window_end") or evidence_summary.get(
-                        "observability_window_end"
-                    )
-                target["states"] = evidence_summary.get("idle_state_counts") or target.get(
-                    "states"
-                ) or {}
+                    target["window_start"] = response.get(
+                        "window_start"
+                    ) or evidence_summary.get("observability_window_start")
+                    target["window_end"] = response.get(
+                        "window_end"
+                    ) or evidence_summary.get("observability_window_end")
+                target["states"] = (
+                    evidence_summary.get("idle_state_counts")
+                    or target.get("states")
+                    or {}
+                )
             if key == "scorecard":
                 target["window_start"] = (
                     response.get("window_start")
@@ -1542,11 +1674,16 @@ def _handoff_provenance(
                     or evidence_summary.get("observability_window_end")
                 )
                 path = str(receipt.get("path") or "")
-                target["departments"] = [
-                    value.split("=", 1)[1]
-                    for value in path.split("&")
-                    if value.startswith("department_code=") and value.split("=", 1)[1]
-                ] or target.get("departments") or []
+                target["departments"] = (
+                    [
+                        value.split("=", 1)[1]
+                        for value in path.split("&")
+                        if value.startswith("department_code=")
+                        and value.split("=", 1)[1]
+                    ]
+                    or target.get("departments")
+                    or []
+                )
             normalized[key] = target
         if normalized:
             structured_result = normalized
@@ -1589,8 +1726,7 @@ def _handoff_provenance(
                     if str(item).strip()
                 )
             scorecard_endpoint = (
-                "GET http://workforce-api:8000/workforce/v1/departments/"
-                "scorecard-brief"
+                "GET http://workforce-api:8000/workforce/v1/departments/scorecard-brief"
             )
             if any(scorecard_params):
                 scorecard_endpoint += "?" + "&".join(
@@ -1649,7 +1785,9 @@ def _handoff_provenance(
                 if "error" in receipt:
                     source_reads[name]["error"] = receipt.get("error")
                 if "response_sha256" in receipt:
-                    source_reads[name]["response_sha256"] = receipt.get("response_sha256")
+                    source_reads[name]["response_sha256"] = receipt.get(
+                        "response_sha256"
+                    )
                 if "response_bytes" in receipt:
                     source_reads[name]["response_bytes"] = receipt.get("response_bytes")
             provenance["source_reads"] = source_reads
@@ -1687,9 +1825,9 @@ def _handoff_provenance(
                 "observability": evidence_receipts.get("/observability", {}).get(
                     "duration_ms"
                 ),
-                "scorecard_brief": evidence_receipts.get(
-                    "/scorecard-brief", {}
-                ).get("duration_ms"),
+                "scorecard_brief": evidence_receipts.get("/scorecard-brief", {}).get(
+                    "duration_ms"
+                ),
             }
         if isinstance(latency, Mapping):
             latency = {
@@ -1706,9 +1844,9 @@ def _handoff_provenance(
             if not isinstance(failure_summary, Mapping):
                 failure_summary = nested_result.get("failure_retry_duplicate")
             if isinstance(failure_summary, Mapping):
-                helper_runs = structured_summary.get("helper_runs") or nested_result.get(
+                helper_runs = structured_summary.get(
                     "helper_runs"
-                )
+                ) or nested_result.get("helper_runs")
                 duplicate_runs = (
                     0
                     if helper_runs == 1
@@ -1781,9 +1919,9 @@ def _augment_risk_legal_answer(
     references = [
         item
         for item in references
-        if str(
-            item.get("official_url") or item.get("origin_url") or ""
-        ).startswith("https://www.law.go.kr/")
+        if str(item.get("official_url") or item.get("origin_url") or "").startswith(
+            "https://www.law.go.kr/"
+        )
     ]
     if not references:
         safe_lines: list[str] = []
@@ -1823,6 +1961,898 @@ def _augment_risk_legal_answer(
         "- 위 자료는 근거 수집용이며 최종 법률 판단이나 거래 승인을 의미하지 않습니다."
     )
     return (normalized.rstrip() + "\n" + "\n".join(citation_lines)).strip()
+
+
+def _accounting_book_id_from_root_body(root_body: str) -> str:
+    """Return the immutable CEO-requested book identifier, when present."""
+
+    match = re.search(
+        r"(?m)^advisory_book_id=([0-9a-f]{8}-[0-9a-f-]{27,})\s*$",
+        str(root_body or ""),
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
+
+
+def _normalize_accounting_book_scope(value: str, root_body: str) -> str:
+    """Prevent an accounting LLM handoff from mixing a position UUID into scope."""
+
+    expected = _accounting_book_id_from_root_body(root_body)
+    if not expected:
+        return str(value or "")
+    return re.sub(
+        r"(?i)(\b(?:Book|장부)\s+)[0-9a-f]{8}-[0-9a-f-]{27,}",
+        rf"\g<1>{expected}",
+        str(value or ""),
+    )
+
+
+def _append_accounting_delivery_scope(
+    content: str,
+    task_payloads: Sequence[Mapping[str, Any]],
+) -> str:
+    """Make the accounting E2E delivery boundary explicit to the user.
+
+    The primary accounting report is projected to Notion before synthesis.
+    The final Discord answer is delivered immediately after synthesis, while
+    LangSmith publication is recorded as an observability receipt and may be
+    independently unavailable to QA. Keep that distinction visible without
+    exposing internal field names or raw payloads.
+    """
+
+    accounting_primary = next(
+        (
+            payload
+            for payload in task_payloads
+            if str(payload.get("assignee") or payload.get("profile") or "").strip()
+            == canonical_profile_for_department("accounting")
+            and (
+                terminal_workflow_role(payload)
+                or str(payload.get("workflow_role") or "").strip().casefold()
+            )
+            == "primary"
+        ),
+        None,
+    )
+    if not isinstance(accounting_primary, Mapping) or "### 시스템 전달 상태" in content:
+        return content
+
+    notion_marker = next(
+        (
+            str(comment.get("body") or comment)
+            for comment in (
+                accounting_primary.get("comments")
+                if isinstance(accounting_primary.get("comments"), Sequence)
+                else ()
+            )
+            if isinstance(comment, Mapping)
+            and "hgfinance.department-notion-delivery.v1"
+            in str(comment.get("body") or "")
+        ),
+        "",
+    )
+    marker_values = {
+        key: value
+        for key, value in (
+            token.split("=", 1) for token in notion_marker.split() if "=" in token
+        )
+        if key and value
+    }
+    notion_delivered = marker_values.get("delivery_status") == "DELIVERED"
+    notion_readback = marker_values.get("readback_status") == "VERIFIED"
+    if notion_delivered and notion_readback:
+        notion_line = "- Notion: 회계 보고서 저장 및 재확인 완료."
+    else:
+        notion_line = (
+            "- Notion: 회계 보고서 저장 상태는 관리자 전달 기록에서 확인합니다."
+        )
+
+    return (
+        f"{content.rstrip()}\n\n"
+        "### 시스템 전달 상태\n"
+        f"{notion_line}\n"
+        "- LangSmith: 실행 메타데이터 기록과 실행 기록 조회 여부는 QA 관측 결과로 구분합니다.\n"
+        "- Discord: CEO 종합 결과를 이 요청 스레드에 전달합니다."
+    ).strip()
+
+
+def _augment_accounting_reconciliation_answer(
+    content: str,
+    task_payloads: Sequence[Mapping[str, Any]],
+) -> str:
+    """Correct the NAV bridge direction and preserve real accounting coordinates."""
+
+    candidate_payloads: list[Mapping[str, Any]] = list(task_payloads)
+    # Some Hermes versions materialize the synthesis task before the scoped
+    # index returns every primary child. The synthesis body still contains
+    # the serialized handoff list, so recover only that bounded list instead
+    # of silently dropping accounting provenance at the response boundary.
+    for payload in task_payloads:
+        body = str(payload.get("body") or "")
+        start = body.find('[{"task_id"')
+        if start < 0:
+            continue
+        try:
+            embedded = json.loads(body[start:].strip())
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(embedded, list):
+            candidate_payloads.extend(
+                item for item in embedded if isinstance(item, Mapping)
+            )
+
+    accounting_payloads = [
+        payload
+        for payload in candidate_payloads
+        if str(payload.get("assignee") or payload.get("profile") or "").strip()
+        == canonical_profile_for_department("accounting")
+    ]
+    if not accounting_payloads:
+        return content
+
+    nav = cash = securities = None
+    identified_positions = total_positions = None
+    unidentified_positions = 0
+    as_of = ""
+    evidence_text = "\n".join(
+        _text(
+            payload.get("final_answer")
+            or payload.get("result")
+            or payload.get("summary")
+        )
+        for payload in accounting_payloads
+    )
+    for payload in candidate_payloads:
+        body = str(payload.get("body") or "")
+        marker = re.search(
+            r"## Accounting Engine snapshot[^\n]*\n(\{.*?\})\n\n## User request",
+            body,
+            flags=re.DOTALL,
+        )
+        if not marker:
+            continue
+        try:
+            snapshot = json.loads(marker.group(1))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(snapshot, Mapping):
+            continue
+        try:
+            nav = int(str(snapshot.get("nav")))
+            cash = int(str(snapshot.get("cash")))
+            securities = int(str(snapshot.get("securities_value")))
+        except (TypeError, ValueError):
+            nav = cash = securities = None
+        positions = snapshot.get("positions")
+        if isinstance(positions, list):
+            total_positions = len(positions)
+            unidentified_positions = sum(
+                1
+                for position in positions
+                if isinstance(position, Mapping)
+                and not (
+                    str(position.get("symbol") or "").strip()
+                    or str(position.get("display_name") or "").strip()
+                )
+            )
+            identified_positions = max(total_positions - unidentified_positions, 0)
+        as_of = str(snapshot.get("as_of") or "").strip()
+        if nav is not None:
+            break
+
+    if nav is None:
+
+        def amount(*patterns: str) -> int | None:
+            for pattern in patterns:
+                match = re.search(pattern, evidence_text, flags=re.IGNORECASE)
+                if match:
+                    try:
+                        return int(match.group(1).replace(",", ""))
+                    except ValueError:
+                        continue
+            return None
+
+        nav = amount(
+            r"(?:^|\n)[^\n]*(?:NAV|순자산 가치)\s*[:：]\s*(?:KRW\s*)?([0-9,]+)"
+        )
+        cash = amount(r"(?:^|\n)[^\n]*(?:현금|cash)\s*[:：]\s*(?:KRW\s*)?([0-9,]+)")
+        securities = amount(
+            r"(?:^|\n)[^\n]*(?:증권가치|증권 평가액|securities_value)\s*[:：]\s*(?:KRW\s*)?([0-9,]+)"
+        )
+
+    root_body = next(
+        (
+            str(payload.get("body") or "")
+            for payload in candidate_payloads
+            if _accounting_book_id_from_root_body(str(payload.get("body") or ""))
+        ),
+        "",
+    )
+    corrected = _normalize_accounting_book_scope(content, root_body)
+    if (
+        total_positions is not None
+        and identified_positions is not None
+        and unidentified_positions
+    ):
+        corrected = re.sub(
+            r"(?:확인 가능한\s+)?(?:장부상\s+)?\d+개\s+롱\s+포지션",
+            f"총 {total_positions}건 중 식별 가능 {identified_positions}건과 "
+            f"식별 불명 {unidentified_positions}건",
+            corrected,
+        )
+    if nav is not None and cash is not None and securities is not None:
+        gap = nav - cash - securities
+        if gap > 0:
+            bridge = (
+                f"- 대사 정정: 현금과 증권가액 합계는 "
+                f"{cash + securities:,}원으로 표시 순자산 가치 "
+                f"{nav:,}원보다 {gap:,}원 부족합니다."
+            )
+            lines: list[str] = []
+            for line in corrected.splitlines():
+                lowered = line.casefold()
+                wrong_direction = any(
+                    term in lowered
+                    for term in (
+                        "많",
+                        "초과",
+                        "상회",
+                        "more than",
+                        "exceeds",
+                        "above",
+                        "greater",
+                    )
+                )
+                if (
+                    wrong_direction
+                    and "현금" in line
+                    and "증권" in line
+                    and f"{gap:,}" in line
+                ):
+                    lines.append(bridge)
+                else:
+                    lines.append(line)
+            corrected = "\n".join(lines).strip()
+
+    # A duplicated accounting handoff has historically been labelled as
+    # Research (or Quant) by the synthesis model. Correct only the clearly
+    # accounting-shaped bullets; do not rewrite genuine Research prose.
+    corrected_lines: list[str] = []
+    for line in corrected.splitlines():
+        label_prefixes = (
+            "- 🔬 **Research:**",
+            "- 📒 **Accounting / Portfolio:**",
+            "- 📊 **Quant/Accounting:**",
+            "- 📊 **Accounting/Portfolio:**",
+        )
+        prefix = next(
+            (value for value in label_prefixes if line.startswith(value)), None
+        )
+        if prefix:
+            body = line[len(prefix) :]
+            accounting_score = sum(
+                term in body
+                for term in (
+                    "Accounting Engine",
+                    "LS ",
+                    "브로커",
+                    "CSPAQ",
+                    "CSPBQ",
+                    "BREAK",
+                    "대사",
+                    "예수금",
+                    "거래비용",
+                    "원장",
+                    "Preliminary NAV",
+                )
+            )
+            risk_score = sum(
+                term in body
+                for term in (
+                    "Mandate",
+                    "섹터",
+                    "Gross Exposure",
+                    "동시 보유",
+                    "일일손실",
+                    "최대낙폭",
+                    "위험",
+                    "한도",
+                )
+            )
+            research_signal = any(
+                term in body
+                for term in (
+                    "Research 결과",
+                    "출처 URL",
+                    "인용 좌표",
+                    "단순 평가손익",
+                    "공시",
+                    "뉴스",
+                    "촉매",
+                    "무효화",
+                )
+            )
+            strong_accounting_signal = (
+                sum(
+                    term in body
+                    for term in (
+                        "LS ",
+                        "브로커",
+                        "CSPAQ",
+                        "CSPBQ",
+                        "BREAK",
+                        "예수금",
+                        "거래비용",
+                    )
+                )
+                >= 2
+            )
+            if prefix == "- 📊 **Accounting/Portfolio:**":
+                target = "- 📒 **Accounting / Portfolio:**"
+            elif prefix == "- 🔬 **Research:**" and not strong_accounting_signal:
+                target = prefix
+            elif risk_score > accounting_score and risk_score > 0:
+                target = "- 🛡 **Risk:**"
+            elif accounting_score > 0:
+                target = "- 📒 **Accounting / Portfolio:**"
+            elif research_signal:
+                target = "- 🔬 **Research:**"
+            else:
+                target = prefix
+            line = target + body
+        corrected_lines.append(line)
+    corrected = "\n".join(corrected_lines).strip()
+    corrected = corrected.replace(
+        "현금과 유동성은 충분하고",
+        "보고된 현금·주문가능액은 높아 보이지만",
+    )
+    corrected = corrected.replace(
+        "현금 완충도 큽니다",
+        "보고된 현금 잔액은 크지만",
+    )
+    corrected = corrected.replace(
+        "Accounting Engine과 브로커 자료가 모두 비권위적·WARN 상태",
+        "회계 시스템은 자료 품질 주의이며 브로커 자료는 공식 확정 자료 아님",
+    )
+    corrected = corrected.replace("레이보우로보틱스", "레인보우로보틱스")
+
+    # Keep the CEO result useful to an operator without copying the full
+    # accounting report. Include the bounded liquidity, settlement, trading
+    # cost, and credit-status facts when the Accounting handoff supplied them.
+    # Derive the bounded accounting facts even when the LLM already emitted
+    # this heading; the values must be merged into that existing section.
+    if accounting_payloads:
+
+        def amount(*patterns: str) -> str | None:
+            for pattern in patterns:
+                match = re.search(pattern, evidence_text, flags=re.IGNORECASE)
+                if match:
+                    return match.group(1).rstrip(",")
+            return None
+
+        liquidity_lines: list[str] = []
+        nav_value = amount(
+            r"(?:^|\n)[^\n]*(?:Preliminary\s+NAV|NAV|순자산\s*가치)\s*[:：]\s*"
+            r"(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+        )
+        cash_value = amount(
+            r"(?:^|\n)[^\n]*(?:^|\s)(?:현금|cash)\s*[:：]\s*"
+            r"(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+        )
+        securities_value = amount(
+            r"(?:^|\n)[^\n]*(?:유가증권\s*평가액|증권가치|증권\s*평가액|"
+            r"securities_value)\s*[:：]\s*(?:KRW\s*)?"
+            r"(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+        )
+        if nav_value or cash_value or securities_value:
+            core_parts = []
+            if nav_value:
+                core_parts.append(f"순자산 가치 {nav_value}원")
+            if cash_value:
+                core_parts.append(f"현금 {cash_value}원")
+            if securities_value:
+                core_parts.append(f"증권 평가액 {securities_value}원")
+            liquidity_lines.append(
+                "- 회계 시스템 핵심 수치: " + ", ".join(core_parts) + "."
+            )
+        deposit = amount(
+            r"(?:LS\s*)?예수금\s*[:：]?\s*(?:KRW\s*)?"
+            r"(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+        )
+        d1 = amount(
+            r"D\+1(?:\s*예수금)?(?:\s*(?:예상\s*(?:정산|결제)|expected\s*settlement))?\s*[:：]?\s*"
+            r"(?:KRW\s*)?"
+            r"(-?[0-9,]+)\s*(?:KRW)?"
+        )
+        d2 = amount(
+            r"D\+2(?:\s*예수금)?(?:\s*(?:예상\s*(?:정산|결제)|expected\s*settlement))?\s*[:：]?\s*"
+            r"(?:KRW\s*)?"
+            r"(-?[0-9,]+)\s*(?:KRW)?"
+        )
+        available = amount(
+            r"(?:인출가능액|인출가능금액|출금가능액|출금가능금액)\s*"
+            r"(?:및|/|·)?\s*(?:현금\s*)?주문가능(?:액|금액)?\s*[:：]?\s*"
+            r"각각\s*(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?",
+            r"(?:인출가능액|인출가능금액|출금가능액|출금가능금액)\s*[:：]\s*"
+            r"(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?",
+            r"출금가능·현금주문가능\s*(?:[:：]\s*)?(?:KRW\s*)?"
+            r"(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?",
+        )
+        settlement = amount(
+            r"D\+2\s*예상\s*결제(?:조정)?\s*[:：]?\s*"
+            r"(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+        )
+        if deposit:
+            liquidity_lines.append(f"- 증권사 예수금: {deposit}원.")
+        if d1 and d2:
+            liquidity_lines.append(f"- D+1 예수금: {d1}원, D+2 예수금: {d2}원.")
+        if available:
+            liquidity_lines.append(
+                f"- 인출가능액·현금주문가능액: 각각 {available}원으로 보고됐습니다."
+            )
+        if settlement:
+            liquidity_lines.append(
+                f"- D+2 예상 결제: {settlement}원이며, 현재 현금과 별도 결제 구간입니다."
+            )
+
+        realized = amount(
+            r"(?:실현손익|실현\s*PnL)\s*[:：]\s*(?:KRW\s*)?"
+            r"(-?[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:KRW)?"
+        )
+        unrealized = amount(
+            r"(?:미실현손익|미실현\s*PnL)\s*[:：]\s*(?:KRW\s*)?"
+            r"(-?[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:KRW)?"
+        )
+        engine_fee = amount(
+            r"(?:^|\n)[^\n]*계상\s*수수료\s*[:：]\s*(?:KRW\s*)?"
+            r"(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+        ) or amount(
+            r"(?:^|\n)[^\n]*(?:수수료\s*[:：]\s*(?:KRW\s*)?|"
+            r"수수료\s+(?:KRW\s*)?)"
+            r"(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+        )
+        engine_tax = amount(
+            r"(?:^|\n)[^\n]*계상\s*세금\s*[:：]\s*(?:KRW\s*)?"
+            r"(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+        ) or amount(
+            r"(?:^|\n)[^\n]*(?:세금\s*[:：]\s*(?:KRW\s*)?|"
+            r"세금\s+(?:KRW\s*)?)"
+            r"(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+        )
+        if realized or unrealized:
+            accounting_parts = []
+            if realized:
+                accounting_parts.append(f"실현손익 {realized}원")
+            if unrealized:
+                accounting_parts.append(f"미실현손익 {unrealized}원")
+            liquidity_lines.append(
+                "- 회계 시스템 보고 손익: " + ", ".join(accounting_parts) + "."
+            )
+        if engine_fee or engine_tax:
+            cost_parts = []
+            if engine_fee:
+                cost_parts.append(f"수수료 {engine_fee}원")
+            if engine_tax:
+                cost_parts.append(f"세금 {engine_tax}원")
+            liquidity_lines.append(
+                "- 회계 시스템 보고 비용: " + ", ".join(cost_parts) + "."
+            )
+
+        credit_match = re.search(
+            r"(?:신용·대출·미수금|미수금·대출·신용주문가능·담보부족액|"
+            r"미수금·대출금·담보부족액):\s*(?:모두\s*)?0(?:\s*KRW)?",
+            evidence_text,
+            flags=re.IGNORECASE,
+        )
+        if credit_match:
+            liquidity_lines.append(
+                "- 신용·대출·미수금 및 담보부족액: 모두 0으로 보고됐습니다."
+                " 계좌 단위 신용·증거금 한도는 필수 조회값 부족으로 확정하지 않았습니다."
+            )
+
+        trade_match = re.search(
+            r"(?:당일 체결 상태:\s*주문수량\s*|주문\s*)([0-9,]+)주?,\s*"
+            r"(?:체결수량\s*|체결\s*)([0-9,]+)주?,\s*"
+            r"미체결\s*([0-9,]+)주?(?:,\s*총 거래대금\s*KRW\s*([0-9,]+))?",
+            evidence_text,
+            flags=re.IGNORECASE,
+        )
+        if trade_match:
+            groups = trade_match.groups()
+            if groups[3]:
+                liquidity_lines.append(
+                    f"- 당일 체결 수량: 주문 {groups[0]}주 중 체결 {groups[1]}주, "
+                    f"미체결 {groups[2]}주; 총 거래대금 {groups[3]}원으로 보고됐습니다."
+                )
+            else:
+                # Do not turn a missing amount field in one bounded broker
+                # line into a stronger "unavailable" claim when another
+                # supplied summary may already carry the amount.
+                liquidity_lines.append(
+                    f"- 당일 체결 수량: 주문 {groups[0]}주 중 체결 {groups[1]}주, "
+                    f"미체결 {groups[2]}주로 보고됐습니다."
+                )
+        else:
+            position_trade = re.search(
+                r"(?:전체\s*)?주문수량\s*([0-9,]+)\s*[,，]\s*체결수량\s*"
+                r"([0-9,]+)\s*[,，]\s*미체결수량\s*([0-9,]+)\s*주?"
+                r"|총\s*주문\s*([0-9,]+)주\s*[,，]\s*체결\s*([0-9,]+)주\s*[,，]\s*"
+                r"미체결\s*([0-9,]+)주",
+                evidence_text,
+                flags=re.IGNORECASE,
+            )
+            if not position_trade:
+                position_trade = re.search(
+                    r"총\s*주문\s*([0-9,]+)주\s*중\s*([0-9,]+)주\s*체결\s*,\s*"
+                    r"미체결\s*([0-9,]+)",
+                    evidence_text,
+                    flags=re.IGNORECASE,
+                )
+            if position_trade:
+                values = position_trade.groups()
+                if values[0] is not None:
+                    ordered, filled, unfilled = values[:3]
+                else:
+                    ordered, filled, unfilled = values[3:]
+                liquidity_lines.append(
+                    f"- 당일 체결 수량: 주문 {ordered}주 중 체결 {filled}주, "
+                    f"미체결 {unfilled}주로 보고됐습니다."
+                )
+        if not trade_match and not re.search(
+            r"(?:전체\s*)?주문수량\s*[0-9,]+\s*[,，]\s*체결수량\s*[0-9,]+\s*[,，]\s*"
+            r"미체결수량\s*[0-9,]+\s*주?|총\s*주문\s*[0-9,]+주\s*[,，]\s*"
+            r"체결\s*[0-9,]+주\s*[,，]\s*미체결\s*[0-9,]+주",
+            evidence_text,
+            flags=re.IGNORECASE,
+        ):
+            # The accounting worker may report the broker payload as
+            # ``금일 체결: 주문수량 ..., 미체결 ..., 체결금액 ...``.
+            compact_trade = re.search(
+                r"(?:금일|당일)\s*체결[^\n:]*:\s*주문수량\s*([0-9,]+)\s*[,，]\s*"
+                r"미체결\s*([0-9,]+)\s*[,，]\s*체결금액\s*KRW\s*([0-9,]+)",
+                evidence_text,
+                flags=re.IGNORECASE,
+            )
+            if compact_trade:
+                ordered, unfilled, traded_value = compact_trade.groups()
+                try:
+                    filled = f"{int(ordered.replace(',', '')) - int(unfilled.replace(',', '')):,}"
+                except ValueError:
+                    filled = "확인 불가"
+                liquidity_lines.append(
+                    f"- 당일 체결 수량: 주문 {ordered}주, 체결 {filled}주, "
+                    f"미체결 {unfilled}주; 체결금액 {traded_value}원으로 보고됐습니다."
+                )
+        cost_match = re.search(
+            r"총 수수료\s*(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+            r".*?총비용\s*(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?",
+            evidence_text,
+            flags=re.IGNORECASE,
+        )
+        if not cost_match:
+            cost_match = re.search(
+                r"commission\s*KRW\s*(-?[0-9]+(?:,[0-9]{3})*).*?"
+                r"total\s+cost\s*KRW\s*(-?[0-9]+(?:,[0-9]{3})*)",
+                evidence_text,
+                flags=re.IGNORECASE,
+            )
+        if not cost_match:
+            cost_match = re.search(
+                r"(?:당일\s*집계|오늘\s*집계|금일\s*집계):[^\n]*"
+                r"수수료\s*(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)[^\n]*"
+                r"총\s*비용\s*(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)",
+                evidence_text,
+                flags=re.IGNORECASE,
+            )
+        if not cost_match:
+            cost_match = re.search(
+                r"(?:당일|금일)[^\n]*수수료\s*(?:KRW\s*)?"
+                r"(-?[0-9]+(?:,[0-9]{3})*)[^\n]*총\s*비용\s*"
+                r"(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)",
+                evidence_text,
+                flags=re.IGNORECASE,
+            )
+        if cost_match:
+            liquidity_lines.append(
+                f"- 당일 거래비용: 수수료 {cost_match.group(1)}원, "
+                f"총비용 {cost_match.group(2)}원으로 보고됐습니다."
+            )
+        else:
+            cost_breakdown = re.search(
+                r"총 수수료\s*(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?.*?"
+                r"거래세\s*(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?.*?"
+                r"농특세\s*(?:KRW\s*)?(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?",
+                evidence_text,
+                flags=re.IGNORECASE,
+            )
+            if cost_breakdown:
+                commission, transaction_tax, agricultural_tax = cost_breakdown.groups()
+                total_cost = (
+                    int(commission.replace(",", ""))
+                    + int(transaction_tax.replace(",", ""))
+                    + int(agricultural_tax.replace(",", ""))
+                )
+                liquidity_lines.append(
+                    f"- 당일 거래비용: 수수료 {commission}원, 거래세 {transaction_tax}원, "
+                    f"농특세 {agricultural_tax}원, 합계 {total_cost:,}원으로 보고됐습니다."
+                )
+        if not cost_match and not re.search(
+            r"당일 거래비용:", "\n".join(liquidity_lines)
+        ):
+            daily_commission = amount(
+                r"당일\s*수수료\s*[:：]?\s*(?:KRW\s*)?"
+                r"(-?[0-9]+(?:,[0-9]{3})*)\s*(?:KRW)?"
+            )
+            if daily_commission:
+                liquidity_lines.append(
+                    f"- 당일 거래 수수료: {daily_commission}원으로 보고됐습니다."
+                )
+        if re.search(
+            r"FOCCQ33600[^\n]*(?:ERROR|제공되지|미제공)",
+            evidence_text,
+            re.IGNORECASE,
+        ):
+            liquidity_lines.append(
+                "- 기간 수익률 자료는 증권사에서 제공되지 않아 확정 손익으로 사용하지 않았습니다."
+            )
+        if re.search(
+            r"t0151[^\n]*(?:EMPTY|비어|결과 없음)",
+            evidence_text,
+            re.IGNORECASE,
+        ):
+            liquidity_lines.append(
+                "- 전일 거래·수수료 조회 자료는 비어 있어 전일 거래 없음으로 해석하지 않았습니다."
+            )
+
+        break_lines: list[str] = []
+        instrument_names = {
+            match.group(2): match.group(1).strip()
+            for match in re.finditer(r"-\s*([^\n(]+)\s*\((\d{6})\):", evidence_text)
+        }
+        instrument_names.update(
+            {
+                match.group(1): match.group(2).strip()
+                for match in re.finditer(r"-\s*(\d{6})\s+([^\n:]+):", evidence_text)
+            }
+        )
+        instrument_names.update(
+            {
+                match.group(2): match.group(1).strip()
+                for match in re.finditer(r"[*-]\s*([^\n(]+?)\s+(\d{6}):", evidence_text)
+            }
+        )
+        seen_break_symbols: set[str] = set()
+        for line in evidence_text.splitlines():
+            break_match = re.search(
+                r"-\s*(.+?)\((\d{6})\):\s*(?:CSPAQ12300\s*)?"
+                r"([0-9,]+)주\s*(?:대|vs)\s*(?:t0424\s*)?([0-9,]+)주",
+                line,
+                flags=re.IGNORECASE,
+            )
+            compact_break = re.search(
+                r"(?:\*|-)\s*(\d{6}):\s*(?:CSPAQ12300\s*)?"
+                r"([0-9,]+)주\s*(?:vs|대)\s*t0424\s*([0-9,]+)주",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if not break_match and not compact_break:
+                compact_break = re.search(
+                    r"(?:\*|-)\s*(\d{6}):\s*([0-9,]+)주\s*(?:vs|대)\s*"
+                    r"([0-9,]+)주",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+            if not break_match and not compact_break:
+                compact_break = re.search(
+                    r"(\d{6})\s*(?:은|는|:)\s*([0-9,]+)주\s*(?:vs|대)\s*"
+                    r"([0-9,]+)주",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+            if break_match:
+                name, symbol, broker_qty, ledger_qty = break_match.groups()
+            elif compact_break:
+                symbol, broker_qty, ledger_qty = compact_break.groups()
+                name = instrument_names.get(symbol, f"종목 {symbol}")
+            else:
+                continue
+            if symbol in seen_break_symbols:
+                continue
+            seen_break_symbols.add(symbol)
+            if break_match or compact_break:
+                break_lines.append(
+                    f"- {name}({symbol}) 수량 대사 차이 "
+                    f"(브로커 TR 간, CSPAQ12300 대 t0424): {broker_qty}주 대 {ledger_qty}주; "
+                    "미해결 상태입니다."
+                )
+        # Some accounting reports put all breaks in one prose line, e.g.
+        # ``005930은 28주 vs 29주, 018880은 0주 vs 300주``.  Search the
+        # whole bounded handoff so a single line does not hide later breaks.
+        for compact_break in re.finditer(
+            r"(\d{6})(?:\s+[^:\n]{1,60})?\s*(?:은|는|:)\s*"
+            r"([0-9,]+)주\s*(?:vs|대)\s*"
+            r"([0-9,]+)주",
+            evidence_text,
+            flags=re.IGNORECASE,
+        ):
+            symbol, broker_qty, ledger_qty = compact_break.groups()
+            if symbol in seen_break_symbols:
+                continue
+            seen_break_symbols.add(symbol)
+            name = instrument_names.get(symbol, f"종목 {symbol}")
+            break_lines.append(
+                f"- {name}({symbol}) 수량 대사 차이 "
+                f"(브로커 TR 간, CSPAQ12300 대 t0424): {broker_qty}주 대 {ledger_qty}주; "
+                "미해결 상태입니다."
+            )
+        if break_lines:
+            liquidity_lines.append("- 미해결 포지션 대사 차이:")
+            liquidity_lines.extend(break_lines)
+
+        if liquidity_lines:
+            section_header = "### 회계·포트폴리오 세부 상태"
+            section_body = "\n".join(liquidity_lines)
+            if section_header not in corrected:
+                corrected = (
+                    corrected.rstrip() + "\n\n" + section_header + "\n" + section_body
+                )
+            else:
+                anchor = corrected.find("\n### 회계 근거 좌표")
+                existing_section = corrected
+                if anchor >= 0:
+                    existing_section = corrected[:anchor]
+                additions = [
+                    line for line in liquidity_lines if line not in existing_section
+                ]
+                if additions:
+                    if anchor >= 0:
+                        corrected = (
+                            corrected[:anchor].rstrip()
+                            + "\n"
+                            + "\n".join(additions)
+                            + corrected[anchor:]
+                        )
+                    else:
+                        corrected = corrected.rstrip() + "\n" + "\n".join(additions)
+
+    coordinates = list(
+        dict.fromkeys(
+            re.findall(r"\b(?:CSPAQ|CSPBQ|CDPCQ|FOCCQ)\d+\b|\bt\d{4}\b", evidence_text)
+        )
+    )
+    if "t0424" in coordinates:
+        coordinates.remove("t0424")
+        coordinates.insert(0, "t0424")
+    coordinates = coordinates[:8]
+    if "### 회계 근거 좌표" not in corrected:
+        citation_lines = [
+            "",
+            "### 회계 근거 좌표",
+            "- 회계 스냅샷: hgfinance.accounting-snapshot.v1"
+            + (f" (기준시각 {as_of})" if as_of else ""),
+        ]
+        citation_lines.append(
+            "- 증권사 대사 조회: "
+            + (", ".join(coordinates) if coordinates else "제공된 좌표 없음")
+        )
+        corrected = corrected.rstrip() + "\n" + "\n".join(citation_lines)
+    if "### 위험 근거 좌표" not in corrected:
+        corrected = corrected.rstrip() + "\n\n### 위험 근거 좌표\n"
+        corrected += (
+            "- 동결 투자한도: hgfinance.mandate-snapshot.v1.\n"
+            "- 회계 상태 스냅샷: hgfinance.accounting-snapshot.v1"
+            + (f" (기준시각 {as_of})" if as_of else "")
+            + ".\n"
+            "- 포지션 대사 보조 조회: t0424, CSPAQ12300.\n"
+            "- Risk 부서의 직접 URL·TR 좌표는 제공되지 않아 공통 스냅샷 대조 의견으로 한정합니다."
+        )
+    return corrected.strip()
+
+
+def _recover_compact_ceo_synthesis(
+    content: str,
+    task_payloads: Sequence[Mapping[str, Any]],
+) -> str:
+    """Recover a usable CEO answer when a synthesis worker persisted only a stub."""
+
+    has_nested_handoff = bool(
+        re.search(
+            r"(?m)^\s*-\s*[^\n]*:\s*\{\s*[\"'](?:final_answer|result)[\"']\s*:",
+            content,
+        )
+    )
+    if (
+        "### 부서별 핵심 의견" in content
+        and len(content) >= 1200
+        and not has_nested_handoff
+    ):
+        return content
+
+    primary_profiles = (
+        ("research-department", "🔬", "Research"),
+        ("quant-backtest-department", "📊", "Quant"),
+        ("risk-management", "🛡", "Risk"),
+        ("accounting-portfolio-department", "📒", "Accounting / Portfolio"),
+    )
+    primary_payloads: dict[str, Mapping[str, Any]] = {}
+    for payload in task_payloads:
+        profile = str(payload.get("assignee") or payload.get("profile") or "").strip()
+        if profile in {item[0] for item in primary_profiles} and (
+            profile not in primary_payloads
+            or terminal_workflow_role(payload) == "primary"
+        ):
+            primary_payloads[profile] = payload
+    if not primary_payloads:
+        return content
+
+    intro = content.split("\n### 부서별 핵심 의견", 1)[0].strip()
+    intro = intro.split("\n\n### 회계 근거 좌표", 1)[0].strip()
+    if intro.startswith("### CEO 종합 판단"):
+        intro = intro[len("### CEO 종합 판단") :].strip()
+    intro = intro or "세 부서의 읽기 전용 검토 결과를 종합했습니다."
+
+    def snippet(payload: Mapping[str, Any], profile: str) -> str:
+        answer = _text(
+            payload.get("final_answer")
+            or payload.get("result")
+            or payload.get("latest_summary")
+            or payload.get("summary")
+        )
+        answer = strip_bounded_retrieval_attempt(answer)
+        lines = [line.strip() for line in answer.splitlines() if line.strip()]
+        if not lines:
+            return "완료된 결과 본문이 없어 확인할 수 없습니다."
+        terms = {
+            "research-department": ("NAV", "현금", "증권", "손익", "매핑", "주의"),
+            "quant-backtest-department": (
+                "데이터셋",
+                "시계열",
+                "TR",
+                "HOLD",
+                "검증",
+                "주의",
+            ),
+            "risk-management": ("위험", "한도", "섹터", "NAV", "대사", "주의"),
+            "accounting-portfolio-department": (
+                "NAV",
+                "현금",
+                "예수금",
+                "손익",
+                "BREAK",
+                "대사",
+                "거래",
+            ),
+        }[profile]
+        selected: list[str] = []
+        for line in lines[:4]:
+            if not line.startswith("#"):
+                selected.append(line)
+        for line in lines[4:30]:
+            if (
+                any(term.casefold() in line.casefold() for term in terms)
+                and line not in selected
+            ):
+                selected.append(line)
+            if len(selected) >= 5:
+                break
+        return " ".join(selected)[:900].rstrip()
+
+    bullets = []
+    for profile, icon, label in primary_profiles:
+        payload = primary_payloads.get(profile)
+        if payload is None:
+            continue
+        bullets.append(f"- {icon} **{label}:** {snippet(payload, profile)}")
+    if not bullets:
+        return content
+    return (
+        "### CEO 종합 판단\n"
+        + intro
+        + "\n\n### 부서별 핵심 의견\n"
+        + "\n".join(bullets)
+        + "\n\n### 결론\n"
+        + "모든 결과는 PAPER 읽기 전용 자문이며 주문·원장 변경·공식 NAV 확정을 의미하지 않습니다."
+    ).strip()
 
 
 def _normalize_hr_scope_claims(content: str) -> str:
@@ -2005,7 +3035,11 @@ def _normalize_hr_scope_claims(content: str) -> str:
     return content
 
 
-def _synthesis_handoff_payload(child: ChildTaskState) -> dict[str, Any]:
+def _synthesis_handoff_payload(
+    child: ChildTaskState,
+    *,
+    root_body: str = "",
+) -> dict[str, Any]:
     """Give CEO synthesis the same bounded HR projection that QA receives."""
 
     handoff = child_handoff_payload(
@@ -2013,6 +3047,24 @@ def _synthesis_handoff_payload(child: ChildTaskState) -> dict[str, Any]:
         profile=child.profile,
         status=child.status,
     )
+    _enrich_trading_handoff(handoff, root_body=root_body)
+    if child.department == "accounting" and root_body:
+        for key in ("result", "final_answer", "summary"):
+            if handoff.get(key):
+                handoff[key] = _normalize_accounting_book_scope(
+                    _text(handoff[key]), root_body
+                )
+    if child.department == "research" and root_body:
+        root_payload = {"body": root_body}
+        answer = _text(handoff.get("final_answer") or handoff.get("result"))
+        canonical_answer = _canonicalize_research_source_urls(
+            answer,
+            (root_payload,),
+        )
+        if canonical_answer != answer:
+            handoff["result"] = canonical_answer
+            handoff["final_answer"] = canonical_answer
+        _normalize_research_handoff_provenance(handoff, (root_payload,))
     if child.department != "hr" or not child.workflow_root_task_id:
         return handoff
 
@@ -2054,6 +3106,539 @@ def _synthesis_handoff_payload(child: ChildTaskState) -> dict[str, Any]:
             handoff.pop(key, None)
         handoff.update(grade_answer(enriched).as_payload())
     return handoff
+
+
+def _https_urls(value: Any) -> list[str]:
+    """Return unique HTTPS coordinates from one bounded answer body."""
+
+    urls: list[str] = []
+    for raw_url in re.findall(r"https://[^\s<>\])}]+", _text(value)):
+        url = raw_url.rstrip(".,;:)")
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _canonical_source_url(value: str) -> str:
+    """Normalize mixed Unicode/percent-encoded URL paths to one form."""
+
+    parts = urlsplit(str(value or "").strip())
+    if parts.scheme.casefold() != "https" or not parts.netloc:
+        return str(value or "").strip()
+
+    # Connector transports can leave a path partially decoded, for example
+    # ``%EC%8B%A4적``.  Decoding the whole path first makes the stray percent
+    # look like a literal character and turns it into ``%25`` on re-encode.
+    # Preserve valid percent triplets and encode only the remaining characters
+    # so the same source coordinate stays byte-stable across the handoff.
+    normalized_path: list[str] = []
+    index = 0
+    safe_path = "/:@-._~!$&'()*+,;="
+    while index < len(parts.path):
+        if (
+            parts.path[index] == "%"
+            and index + 2 < len(parts.path)
+            and all(
+                char in "0123456789abcdefABCDEF"
+                for char in parts.path[index + 1 : index + 3]
+            )
+        ):
+            normalized_path.append(parts.path[index : index + 3].upper())
+            index += 3
+            continue
+        if (
+            parts.path[index] == "%"
+            and index + 1 < len(parts.path)
+            and ord(parts.path[index + 1]) > 127
+        ):
+            # A partially decoded connector path may leave the old escape
+            # marker in front of a Unicode character (``%분기``).  The
+            # marker is transport noise, not a literal URL character.
+            index += 1
+            continue
+        character = parts.path[index]
+        encoded_character = quote(character, safe=safe_path)
+        if ord(character) > 127:
+            # If a connector decoded only the tail of a UTF-8 escape, the
+            # preceding valid triplets can already be the prefix of this
+            # character (``%EB%B6%분``).  Append only the missing byte(s) to
+            # avoid producing ``분분`` in the canonical coordinate.
+            existing_path = "".join(normalized_path)
+            overlap = 0
+            encoded_utf8 = quote(character, safe="")
+            for prefix_length in range(3, len(encoded_utf8) + 1, 3):
+                if existing_path.endswith(encoded_utf8[:prefix_length]):
+                    overlap = prefix_length
+            normalized_path.append(encoded_utf8[overlap:])
+        else:
+            normalized_path.append(encoded_character)
+        index += 1
+    path = "".join(normalized_path)
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
+def _canonicalize_research_source_urls(
+    content: str,
+    task_payloads: Sequence[Mapping[str, Any]],
+) -> str:
+    """Keep CEO source coordinates byte-stable with the Research handoff."""
+
+    root_canonical_urls: list[str] = []
+    canonical_urls: list[str] = []
+    # The root user request is the strongest source of truth for a URL.  The
+    # Research worker may receive a transport-decoded representation from an
+    # upstream connector, so prefer the exact URL the user supplied whenever
+    # the root body carries the scoped request snapshot.
+    user_request_marker = "\n## User request\n"
+    for payload in task_payloads:
+        body = _text(payload.get("body"))
+        if user_request_marker not in body:
+            continue
+        user_request = body.split(user_request_marker, 1)[1]
+        for url in _https_urls(user_request):
+            normalized_url = _canonical_source_url(url)
+            if normalized_url not in canonical_urls:
+                canonical_urls.append(normalized_url)
+            if normalized_url not in root_canonical_urls:
+                root_canonical_urls.append(normalized_url)
+
+    for payload in task_payloads:
+        profile = str(payload.get("assignee") or payload.get("profile") or "")
+        if profile != canonical_profile_for_department("research"):
+            continue
+        role = terminal_workflow_role(payload) or str(
+            payload.get("workflow_role") or ""
+        )
+        if role.casefold() != "primary":
+            continue
+        for url in _https_urls(payload.get("final_answer") or payload.get("result")):
+            normalized_url = _canonical_source_url(url)
+            if normalized_url not in canonical_urls:
+                canonical_urls.append(normalized_url)
+    if not canonical_urls:
+        return content
+    for raw_url in _https_urls(content):
+        url = _canonical_source_url(raw_url)
+        canonical = next(
+            (
+                candidate
+                for candidate in root_canonical_urls
+                if unquote(candidate) == unquote(url)
+            ),
+            None,
+        )
+        if canonical is None:
+            # A model can emit a transport-decoded, partially re-encoded, or
+            # truncated path.  When the scoped user request supplied exactly
+            # one source on that host, it is the authoritative coordinate for
+            # every repeated citation on that host.  Do this before looking at
+            # Research's own variants, otherwise several malformed variants
+            # make the existing same-host fallback ambiguous.
+            same_host_root = [
+                candidate
+                for candidate in root_canonical_urls
+                if urlsplit(candidate).netloc == urlsplit(url).netloc
+            ]
+            if len(same_host_root) == 1:
+                canonical = same_host_root[0]
+        if canonical is None:
+            canonical = next(
+                (
+                    candidate
+                    for candidate in canonical_urls
+                    if unquote(candidate) == unquote(url)
+                ),
+                None,
+            )
+        if canonical is None:
+            same_host = [
+                candidate
+                for candidate in canonical_urls
+                if urlsplit(candidate).netloc == urlsplit(url).netloc
+            ]
+            if len(same_host) == 1:
+                canonical = same_host[0]
+        if canonical and canonical != raw_url:
+            content = content.replace(raw_url, canonical)
+    return content
+
+
+def _append_research_source_coordinates(
+    content: str,
+    task_payloads: Sequence[Mapping[str, Any]],
+) -> str:
+    """Preserve Research source name/date/full URL when synthesis omits it."""
+
+    if "### 리서치 근거 좌표" in content:
+        return content
+    positive_start = content.find("### 긍정 근거")
+    counter_start = content.find("### 반대 근거")
+    if positive_start >= 0 and counter_start > positive_start:
+        next_section = content.find("\n### ", counter_start + 1)
+        evidence_text = content[
+            positive_start : next_section if next_section >= 0 else None
+        ]
+        numbered_items = re.split(r"(?m)^\s*\d+[.)]\s+", evidence_text)[1:]
+        if numbered_items and all("https://" in item for item in numbered_items):
+            return content
+    references: list[tuple[str, str, str]] = []
+    last_date = ""
+    for payload in task_payloads:
+        profile = str(payload.get("assignee") or payload.get("profile") or "")
+        if profile != canonical_profile_for_department("research"):
+            continue
+        role = terminal_workflow_role(payload) or str(
+            payload.get("workflow_role") or ""
+        )
+        if role.casefold() != "primary":
+            continue
+        answer = _text(payload.get("final_answer") or payload.get("result"))
+        for line in answer.splitlines():
+            date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", line)
+            if date_match:
+                last_date = date_match.group(1)
+            for url in _https_urls(line):
+                url = _canonicalize_research_source_urls(url, task_payloads)
+                prefix = line.split(url, 1)[0]
+                source_match = re.search(
+                    r"(?:20\d{2}-\d{2}-\d{2}|같은 날)\s*([^\s,.(]+)",
+                    prefix,
+                )
+                source = source_match.group(1) if source_match else "Research 출처"
+                source = source.rstrip("은는이").strip() or "Research 출처"
+                source_by_host = {
+                    "www.pinpointnews.co.kr": "Pinpoint News",
+                    "www.cbci.co.kr": "CBC뉴스",
+                    "www.mtnews.net": "기계신문",
+                    "n.news.naver.com": "네이버뉴스",
+                    "www.kukinews.com": "쿠키뉴스",
+                }
+                source = source_by_host.get(urlsplit(url).netloc, source)
+                reference = (source, last_date or "발행일 미상", url)
+                if reference not in references:
+                    references.append(reference)
+    if not references:
+        return content
+    lines = ["", "### 리서치 근거 좌표"]
+    lines.extend(
+        f"- {source} · 발행일 {date}: {url}" for source, date, url in references[:8]
+    )
+    return content.rstrip() + "\n" + "\n".join(lines)
+
+
+def _trading_source_coordinates(root_body: str) -> list[dict[str, str]]:
+    """Return only reproducible Trading coordinates from the frozen root input.
+
+    Trading PAPER analysis normally has no market TR or public URL. Its facts
+    come from the immutable mandate and accounting snapshots attached to the
+    CEO root. A hash is emitted only when that exact snapshot is present; no
+    value is inferred from the worker prose.
+    """
+
+    body = str(root_body or "")
+    if not body or "## User request" not in body:
+        return []
+    scoped = body.split("\n## User request\n", 1)[0]
+    references: list[dict[str, str]] = []
+    mandate_start = scoped.find("hgfinance.mandate-snapshot.v1")
+    if mandate_start >= 0:
+        mandate_block = scoped[mandate_start:]
+        mandate_hash = re.search(r"(?m)^content_hash=([0-9a-f]{8,})\s*$", mandate_block)
+        if mandate_hash:
+            references.append(
+                {
+                    "title": "동결 투자한도 스냅샷",
+                    "citation": mandate_hash.group(1),
+                }
+            )
+
+    accounting_match = re.search(
+        r"## Accounting Engine snapshot[^\n]*\n(\{.*?\})\n\n## User request",
+        body,
+        flags=re.DOTALL,
+    )
+    if accounting_match:
+        raw_snapshot = accounting_match.group(1)
+        try:
+            snapshot = json.loads(raw_snapshot)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            snapshot = None
+        if isinstance(snapshot, Mapping):
+            as_of = str(snapshot.get("as_of") or "").strip()
+            reference = {
+                "title": "회계 읽기 전용 스냅샷",
+                # This is the hash of the exact snapshot persisted in the
+                # workflow input, not a claim that the source is authoritative.
+                "citation": hashlib.sha256(raw_snapshot.encode("utf-8")).hexdigest(),
+            }
+            if as_of:
+                reference["as_of"] = as_of
+            references.append(reference)
+    return references
+
+
+def _append_trading_source_coordinates(
+    content: str,
+    *,
+    root_body: str,
+    task_payloads: Sequence[Mapping[str, Any]] = (),
+) -> str:
+    """Append root-backed Trading evidence once, when Trading is in scope."""
+
+    trading_profile = canonical_profile_for_department("trading")
+    if not any(
+        str(payload.get("assignee") or payload.get("profile") or "").strip()
+        == trading_profile
+        and (
+            terminal_workflow_role(payload)
+            or str(payload.get("workflow_role") or "").strip().casefold()
+        )
+        == "primary"
+        for payload in task_payloads
+        if isinstance(payload, Mapping)
+    ):
+        return content
+    if "### 거래 부서 검증 근거" in str(content or ""):
+        return content
+    references = _trading_source_coordinates(root_body)
+    if not references:
+        return content
+    lines = ["", "### 거래 부서 검증 근거"]
+    for reference in references:
+        suffix = f" · 기준시각 {reference['as_of']}" if reference.get("as_of") else ""
+        lines.append(
+            f"- {reference['title']}{suffix} · 기록 해시: {reference['citation']}"
+        )
+    return str(content or "").rstrip() + "\n" + "\n".join(lines)
+
+
+def _enrich_trading_handoff(
+    handoff: dict[str, Any],
+    *,
+    root_body: str,
+) -> dict[str, Any]:
+    """Use one evidence projection for CEO synthesis, QA, and direct delivery."""
+
+    if str(handoff.get("profile") or "").strip() != canonical_profile_for_department(
+        "trading"
+    ):
+        return handoff
+    references = _trading_source_coordinates(root_body)
+    if not references:
+        return handoff
+    provenance = handoff.get("provenance")
+    provenance = dict(provenance) if isinstance(provenance, Mapping) else {}
+    existing = provenance.get("source_references")
+    existing = (
+        list(existing)
+        if isinstance(existing, Sequence)
+        and not isinstance(existing, (str, bytes, bytearray))
+        else []
+    )
+    source_references: list[Mapping[str, Any]] = []
+    seen_references: set[tuple[str, str, str]] = set()
+    for reference in (*existing, *references):
+        if not isinstance(reference, Mapping):
+            continue
+        identity = (
+            str(reference.get("title") or "").strip(),
+            str(reference.get("citation") or "").strip(),
+            str(reference.get("as_of") or "").strip(),
+        )
+        if identity in seen_references:
+            continue
+        seen_references.add(identity)
+        source_references.append(reference)
+    provenance["source_references"] = source_references
+    provenance["evidence_scope"] = "CEO root frozen mandate/accounting snapshots"
+    handoff["provenance"] = provenance
+    answer = _text(handoff.get("final_answer") or handoff.get("result"))
+    enriched = _append_trading_source_coordinates(
+        answer,
+        root_body=root_body,
+        task_payloads=(handoff,),
+    )
+    if enriched != answer:
+        handoff["result"] = enriched
+        handoff["final_answer"] = enriched
+        for key in (
+            "answer_gaps",
+            "answer_gaps_note",
+            "answer_body_missing",
+            "answer_body_missing_note",
+        ):
+            handoff.pop(key, None)
+        handoff.update(
+            grade_answer(enriched, summary=_text(handoff.get("summary"))).as_payload()
+        )
+    return handoff
+
+
+def _expand_research_implicit_source_urls(
+    content: str,
+    task_payloads: Sequence[Mapping[str, Any]],
+) -> str:
+    """Print the full scoped URL when a model says only ``위와 동일``."""
+
+    scoped_urls: list[str] = []
+    for payload in task_payloads:
+        body = _text(payload.get("body"))
+        if "\n## User request\n" not in body:
+            continue
+        request = body.split("\n## User request\n", 1)[1]
+        scoped_urls.extend(_https_urls(request))
+    official_urls = [
+        url
+        for url in dict.fromkeys(scoped_urls)
+        if urlsplit(url).netloc == "news.samsung.com"
+    ]
+    if len(official_urls) != 1:
+        return content
+    official_url = official_urls[0]
+    return re.sub(
+        r"(URL\s*:\s*)위와\s*동일\s*(\([^\n]*?\))",
+        rf"\g<1>{official_url} \g<2>",
+        content,
+        flags=re.IGNORECASE,
+    )
+
+
+def _normalize_research_handoff_provenance(
+    handoff: dict[str, Any],
+    task_payloads: Sequence[Mapping[str, Any]],
+) -> None:
+    """Canonicalize and deduplicate Research source coordinates in a handoff."""
+
+    provenance = handoff.get("provenance")
+    if not isinstance(provenance, Mapping):
+        return
+    raw_references = provenance.get("source_references")
+    if not isinstance(raw_references, Sequence) or isinstance(
+        raw_references, (str, bytes, bytearray)
+    ):
+        return
+    references: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw_reference in raw_references:
+        if not isinstance(raw_reference, Mapping):
+            continue
+        reference = dict(raw_reference)
+        url = str(reference.get("url") or "").strip()
+        if url.startswith("https://"):
+            reference["url"] = _canonicalize_research_source_urls(
+                url,
+                task_payloads,
+            )
+        identity = (
+            str(reference.get("title") or "").strip(),
+            str(reference.get("published") or "").strip(),
+            str(reference.get("url") or "").strip(),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        references.append(reference)
+    if references:
+        provenance["source_references"] = references
+
+
+def _normalize_research_answer_headings(content: str) -> str:
+    """Normalize plain Research section labels to the user-facing shape."""
+
+    labels = {
+        "긍정 근거",
+        "반대 근거",
+        "관찰할 촉매·무효화 조건",
+        "자료 기준과 확인하지 못한 자료",
+    }
+    normalized: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped in labels:
+            normalized.append(f"### {stripped}")
+        else:
+            normalized.append(line)
+    return "\n".join(normalized)
+
+
+_RESEARCH_REQUIRED_HEADINGS = (
+    "### 긍정 근거",
+    "### 반대 근거",
+    "### 관찰할 촉매·무효화 조건",
+    "### 자료 기준과 확인하지 못한 자료",
+)
+
+
+def _research_answer_is_complete(content: str) -> bool:
+    """Check the bounded Research answer shape before CEO delivery."""
+
+    text = _text(content).strip()
+    return (
+        bool(text)
+        and not re.search(r"\{\s*[\"']error[\"']\s*:", text)
+        and all(heading in text for heading in _RESEARCH_REQUIRED_HEADINGS)
+    )
+
+
+def _remove_research_duplicate_section(content: str) -> str:
+    """Drop a repeated department handoff from an already complete answer."""
+
+    marker = "\n### 부서별 핵심 의견"
+    if marker not in content:
+        return content
+    head, tail = content.split(marker, 1)
+    conclusion_marker = "\n### 결론"
+    if conclusion_marker in tail:
+        conclusion = tail.split(conclusion_marker, 1)[1].strip()
+        if conclusion:
+            return head.rstrip() + "\n\n### 결론\n" + conclusion
+    return head.rstrip()
+
+
+def _deduplicate_research_conclusion_headings(content: str) -> str:
+    """Keep one conclusion heading while retaining each conclusion statement."""
+
+    marker = "\n### 결론"
+    if content.count(marker) <= 1:
+        return content
+    sections = content.split(marker)
+    head = sections[0].rstrip()
+    bodies = [section.strip() for section in sections[1:] if section.strip()]
+    return head + "\n\n### 결론\n" + "\n\n".join(bodies)
+
+
+def _quant_retrieval_attempt_from_payloads(
+    task_payloads: Sequence[Mapping[str, Any]],
+) -> dict[str, str] | None:
+    """Find the authoritative bounded retrieval record from one Quant primary."""
+
+    quant_profile = canonical_profile_for_department("quant")
+    for payload in task_payloads:
+        profile = str(payload.get("assignee") or payload.get("profile") or "")
+        if profile != quant_profile or terminal_workflow_role(payload) != "primary":
+            continue
+        answer = _text(payload.get("final_answer") or payload.get("result"))
+        record = bounded_retrieval_attempt(
+            answer
+        ) or bounded_retrieval_attempt_from_metadata(merged_run_metadata(payload))
+        if record is not None:
+            return record
+    return None
+
+
+def _ensure_quant_retrieval_attempt(
+    answer: str,
+    task_payloads: Sequence[Mapping[str, Any]],
+) -> str:
+    """Keep Quant's reproducibility record on the final response boundary."""
+
+    if not answer or bounded_retrieval_attempt(answer) is not None:
+        return answer
+    record = _quant_retrieval_attempt_from_payloads(task_payloads)
+    if record is None:
+        return answer
+    formatted = format_bounded_retrieval_attempt(record)
+    return f"{answer.rstrip()}\n\n{formatted}".strip() if formatted else answer
 
 
 def _compact_hr_qa_handoff(handoff: dict[str, Any]) -> None:
@@ -2121,16 +3706,19 @@ def _augment_hr_final_answer(
     """Complete a CEO HR summary with bounded proposal and source details."""
 
     content = _normalize_hr_scope_claims(content)
-    already_complete = all(
-        marker in content
-        for marker in (
-            "### HR 근거와 재현 정보",
-            "### 제안서 핵심 내용",
-            "응답 재현 식별자",
-            "Scorecard 내용:",
-            "관측 필드 확인:",
+    already_complete = (
+        all(
+            marker in content
+            for marker in (
+                "### HR 근거와 재현 정보",
+                "### 제안서 핵심 내용",
+                "응답 재현 식별자",
+                "Scorecard 내용:",
+                "관측 필드 확인:",
+            )
         )
-    ) and "기간 확인되지 않음" not in content
+        and "기간 확인되지 않음" not in content
+    )
     if already_complete:
         return content
     primary = next(
@@ -2244,20 +3832,14 @@ def _augment_hr_final_answer(
 
         def _evidence_request(fragment: str) -> Mapping[str, Any]:
             return next(
-                (
-                    item
-                    for item in requests
-                    if fragment in str(item.get("path") or "")
-                ),
+                (item for item in requests if fragment in str(item.get("path") or "")),
                 {},
             )
 
         def _evidence_endpoint(item: Mapping[str, Any]) -> str:
             path = str(item.get("path") or "").strip()
             return (
-                "GET http://workforce-api:8000" + path
-                if path.startswith("/")
-                else path
+                "GET http://workforce-api:8000" + path if path.startswith("/") else path
             )
 
         improvements_read = _evidence_request("/improvements")
@@ -2265,9 +3847,7 @@ def _augment_hr_final_answer(
         scorecard_read = _evidence_request("/scorecard-brief")
         improvements_response = improvements_read.get("response")
         improvements_response = (
-            improvements_response
-            if isinstance(improvements_response, Mapping)
-            else {}
+            improvements_response if isinstance(improvements_response, Mapping) else {}
         )
         observability_response = observability_read.get("response")
         observability_response = (
@@ -2292,9 +3872,7 @@ def _augment_hr_final_answer(
                     if line.strip().startswith(f"| {department} |")
                 ]
                 for row in rows:
-                    cells = [
-                        cell.strip() for cell in row.strip("|").split("|")
-                    ]
+                    cells = [cell.strip() for cell in row.strip("|").split("|")]
                     if len(cells) < 2:
                         continue
                     snapshot_statuses.setdefault(department, cells[1])
@@ -2342,12 +3920,16 @@ def _augment_hr_final_answer(
                 "window_end": summary.get("observability_window_end"),
                 "departments": departments,
                 "capacity_cost": (
-                    "NO_SNAPSHOT" if "NO_SNAPSHOT" in scorecard_response else "확인 자료 없음"
+                    "NO_SNAPSHOT"
+                    if "NO_SNAPSHOT" in scorecard_response
+                    else "확인 자료 없음"
                 ),
                 "content_status": (
                     "NO_SNAPSHOT"
                     if snapshot_statuses
-                    and all(value == "NO_SNAPSHOT" for value in snapshot_statuses.values())
+                    and all(
+                        value == "NO_SNAPSHOT" for value in snapshot_statuses.values()
+                    )
                     else "EXPLICIT_TABLE"
                     if snapshot_statuses
                     else None
@@ -2355,9 +3937,7 @@ def _augment_hr_final_answer(
                 "snapshot_status_by_department": snapshot_statuses,
                 "quality_eval_run_references": eval_references,
                 "quality": {
-                    "eval_run_references": 0
-                    if "| 0 |" in scorecard_response
-                    else None
+                    "eval_run_references": 0 if "| 0 |" in scorecard_response else None
                 },
             },
         }
@@ -2376,9 +3956,7 @@ def _augment_hr_final_answer(
     if isinstance(evidence_provenance, Mapping):
         candidate_summary = evidence_provenance.get("evidence_summary")
         if isinstance(candidate_summary, Mapping):
-            bounded_failure_summary = candidate_summary.get(
-                "failure_retry_duplicate"
-            )
+            bounded_failure_summary = candidate_summary.get("failure_retry_duplicate")
     if isinstance(bounded_failure_summary, Mapping):
         execution_metrics = {
             **execution_metrics,
@@ -2453,7 +4031,9 @@ def _augment_hr_final_answer(
         # reads live under source_checks and the proposal lives separately.
         source_checks = metadata.get("source_checks")
         proposal_envelope = metadata.get("proposal")
-        if isinstance(source_checks, Mapping) and isinstance(proposal_envelope, Mapping):
+        if isinstance(source_checks, Mapping) and isinstance(
+            proposal_envelope, Mapping
+        ):
             result = {
                 "candidate_snapshot": source_checks.get("improvements"),
                 "observability": source_checks.get("observability"),
@@ -2622,7 +4202,7 @@ def _augment_hr_final_answer(
                     else {}
                 ),
             }
-    if isinstance(result, Mapping) and "candidate_snapshot" not in result:
+    if isinstance(result, Mapping) and "candidate_snapshot" not in result:  # noqa: SIM102 - nested normalization keeps the source envelope readable.
         # The active HR Hermes emits this compact, user-ready envelope after
         # its three read-only Workforce API calls.
         if "improvement_candidate_count" in result:
@@ -2742,9 +4322,7 @@ def _augment_hr_final_answer(
                     else None
                 ),
                 "capacity_and_cost": (
-                    "확인 자료 없음"
-                    if isinstance(scorecard_read, Mapping)
-                    else None
+                    "확인 자료 없음" if isinstance(scorecard_read, Mapping) else None
                 ),
                 "quality": (
                     scorecard_read.get("quality")
@@ -2810,11 +4388,15 @@ def _augment_hr_final_answer(
             if not isinstance(improvements, Mapping):
                 improvements = {
                     "http_status": 200 if "HTTP 200" in str(improvements) else None,
-                    "candidate_count": 0 if "candidates=0" in str(improvements) else None,
+                    "candidate_count": 0
+                    if "candidates=0" in str(improvements)
+                    else None,
                 }
             if not isinstance(observability_read, Mapping):
                 observability_read = {
-                    "http_status": 200 if "HTTP 200" in str(observability_read) else None,
+                    "http_status": 200
+                    if "HTTP 200" in str(observability_read)
+                    else None,
                     "lookback_hours": 24,
                     "states": {},
                 }
@@ -2849,7 +4431,9 @@ def _augment_hr_final_answer(
         if isinstance(authoritative_reads, Sequence) and not isinstance(
             authoritative_reads, (str, bytes)
         ):
-            read_lines = [str(item).strip() for item in authoritative_reads if str(item).strip()]
+            read_lines = [
+                str(item).strip() for item in authoritative_reads if str(item).strip()
+            ]
             scorecard_line = next(
                 (line for line in read_lines if "/scorecard-brief" in line), ""
             )
@@ -2947,8 +4531,7 @@ def _augment_hr_final_answer(
                 if isinstance(scorecard_read, Mapping)
                 else [],
                 "scorecard_http": (
-                    scorecard_read.get("http_status")
-                    or scorecard_read.get("status")
+                    scorecard_read.get("http_status") or scorecard_read.get("status")
                 )
                 if isinstance(scorecard_read, Mapping)
                 else None,
@@ -2956,12 +4539,14 @@ def _augment_hr_final_answer(
                     scorecard_read.get("window_start")
                     if isinstance(scorecard_read, Mapping)
                     else None
-                ) or scorecard_start,
+                )
+                or scorecard_start,
                 "scorecard_window_end": (
                     scorecard_read.get("window_end")
                     if isinstance(scorecard_read, Mapping)
                     else None
-                ) or scorecard_end,
+                )
+                or scorecard_end,
                 "capacity_and_cost": scorecard_read.get("capacity")
                 if isinstance(scorecard_read, Mapping)
                 else None,
@@ -2971,7 +4556,9 @@ def _augment_hr_final_answer(
             }
     if not isinstance(result, Mapping):
         source_checks = metadata.get("source_checks")
-        if isinstance(source_checks, Sequence) and not isinstance(source_checks, (str, bytes)):
+        if isinstance(source_checks, Sequence) and not isinstance(
+            source_checks, (str, bytes)
+        ):
             checks = [item for item in source_checks if isinstance(item, Mapping)]
 
             def _source_check(fragment: str) -> Mapping[str, Any]:
@@ -3080,7 +4667,10 @@ def _augment_hr_final_answer(
                     )
                 for candidate_path in candidates:
                     try:
-                        if candidate_path.is_file() and candidate_path.stat().st_size <= 2 * 1024 * 1024:
+                        if (
+                            candidate_path.is_file()
+                            and candidate_path.stat().st_size <= 2 * 1024 * 1024
+                        ):
                             return candidate_path.read_text(encoding="utf-8")
                     except (OSError, UnicodeError, ValueError):
                         continue
@@ -3107,8 +4697,7 @@ def _augment_hr_final_answer(
                 "PROPOSAL-ONLY": "제안 상태",
                 "INSUFFICIENT_EVIDENCE": "근거 부족",
                 "CONFLICTING_EVIDENCE": "상충 근거",
-                "no hiring, retraining, deactivation, permission, activation, or investment approval":
-                    "채용·재훈련·비활성화·권한 부여·활성화·투자 승인을 하지 않음",
+                "no hiring, retraining, deactivation, permission, activation, or investment approval": "채용·재훈련·비활성화·권한 부여·활성화·투자 승인을 하지 않음",
             }.items():
                 text = text.replace(source, translated)
             return text
@@ -3116,14 +4705,18 @@ def _augment_hr_final_answer(
         def _markdown_section(markdown: str, heading: str) -> str:
             lines = markdown.splitlines()
             start = next(
-                (index + 1 for index, line in enumerate(lines) if line.strip() == heading),
+                (
+                    index + 1
+                    for index, line in enumerate(lines)
+                    if line.strip() == heading
+                ),
                 None,
             )
             if start is None:
                 return ""
             selected: list[str] = []
             for line in lines[start:]:
-                if line.startswith("### ") or line.startswith("## "):
+                if line.startswith(("### ", "## ")):
                     break
                 if line.strip():
                     selected.append(line.strip())
@@ -3134,14 +4727,14 @@ def _augment_hr_final_answer(
             for line in markdown.splitlines():
                 value = line.strip().lstrip("-* ").strip()
                 if value.startswith(prefix):
-                    return _humanize_hr_text(value[len(prefix):].strip())
+                    return _humanize_hr_text(value[len(prefix) :].strip())
             return ""
 
         def _markdown_fact(markdown: str, prefix: str) -> str:
             for line in markdown.splitlines():
                 value = line.strip()
                 if value.startswith(prefix):
-                    return _humanize_hr_text(value[len(prefix):].strip())
+                    return _humanize_hr_text(value[len(prefix) :].strip())
             return ""
 
         def _markdown_cases(markdown: str, prefix: str) -> list[str]:
@@ -3160,9 +4753,8 @@ def _augment_hr_final_answer(
                     "Golden" in stripped or "Adversarial" in stripped
                 ):
                     flush()
-                    in_section = (
-                        ("Golden" in stripped and prefix == "G")
-                        or ("Adversarial" in stripped and prefix == "A")
+                    in_section = ("Golden" in stripped and prefix == "G") or (
+                        "Adversarial" in stripped and prefix == "A"
                     )
                     continue
                 # Some HR artifacts use a numbered heading such as
@@ -3206,20 +4798,31 @@ def _augment_hr_final_answer(
             proposal_markdown = _read_proposal_artifact()
             proposal_title = "리스크 분석 보조 Agent"
             first_line = next(
-                (line.strip().lstrip("# ") for line in proposal_markdown.splitlines() if line.startswith("# ")),
+                (
+                    line.strip().lstrip("# ")
+                    for line in proposal_markdown.splitlines()
+                    if line.startswith("# ")
+                ),
                 "",
             )
             if "—" in first_line:
                 proposal_title = first_line.split("—", 1)[0].strip()
-            proposal_title = _markdown_labeled_value(proposal_markdown, "직무명") or proposal_title
-            proposal_title = _markdown_labeled_value(proposal_markdown, "역할명") or proposal_title
+            proposal_title = (
+                _markdown_labeled_value(proposal_markdown, "직무명") or proposal_title
+            )
+            proposal_title = (
+                _markdown_labeled_value(proposal_markdown, "역할명") or proposal_title
+            )
             proposal_title = (
                 proposal_title
                 if proposal_title != "리스크 분석 보조 Agent"
-                else _markdown_section(proposal_markdown, "### 직무명") or proposal_title
+                else _markdown_section(proposal_markdown, "### 직무명")
+                or proposal_title
             )
             if proposal_title == "리스크 분석 보조 Agent":
-                proposal_title = _markdown_section(proposal_markdown, "### 역할명") or proposal_title
+                proposal_title = (
+                    _markdown_section(proposal_markdown, "### 역할명") or proposal_title
+                )
             mission = (
                 _markdown_labeled_value(proposal_markdown, "미션")
                 or _markdown_section(proposal_markdown, "### 역할 목적")
@@ -3250,10 +4853,16 @@ def _augment_hr_final_answer(
                 "inputs": [inputs],
                 "outputs": [outputs],
                 "success_metrics": [
-                    _markdown_section(proposal_markdown, "### 성공 지표(측정 가능할 때만)")
-                    or _markdown_section(proposal_markdown, "### 성공 기준(운영 전 합의 필요)")
+                    _markdown_section(
+                        proposal_markdown, "### 성공 지표(측정 가능할 때만)"
+                    )
+                    or _markdown_section(
+                        proposal_markdown, "### 성공 기준(운영 전 합의 필요)"
+                    )
                     or _markdown_section(proposal_markdown, "### 성공 기준(초안)")
-                    or _markdown_section(proposal_markdown, "### 성공 지표(독립 QA가 측정)")
+                    or _markdown_section(
+                        proposal_markdown, "### 성공 지표(독립 QA가 측정)"
+                    )
                     or _markdown_section(proposal_markdown, "## 6. 평가 운영안(제안)")
                     or "근거·시점·범위 보존, 누락·불일치 표시, 금지된 실행·승인 0건, 독립 QA/Audit 평가 전제"
                 ],
@@ -3272,8 +4881,10 @@ def _augment_hr_final_answer(
                     if not stripped.startswith("|"):
                         continue
                     cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-                    if len(cells) < 5 or not cells[0] or not any(
-                        character.isdigit() for character in cells[0]
+                    if (
+                        len(cells) < 5
+                        or not cells[0]
+                        or not any(character.isdigit() for character in cells[0])
                     ):
                         continue
                     case_prefix = cells[0][0].upper()
@@ -3308,8 +4919,8 @@ def _augment_hr_final_answer(
             observation_window_start = None
             observation_window_end = None
             if observation_window and " ~ " in observation_window:
-                observation_window_start, observation_window_end = observation_window.split(
-                    " ~ ", 1
+                observation_window_start, observation_window_end = (
+                    observation_window.split(" ~ ", 1)
                 )
             if not observation_window_start or not observation_window_end:
                 observed_facts = facts.get("observability")
@@ -3322,8 +4933,7 @@ def _augment_hr_final_answer(
                 scorecard_window_start = observation_window_start
                 scorecard_window_end = observation_window_end
             scorecard_source = (
-                "GET http://workforce-api:8000/workforce/v1/departments/"
-                "scorecard-brief"
+                "GET http://workforce-api:8000/workforce/v1/departments/scorecard-brief"
             )
             scorecard_query: list[str] = []
             if scorecard_window_start and scorecard_window_end:
@@ -3358,14 +4968,18 @@ def _augment_hr_final_answer(
                         "observability?lookback_hours=24"
                     ),
                     "http_status": facts.get("observability_http") or 200,
-                    "lookback_hours": facts.get("observability", {}).get("lookback_hours")
+                    "lookback_hours": facts.get("observability", {}).get(
+                        "lookback_hours"
+                    )
                     if isinstance(facts.get("observability"), Mapping)
                     else 24,
                     "statuses": facts.get("observability", {}).get("statuses")
                     if isinstance(facts.get("observability"), Mapping)
-                    else (facts.get("idle_agents", {}).get("statuses")
-                          if isinstance(facts.get("idle_agents"), Mapping)
-                          else {}),
+                    else (
+                        facts.get("idle_agents", {}).get("statuses")
+                        if isinstance(facts.get("idle_agents"), Mapping)
+                        else {}
+                    ),
                     "window_start": observation_window_start,
                     "window_end": observation_window_end,
                 },
@@ -3437,8 +5051,7 @@ def _augment_hr_final_answer(
                 normalized_lines: list[str] = []
                 for line in enriched.splitlines():
                     has_unverified_zero = any(
-                        f"{state} 0" in line
-                        for state in missing_states
+                        f"{state} 0" in line for state in missing_states
                     )
                     if has_unverified_zero:
                         # Replace only the unavailable state tokens.  Splitting
@@ -3463,7 +5076,9 @@ def _augment_hr_final_answer(
         "HR handoff에 조회 경로·HTTP 상태·기간과 제안서 파일 해시를 함께 기록했습니다.",
     )
     enriched = enriched.replace("동일한 24시간 창", "별도 Scorecard 조회 기간")
-    enriched = enriched.replace("관측과 Scorecard가 복구되어", "관측 및 Scorecard 데이터가 제공되어")
+    enriched = enriched.replace(
+        "관측과 Scorecard가 복구되어", "관측 및 Scorecard 데이터가 제공되어"
+    )
     enriched = enriched.replace(
         "HR 부서의 PAPER/읽기 전용 E2E 검증은 완료되었습니다.",
         "HR 부서의 PAPER/읽기 전용 helper 검증은 완료되었습니다. 관측되지 않은 항목은 조치 보류로 표시했습니다.",
@@ -3502,8 +5117,7 @@ def _augment_hr_final_answer(
         "eval_run": "QA 평가 실행 기록",
         "research-department": "연구 부서",
         "risk-management": "리스크 부서",
-        "no hiring, retraining, deactivation, permission, activation, or investment approval":
-            "채용·재훈련·비활성화·권한 부여·활성화·투자 승인을 하지 않음",
+        "no hiring, retraining, deactivation, permission, activation, or investment approval": "채용·재훈련·비활성화·권한 부여·활성화·투자 승인을 하지 않음",
     }.items():
         enriched = enriched.replace(source, translated)
     # The humanized labels above must not rewrite technical values inside a
@@ -3522,8 +5136,10 @@ def _augment_hr_final_answer(
         "",
         "### HR 근거와 재현 정보",
         "",
-        f"- 개선 후보 조회: {candidate.get('source') if isinstance(candidate, Mapping) else 'Workforce API'} "
-        f"({_read_status(candidate)}, 후보 {candidate.get('candidate_count') if isinstance(candidate, Mapping) else '확인 필요'}건)",
+        (
+            f"- 개선 후보 조회: {candidate.get('source') if isinstance(candidate, Mapping) else 'Workforce API'} "
+            f"({_read_status(candidate)}, 후보 {candidate.get('candidate_count') if isinstance(candidate, Mapping) else '확인 필요'}건)"
+        ),
     ]
     if isinstance(observability, Mapping):
         lines.append(
@@ -3590,7 +5206,9 @@ def _augment_hr_final_answer(
                     f"- Scorecard 내용: {readable}의 처리량·비용·품질 스냅샷은 확인 자료 없음({reference_text})"
                 )
     else:
-        lines.append(f"- Scorecard 조회 기간: {_window(scorecard)} (관측 조회와 별도 응답)")
+        lines.append(
+            f"- Scorecard 조회 기간: {_window(scorecard)} (관측 조회와 별도 응답)"
+        )
 
     latency = execution_metrics.get("latency_ms")
     latency = latency if isinstance(latency, Mapping) else {}
@@ -3601,14 +5219,18 @@ def _augment_hr_final_answer(
             "",
             "### 실행 지표",
             "",
-            "- 단계별 지연: "
-            f"개선 후보 {latency.get('improvements', '확인 필요')}ms, "
-            f"Observability {latency.get('observability', '확인 필요')}ms, "
-            f"Scorecard brief {latency.get('scorecard_brief', '확인 필요')}ms",
-            "- 실패·재시도·중복: "
-            f"요청 실패 {failures.get('request_failures', '확인 필요')}건, "
-            f"재시도/재시도 관측 {failures.get('helper_retries_or_retries_observed', '확인 필요')}건, "
-            f"중복 helper 실행 {failures.get('duplicate_helper_runs', '확인 필요')}건",
+            (
+                "- 단계별 지연: "
+                f"개선 후보 {latency.get('improvements', '확인 필요')}ms, "
+                f"Observability {latency.get('observability', '확인 필요')}ms, "
+                f"Scorecard brief {latency.get('scorecard_brief', '확인 필요')}ms"
+            ),
+            (
+                "- 실패·재시도·중복: "
+                f"요청 실패 {failures.get('request_failures', '확인 필요')}건, "
+                f"재시도/재시도 관측 {failures.get('helper_retries_or_retries_observed', '확인 필요')}건, "
+                f"중복 helper 실행 {failures.get('duplicate_helper_runs', '확인 필요')}건"
+            ),
         ]
     )
     field_presence = (
@@ -3666,11 +5288,10 @@ def _augment_hr_final_answer(
             return {}
         body = next(
             (
-                str(item.get("body") or "")
-                if isinstance(item, Mapping)
-                else str(item)
+                str(item.get("body") or "") if isinstance(item, Mapping) else str(item)
                 for item in comments
-                if marker in (
+                if marker
+                in (
                     str(item.get("body") or "")
                     if isinstance(item, Mapping)
                     else str(item)
@@ -3681,9 +5302,7 @@ def _augment_hr_final_answer(
         return {
             key: value
             for key, value in (
-                token.split("=", 1)
-                for token in body.split()
-                if "=" in token
+                token.split("=", 1) for token in body.split() if "=" in token
             )
         }
 
@@ -3761,10 +5380,16 @@ def _augment_hr_final_answer(
         golden = _list(evaluation.get("golden"))
         adversarial = _list(evaluation.get("adversarial"))
         if golden:
-            lines.extend(["", "- Golden 평가 사례:", *[f"  - {item}" for item in golden]])
+            lines.extend(
+                ["", "- Golden 평가 사례:", *[f"  - {item}" for item in golden]]
+            )
         if adversarial:
             lines.extend(
-                ["", "- Adversarial 평가 사례:", *[f"  - {item}" for item in adversarial]]
+                [
+                    "",
+                    "- Adversarial 평가 사례:",
+                    *[f"  - {item}" for item in adversarial],
+                ]
             )
     return enriched.rstrip() + "\n" + "\n".join(lines)
 
@@ -3800,6 +5425,13 @@ def _terminal_payload_mapping(
 class SupervisorState:
     parent_task_id: str
     children: tuple[ChildTaskState, ...]
+    # The client request ID is distinct from the Kanban root ID. Propagating
+    # both lets LangSmith join ingress, primary, and synthesis traces without
+    # losing the durable task boundary.
+    request_id: str = ""
+    # Immutable root body used only to canonicalize bounded handoff metadata.
+    # It is never copied into user-facing output or LangSmith payload text.
+    root_body: str = ""
     # CEO planning roots normally become terminal immediately after durable
     # child creation. The supervisor must not try to move that already-done
     # planning record back to BLOCKED when a later child fails.
@@ -3851,7 +5483,9 @@ class SupervisorState:
         # safety before any state-changing operation.
         enabled = self.qa_enabled
         if enabled is None:
-            enabled = True if self.workflow_mode == "binding" else bool(self.qa_required)
+            enabled = (
+                True if self.workflow_mode == "binding" else bool(self.qa_required)
+            )
         object.__setattr__(self, "qa_enabled", bool(enabled))
         object.__setattr__(self, "qa_blocks_response", False)
 
@@ -3872,7 +5506,11 @@ class SupervisorState:
         if not self.selected_primary_profiles:
             return ()
         present = {child.profile for child in self.analysis_children}
-        return tuple(profile for profile in self.selected_primary_profiles if profile not in present)
+        return tuple(
+            profile
+            for profile in self.selected_primary_profiles
+            if profile not in present
+        )
 
     @property
     def primary_by_profile(self) -> dict[str, ChildTaskState]:
@@ -3911,9 +5549,12 @@ class SupervisorState:
         selected_count = len(self.selected_primary_profiles) or len(
             self.primary_by_profile
         )
-        return bool(selected_count) and not self.missing_primary_profiles and not (
-            self.duplicate_primary_profiles
-        ) and self.ready_count == selected_count
+        return (
+            bool(selected_count)
+            and not self.missing_primary_profiles
+            and not (self.duplicate_primary_profiles)
+            and self.ready_count == selected_count
+        )
 
     @property
     def usable_analysis_children(self) -> tuple[ChildTaskState, ...]:
@@ -3933,7 +5574,11 @@ class SupervisorState:
         counts: dict[str, int] = {}
         for child in self.analysis_children:
             counts[child.profile] = counts.get(child.profile, 0) + 1
-        return tuple(profile for profile in self.selected_primary_profiles or counts if counts.get(profile, 0) > 1)
+        return tuple(
+            profile
+            for profile in self.selected_primary_profiles or counts
+            if counts.get(profile, 0) > 1
+        )
 
     @property
     def qa_children(self) -> tuple[ChildTaskState, ...]:
@@ -3950,16 +5595,14 @@ class SupervisorState:
         """True only for an explicit durable ``workflow_role=qa`` child."""
 
         return any(
-            child.is_in_workflow(self.parent_task_id)
-            and child.workflow_role == "qa"
+            child.is_in_workflow(self.parent_task_id) and child.workflow_role == "qa"
             for child in self.children
         )
 
     @property
     def qa_legacy_primary_present(self) -> bool:
         return any(
-            child.is_in_workflow(self.parent_task_id)
-            and child.is_legacy_qa_primary
+            child.is_in_workflow(self.parent_task_id) and child.is_legacy_qa_primary
             for child in self.children
         )
 
@@ -3973,10 +5616,7 @@ class SupervisorState:
                 child.is_in_workflow(self.parent_task_id)
                 and child.workflow_role == "synthesis"
                 and (
-                    (
-                        SUPERVISOR_MARKER in child.body
-                        and action.value in child.body
-                    )
+                    (SUPERVISOR_MARKER in child.body and action.value in child.body)
                     or _is_direct_ceo_response_synthesis(
                         role=child.workflow_role,
                         body=child.body,
@@ -4027,7 +5667,10 @@ def _blocked_decision(
             parent_task_ids=(),
             reason="blocked_needs_user_input",
         )
-    if child.retry_count < state.max_retries and child.block_kind in {"transient", "retryable"}:
+    if child.retry_count < state.max_retries and child.block_kind in {
+        "transient",
+        "retryable",
+    }:
         return SupervisorDecision(
             SupervisorAction.RETRY_TASK,
             state.parent_task_id,
@@ -4132,8 +5775,10 @@ def _handled_empty_primary_control_root(
         and f"action={SupervisorAction.SYNTHESIZE.value}" in body
         and "synthesis_mode=deterministic_empty_primary_defer" in body
     )
-    if not root_id or SUPERVISOR_MARKER not in body or not (
-        is_control or is_empty_primary_defer
+    if (
+        not root_id
+        or SUPERVISOR_MARKER not in body
+        or not (is_control or is_empty_primary_defer)
     ):
         return None
     return root_id
@@ -4154,8 +5799,35 @@ _FAST_ADVISORY_EXECUTION_GUIDANCE = (
     "- Do not delegate, run experiments/backtests, create artifacts, or repeat equivalent lookups.\n"
     "- Stop once the current direction, up to two drivers, up to two uncertainties, and one or two checks are supported.\n"
     "- If a non-critical datum is unavailable, state the limitation and produce the bounded final_answer.\n"
-    "- Return a concise Korean user-ready final_answer; do not return an operational progress report.\n"
-    "- When calling kanban_complete, put the complete user-facing answer in result (the canonical downstream answer body). Keep summary to a brief handoff; do not leave the answer only in summary or metadata."
+    "- Return a concise Korean user-ready final_answer; do not return an operational progress report."
+)
+_TERMINAL_RESULT_CONTRACT_GUIDANCE = (
+    "Terminal result persistence contract (required):\n"
+    "- Before calling kanban_complete, put the complete user-facing answer in "
+    "result; final_answer should mirror it.\n"
+    "- Keep summary to a brief handoff; structured execution metadata is "
+    "supplementary and never the only answer store.\n"
+    "- kanban_complete is the final state transition and final tool call; do "
+    "not write the answer only after it.\n"
+    "- If required evidence is missing, use kanban_block with kind=needs_input "
+    "or finish with an explicit fail-closed answer in result."
+)
+_QUANT_ANALYSIS_EXECUTION_GUIDANCE = (
+    "Quant bounded evidence contract:\n"
+    "- This primary task owns the terminal handoff. Do not call delegate_task, "
+    "spawn a subagent, or create a child task for standard/fast analysis.\n"
+    "- Use only the allowed read-only Quant/MCP surfaces and stop after at most "
+    "two retrieval rounds; do not spend turns discovering unrelated tools.\n"
+    "- Before kanban_complete, include exactly one bounded retrieval_attempt "
+    "record with instrument, requested_window, source, tr, status, queried_at, "
+    "extracted_at, and snapshot_hash fields. Use UNAVAILABLE explicitly when "
+    "the source or hash cannot be obtained.\n"
+    "- If the source is unavailable or incomplete, set status=UNAVAILABLE, do "
+    "not calculate or invent return/volatility/Sharpe/MDD, and conclude HOLD "
+    "or NOT_VERIFIABLE.\n"
+    "- Put the complete Korean user-facing answer and the retrieval_attempt "
+    "record in result. Keep summary short; never leave the answer only in "
+    "summary or metadata."
 )
 _RISK_LEGAL_EVIDENCE_GUIDANCE = (
     "When a Risk handoff contains legal_evidence, cite only its official law.go.kr "
@@ -4174,6 +5846,8 @@ _SCOPED_REQUEST_CONTEXT_GUARD = (
     "- If the required target is absent, call kanban_block with needs_input "
     "instead of guessing."
 )
+
+
 def _is_planning_root_body(body: str) -> bool:
     """Recognize current and legacy planning roots through one predicate."""
 
@@ -4245,7 +5919,7 @@ def _delegation_plan_from_root_body(body: str) -> dict[str, str]:
         if not normalized_key.startswith(_DELEGATION_INSTRUCTION_PREFIX):
             continue
 
-        raw_profile = normalized_key[len(_DELEGATION_INSTRUCTION_PREFIX):].strip()
+        raw_profile = normalized_key[len(_DELEGATION_INSTRUCTION_PREFIX) :].strip()
         instruction = value.strip()
 
         if not raw_profile or not instruction:
@@ -4314,12 +5988,10 @@ def _materialization_plan_body(
 
         newer_mode_correction = any(
             isinstance(newer, Mapping)
-            and str(newer.get("author") or "").strip().casefold()
-            == "ceo-agent"
+            and str(newer.get("author") or "").strip().casefold() == "ceo-agent"
             and "delegation_instruction." not in str(newer.get("body") or "")
-            and _analysis_execution_mode_from_root_body(
-                str(newer.get("body") or "")
-            ) is not None
+            and _analysis_execution_mode_from_root_body(str(newer.get("body") or ""))
+            is not None
             for newer in comments[comment_index + 1 :]
         )
         if newer_mode_correction:
@@ -4426,11 +6098,24 @@ def _initial_primary_materialization_decisions(
 
     for profile in missing:
         department = department_for_canonical_profile(profile)
-        execution_guidance = (
-            _FAST_ADVISORY_EXECUTION_GUIDANCE
-            if analysis_mode == "fast_advisory"
-            else ""
-        )
+        guidance_parts: list[str] = []
+        if analysis_mode == "fast_advisory":
+            guidance_parts.append(_FAST_ADVISORY_EXECUTION_GUIDANCE)
+        if (
+            analysis_mode == "fast_advisory"
+            or profile == canonical_profile_for_department("risk")
+        ):
+            guidance_parts.append(_TERMINAL_RESULT_CONTRACT_GUIDANCE)
+        execution_guidance = "\n\n".join(guidance_parts)
+        if profile == canonical_profile_for_department("quant") and analysis_mode in {
+            "fast_advisory",
+            "standard_analysis",
+        }:
+            execution_guidance = "\n\n".join(
+                part
+                for part in (execution_guidance, _QUANT_ANALYSIS_EXECUTION_GUIDANCE)
+                if part
+            )
         feedback_guidance = approved_feedback_section_from_root(
             root_body,
             department,
@@ -4450,7 +6135,7 @@ def _initial_primary_materialization_decisions(
                     f"{plan[profile]}\n\n"
                     f"{feedback_guidance}"
                 ),
-                parent_task_ids=(),
+                parent_task_ids=(state.parent_task_id,),
                 reason=f"initial_primary_materialize:{profile}",
             )
         )
@@ -4520,11 +6205,14 @@ def _deferred_conditional_decision(
         return None
 
     try:
-        from apps.api.ceo import _conditional_rule_child_body  # noqa: PLC0415
-        from apps.api.user_order_workflow import user_order_repository  # noqa: PLC0415
+        from apps.api.ceo import _conditional_rule_child_body
+        from apps.api.user_order_workflow import user_order_repository
 
         record = user_order_repository().get(order_request_id)
-        if record is None or record.ceo_root_task_id not in {None, state.parent_task_id}:
+        if record is None or record.ceo_root_task_id not in {
+            None,
+            state.parent_task_id,
+        }:
             logger.warning(
                 "deferred-conditional-authority-mismatch root=%s order_request=%s",
                 state.parent_task_id,
@@ -4540,7 +6228,7 @@ def _deferred_conditional_decision(
             )
             return None
         from orchestration.ceo_workflow_scope import (
-            UserPaperOrderScope,  # noqa: PLC0415
+            UserPaperOrderScope,
         )
 
         scope = UserPaperOrderScope(
@@ -4582,7 +6270,6 @@ def _deferred_conditional_decision(
         reason="deferred_conditional_after_research",
         initial_status="blocked",
     )
-
 
 
 def _single_primary_passthrough_child(
@@ -4684,7 +6371,9 @@ def _analysis_synthesis_decision(
 ) -> SupervisorDecision | None:
     """Build synthesis from primary state without consulting QA state."""
 
-    if state.workflow_mode != "analysis" or state.has_action(SupervisorAction.SYNTHESIZE):
+    if state.workflow_mode != "analysis" or state.has_action(
+        SupervisorAction.SYNTHESIZE
+    ):
         return None
     if state.selected_primary_profiles and (
         state.missing_primary_profiles or state.duplicate_primary_profiles
@@ -4753,10 +6442,25 @@ def _analysis_synthesis_decision(
             "observability and scorecard windows distinct, and include the artifact "
             "filename and SHA-256 when available. Never merge those windows or expose "
             "local paths, session IDs, or raw metadata to the user.\n"
+            "When a Research handoff includes provenance.source_references, preserve "
+            "the source name, publication date, and full URL in the Korean final "
+            "answer. For a Research-only request, keep separate headings for "
+            "긍정 근거 and 반대 근거, retain up to two numbered items in each, and "
+            "include 관찰할 촉매·무효화 조건 plus 자료 기준과 확인하지 못한 자료. "
+            "For every numbered positive or counter item that contains a factual "
+            "claim or number, append that item's source name, publication date, "
+            "and full URL; do not leave a counter item with only an implicit or "
+            "shared citation. "
+            "Preserve every source-backed number's sign, unit, and meaning "
+            "exactly (for example, △ or - denotes a loss; never rewrite it as "
+            "a merely decreased positive amount). If the source meaning is "
+            "uncertain, omit the number and state the verification limit. "
+            "Never claim that a URL or citation was provided unless it is printed "
+            "in the final answer; if a source is unavailable, say so explicitly.\n"
             + _RISK_LEGAL_EVIDENCE_GUIDANCE
             + json.dumps(
                 [
-                    _synthesis_handoff_payload(child)
+                    _synthesis_handoff_payload(child, root_body=state.root_body)
                     for child in state.analysis_children
                 ],
                 ensure_ascii=False,
@@ -4784,7 +6488,12 @@ def _binding_partial_defer_result(
         )
         if child.done:
             result = " ".join(
-                (child.final_answer or child.result or child.summary or "결과 본문 없음")
+                (
+                    child.final_answer
+                    or child.result
+                    or child.summary
+                    or "결과 본문 없음"
+                )
                 .strip()
                 .split()
             )
@@ -4825,8 +6534,10 @@ def _binding_partial_defer_result(
             "🧠 **CEO 종합**",
             "",
             "**결론: DEFER**",
-            "필수 부서 결과가 완전하지 않아 투자 판단과 추가 실행을 "
-            "승인하지 않습니다. 확인된 부분 결과와 실패 범위를 그대로 전달합니다.",
+            (
+                "필수 부서 결과가 완전하지 않아 투자 판단과 추가 실행을 "
+                "승인하지 않습니다. 확인된 부분 결과와 실패 범위를 그대로 전달합니다."
+            ),
             "",
             "### 확보된 부분 결과",
             *(completed or ["- 없음"]),
@@ -4974,9 +6685,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                     retry_count=child.retry_count,
                     reason="failed_child_retry",
                 )
-            if not (
-                state.workflow_mode == "binding" and state.root_is_user_query
-            ):
+            if not (state.workflow_mode == "binding" and state.root_is_user_query):
                 return SupervisorDecision(
                     SupervisorAction.BLOCK_ABORT,
                     state.parent_task_id,
@@ -5005,9 +6714,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if state.has_action(SupervisorAction.SYNTHESIZE):
         return None
-    if any(
-        child.blocked or child.failed for child in state.analysis_children
-    ):
+    if any(child.blocked or child.failed for child in state.analysis_children):
         return _binding_partial_defer_decision(
             state,
             reason="primary_department_partial_failure",
@@ -5051,17 +6758,17 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
             "Synthesize the terminal primary/Risk result immediately. QA is a "
             "post-response asynchronous audit and is never a response gate. For a marked "
             "user PAPER-order result, preserve the primary final_answer verbatim; "
-                "a non-binding or rejected result must explicitly say no order was "
-                "submitted and must never be described as pending review.\n"
-                "When an HR handoff is present, preserve its provenance in the Korean "
-                "final answer: identify the source endpoint and HTTP status, keep the "
-                "observability and scorecard windows distinct, and include the artifact "
-                "filename and SHA-256 when available. Never merge those windows or expose "
-                "local paths, session IDs, or raw metadata to the user.\n"
-                + _RISK_LEGAL_EVIDENCE_GUIDANCE
+            "a non-binding or rejected result must explicitly say no order was "
+            "submitted and must never be described as pending review.\n"
+            "When an HR handoff is present, preserve its provenance in the Korean "
+            "final answer: identify the source endpoint and HTTP status, keep the "
+            "observability and scorecard windows distinct, and include the artifact "
+            "filename and SHA-256 when available. Never merge those windows or expose "
+            "local paths, session IDs, or raw metadata to the user.\n"
+            + _RISK_LEGAL_EVIDENCE_GUIDANCE
             + json.dumps(
                 [
-                    _synthesis_handoff_payload(child)
+                    _synthesis_handoff_payload(child, root_body=state.root_body)
                     for child in state.analysis_children
                 ],
                 ensure_ascii=False,
@@ -5079,7 +6786,9 @@ def parse_supervisor_output(payload: str | Mapping[str, Any]) -> SupervisorDecis
         try:
             payload = json.loads(payload)
         except json.JSONDecodeError as exc:
-            raise SupervisorValidationError("supervisor output is not valid JSON") from exc
+            raise SupervisorValidationError(
+                "supervisor output is not valid JSON"
+            ) from exc
     if not isinstance(payload, Mapping):
         raise SupervisorValidationError("supervisor output must be an object")
     allowed = {
@@ -5100,7 +6809,9 @@ def parse_supervisor_output(payload: str | Mapping[str, Any]) -> SupervisorDecis
         action = SupervisorAction(str(payload["action"]))
         parent_task_id = str(payload["parent_task_id"])
     except (KeyError, ValueError, TypeError) as exc:
-        raise SupervisorValidationError("invalid supervisor action or parent_task_id") from exc
+        raise SupervisorValidationError(
+            "invalid supervisor action or parent_task_id"
+        ) from exc
     assignee = payload.get("assignee")
     if assignee is not None:
         try:
@@ -5115,13 +6826,17 @@ def parse_supervisor_output(payload: str | Mapping[str, Any]) -> SupervisorDecis
         SupervisorAction.RUN_QA,
         SupervisorAction.SYNTHESIZE,
     } and (not assignee or not payload.get("title") or not payload.get("body")):
-        raise SupervisorValidationError(f"{action.value} requires canonical assignee, title, and body")
+        raise SupervisorValidationError(
+            f"{action.value} requires canonical assignee, title, and body"
+        )
     if action == SupervisorAction.RETRY_TASK and not payload.get("target_task_id"):
         raise SupervisorValidationError("RETRY_TASK requires target_task_id")
     return SupervisorDecision(
         action=action,
         parent_task_id=parent_task_id,
-        target_task_id=str(payload["target_task_id"]) if payload.get("target_task_id") else None,
+        target_task_id=str(payload["target_task_id"])
+        if payload.get("target_task_id")
+        else None,
         assignee=assignee,
         title=str(payload["title"]) if payload.get("title") else None,
         body=str(payload["body"]) if payload.get("body") else None,
@@ -5136,12 +6851,12 @@ class _DirectKanbanShowUnavailable(RuntimeError):
 
 
 class _HermesDirectKanbanReader:
-    """Read the exact Hermes ``show --json`` projection without a subprocess.
+    """Read Hermes Kanban projections without a subprocess.
 
     This is deliberately an adapter around Hermes' own ``kanban_db`` helpers,
     not a second workflow reader.  The connection is SQLite read-only and the
     response is assembled with Hermes' own ``_task_to_dict`` serializer and
-    the same helper calls used by ``hermes kanban show --json``.  Import,
+    the same helpers used by ``hermes kanban show/list --json``.  Import,
     schema, or read failures are surfaced to the caller so the CLI remains the
     authoritative fallback.
     """
@@ -5175,7 +6890,7 @@ class _HermesDirectKanbanReader:
             self._kanban_db = kanban_db
             self._task_to_dict = _task_to_dict
             self._db_uri = db_path.as_uri() + "?mode=ro"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - optional native reader is fail-open.
             self._unavailable_reason = type(exc).__name__
 
     @property
@@ -5209,8 +6924,11 @@ class _HermesDirectKanbanReader:
         if connection is not None:
             try:
                 connection.close()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - cleanup is fail-open.
+                logger.debug(
+                    "direct-kanban-reader-close-failed error=%s",
+                    type(exc).__name__,
+                )
 
     def show(self, task_id: str) -> dict[str, Any]:
         """Return the same structured projection as Hermes ``show --json``."""
@@ -5274,6 +6992,28 @@ class _HermesDirectKanbanReader:
                 self._drop_connection()
                 raise _DirectKanbanShowUnavailable(type(exc).__name__) from exc
 
+    def list_tasks(
+        self, *, include_archived: bool = False
+    ) -> tuple[dict[str, Any], ...]:
+        """Return the same task rows as Hermes ``list --json``."""
+
+        with self._lock:
+            try:
+                assert self._kanban_db is not None
+                assert self._task_to_dict is not None
+                conn = self._connection_for_read()
+                tasks = self._kanban_db.list_tasks(
+                    conn,
+                    include_archived=include_archived,
+                    order_by="created-desc",
+                )
+                return tuple(self._task_to_dict(task) for task in tasks)
+            except _DirectKanbanShowUnavailable:
+                raise
+            except Exception as exc:
+                self._drop_connection()
+                raise _DirectKanbanShowUnavailable(type(exc).__name__) from exc
+
 
 class HermesKanbanClient:
     """Hermes Kanban adapter with a fail-closed native read fast path."""
@@ -5291,7 +7031,9 @@ class HermesKanbanClient:
         self.environment = dict(environment or os.environ)
         using_default_runner = runner is None
         self.runner = runner or subprocess.run
-        self.timeout = timeout or float(os.environ.get("CEO_SUPERVISOR_CLI_TIMEOUT_SECONDS", "15"))
+        self.timeout = timeout or float(
+            os.environ.get("CEO_SUPERVISOR_CLI_TIMEOUT_SECONDS", "15")
+        )
         self.root_index = root_index
         if self.root_index is None and using_default_runner:
             self.root_index = SQLiteRootScopedIndex(self.environment)
@@ -5517,9 +7259,7 @@ class HermesKanbanClient:
         # transports so the policy layer cannot observe two payload shapes.
         task = payload.get("task", payload)
         if not isinstance(task, dict):
-            raise HermesKanbanCommandError(
-                "hermes kanban show returned no task object"
-            )
+            raise HermesKanbanCommandError("hermes kanban show returned no task object")
         normalized = dict(task)
         for key in (
             "latest_summary",
@@ -5602,7 +7342,13 @@ class HermesKanbanClient:
         # 사용자 발원(origin=user-query) 워크플로의 자식은 대기열에서 공장 카드보다
         # 앞선다. 루트만 앞세우면 소용이 없다 - 실제로 답을 만드는 것은 자식이고,
         # 자식이 공장 뒤에 서면 사용자 지연은 그대로다(2026-08-14 실측).
-        priority = USER_QUERY_PRIORITY if is_user_query_body(body) else 0
+        priority = 0
+        if is_user_query_body(body):
+            priority = (
+                RESEARCH_QUERY_PRIORITY
+                if assignee == CANONICAL_PROFILE_BY_DEPARTMENT["research"]
+                else USER_QUERY_PRIORITY
+            )
         request = CanonicalKanbanTaskRequest(
             assignee, title, body, idempotency_key, priority=priority
         )
@@ -5744,14 +7490,32 @@ class HermesKanbanClient:
                 operation="update",
             )
 
-    def list_tasks(self) -> tuple[dict[str, Any], ...]:
+    def list_tasks(
+        self, *, include_archived: bool = False
+    ) -> tuple[dict[str, Any], ...]:
         """List current-board tasks through the supported Hermes JSON API."""
 
+        direct_reader = self._direct_show_reader
+        if direct_reader is not None and direct_reader.available:
+            try:
+                rows = direct_reader.list_tasks(include_archived=include_archived)
+            except _DirectKanbanShowUnavailable as exc:
+                logger.warning(
+                    "hermes-kanban-list-direct-fallback include_archived=%s reason=%s",
+                    str(include_archived).lower(),
+                    type(exc).__name__,
+                )
+            else:
+                with self._retrieval_metrics_lock:
+                    self._full_board_list_count += 1
+                return rows
+
         started_ns = time.perf_counter_ns()
+        args = ["kanban", "list", "--json"]
+        if include_archived:
+            args.append("--archived")
         try:
-            payload = json.loads(
-                self._run(("kanban", "list", "--json"), operation="list")
-            )
+            payload = json.loads(self._run(tuple(args), operation="list"))
         except (json.JSONDecodeError, TypeError) as exc:
             self._record_json_failure("list")
             raise HermesKanbanCommandError(
@@ -5770,7 +7534,9 @@ class HermesKanbanClient:
             self._retrieval_metrics["full_board_list_latency_ms"].append(elapsed_ms)
         return tuple(dict(item) for item in payload)
 
-    def recovery_candidate_rows(self) -> tuple[dict[str, Any], ...]:
+    def recovery_candidate_rows(
+        self, *, include_historical: bool = False
+    ) -> tuple[dict[str, Any], ...]:
         """Return SQLite discovery candidates, never authoritative task state."""
 
         index = self.root_index
@@ -5783,7 +7549,12 @@ class HermesKanbanClient:
             )
         started_ns = time.perf_counter_ns()
         try:
-            rows = discovery()
+            try:
+                rows = discovery(include_historical=include_historical)
+            except TypeError:
+                # Keep small test/embedding indexes compatible while the
+                # production index adopts the explicit steady-state filter.
+                rows = discovery()
         finally:
             elapsed_ms = max(
                 0,
@@ -5877,24 +7648,16 @@ class HermesKanbanClient:
         return list(dict.fromkeys(scoped_ids))
 
     @staticmethod
-    def _is_canonical_scoped_root(
-        payload: Mapping[str, Any], task_id: str
-    ) -> bool:
+    def _is_canonical_scoped_root(payload: Mapping[str, Any], task_id: str) -> bool:
         body = str(payload.get("body") or "")
         role = workflow_role_from_body(body)
         return (
-            (
-                role == "root"
-                and is_user_query_body(body)
-                and workflow_mode_from_body(body) in {"analysis", "binding"}
-            )
-            or (
-                CEO_WORKFLOW_SCOPE_MARKER in body
-                and (
-                    role == "root"
-                    or "root_task_role=scope_and_planning" in body
-                )
-            )
+            role == "root"
+            and is_user_query_body(body)
+            and workflow_mode_from_body(body) in {"analysis", "binding"}
+        ) or (
+            CEO_WORKFLOW_SCOPE_MARKER in body
+            and (role == "root" or "root_task_role=scope_and_planning" in body)
         )
 
     def _hydrate_ids(
@@ -5927,9 +7690,7 @@ class HermesKanbanClient:
                 for task_id in pending
             ]
             hydrated_payloads = tuple(future.result() for future in futures)
-        hydrated.update(
-            dict(zip(pending, hydrated_payloads, strict=True))
-        )
+        hydrated.update(dict(zip(pending, hydrated_payloads, strict=True)))
         return hydrated
 
     def _full_board_authoritative_snapshot(
@@ -5952,9 +7713,7 @@ class HermesKanbanClient:
         }
         task_row = listed_by_id.get(task_id)
         task_refs = (
-            extract_scope_references(task_row).root_ids
-            if task_row is not None
-            else ()
+            extract_scope_references(task_row).root_ids if task_row is not None else ()
         )
         effective_root_id = str(root_id or "").strip() or (
             task_refs[0] if task_refs else task_id
@@ -6007,9 +7766,7 @@ class HermesKanbanClient:
             try:
                 root_for_task = getattr(self.root_index, "root_id_for_task", None)
                 indexed_root = (
-                    root_for_task(task_id)
-                    if callable(root_for_task)
-                    else None
+                    root_for_task(task_id) if callable(root_for_task) else None
                 )
             except RootScopedIndexUnavailable:
                 indexed_root = None
@@ -6020,9 +7777,7 @@ class HermesKanbanClient:
                 )
                 with self._retrieval_metrics_lock:
                     self._root_lookup_count += 1
-                    self._retrieval_metrics["root_lookup_latency_ms"].append(
-                        elapsed_ms
-                    )
+                    self._retrieval_metrics["root_lookup_latency_ms"].append(elapsed_ms)
             if indexed_root:
                 return indexed_root
 
@@ -6087,10 +7842,7 @@ class HermesKanbanClient:
         try:
             task_payload = self.show(task_id)
             task_scope = extract_scope_references(task_payload).root_ids
-            task_is_scoped = (
-                task_id != root_id
-                and task_scope == (root_id,)
-            )
+            task_is_scoped = task_id != root_id and task_scope == (root_id,)
             task_is_root = task_id == root_id and self._is_canonical_scoped_root(
                 task_payload, task_id
             )
@@ -6111,7 +7863,9 @@ class HermesKanbanClient:
             # scope.  Missing it means the index is stale or the correlation is
             # malformed; do not make a decision from an incomplete set.
             if task_id != root_id and task_id not in scoped_ids:
-                raise RootScopedIndexUnavailable("indexed candidate set omitted event task")
+                raise RootScopedIndexUnavailable(
+                    "indexed candidate set omitted event task"
+                )
 
             hydrate_ids = list(dict.fromkeys((root_id, task_id, *scoped_ids)))
             hydrated = self._hydrate_ids(
@@ -6120,16 +7874,25 @@ class HermesKanbanClient:
             )
 
             root_payload = hydrated[root_id]
-            if str(root_payload.get("id") or root_payload.get("task_id") or "") != root_id:
-                raise RootScopedIndexUnavailable("indexed root show returned another task")
+            if (
+                str(root_payload.get("id") or root_payload.get("task_id") or "")
+                != root_id
+            ):
+                raise RootScopedIndexUnavailable(
+                    "indexed root show returned another task"
+                )
             for candidate_id in scoped_ids:
                 payload = hydrated[candidate_id]
                 payload_id = str(payload.get("id") or payload.get("task_id") or "")
                 if payload_id != candidate_id:
-                    raise RootScopedIndexUnavailable("indexed show returned another task")
+                    raise RootScopedIndexUnavailable(
+                        "indexed show returned another task"
+                    )
                 refs = extract_scope_references(payload).root_ids
                 if refs != (root_id,):
-                    raise RootScopedIndexUnavailable("indexed candidate has inconsistent root correlation")
+                    raise RootScopedIndexUnavailable(
+                        "indexed candidate has inconsistent root correlation"
+                    )
 
             logger.info(
                 "kanban-root-retrieval mode=indexed root=%s candidates=%d "
@@ -6231,11 +7994,11 @@ class HermesKanbanClient:
     def _workflow_impl(self, task_id: str) -> tuple[str, tuple[dict[str, Any], ...]]:
         """Collect one workflow using execution edges or the durable scope marker.
 
-        Current CEO primary tasks deliberately have no parent edge to the
-        planning root: Hermes treats ``--parent`` as a blocking dependency.
-        Those tasks carry ``workflow_root_task_id`` in their body and are
-        discovered through ``kanban list --json``. Parent-linked workflows from
-        before this contract remain supported through the ancestry fallback.
+        Current CEO primary tasks carry a real parent edge to the planning
+        root and also carry ``workflow_root_task_id`` in their body. The body
+        marker remains the compatibility index for parentless tasks created by
+        older supervisor versions; new materialization must not depend on that
+        fallback to form the workflow graph.
         """
 
         cache: dict[str, dict[str, Any]] = {}
@@ -6249,10 +8012,10 @@ class HermesKanbanClient:
         scoped_root_ids = extract_scope_references(starting_payload).root_ids
 
         # A scoped primary/QA/synthesis declares workflow_root_task_id directly.
-        # The root itself deliberately does not point to itself; identify it by
-        # the durable workflow marker + workflow_role=root and perform the same
-        # marker-based discovery. This keeps parentless primaries inside the
-        # workflow scope without turning the root into an execution dependency.
+        # The root itself does not point to itself; identify it by the durable
+        # workflow marker + workflow_role=root and perform the same marker-based
+        # discovery. The marker is retained for legacy cards, not as a reason
+        # to omit the canonical root dependency from new cards.
         # hgfinance-canonical-root-scope-v1
         #
         # Current direct CEO ingress roots are canonical user-query roots but
@@ -6260,9 +8023,7 @@ class HermesKanbanClient:
         # Parentless primaries still declare workflow_root_task_id, so these
         # roots must enter marker-based scope discovery rather than ancestry
         # fallback.
-        canonical_user_root = self._is_canonical_scoped_root(
-            starting_payload, task_id
-        )
+        canonical_user_root = self._is_canonical_scoped_root(starting_payload, task_id)
         is_scoped_root = canonical_user_root
 
         if scoped_root_ids or is_scoped_root:
@@ -6316,7 +8077,9 @@ class HermesKanbanClient:
                 descendants(child_id)
 
         descendants(root_id)
-        return root_id, tuple(task for current, task in cache.items() if current != root_id)
+        return root_id, tuple(
+            task for current, task in cache.items() if current != root_id
+        )
 
 
 DEPARTMENT_DISCORD_LABELS: dict[str, tuple[str, str]] = {
@@ -6424,8 +8187,7 @@ def _department_progress_text(
 
         if tail:
             quoted = "\n".join(
-                f"> {line}" if line.strip() else ">"
-                for line in tail.splitlines()
+                f"> {line}" if line.strip() else ">" for line in tail.splitlines()
             )
             detail_hint = (
                 "\n\n🧵 **전체 상세 분석은 이 요청의 스레드에서 확인할 수 있습니다.**"
@@ -6461,8 +8223,7 @@ def _department_progress_text(
         if len(result_text) > 450:
             result_text = result_text[:447].rstrip() + "..."
         quoted = "\n".join(
-            f"> {line}" if line.strip() else ">"
-            for line in result_text.splitlines()
+            f"> {line}" if line.strip() else ">" for line in result_text.splitlines()
         )
         return (
             f"{icon} **{label}**\n"
@@ -6531,12 +8292,15 @@ class CeoSupervisorService:
         max_retries: int = 2,
         max_wakeups: int = 8,
         qa_required: bool = True,
-        decider: Callable[[SupervisorState], SupervisorDecision | None] = decide_supervisor,
+        decider: Callable[
+            [SupervisorState], SupervisorDecision | None
+        ] = decide_supervisor,
         synthesis_projection: Any | None = None,
         qa_projection: Any | None = None,
         discord_delivery: DiscordFinalDelivery | None = None,
         department_notion_projection: Any | None = None,
         experience_bank: ExperienceBank | None = None,
+        d5_feedback_ledger: FeedbackLedger | None = None,
         terminal_observer_submit: Callable[[Callable[[], None]], bool] | None = None,
     ) -> None:
         self.client = client
@@ -6549,6 +8313,9 @@ class CeoSupervisorService:
         self.qa_projection = qa_projection
         self.discord_delivery = discord_delivery
         self.experience_bank = experience_bank or ExperienceBank.from_env()
+        # D5 improvement candidates share the existing QA approval/benchmark
+        # ledger, but are created lazily only after a verified QA finding.
+        self._d5_feedback_ledger = d5_feedback_ledger
         # Production supplies a bounded background queue so slow Discord and
         # Notion projections do not hold an event worker. Tests and embedders
         # default to synchronous execution for deterministic compatibility.
@@ -6605,64 +8372,109 @@ class CeoSupervisorService:
         self._d5_recording_roots: set[str] = set()
         self._d5_record_lock = threading.Lock()
 
-    def _record_discord_experience_once(
+    def _record_discord_experience_after_qa(
         self,
         *,
         root_id: str,
         root_payload: Mapping[str, Any],
+        qa_task: Mapping[str, Any],
+        workflow_tasks: Sequence[Mapping[str, Any]],
+        projection_result: Mapping[str, Any],
     ) -> None:
-        """Record one safe D5 aggregate after the response-plane finalization."""
+        """Record one verified D5 aggregate after the async QA projection."""
 
         if not getattr(self.experience_bank, "enabled", False):
             return
         root = str(root_id or "").strip()
         body = str(root_payload.get("body") or "")
+        qa_id = str(qa_task.get("id") or qa_task.get("task_id") or "").strip()
+        projection_status = str(projection_result.get("status") or "").casefold()
         if (
             not root
             or not is_user_query_body(body)
             or user_paper_order_scope_from_body(body) is not None
+            or not qa_id
+            or projection_status not in {"persisted", "duplicate"}
         ):
             return
+        experience_key = f"{root}:{qa_id}"
         with self._d5_record_lock:
-            if root in self._d5_recorded_roots or root in self._d5_recording_roots:
+            if (
+                experience_key in self._d5_recorded_roots
+                or experience_key in self._d5_recording_roots
+            ):
                 return
-            self._d5_recording_roots.add(root)
+            self._d5_recording_roots.add(experience_key)
         try:
-            workflow_root, task_payloads = self.client.workflow(root)
-            if workflow_root != root:
-                return
             terminal_status = str(
-                root_payload.get("status")
-                or root_payload.get("outcome")
-                or "completed"
+                root_payload.get("status") or root_payload.get("outcome") or "completed"
             )
             record = build_discord_experience_record(
                 root_id=root,
                 root_payload=root_payload,
-                task_payloads=task_payloads,
+                task_payloads=workflow_tasks,
                 terminal_status=terminal_status,
+                qa_decision=str(
+                    projection_result.get("canonical_decision") or "UNKNOWN"
+                ),
+                qa_findings=(
+                    projection_result.get("findings")
+                    if isinstance(projection_result.get("findings"), Sequence)
+                    and not isinstance(
+                        projection_result.get("findings"), (str, bytes, bytearray)
+                    )
+                    else ()
+                ),
+                qa_task_id=qa_id,
             )
             result = self.experience_bank.record(record)
+            candidate_ids: tuple[str, ...] = ()
+            if not record.success or record.failure_codes:
+                try:
+                    feedback_ledger = self._d5_feedback_ledger
+                    if feedback_ledger is None:
+                        feedback_ledger = d5_feedback_ledger_from_env()
+                    candidate_ids = record_verified_d5_candidates(
+                        feedback_ledger,
+                        root_id=root,
+                        root_payload=root_payload,
+                        qa_task_id=qa_id,
+                        projection_result=projection_result,
+                        record=record,
+                    )
+                except Exception as exc:  # noqa: BLE001 - improvement is fail-open.
+                    logger.warning(
+                        "memo_harness_d5_improvement_candidate_failed root=%s qa=%s "
+                        "error=%s detail=%s",
+                        root,
+                        qa_id,
+                        type(exc).__name__,
+                        _text(str(exc))[:160],
+                    )
             if result.available:
                 with self._d5_record_lock:
-                    self._d5_recorded_roots.add(root)
+                    self._d5_recorded_roots.add(experience_key)
             logger.info(
-                "memo_harness_d5_discord_record root=%s mode=%s "
-                "available=%s written=%s",
+                "memo_harness_d5_discord_verified_record root=%s qa=%s "
+                "mode=%s available=%s written=%s success=%s candidates=%s",
                 root,
+                qa_id,
                 result.mode,
                 str(result.available).lower(),
                 str(result.written).lower(),
+                str(record.success).lower(),
+                ",".join(candidate_ids) or "none",
             )
         except Exception as exc:  # noqa: BLE001 - D5 is advisory/fail-open.
             logger.warning(
-                "memo_harness_d5_discord_record_failed root=%s error=%s",
+                "memo_harness_d5_discord_verified_record_failed root=%s qa=%s error=%s",
                 root,
+                qa_id,
                 type(exc).__name__,
             )
         finally:
             with self._d5_record_lock:
-                self._d5_recording_roots.discard(root)
+                self._d5_recording_roots.discard(experience_key)
 
     def _remember_hr_response_delivery(
         self,
@@ -6725,9 +8537,7 @@ class CeoSupervisorService:
         ):
             return None
         for comment in reversed(comments):
-            body = str(
-                comment.get("body") if isinstance(comment, Mapping) else comment
-            )
+            body = str(comment.get("body") if isinstance(comment, Mapping) else comment)
             if not body.startswith(_HR_RESPONSE_DELIVERY_MARKER):
                 continue
             fields = {
@@ -6738,16 +8548,12 @@ class CeoSupervisorService:
             if fields.get("root_task_id") != root_task_id:
                 continue
             return {
-                "response_task_id": str(
-                    task.get("id") or task.get("task_id") or ""
-                ),
+                "response_task_id": str(task.get("id") or task.get("task_id") or ""),
                 "discord_status": fields.get("discord_status", "unconfirmed"),
                 "discord_duplicate": fields.get("discord_status") == "deduped",
                 "langsmith_closed": fields.get("langsmith_status")
                 == "published_or_deduped",
-                "langsmith_status": fields.get(
-                    "langsmith_status", "unconfirmed"
-                ),
+                "langsmith_status": fields.get("langsmith_status", "unconfirmed"),
                 "content": _text(
                     task.get("final_answer")
                     or task.get("result")
@@ -6772,11 +8578,6 @@ class CeoSupervisorService:
 
         terminal_payload = _terminal_payload_mapping(terminal_payload)
 
-        self._record_discord_experience_once(
-            root_id=root_id,
-            root_payload=root_payload,
-        )
-
         with self._closed_root_traces_lock:
             if root_id in self._closed_root_traces:
                 return True
@@ -6793,9 +8594,8 @@ class CeoSupervisorService:
             # callers provide the fresh payload, preserving restart safety.
             comments = root_payload.get("comments") or []
             if any(
-                _LANGSMITH_DIRECT_ROOT_MARKER in str(
-                    comment.get("body") if isinstance(comment, Mapping) else comment
-                )
+                _LANGSMITH_DIRECT_ROOT_MARKER
+                in str(comment.get("body") if isinstance(comment, Mapping) else comment)
                 for comment in comments
             ):
                 with self._closed_root_traces_lock:
@@ -6840,9 +8640,7 @@ class CeoSupervisorService:
                 )
                 ended_at = datetime.fromtimestamp(ended, tz=timezone.utc)
                 resolved_task_id = task_id or str(
-                    answer_payload.get("id")
-                    or answer_payload.get("task_id")
-                    or root_id
+                    answer_payload.get("id") or answer_payload.get("task_id") or root_id
                 )
                 has_discord_context = any(
                     read_marker(candidate_body, marker)
@@ -6879,7 +8677,7 @@ class CeoSupervisorService:
                             root_id,
                             f"{_LANGSMITH_DIRECT_ROOT_MARKER} status=published",
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - observer marker is fail-open.
                         logger.warning(
                             "langsmith-direct-root-marker-failed root=%s",
                             root_id,
@@ -6897,7 +8695,11 @@ class CeoSupervisorService:
         # process; prompt/answer text is never sent to LangSmith.
         answer_payload = terminal_payload or root_payload
         answer = self._root_explicit_response_content(answer_payload)
-        prompt = body.split("\n## User request\n", 1)[1].strip() if "\n## User request\n" in body else ""
+        prompt = (
+            body.split("\n## User request\n", 1)[1].strip()
+            if "\n## User request\n" in body
+            else ""
+        )
         semantic_qa = evaluate_prompt_answer(
             prompt,
             answer,
@@ -6905,7 +8707,10 @@ class CeoSupervisorService:
             status=status,
         )
         try:
-            from orchestration.llm_observability import close_root_trace
+            from orchestration.llm_observability import (
+                close_root_trace,
+                redacted_content_summary,
+            )
 
             closed = close_root_trace(
                 context,
@@ -6925,6 +8730,7 @@ class CeoSupervisorService:
                     "terminal_department": department or "ceo-workflow",
                 },
                 semantic_qa=semantic_qa.as_metadata(),
+                output_summary=redacted_content_summary(answer, kind="ceo_response"),
             )
         except Exception as exc:  # noqa: BLE001 - observability is fail-open.
             logger.warning(
@@ -6947,6 +8753,108 @@ class CeoSupervisorService:
     def _parent_lock(self, parent_task_id: str) -> threading.Lock:
         with self._parent_locks_lock:
             return self._parent_locks.setdefault(parent_task_id, threading.Lock())
+
+    @staticmethod
+    def _qa_langsmith_evidence(
+        *,
+        root_task_id: str,
+        root_payload: Mapping[str, Any],
+        response_task_id: str,
+        primary_handoffs: Sequence[Mapping[str, Any]],
+        task_payloads: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Attach one bounded LangSmith metadata slice to the QA task.
+
+        QA must receive the same trace evidence that operators inspect.  The
+        shared query adapter owns transport/fallback behavior; this method only
+        supplies the current workflow correlation set and time window.  A
+        provider outage is represented as unavailable evidence so the QA
+        worker can record WARN/unknown instead of failing or guessing.
+        """
+
+        correlation_ids = {
+            str(root_task_id),
+            str(response_task_id),
+            langsmith_trace_run_id_from_body(str(root_payload.get("body") or "")),
+            read_marker(str(root_payload.get("body") or ""), "request_id"),
+        }
+        correlation_ids.update(
+            str(item.get("task_id") or "")
+            for item in primary_handoffs
+            if item.get("task_id")
+        )
+        correlation_ids.update(
+            str(payload.get("id") or payload.get("task_id") or "")
+            for payload in task_payloads
+            if terminal_workflow_role(payload) in {"primary", "synthesis"}
+        )
+        numeric_times = []
+        for payload in task_payloads:
+            for key in ("created_at", "started_at", "completed_at", "finished_at"):
+                try:
+                    value = float(payload.get(key) or 0)
+                except (TypeError, ValueError):
+                    value = 0
+                if value > 0:
+                    numeric_times.append(value)
+        now = time.time()
+        earliest = min(numeric_times, default=now - 3600)
+        # Keep a bounded request-local window. The lower bound is also capped
+        # to one day so a malformed legacy timestamp cannot cause a full scan.
+        lower_bound = max(now - 86_400, earliest - 120)
+        try:
+            from orchestration.langsmith_queries import (
+                query_correlated_trace_metadata,
+            )
+
+            evidence = query_correlated_trace_metadata(
+                correlation_ids=correlation_ids,
+                min_start_time=datetime.fromtimestamp(lower_bound, tz=timezone.utc),
+                max_start_time=datetime.now(timezone.utc),
+                max_results=300,
+            )
+            if isinstance(evidence, Mapping):
+                normalized = dict(evidence)
+                traces = normalized.get("traces")
+                trace_items = (
+                    tuple(item for item in traces if isinstance(item, Mapping))
+                    if isinstance(traces, Sequence)
+                    and not isinstance(traces, (str, bytes, bytearray))
+                    else ()
+                )
+                normalized["trace_manifest"] = {
+                    "trace_count": len(trace_items),
+                    "department_count": len(
+                        {
+                            str(item.get("department") or "")
+                            for item in trace_items
+                            if str(item.get("department") or "")
+                        }
+                    ),
+                    "stages": sorted(
+                        {
+                            str(item.get("stage") or "")
+                            for item in trace_items
+                            if str(item.get("stage") or "")
+                        }
+                    ),
+                    "source": "deterministic_query_result",
+                }
+                return normalized
+        except Exception as exc:  # noqa: BLE001 - QA evidence is fail-open.
+            logger.warning(
+                "qa-langsmith-evidence-read-failed root=%s error=%s",
+                root_task_id,
+                type(exc).__name__,
+            )
+        return {
+            "status": "UNAVAILABLE",
+            "metadata_only": True,
+            "raw_payloads_sent": False,
+            "error_code": "qa_langsmith_evidence_unavailable",
+            "trace_count": 0,
+            "traces": [],
+        }
 
     @staticmethod
     def _synthesis_availability(state: SupervisorState) -> str:
@@ -7188,16 +9096,36 @@ class CeoSupervisorService:
             if terminal_workflow_role(payload) != "primary":
                 continue
             task = ChildTaskState.from_hermes(payload)
-            if (
-                task.is_in_workflow(root_task_id)
-                and task.workflow_role == "primary"
-            ):
+            if task.is_in_workflow(root_task_id) and task.workflow_role == "primary":
+                if task.profile == canonical_profile_for_department("research"):
+                    research_answer = _text(task.final_answer or task.result)
+                    canonical_research_answer = _canonicalize_research_source_urls(
+                        research_answer,
+                        (root_payload, payload),
+                    )
+                    if canonical_research_answer != research_answer:
+                        payload = dict(payload)
+                        payload["result"] = canonical_research_answer
+                        payload["final_answer"] = canonical_research_answer
+                        task = ChildTaskState.from_hermes(payload)
                 handoff = child_handoff_payload(
                     task,
                     include_hr_evidence=True,
                     profile=task.profile,
                     status=task.status,
                 )
+                _enrich_trading_handoff(handoff, root_body=root_body)
+                if task.department == "accounting":
+                    for key in ("result", "final_answer", "summary"):
+                        if handoff.get(key):
+                            handoff[key] = _normalize_accounting_book_scope(
+                                _text(handoff[key]), root_body
+                            )
+                if task.department == "research":
+                    _normalize_research_handoff_provenance(
+                        handoff,
+                        (root_payload, payload),
+                    )
                 if task.department == "hr":
                     # The post-response observer may receive a shallow board
                     # row, so make its visible HR answer use the same
@@ -7267,6 +9195,13 @@ class CeoSupervisorService:
             "primary_handoffs": primary_handoffs,
             "ceo_response": ceo_response,
             "workflow_observations": dict(downstream_evidence or {}),
+            "langsmith_evidence": self._qa_langsmith_evidence(
+                root_task_id=root_task_id,
+                root_payload=root_payload,
+                response_task_id=response_id,
+                primary_handoffs=primary_handoffs,
+                task_payloads=task_payloads,
+            ),
         }
         # ``grade_answer`` measures the visible response shape, while HR's
         # handoff trust flag measures whether its evidence is independently
@@ -7305,6 +9240,17 @@ class CeoSupervisorService:
             "store_reasoning_trace=false\n"
             "Audit the exact CEO input and final response below. Check evidence,"
             " citations, unsupported claims, scope, and reproducibility. Treat"
+            " langsmith_evidence as the authoritative execution result from"
+            " every correlated department trace; use its status, latency,"
+            " retries, tool errors, and trace coverage in the QA judgment."
+            " The nested trace_manifest is deterministically computed from the"
+            " returned trace list; use it instead of manually recounting a long"
+            " bounded list."
+            " It is metadata-only by contract. If it is UNAVAILABLE or"
+            " NOT_FOUND, preserve that as an evidence gap and do not infer PASS."
+            " The Kanban payload below is correlation context and response"
+            " content only; do not replace LangSmith trace evidence with task"
+            " status or a prose completion message."
             " workflow_observations as supervisor-produced metadata-only evidence"
             " for trace lifecycle/connectivity; never require raw payloads or a"
             " public trace URL. This is an independent post-response audit; do not"
@@ -7324,8 +9270,15 @@ class CeoSupervisorService:
             " omitted, an independent byte-level replay is unavailable, or"
             " qa.event_count is zero before the post-terminal projection;"
             " the listed receipt status, matching summary hash, and explicit"
-            " projection_after_terminal=true are the authoritative checks.\n"
-            + json.dumps(audit_input, ensure_ascii=False)
+            " projection_after_terminal=true are the authoritative checks."
+            " For Research answers, source name, publication date, and the exact"
+            " canonical URL in provenance.source_references are the bounded"
+            " reproducibility contract. Do not create a finding solely because"
+            " raw source bodies, excerpts, or content hashes are omitted; raw"
+            " payloads are prohibited in this audit. Create a finding when a"
+            " source coordinate is missing or mismatched, a factual item has no"
+            " source mapping, or the answer exceeds its stated verification"
+            " limits.\n" + json.dumps(audit_input, ensure_ascii=False)
         )
         try:
             created = self.client.create_task(
@@ -7353,7 +9306,9 @@ class CeoSupervisorService:
             )
             return None
 
-        created_task = created.get("task", created) if isinstance(created, Mapping) else created
+        created_task = (
+            created.get("task", created) if isinstance(created, Mapping) else created
+        )
         created_id = (
             str(created_task.get("id") or created_task.get("task_id") or "")
             if isinstance(created_task, Mapping)
@@ -7409,15 +9364,16 @@ class CeoSupervisorService:
                 return None
             try:
                 task = show(task_id)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - show recovery is fail-open.
                 logger.warning(
-                    "terminal-projection-show-failed "
-                    "root=%s task=%s error=%s",
+                    "terminal-projection-show-failed root=%s task=%s error=%s",
                     root_task_id,
                     task_id,
                     type(exc).__name__,
                 )
                 return None
+
+        task = self._repair_terminal_result_contract(task)
 
         if task_id == root_task_id:
             root_final_status = self._reconcile_unmaterialized_primary_root(
@@ -7430,10 +9386,22 @@ class CeoSupervisorService:
 
         body = str(task.get("body") or "")
         role = terminal_workflow_role(task) or ""
+        if (
+            str(task.get("assignee") or task.get("profile") or "")
+            == canonical_profile_for_department("research")
+            and role.casefold() == "primary"
+        ):
+            research_answer = _text(task.get("final_answer") or task.get("result"))
+            canonical_research_answer = _canonicalize_research_source_urls(
+                research_answer,
+                (root_payload, task, *task_payloads),
+            )
+            if canonical_research_answer != research_answer:
+                task = dict(task)
+                task["result"] = canonical_research_answer
+                task["final_answer"] = canonical_research_answer
         task_action = terminal_action(task) or terminal_action({"body": body})
-        supervisor_synthesis = (
-            role == "synthesis" and task_action == "SYNTHESIZE"
-        )
+        supervisor_synthesis = role == "synthesis" and task_action == "SYNTHESIZE"
         direct_ceo_synthesis = _is_direct_ceo_response_synthesis(
             role=role,
             body=body,
@@ -7567,20 +9535,135 @@ class CeoSupervisorService:
                             task_id,
                             type(exc).__name__,
                         )
-            content = strip_internal_handoff(_text(
-                synthesized.final_answer
-                or synthesized.result
-                or task.get("latest_summary")
-                or task.get("summary")
-                or task.get("result")
-            ))
+            content = strip_internal_handoff(
+                _text(
+                    synthesized.final_answer
+                    or synthesized.result
+                    or task.get("latest_summary")
+                    or task.get("summary")
+                    or task.get("result")
+                )
+            )
+            original_content = content
+            # CEO synthesis can normalize equivalent Unicode loss glyphs while
+            # rewriting a Research answer. Keep the source-facing symbol stable
+            # so numeric-sign QA compares meaning-preserving text exactly.
+            content = content.replace("▵", "△").replace("▽", "△")
+            content = _normalize_research_answer_headings(content)
+            content = _canonicalize_research_source_urls(content, task_payloads)
+            content = _expand_research_implicit_source_urls(content, task_payloads)
+            enrichment_payloads = [*task_payloads, task]
+            # Workflow reconstruction may carry only a compact primary card.
+            # Hydrate the accounting primary once when its bounded liquidity
+            # report is absent, so the CEO summary does not silently discard
+            # settlement, cash-availability, and trading-cost evidence.
+            show = getattr(self.client, "show", None)
+            if callable(show):
+                for index, payload in enumerate(enrichment_payloads):
+                    if (
+                        str(
+                            payload.get("assignee") or payload.get("profile") or ""
+                        ).strip()
+                        != canonical_profile_for_department("accounting")
+                        or terminal_workflow_role(payload) != "primary"
+                    ):
+                        continue
+                    primary_text = _text(
+                        payload.get("final_answer")
+                        or payload.get("result")
+                        or payload.get("summary")
+                    )
+                    if "LS 예수금" in primary_text or "인출가능액" in primary_text:
+                        continue
+                    primary_id = str(
+                        payload.get("id") or payload.get("task_id") or ""
+                    ).strip()
+                    if not primary_id:
+                        continue
+                    try:
+                        hydrated = show(primary_id)
+                    except Exception as exc:  # noqa: BLE001 - enrichment is fail-open.
+                        logger.warning(
+                            "accounting-primary-hydration-failed root=%s task=%s error=%s",
+                            root_task_id,
+                            primary_id,
+                            type(exc).__name__,
+                        )
+                        continue
+                    if isinstance(hydrated, Mapping):
+                        enrichment_payloads[index] = hydrated
+                    break
+            content = _recover_compact_ceo_synthesis(content, enrichment_payloads)
+            content = _augment_accounting_reconciliation_answer(
+                content,
+                tuple(enrichment_payloads),
+            )
             content = _augment_risk_legal_answer(content, task_payloads)
+            content = content.replace("식별된 6종목", "포지션 6개 라인")
+            content = content.replace("식별된 6개 포지션", "포지션 6개 라인")
+            content = content.replace("▵", "△").replace("▽", "△")
+            content = _normalize_research_answer_headings(content)
+            content = _canonicalize_research_source_urls(
+                content,
+                (*task_payloads, task),
+            )
+            content = _expand_research_implicit_source_urls(
+                content,
+                (*task_payloads, task),
+            )
+            content = _append_research_source_coordinates(
+                content,
+                (*task_payloads, task),
+            )
+            content = _append_trading_source_coordinates(
+                content,
+                root_body=root_body,
+                task_payloads=(*task_payloads, task),
+            )
+            content = _append_accounting_delivery_scope(content, enrichment_payloads)
+            if tuple(selected_primary_profiles_from_task(root_payload)) == (
+                canonical_profile_for_department("research"),
+            ) and not _research_answer_is_complete(content):
+                for payload in (*task_payloads, task):
+                    if (
+                        str(payload.get("assignee") or payload.get("profile") or "")
+                        != canonical_profile_for_department("research")
+                        or terminal_workflow_role(payload) != "primary"
+                    ):
+                        continue
+                    candidate = _text(
+                        payload.get("final_answer") or payload.get("result")
+                    )
+                    candidate = candidate.replace("▵", "△").replace("▽", "△")
+                    candidate = _normalize_research_answer_headings(candidate)
+                    candidate = _canonicalize_research_source_urls(
+                        candidate,
+                        (root_payload, payload),
+                    )
+                    if _research_answer_is_complete(candidate):
+                        logger.warning(
+                            "research-synthesis-fallback-to-complete-primary "
+                            "root=%s task=%s",
+                            root_task_id,
+                            task_id,
+                        )
+                        content = candidate
+                        break
+            if tuple(selected_primary_profiles_from_task(root_payload)) == (
+                canonical_profile_for_department("research"),
+            ):
+                content = _remove_research_duplicate_section(content)
+                content = _deduplicate_research_conclusion_headings(content)
             enriched_content = _augment_hr_final_answer(
                 content,
                 root_task_id=root_task_id,
                 task_payloads=task_payloads,
             )
-            if enriched_content != content:
+            enriched_content = _ensure_quant_retrieval_attempt(
+                enriched_content,
+                enrichment_payloads,
+            )
+            if enriched_content != original_content:
                 enriched_metadata = merged_run_metadata(task)
                 enriched_metadata.update(
                     {
@@ -7589,9 +9672,30 @@ class CeoSupervisorService:
                         "synthesis_provenance_enriched": True,
                     }
                 )
+                try:
+                    enriched_metadata.update(
+                        grade_answer(enriched_content).as_payload()
+                    )
+                except Exception:  # noqa: BLE001 - grading must not block delivery.
+                    logger.warning(
+                        "synthesis-answer-grade-refresh-failed root=%s task=%s",
+                        root_task_id,
+                        task_id,
+                    )
                 persisted = False
                 try:
-                    self.client.complete_task(
+                    persist_terminal = self.client.complete_task
+                    if str(task.get("status") or "").casefold() in {
+                        "done",
+                        "completed",
+                        "archived",
+                    }:
+                        persist_terminal = getattr(
+                            self.client,
+                            "edit_task",
+                            persist_terminal,
+                        )
+                    persist_terminal(
                         task_id,
                         result=enriched_content,
                         summary=_text(task.get("summary") or enriched_content),
@@ -7669,9 +9773,7 @@ class CeoSupervisorService:
                     canonical_profile_for_department("ceo"),
                 )
                 delivery_home = (
-                    ceo_profile_home
-                    if os.path.isdir(ceo_profile_home)
-                    else hermes_home
+                    ceo_profile_home if os.path.isdir(ceo_profile_home) else hermes_home
                 )
                 delivery_store = DiscordIdempotencyStore(delivery_home)
                 ceo_profile = canonical_profile_for_department("ceo")
@@ -7720,8 +9822,7 @@ class CeoSupervisorService:
                     delivery_status = parent_status
 
                     logger.info(
-                        "synthesis-discord-parent-fallback "
-                        "root=%s task=%s status=%s",
+                        "synthesis-discord-parent-fallback root=%s task=%s status=%s",
                         root_task_id,
                         task_id,
                         parent_status,
@@ -7769,12 +9870,14 @@ class CeoSupervisorService:
                     else delivery_error
                 ),
             )
-            response_confirmed = (
-                terminal_status not in {"blocked", "gave_up", "failed", "crashed", "timed_out"}
-                and (
-                    not discord_delivery_required
-                    or delivery_status in {"sent", "deduped"}
-                )
+            response_confirmed = terminal_status not in {
+                "blocked",
+                "gave_up",
+                "failed",
+                "crashed",
+                "timed_out",
+            } and (
+                not discord_delivery_required or delivery_status in {"sent", "deduped"}
             )
             # A failed Discord delivery is itself an operational finding.  Do
             # not let it suppress the post-response QA audit: otherwise the
@@ -7793,8 +9896,7 @@ class CeoSupervisorService:
                         "raw_payloads_sent": False,
                     },
                     "discord": {
-                        "response_delivered": delivery_status
-                        in {"sent", "deduped"},
+                        "response_delivered": delivery_status in {"sent", "deduped"},
                         "delivery_status": delivery_status,
                         "duplicate": delivery_status == "deduped",
                         "not_applicable": not discord_delivery_required,
@@ -7815,9 +9917,7 @@ class CeoSupervisorService:
                     "qa_blocks_response": False,
                 }
                 synthesis_text = _text(
-                    synthesized.final_answer
-                    or synthesized.result
-                    or task.get("result")
+                    synthesized.final_answer or synthesized.result or task.get("result")
                 )
                 synthesis_summary_hash = hashlib.sha256(
                     synthesis_text.encode("utf-8")
@@ -7862,9 +9962,7 @@ class CeoSupervisorService:
                 if isinstance(hr_primary, Mapping):
                     hr_snapshot: Mapping[str, Any] = hr_primary
                     show = getattr(self.client, "show", None)
-                    hr_id = str(
-                        hr_primary.get("id") or hr_primary.get("task_id") or ""
-                    )
+                    hr_id = str(hr_primary.get("id") or hr_primary.get("task_id") or "")
                     if callable(show) and hr_id:
                         try:
                             hydrated_hr = show(hr_id)
@@ -7890,9 +9988,7 @@ class CeoSupervisorService:
                     )
                     hr_reads = hr_provenance.get("source_reads")
                     hr_reads = hr_reads if isinstance(hr_reads, Mapping) else {}
-                    hr_failures = hr_provenance.get(
-                        "failures_retries_duplicates", {}
-                    )
+                    hr_failures = hr_provenance.get("failures_retries_duplicates", {})
                     hr_failures = (
                         hr_failures if isinstance(hr_failures, Mapping) else {}
                     )
@@ -7922,9 +10018,7 @@ class CeoSupervisorService:
                     qa_downstream_evidence["hermes"] = {
                         "profile": "hr-department",
                         "primary_task_id": hr_id,
-                        "terminal_status": str(
-                            hr_snapshot.get("status") or "done"
-                        ),
+                        "terminal_status": str(hr_snapshot.get("status") or "done"),
                         "terminal_contract": "satisfied",
                         "helper_runs": hr_summary.get("helper_runs"),
                         "workforce_read_calls": len(hr_reads),
@@ -8008,6 +10102,123 @@ class CeoSupervisorService:
                         "projection_after_terminal": True,
                         "qa_blocks_response": False,
                     }
+                # Accounting primary reports are projected to Notion before
+                # synthesis. Carry that scoped receipt into the post-response
+                # audit as well; the final answer must not claim a verified
+                # Notion handoff without this bounded evidence.
+                accounting_primary = next(
+                    (
+                        payload
+                        for payload in task_payloads
+                        if str(
+                            payload.get("assignee") or payload.get("profile") or ""
+                        ).strip()
+                        == canonical_profile_for_department("accounting")
+                        and (
+                            terminal_workflow_role(payload)
+                            or str(payload.get("workflow_role") or "")
+                            .strip()
+                            .casefold()
+                        )
+                        == "primary"
+                        and (
+                            terminal_workflow_root(payload)
+                            or str(payload.get("workflow_root_task_id") or "")
+                        )
+                        == root_task_id
+                    ),
+                    None,
+                )
+                if isinstance(accounting_primary, Mapping):
+                    accounting_snapshot: Mapping[str, Any] = accounting_primary
+                    show = getattr(self.client, "show", None)
+                    accounting_id = str(
+                        accounting_primary.get("id")
+                        or accounting_primary.get("task_id")
+                        or ""
+                    ).strip()
+                    if callable(show) and accounting_id:
+                        try:
+                            hydrated_accounting = show(accounting_id)
+                            if isinstance(hydrated_accounting, Mapping):
+                                accounting_snapshot = {
+                                    **dict(accounting_primary),
+                                    **hydrated_accounting,
+                                }
+                        except Exception as exc:  # noqa: BLE001 - QA is fail-open.
+                            logger.warning(
+                                "accounting-qa-evidence-hydration-failed "
+                                "root=%s task=%s error=%s",
+                                root_task_id,
+                                accounting_id,
+                                type(exc).__name__,
+                            )
+                    accounting_comments = accounting_snapshot.get("comments")
+                    accounting_comments = (
+                        accounting_comments
+                        if isinstance(accounting_comments, Sequence)
+                        and not isinstance(accounting_comments, (str, bytes, bytearray))
+                        else ()
+                    )
+                    accounting_notion_marker = next(
+                        (
+                            str(comment.get("body") or comment)
+                            for comment in accounting_comments
+                            if isinstance(comment, Mapping)
+                            and "hgfinance.department-notion-delivery.v1"
+                            in str(comment.get("body") or "")
+                        ),
+                        "",
+                    )
+                    accounting_notion_values = {
+                        key: value
+                        for key, value in (
+                            token.split("=", 1)
+                            for token in accounting_notion_marker.split()
+                            if "=" in token
+                        )
+                        if key and value
+                    }
+                    qa_downstream_evidence["notion"] = {
+                        "status": accounting_notion_values.get("status")
+                        or "unverified",
+                        "delivery_status": accounting_notion_values.get(
+                            "delivery_status"
+                        )
+                        or "unverified",
+                        "readback_status": accounting_notion_values.get(
+                            "readback_status"
+                        )
+                        or "unverified",
+                        "payload_hash_present": accounting_notion_values.get(
+                            "payload_hash_present"
+                        )
+                        == "true",
+                        "page_id_present": bool(
+                            accounting_notion_values.get("page_id")
+                        ),
+                        "readback_hash_present": accounting_notion_values.get(
+                            "readback_hash_present"
+                        )
+                        == "true",
+                    }
+                    qa_downstream_evidence["delivery_receipts"]["notion"] = {
+                        "delivery_status": qa_downstream_evidence["notion"].get(
+                            "delivery_status"
+                        ),
+                        "readback_status": qa_downstream_evidence["notion"].get(
+                            "readback_status"
+                        ),
+                        "payload_hash_present": qa_downstream_evidence["notion"].get(
+                            "payload_hash_present"
+                        ),
+                        "page_id_present": qa_downstream_evidence["notion"].get(
+                            "page_id_present"
+                        ),
+                        "readback_hash_present": qa_downstream_evidence["notion"].get(
+                            "readback_hash_present"
+                        ),
+                    }
                 self._schedule_post_response_qa(
                     root_task_id=root_task_id,
                     root_payload=root_payload,
@@ -8033,7 +10244,24 @@ class CeoSupervisorService:
                 ).strip()
                 risk_started_ms = _task_timestamp_ms(task, "started_at")
                 risk_ended_ms = _task_timestamp_ms(task, "completed_at")
-                if risk_session_id and risk_started_ms and risk_ended_ms:
+                risk_run_id = str(task.get("current_run_id") or "").strip()
+                if not risk_run_id:
+                    runs = task.get("runs")
+                    if isinstance(runs, Sequence) and not isinstance(
+                        runs, (str, bytes, bytearray)
+                    ):
+                        for candidate in reversed(runs):
+                            if not isinstance(candidate, Mapping):
+                                continue
+                            risk_run_id = str(candidate.get("id") or "").strip()
+                            if risk_run_id:
+                                break
+                if (
+                    risk_session_id
+                    and risk_started_ms
+                    and risk_ended_ms
+                    and risk_run_id
+                ):
                     from orchestration.risk_observability import (
                         publish_risk_hermes_profile,
                     )
@@ -8049,6 +10277,8 @@ class CeoSupervisorService:
                     )
                     published = publish_risk_hermes_profile(
                         task_id=task_id,
+                        task_body=str(task.get("body") or ""),
+                        run_id=risk_run_id,
                         root_id=root_task_id,
                         session_id=risk_session_id,
                         log_dir=risk_log_dir,
@@ -8058,8 +10288,7 @@ class CeoSupervisorService:
                         environment=observer_environment,
                     )
                     logger.info(
-                        "risk-hermes-worker-profile task=%s session=%s "
-                        "published=%s",
+                        "risk-hermes-worker-profile task=%s session=%s published=%s",
                         task_id,
                         risk_session_id,
                         published,
@@ -8082,12 +10311,42 @@ class CeoSupervisorService:
         )
         if projection is not None:
             try:
-                projection.project(
+                projection_result = projection.project(
                     root_task_id=root_task_id,
                     task=task,
                     workflow_tasks=task_payloads,
                     event=event,
                 )
+                if role == "qa" and task_action == "RUN_QA":
+                    try:
+                        self._refresh_ceo_notion_after_qa(
+                            root_task_id=root_task_id,
+                            workflow_tasks=task_payloads,
+                            event=event,
+                            qa_projection_result=projection_result,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - observers are isolated.
+                        logger.warning(
+                            "ceo-notion-qa-refresh-failed-before-d5 root=%s error=%s",
+                            root_task_id,
+                            type(exc).__name__,
+                        )
+                    root_payload = next(
+                        (
+                            payload
+                            for payload in task_payloads
+                            if str(payload.get("id") or payload.get("task_id") or "")
+                            == root_task_id
+                        ),
+                        {},
+                    )
+                    self._record_discord_experience_after_qa(
+                        root_id=root_task_id,
+                        root_payload=root_payload,
+                        qa_task=task,
+                        workflow_tasks=task_payloads,
+                        projection_result=projection_result,
+                    )
             except Exception as exc:
                 logger.exception(
                     "terminal projection observer failed",
@@ -8128,9 +10387,25 @@ class CeoSupervisorService:
                 else nullcontext()
             )
             with notion_context:
+                projection_task = task
+                if role.casefold() == "primary" and str(
+                    task.get("assignee") or task.get("profile") or ""
+                ).strip() == canonical_profile_for_department("research"):
+                    projection_task = dict(task)
+                    projection_task["root_body"] = str(root_payload.get("body") or "")
+                    research_answer = _text(
+                        task.get("final_answer") or task.get("result")
+                    )
+                    canonical_research_answer = _canonicalize_research_source_urls(
+                        research_answer,
+                        (root_payload, task, *task_payloads),
+                    )
+                    if canonical_research_answer != research_answer:
+                        projection_task["result"] = canonical_research_answer
+                        projection_task["final_answer"] = canonical_research_answer
                 department_projection = self._department_notion_projection.project(
                     root_task_id=root_task_id,
-                    task=task,
+                    task=projection_task,
                     workflow_tasks=task_payloads,
                     event=event,
                 )
@@ -8161,18 +10436,17 @@ class CeoSupervisorService:
                         f"page_id={department_projection.page_id or ''} "
                         f"readback_hash_present={str(bool(department_projection.readback_hash)).lower()}",
                     )
-                if department_projection.risk_plan_id:
-                    if callable(comment_task):
-                        comment_task(
-                            task_id,
-                            "hgfinance.risk-projection-delivery.v1 "
-                            f"risk_plan_id={department_projection.risk_plan_id} "
-                            f"delivery_status={department_projection.delivery_status} "
-                            f"readback_status={department_projection.readback_status} "
-                            f"payload_hash={department_projection.payload_hash} "
-                            f"page_id={department_projection.page_id or ''} "
-                            f"evidence_status={department_projection.evidence_status or ''}",
-                        )
+                if department_projection.risk_plan_id and callable(comment_task):
+                    comment_task(
+                        task_id,
+                        "hgfinance.risk-projection-delivery.v1 "
+                        f"risk_plan_id={department_projection.risk_plan_id} "
+                        f"delivery_status={department_projection.delivery_status} "
+                        f"readback_status={department_projection.readback_status} "
+                        f"payload_hash={department_projection.payload_hash} "
+                        f"page_id={department_projection.page_id or ''} "
+                        f"evidence_status={department_projection.evidence_status or ''}",
+                    )
         except Exception as exc:
             logger.exception(
                 "department notion projection observer failed",
@@ -8187,9 +10461,12 @@ class CeoSupervisorService:
         # Schedule QA only after the Notion projection has returned so its
         # immutable audit input can distinguish an observed downstream result
         # from a merely requested one.
-        if role == "primary" and task_id and str(
-            task.get("assignee") or task.get("profile") or ""
-        ).strip() == canonical_profile_for_department("hr"):
+        if (
+            role == "primary"
+            and task_id
+            and str(task.get("assignee") or task.get("profile") or "").strip()
+            == canonical_profile_for_department("hr")
+        ):
             delivery = self._hr_response_delivery_for(
                 root_task_id=root_task_id,
                 task=task,
@@ -8248,8 +10525,7 @@ class CeoSupervisorService:
                     for item in task_payloads
                 )
                 if not any(
-                    str(item.get("id") or item.get("task_id") or "")
-                    == response_task_id
+                    str(item.get("id") or item.get("task_id") or "") == response_task_id
                     for item in response_payloads
                 ):
                     response_payloads = (*response_payloads, response_task)
@@ -8260,9 +10536,7 @@ class CeoSupervisorService:
                 # enrichment, so refresh only this scoped response in memory
                 # before constructing the post-response audit input.
                 if str(
-                    response_task.get("assignee")
-                    or response_task.get("profile")
-                    or ""
+                    response_task.get("assignee") or response_task.get("profile") or ""
                 ).strip() == canonical_profile_for_department("hr"):
                     enriched_response = _augment_hr_final_answer(
                         delivered_content,
@@ -8292,16 +10566,12 @@ class CeoSupervisorService:
                     )
                 provenance_reads = hr_provenance.get("source_reads")
                 provenance_reads = (
-                    provenance_reads
-                    if isinstance(provenance_reads, Mapping)
-                    else {}
+                    provenance_reads if isinstance(provenance_reads, Mapping) else {}
                 )
                 artifacts = hr_provenance.get("artifacts")
                 artifacts = artifacts if isinstance(artifacts, Sequence) else ()
                 metadata = merged_run_metadata(response_task)
-                declared_hashes = {
-                    str(metadata.get("artifact_sha256") or "").strip()
-                }
+                declared_hashes = {str(metadata.get("artifact_sha256") or "").strip()}
                 declared_artifacts = metadata.get("artifacts")
                 if isinstance(declared_artifacts, Sequence) and not isinstance(
                     declared_artifacts, (str, bytes, bytearray)
@@ -8357,7 +10627,9 @@ class CeoSupervisorService:
                     if isinstance(approved_gets, Mapping):
                         http_statuses = approved_gets.get("http_statuses")
                 approved_gets = metadata.get("approved_gets")
-                approved_gets = approved_gets if isinstance(approved_gets, Mapping) else {}
+                approved_gets = (
+                    approved_gets if isinstance(approved_gets, Mapping) else {}
+                )
                 structured_summary = metadata.get("structured_summary")
                 structured_summary = (
                     structured_summary
@@ -8399,7 +10671,11 @@ class CeoSupervisorService:
                     if isinstance(value, Mapping):
                         return [
                             value[key]
-                            for key in ("improvements", "observability", "scorecard_brief")
+                            for key in (
+                                "improvements",
+                                "observability",
+                                "scorecard_brief",
+                            )
                             if key in value
                         ]
                     if isinstance(value, Sequence) and not isinstance(
@@ -8408,9 +10684,7 @@ class CeoSupervisorService:
                         return list(value)
                     return []
 
-                http_statuses = (
-                    _status_values(http_statuses)
-                )
+                http_statuses = _status_values(http_statuses)
                 # Prefer the task-scoped artifact's three receipts whenever
                 # available.  This preserves a timeout/None as a real third
                 # request instead of silently collapsing the audit to two.
@@ -8466,9 +10740,7 @@ class CeoSupervisorService:
                     "hermes": {
                         "profile": "hr-department",
                         "primary_task_id": response_task_id,
-                        "terminal_status": str(
-                            response_task.get("status") or "done"
-                        ),
+                        "terminal_status": str(response_task.get("status") or "done"),
                         "terminal_contract": "satisfied",
                         "helper_runs": helper_runs,
                         "workforce_read_calls": len(http_statuses),
@@ -8506,9 +10778,7 @@ class CeoSupervisorService:
                         "root_task_id": root_task_id,
                         "correlation_id": f"{root_task_id}:{response_task_id}",
                         "trace_closed": bool(delivery.get("langsmith_closed")),
-                        "publication_confirmed": bool(
-                            delivery.get("langsmith_closed")
-                        ),
+                        "publication_confirmed": bool(delivery.get("langsmith_closed")),
                         "summary_hash": delivered_content_hash,
                         "metadata_only": True,
                         "raw_payloads_sent": False,
@@ -8622,6 +10892,180 @@ class CeoSupervisorService:
 
         return delivery_status
 
+    def _refresh_ceo_notion_after_qa(
+        self,
+        *,
+        root_task_id: str,
+        workflow_tasks: Sequence[Mapping[str, Any]],
+        event: Mapping[str, Any],
+        qa_projection_result: Mapping[str, Any] | None,
+    ) -> None:
+        """Refresh the existing CEO report after the async QA projection.
+
+        CEO response delivery remains independent of Notion and QA. Once the
+        QA observer has persisted its verdict, reuse the one CEO projection
+        implementation to update its existing page with the QA task/status.
+        Missing Notion configuration or a missing synthesis row is harmless;
+        the QA result is already durable in its own projection.
+        """
+
+        synthesis = next(
+            (
+                payload
+                for payload in workflow_tasks
+                if terminal_workflow_role(payload) == "synthesis"
+                and terminal_action(payload) == "SYNTHESIZE"
+                and terminal_success(payload)
+            ),
+            None,
+        )
+        if synthesis is None or self.synthesis_projection is None:
+            return
+        refresh_event = dict(event)
+        refresh_event["force_upsert"] = True
+        refresh_event["qa_projection_status"] = str(
+            (qa_projection_result or {}).get("status") or "unknown"
+        )
+        result = self.synthesis_projection.project(
+            root_task_id=root_task_id,
+            task=synthesis,
+            workflow_tasks=workflow_tasks,
+            event=refresh_event,
+        )
+        logger.info(
+            "ceo-notion-qa-refresh root=%s synthesis=%s qa_status=%s status=%s",
+            root_task_id,
+            task_id(synthesis),
+            refresh_event["qa_projection_status"],
+            str(result.get("status") if isinstance(result, Mapping) else "unknown"),
+        )
+
+    def _repair_terminal_result_contract(
+        self,
+        task: Mapping[str, Any],
+        *,
+        allow_legacy_risk_markerless: bool = False,
+    ) -> Mapping[str, Any]:
+        """Backfill one missing terminal answer from its durable handoff.
+
+        This is a recovery path for cards created before the canonical Hermes
+        completion patch. It only uses an explicit final answer or the already
+        persisted run summary; it never reconstructs content from unrelated
+        tasks or external systems. Markerless Risk cards are accepted only by
+        the explicit compatibility caller below, not by the normal terminal
+        observer.
+        """
+
+        role = terminal_workflow_role(task)
+        risk_profile = str(task.get("assignee") or task.get("profile") or "") == (
+            canonical_profile_for_department("risk")
+        )
+        markerless_risk = allow_legacy_risk_markerless and risk_profile and role is None
+        if (role not in {"primary", "qa", "synthesis"} and not markerless_risk) or str(
+            task.get("status") or ""
+        ).casefold() not in {
+            "done",
+            "completed",
+            "archived",
+        }:
+            return task
+
+        transport_tokens = {"success", "completed", "complete", "done", "ok"}
+        result = _text(task.get("result")).strip()
+        metadata = merged_run_metadata(task)
+        metadata_result = _text(metadata.get("result")).strip()
+        final_answer = ""
+        for candidate in (
+            task.get("final_answer"),
+            metadata.get("final_answer"),
+            metadata.get("user_facing_final_answer"),
+            metadata_result,
+        ):
+            candidate_text = _text(candidate).strip()
+            if candidate_text and candidate_text.casefold() not in transport_tokens:
+                final_answer = candidate_text
+                break
+        if result and result.casefold() not in transport_tokens:
+            return task
+        canonical_result = (
+            final_answer
+            or (result if result.casefold() not in transport_tokens else "")
+            or _text(task.get("summary") or task.get("latest_summary")).strip()
+        )
+        if not canonical_result:
+            return task
+
+        editor = getattr(self.client, "edit_task", None)
+        if not callable(editor):
+            return task
+
+        task_key = str(task.get("id") or task.get("task_id") or "")
+        contract_version = (
+            "risk.result.v1"
+            if risk_profile and (role == "primary" or markerless_risk)
+            else "terminal.result.v1"
+        )
+        repaired_metadata = dict(metadata)
+        repaired_metadata.update(
+            {
+                "result": canonical_result,
+                "final_answer": canonical_result,
+                "terminal_result_contract_version": contract_version,
+            }
+        )
+        if contract_version == "risk.result.v1":
+            repaired_metadata["risk_result_contract_version"] = contract_version
+        repaired_summary = _text(
+            task.get("summary") or task.get("latest_summary") or canonical_result
+        ).strip()
+        try:
+            editor(
+                task_key,
+                result=canonical_result,
+                summary=repaired_summary,
+                metadata=repaired_metadata,
+            )
+        except Exception as exc:  # noqa: BLE001 - observers remain fail-open.
+            logger.warning(
+                "terminal-result-contract-repair-failed task=%s error=%s",
+                task_key,
+                type(exc).__name__,
+            )
+            return task
+
+        repaired = dict(task)
+        repaired.update(
+            {
+                "result": canonical_result,
+                "final_answer": canonical_result,
+                "run_metadata": repaired_metadata,
+                "metadata": repaired_metadata,
+            }
+        )
+        logger.warning(
+            "terminal-result-contract-repaired task=%s role=%s",
+            task_key,
+            role,
+        )
+        return repaired
+
+    def _repair_risk_primary_result_contract(
+        self,
+        task: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Compatibility name for the shared terminal-result recovery path."""
+
+        if str(
+            task.get("assignee") or task.get("profile") or ""
+        ) != canonical_profile_for_department("risk") or terminal_workflow_role(
+            task
+        ) not in {"primary", None}:
+            return task
+        return self._repair_terminal_result_contract(
+            task,
+            allow_legacy_risk_markerless=terminal_workflow_role(task) is None,
+        )
+
     def _bridge_root_completion_to_discord(
         self,
         *,
@@ -8652,9 +11096,8 @@ class CeoSupervisorService:
 
         root_body = str(root_payload.get("body") or "")
 
-        if (
-            workflow_mode_from_body(root_body) != "analysis"
-            or not is_user_query_body(root_body)
+        if workflow_mode_from_body(root_body) != "analysis" or not is_user_query_body(
+            root_body
         ):
             return None
 
@@ -8668,9 +11111,7 @@ class CeoSupervisorService:
             ceo_profile,
         )
         delivery_home = (
-            ceo_profile_home
-            if os.path.isdir(ceo_profile_home)
-            else hermes_home
+            ceo_profile_home if os.path.isdir(ceo_profile_home) else hermes_home
         )
         store = DiscordIdempotencyStore(delivery_home)
 
@@ -8689,13 +11130,12 @@ class CeoSupervisorService:
                 payloads = task_payloads
                 if payloads is None:
                     children = root_payload.get("children")
-                    payloads = tuple(
-                        child
-                        for child in children
-                        if isinstance(child, Mapping)
-                    ) if isinstance(children, Sequence) and not isinstance(
-                        children, (str, bytes)
-                    ) else ()
+                    payloads = (
+                        tuple(child for child in children if isinstance(child, Mapping))
+                        if isinstance(children, Sequence)
+                        and not isinstance(children, (str, bytes))
+                        else ()
+                    )
                 materialized = {
                     child.profile
                     for child in self._materialized_primary_children(
@@ -8725,10 +11165,23 @@ class CeoSupervisorService:
             for profile in selected:
                 try:
                     department = department_for_canonical_profile(profile)
-                except Exception:
+                except CanonicalProfileError:
                     department = profile
 
-                instruction = str(plan.get(profile) or "").strip()
+                # The delegation card is user-facing. Keep the durable plan's
+                # English execution instruction in Kanban, but show a short
+                # Korean explanation in the general Discord thread.
+                instruction = (
+                    plan.get(profile)
+                    or {
+                        "research-department": "시장·공시 근거와 불확실성을 확인합니다.",
+                        "quant-backtest-department": "정량 자료와 시장 신호를 점검합니다.",
+                        "risk-management": "포트폴리오 위험과 투자지침 한도를 읽기 전용으로 점검합니다.",
+                        "accounting-portfolio-department": "원장·현금·손익·대사 상태를 읽기 전용으로 확인합니다.",
+                        "trading-department": "주문 없이 거래 관련 영향만 검토합니다.",
+                    }.get(profile)
+                    or "요청된 분석을 읽기 전용으로 수행합니다."
+                )
 
                 lines.append(f"**{department}**")
                 if instruction:
@@ -8748,8 +11201,7 @@ class CeoSupervisorService:
             )
 
             logger.info(
-                "ceo-root-discord-bridge root=%s mode=delegated "
-                "selected=%s status=%s",
+                "ceo-root-discord-bridge root=%s mode=delegated selected=%s status=%s",
                 root_task_id,
                 ",".join(selected),
                 status,
@@ -8877,10 +11329,7 @@ class CeoSupervisorService:
         if isinstance(root_payload, ChildTaskState):
             return _text(root_payload.final_answer or root_payload.result)
 
-        content = _text(
-            root_payload.get("final_answer")
-            or root_payload.get("result")
-        )
+        content = _text(root_payload.get("final_answer") or root_payload.get("result"))
         if content:
             return content
 
@@ -8966,8 +11415,7 @@ class CeoSupervisorService:
 
         selected = tuple(selected_primary_profiles_from_task(root_payload))
         if not selected or not all(
-            not is_analysis_primary_eligible(profile)
-            for profile in selected
+            not is_analysis_primary_eligible(profile) for profile in selected
         ):
             return None
 
@@ -9001,9 +11449,7 @@ class CeoSupervisorService:
             ceo_profile = canonical_profile_for_department("ceo")
             ceo_profile_home = os.path.join(hermes_home, "profiles", ceo_profile)
             delivery_home = (
-                ceo_profile_home
-                if os.path.isdir(ceo_profile_home)
-                else hermes_home
+                ceo_profile_home if os.path.isdir(ceo_profile_home) else hermes_home
             )
             status = self._deliver_direct_ceo_answer(
                 root_task_id=root_task_id,
@@ -9036,14 +11482,14 @@ class CeoSupervisorService:
         # are not user-input requests: QA can audit a response, but cannot
         # supply the missing analysis primary.
         try:
-            workflow_mode = workflow_mode_from_body(
-                str(root_payload.get("body") or "")
-            )
+            workflow_mode = workflow_mode_from_body(str(root_payload.get("body") or ""))
         except WorkflowScopeViolation:
             workflow_mode = "analysis"
         state = SupervisorState(
             parent_task_id=root_task_id,
             children=materialized,
+            request_id=read_marker(str(root_payload.get("body") or ""), "request_id"),
+            root_body=str(root_payload.get("body") or ""),
             workflow_mode=workflow_mode,
             selected_primary_profiles=selected,
             root_is_user_query=True,
@@ -9143,8 +11589,7 @@ class CeoSupervisorService:
         if (
             workflow_mode_from_body(root_body) != "analysis"
             or not is_user_query_body(root_body)
-            or str(root_payload.get("status") or "").casefold()
-            not in TERMINAL_STATUSES
+            or str(root_payload.get("status") or "").casefold() not in TERMINAL_STATUSES
             or task_id == root_task_id
         ):
             return None
@@ -9182,9 +11627,7 @@ class CeoSupervisorService:
         ceo_profile = canonical_profile_for_department("ceo")
         ceo_profile_home = os.path.join(hermes_home, "profiles", ceo_profile)
         delivery_home = (
-            ceo_profile_home
-            if os.path.isdir(ceo_profile_home)
-            else hermes_home
+            ceo_profile_home if os.path.isdir(ceo_profile_home) else hermes_home
         )
         store = DiscordIdempotencyStore(delivery_home)
 
@@ -9221,15 +11664,13 @@ class CeoSupervisorService:
                 error_class=None if root_content else "child_terminal_failure",
             )
             logger.info(
-                "ceo-late-child-finalization root=%s child=%s status=%s "
-                "mode=%s",
+                "ceo-late-child-finalization root=%s child=%s status=%s mode=%s",
                 root_task_id,
                 task_id,
                 status,
                 "direct" if root_content else "blocked",
             )
         return status
-
 
     def _reconcile_department_start_progress(
         self,
@@ -9283,11 +11724,7 @@ class CeoSupervisorService:
                 except HermesKanbanCommandError:
                     candidate = payload
 
-            status = str(
-                candidate.get("status")
-                or child.status
-                or ""
-            ).casefold()
+            status = str(candidate.get("status") or child.status or "").casefold()
 
             started_at = candidate.get("started_at")
 
@@ -9308,7 +11745,7 @@ class CeoSupervisorService:
                         "kind": "started",
                     },
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - observer is fail-open.
                 logger.warning(
                     "department-start-reconcile-failed "
                     "root=%s task=%s profile=%s error=%s",
@@ -9317,8 +11754,6 @@ class CeoSupervisorService:
                     child.profile,
                     type(exc).__name__,
                 )
-
-
 
     def _reconcile_department_terminal_progress(
         self,
@@ -9401,7 +11836,7 @@ class CeoSupervisorService:
                         "kind": kind,
                     },
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - observer is fail-open.
                 logger.warning(
                     "department-terminal-reconcile-failed "
                     "root=%s task=%s profile=%s error=%s",
@@ -9445,20 +11880,27 @@ class CeoSupervisorService:
             return None
 
         kind = str(
-            event.get("kind")
-            or event.get("event_type")
-            or event.get("status")
-            or ""
+            event.get("kind") or event.get("event_type") or event.get("status") or ""
         ).casefold()
 
-        analysis_result = strip_internal_handoff(
-            child.final_answer or child.result or ""
-        )
-        department_result = analysis_result or child.summary
         terminal_metadata: Mapping[str, Any] = {}
         risk_plan: Mapping[str, Any] | None = None
         if child.profile == canonical_profile_for_department("risk"):
             terminal_metadata = merged_run_metadata(task_payload)
+        metadata_answer = _text(
+            terminal_metadata.get("final_answer")
+            or terminal_metadata.get("user_facing_final_answer")
+        )
+        analysis_result = strip_internal_handoff(
+            child.final_answer or child.result or metadata_answer
+        )
+        if child.profile == canonical_profile_for_department("research"):
+            analysis_result = _canonicalize_research_source_urls(
+                analysis_result,
+                (root_payload, task_payload),
+            )
+        department_result = analysis_result or child.summary
+        if child.profile == canonical_profile_for_department("risk"):
             candidate_plan = terminal_metadata.get(
                 "position_risk_plan"
             ) or terminal_metadata.get("risk_plan")
@@ -9484,9 +11926,7 @@ class CeoSupervisorService:
             return None
 
         logical_kind = (
-            "started"
-            if kind in {"claimed", "spawned", "started", "running"}
-            else kind
+            "started" if kind in {"claimed", "spawned", "started", "running"} else kind
         )
 
         delivery_task = dict(task_payload)
@@ -9507,9 +11947,7 @@ class CeoSupervisorService:
             canonical_profile_for_department("ceo"),
         )
         delivery_home = (
-            ceo_profile_home
-            if os.path.isdir(ceo_profile_home)
-            else hermes_home
+            ceo_profile_home if os.path.isdir(ceo_profile_home) else hermes_home
         )
 
         icon, detail_label = DEPARTMENT_DISCORD_LABELS.get(
@@ -9518,17 +11956,11 @@ class CeoSupervisorService:
         )
 
         if logical_kind == "started":
-            card_content = (
-                f"{icon} **{detail_label}**\n"
-                "⏳ 분석 중입니다..."
-            )
+            card_content = f"{icon} **{detail_label}**\n⏳ 분석 중입니다..."
         elif kind in {"done", "completed"}:
             result_text = str(department_result or "").strip()
 
-            card_content = (
-                f"{icon} **{detail_label}**\n"
-                "✅ 분석을 완료했습니다."
-            )
+            card_content = f"{icon} **{detail_label}**\n✅ 분석을 완료했습니다."
 
             if result_text:
                 card_content += f"\n\n{result_text}"
@@ -9568,10 +12000,9 @@ class CeoSupervisorService:
                     response_key_suffix=(f"department-card:{child.task_id}"),
                     update_existing=(logical_kind != "started"),
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - observer is fail-open.
             logger.warning(
-                "department-thread-card-failed "
-                "root=%s task=%s profile=%s error=%s",
+                "department-thread-card-failed root=%s task=%s profile=%s error=%s",
                 root_task_id,
                 child.task_id,
                 child.profile,
@@ -9613,8 +12044,7 @@ class CeoSupervisorService:
                 self._department_started_progress.add(child.task_id)
 
         logger.info(
-            "department-thread-card root=%s task=%s "
-            "profile=%s kind=%s status=%s",
+            "department-thread-card root=%s task=%s profile=%s kind=%s status=%s",
             root_task_id,
             child.task_id,
             child.profile,
@@ -9645,11 +12075,7 @@ class CeoSupervisorService:
         show = getattr(self.client, "show", None)
         workflow = getattr(self.client, "workflow", None)
 
-        if (
-            not callable(list_tasks)
-            or not callable(show)
-            or not callable(workflow)
-        ):
+        if not callable(list_tasks) or not callable(show) or not callable(workflow):
             return ()
 
         # hgfinance-recent-done-root-recovery-v1
@@ -9738,9 +12164,7 @@ class CeoSupervisorService:
             with self._parent_lock(root_id):
                 root_payload = show(root_id)
                 self._remember_workflow_root(root_id, root_id, (root_payload,))
-                root_status = str(
-                    root_payload.get("status") or ""
-                ).casefold()
+                root_status = str(root_payload.get("status") or "").casefold()
 
                 # hgfinance-ready-plan-done-recovery-v1
                 #
@@ -9767,7 +12191,7 @@ class CeoSupervisorService:
                 raw_selected_profiles = selected_primary_profiles_from_task(
                     materialization_payload
                 )
-                selected_profiles, planner_qa_requested = split_planner_selection(
+                _selected_profiles, planner_qa_requested = split_planner_selection(
                     raw_selected_profiles
                 )
                 # Keep the raw selection in this compatibility recovery state
@@ -9800,6 +12224,8 @@ class CeoSupervisorService:
                 state = SupervisorState(
                     parent_task_id=root_id,
                     children=children,
+                    request_id=read_marker(root_body, "request_id"),
+                    root_body=root_body,
                     parent_status=str(root_payload.get("status") or ""),
                     wakeups=0,
                     replan_count=0,
@@ -9819,9 +12245,7 @@ class CeoSupervisorService:
                     previous_question_context=previous_question_context_from_body(
                         root_body
                     ),
-                    allow_primary_passthrough=(
-                        self.discord_delivery is not None
-                    ),
+                    allow_primary_passthrough=(self.discord_delivery is not None),
                     risk_advisory_context=fetch_risk_advisory_context(root_body),
                     accounting_advisory_context=fetch_accounting_advisory_context(),
                     workforce_advisory_context=fetch_workforce_advisory_context(
@@ -9845,8 +12269,7 @@ class CeoSupervisorService:
                         self._execute(decision, state)
                     materialized.extend(decisions)
                     logger.info(
-                        "empty-primary-clarification-materialized "
-                        "root=%s action=%s",
+                        "empty-primary-clarification-materialized root=%s action=%s",
                         root_id,
                         decisions[0].action.value,
                     )
@@ -9864,7 +12287,7 @@ class CeoSupervisorService:
                             decision.assignee or "" for decision in decisions
                         ),
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - Discord bridge is fail-open.
                     # Existing policy: a Discord delegation failure must not
                     # prevent primary execution.
                     logger.warning(
@@ -9882,11 +12305,11 @@ class CeoSupervisorService:
 
                 # hgfinance-parallel-primary-fanout-v1
                 #
-                # Initial analysis primaries are independent: they deliberately
-                # have no execution-parent edges and each has a distinct
-                # canonical profile/idempotency key. Run only this initial
-                # ready-plan fan-out concurrently. QA, synthesis, binding, and
-                # terminal fallback remain sequential.
+                # Initial analysis primaries have the planning root as their
+                # dependency and each has a distinct canonical
+                # profile/idempotency key. They can still be created in a
+                # bounded fan-out after the root is terminal. QA, synthesis,
+                # binding, and terminal fallback remain sequential.
                 if len(decisions) == 1:
                     self._execute(decisions[0], state)
                 else:
@@ -9914,14 +12337,10 @@ class CeoSupervisorService:
                             future.result()
 
                 logger.info(
-                    "ready-primary-materialized "
-                    "root=%s count=%d profiles=%s",
+                    "ready-primary-materialized root=%s count=%d profiles=%s",
                     root_id,
                     len(decisions),
-                    ",".join(
-                        decision.assignee or ""
-                        for decision in decisions
-                    ),
+                    ",".join(decision.assignee or "" for decision in decisions),
                 )
 
                 materialized.extend(decisions)
@@ -9949,7 +12368,12 @@ class CeoSupervisorService:
         recovery_candidates = getattr(self.client, "recovery_candidate_rows", None)
         if callable(recovery_candidates):
             try:
-                candidate_rows = recovery_candidates()
+                try:
+                    candidate_rows = recovery_candidates(include_historical=True)
+                except TypeError:
+                    # Older embedders expose the discovery callback without
+                    # the optional historical flag.
+                    candidate_rows = recovery_candidates()
             except RootScopedIndexUnavailable:
                 candidate_rows = None
         if candidate_rows is None:
@@ -10019,8 +12443,7 @@ class CeoSupervisorService:
                 if payload.get("assignee") is not None
             )
             if any(
-                child.is_in_workflow(root_id)
-                and child.workflow_role == "synthesis"
+                child.is_in_workflow(root_id) and child.workflow_role == "synthesis"
                 for child in children
             ):
                 # A synthesis already exists, including one whose terminal
@@ -10049,11 +12472,7 @@ class CeoSupervisorService:
                 continue
 
             wake_child = next(
-                (
-                    child
-                    for child in terminal_primary
-                    if child.blocked or child.failed
-                ),
+                (child for child in terminal_primary if child.blocked or child.failed),
                 terminal_primary[0],
             )
             if wake_child.blocked:
@@ -10160,8 +12579,7 @@ class CeoSupervisorService:
                 if payload.get("assignee") is not None
             )
             if any(
-                child.is_in_workflow(root_id)
-                and child.workflow_role == "synthesis"
+                child.is_in_workflow(root_id) and child.workflow_role == "synthesis"
                 for child in children
             ):
                 continue
@@ -10244,10 +12662,7 @@ class CeoSupervisorService:
             if status not in {"done", "completed", "archived"}:
                 continue
 
-            if (
-                completed_at <= 0
-                or now - completed_at > done_recovery_window_seconds
-            ):
+            if completed_at <= 0 or now - completed_at > done_recovery_window_seconds:
                 continue
 
             body = str(row.get("body") or "")
@@ -10256,18 +12671,11 @@ class CeoSupervisorService:
             if role != "synthesis":
                 continue
 
-            action = (
-                terminal_action(row)
-                or terminal_action({"body": body})
-                or ""
-            )
+            action = terminal_action(row) or terminal_action({"body": body}) or ""
 
-            if (
-                action != "SYNTHESIZE"
-                and not _is_direct_ceo_response_synthesis(
-                    role=role,
-                    body=body,
-                )
+            if action != "SYNTHESIZE" and not _is_direct_ceo_response_synthesis(
+                role=role,
+                body=body,
             ):
                 continue
 
@@ -10289,7 +12697,7 @@ class CeoSupervisorService:
 
             try:
                 payload = show(task_id)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - recovery is fail-open.
                 logger.warning(
                     "synthesis-reconcile-show-failed task=%s error=%s",
                     task_id,
@@ -10302,11 +12710,7 @@ class CeoSupervisorService:
             status = str(payload.get("status") or "").casefold()
             body = str(payload.get("body") or "")
             role = terminal_workflow_role(payload) or ""
-            action = (
-                terminal_action(payload)
-                or terminal_action({"body": body})
-                or ""
-            )
+            action = terminal_action(payload) or terminal_action({"body": body}) or ""
             roots = extract_scope_references(payload).root_ids
 
             if (
@@ -10398,7 +12802,7 @@ class CeoSupervisorService:
         raw_selected_profiles = selected_primary_profiles_from_task(
             materialization_payload
         )
-        selected_profiles, planner_qa_requested = split_planner_selection(
+        _selected_profiles, planner_qa_requested = split_planner_selection(
             raw_selected_profiles
         )
         recovery_selected_profiles = raw_selected_profiles
@@ -10411,7 +12815,7 @@ class CeoSupervisorService:
                     root_task_id=task_id,
                     root_payload=root_payload,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Discord bridge is fail-open.
                 logger.warning(
                     "ceo-root-discord-bridge-failed root=%s error=%s",
                     task_id,
@@ -10441,6 +12845,8 @@ class CeoSupervisorService:
         state = SupervisorState(
             parent_task_id=task_id,
             children=(),
+            request_id=read_marker(root_body, "request_id"),
+            root_body=root_body,
             parent_status=str(root_payload.get("status") or ""),
             wakeups=0,
             replan_count=0,
@@ -10475,8 +12881,7 @@ class CeoSupervisorService:
             return False, None
 
         if any(
-            decision.action != SupervisorAction.CREATE_TASK
-            for decision in decisions
+            decision.action != SupervisorAction.CREATE_TASK for decision in decisions
         ):
             final_status = self._reconcile_unmaterialized_primary_root(
                 root_task_id=task_id,
@@ -10488,8 +12893,7 @@ class CeoSupervisorService:
             for decision in decisions:
                 self._execute(decision, state)
             logger.info(
-                "empty-primary-clarification-materialized "
-                "root=%s action=%s",
+                "empty-primary-clarification-materialized root=%s action=%s",
                 task_id,
                 decisions[0].action.value,
             )
@@ -10506,7 +12910,7 @@ class CeoSupervisorService:
                     decision.assignee or "" for decision in decisions
                 ),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - projection is fail-open.
             # A Discord projection failure must not change child execution.
             logger.warning(
                 "ceo-root-discord-bridge-failed root=%s error=%s",
@@ -10570,11 +12974,7 @@ class CeoSupervisorService:
             self._task_root_cache[root_task_id] = root_task_id
 
             for payload in payloads:
-                child_id = str(
-                    payload.get("id")
-                    or payload.get("task_id")
-                    or ""
-                )
+                child_id = str(payload.get("id") or payload.get("task_id") or "")
                 if child_id:
                     self._task_root_cache[child_id] = root_task_id
                     if child_id == root_task_id:
@@ -10730,27 +13130,31 @@ class CeoSupervisorService:
                 logger.warning(
                     "head-card-activity-not-published task=%s stage=%s persona=%s "
                     "(langfuse 미설치·자격증명 부재·전송 실패 중 하나)",
-                    task_id, stage, persona,
+                    task_id,
+                    stage,
+                    persona,
                 )
         except Exception as exc:  # noqa: BLE001 - 계측이 워크플로를 멈추지 못한다
             logger.warning(
                 "head-card-activity-publish-failed task=%s error=%s: %s",
-                task_id, type(exc).__name__, exc,
+                task_id,
+                type(exc).__name__,
+                exc,
             )
 
-    def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
+    def handle_terminal_event(
+        self, event: Mapping[str, Any]
+    ) -> SupervisorDecision | None:
         handler_started_ms = time.time_ns() // 1_000_000
         handler_started_mono_ns = time.perf_counter_ns()
-        event_consumed_ms = int(
-            event.get("_event_consumed_ms") or handler_started_ms
-        )
+        event_consumed_ms = int(event.get("_event_consumed_ms") or handler_started_ms)
         event_created_ms = int(event.get("_event_created_ms") or 0)
-        event_persisted_ms = int(
-            event.get("_event_persisted_ms") or event_created_ms
-        )
+        event_persisted_ms = int(event.get("_event_persisted_ms") or event_created_ms)
         event_detected_ms = int(event.get("_event_detected_ms") or 0)
         task_id = str(event.get("task_id") or event.get("id") or "")
-        kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
+        kind = str(
+            event.get("kind") or event.get("event_type") or event.get("status") or ""
+        ).casefold()
         if not task_id:
             return None
 
@@ -10782,7 +13186,7 @@ class CeoSupervisorService:
                         task_payload=task_payload,
                         event=event,
                     )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - progress observer is fail-open.
                 # Progress projection must never interfere with execution.
                 logger.warning(
                     "department-discord-progress-failed task=%s kind=%s error=%s",
@@ -10799,21 +13203,14 @@ class CeoSupervisorService:
 
         event_key = str(event.get("event_id") or f"{task_id}:{kind}")
         transition_key = (
-            f"{task_id}:completed"
-            if kind in {"done", "completed", "archived"}
-            else ""
+            f"{task_id}:completed" if kind in {"done", "completed", "archived"} else ""
         )
         with self._seen_events_lock:
-            if (
-                event_key in self._seen_events
-                or (
-                    transition_key
-                    and transition_key in self._seen_terminal_transitions
-                )
+            if event_key in self._seen_events or (
+                transition_key and transition_key in self._seen_terminal_transitions
             ):
                 logger.info(
-                    "supervisor-terminal-duplicate-suppressed "
-                    "task=%s kind=%s event=%s",
+                    "supervisor-terminal-duplicate-suppressed task=%s kind=%s event=%s",
                     task_id,
                     kind,
                     event_key,
@@ -10858,7 +13255,7 @@ class CeoSupervisorService:
                     self._seen_events.discard(event_key)
                     self._seen_terminal_transitions.discard(transition_key)
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - fast path is fail-open.
                 # Fast path is an optimization only. Any ambiguity falls through
                 # to the existing authoritative workflow reconstruction.
                 logger.warning(
@@ -10993,17 +13390,12 @@ class CeoSupervisorService:
                     (
                         payload
                         for payload in payloads
-                        if str(
-                            payload.get("id")
-                            or payload.get("task_id")
-                            or ""
-                        ) == task_id
+                        if str(payload.get("id") or payload.get("task_id") or "")
+                        == task_id
                     ),
                     {},
                 )
-                task_completed_ms = _task_timestamp_ms(
-                    timing_task, "completed_at"
-                )
+                task_completed_ms = _task_timestamp_ms(timing_task, "completed_at")
                 logger.info(
                     "supervisor-terminal-timing root=%s task=%s kind=%s "
                     "task_completed=%d event_created=%d event_persisted=%d "
@@ -11078,47 +13470,49 @@ class CeoSupervisorService:
                                 synthesis_timing,
                                 success=execution_succeeded,
                             )
+
                 # The root is a planning/scope task in the current contract. Its
                 # terminal transition means planning finished, not that the
                 # workflow is ready for synthesis. Primary child events are the
                 # wake-up boundary.
                 root_body = str(root_payload.get("body") or "")
-                if root_id == task_id and kind in {"done", "completed"}:
-                    if _is_planning_root_body(root_body):
-                        # Root completion remains a planning boundary, never a
-                        # synthesis-ready signal.  Project only the CEO-authored
-                        # durable outcome into the already-existing Discord thread.
-                        try:
-                            bridge_status = self._bridge_root_completion_to_discord(
-                                root_task_id=root_id,
-                                root_payload=root_payload,
-                                task_payloads=(root_payload, *payloads),
-                            )
-                        except Exception as exc:
-                            # UI projection must never mutate or block workflow
-                            # execution. Existing primary events remain the
-                            # deterministic wake-up boundary.
-                            logger.warning(
-                                "ceo-root-discord-bridge-failed "
-                                "root=%s error=%s",
-                                root_id,
-                                type(exc).__name__,
-                            )
-                            bridge_status = "failed"
-
-                        logger.info(
-                            "root-planning-complete-projected "
-                            "root=%s event=%s status=%s",
-                            root_id,
-                            event_key,
-                            bridge_status,
-                        )
-                        self._reconcile_unmaterialized_primary_root(
+                if (
+                    root_id == task_id
+                    and kind in {"done", "completed"}
+                    and _is_planning_root_body(root_body)
+                ):
+                    # Root completion remains a planning boundary, never a
+                    # synthesis-ready signal.  Project only the CEO-authored
+                    # durable outcome into the already-existing Discord thread.
+                    try:
+                        bridge_status = self._bridge_root_completion_to_discord(
                             root_task_id=root_id,
                             root_payload=root_payload,
                             task_payloads=(root_payload, *payloads),
                         )
-                        return None
+                    except Exception as exc:  # noqa: BLE001 - UI observer is fail-open.
+                        # UI projection must never mutate or block workflow
+                        # execution. Existing primary events remain the
+                        # deterministic wake-up boundary.
+                        logger.warning(
+                            "ceo-root-discord-bridge-failed root=%s error=%s",
+                            root_id,
+                            type(exc).__name__,
+                        )
+                        bridge_status = "failed"
+
+                    logger.info(
+                        "root-planning-complete-projected root=%s event=%s status=%s",
+                        root_id,
+                        event_key,
+                        bridge_status,
+                    )
+                    self._reconcile_unmaterialized_primary_root(
+                        root_task_id=root_id,
+                        root_payload=root_payload,
+                        task_payloads=(root_payload, *payloads),
+                    )
+                    return None
                 try:
                     validate_workflow_scope(
                         root_task_id=root_id,
@@ -11126,28 +13520,29 @@ class CeoSupervisorService:
                         descendants=payloads,
                     )
                     workflow_mode = workflow_mode_from_body(root_body)
-                    user_paper_order_scope = user_paper_order_scope_from_body(
-                        root_body
-                    )
+                    user_paper_order_scope = user_paper_order_scope_from_body(root_body)
                     validation_completed_ms = time.time_ns() // 1_000_000
                 except WorkflowScopeViolation as exc:
                     reason = f"workflow_scope_validation: {exc}"
                     scope_error_prefix = (
-                        "hgfinance.ceo-workflow-scope-error.v1 "
-                        f"event={event_key} "
+                        f"hgfinance.ceo-workflow-scope-error.v1 event={event_key} "
                     )
                     comments = root_payload.get("comments")
-                    scope_error_comments = tuple(
-                        comment
-                        for comment in (comments or ())
-                        if isinstance(comment, Mapping)
-                        and str(comment.get("body") or "").startswith(
-                            "hgfinance.ceo-workflow-scope-error.v1 "
+                    scope_error_comments = (
+                        tuple(
+                            comment
+                            for comment in (comments or ())
+                            if isinstance(comment, Mapping)
+                            and str(comment.get("body") or "").startswith(
+                                "hgfinance.ceo-workflow-scope-error.v1 "
+                            )
                         )
-                    ) if (
-                        isinstance(comments, Sequence)
-                        and not isinstance(comments, (str, bytes))
-                    ) else ()
+                        if (
+                            isinstance(comments, Sequence)
+                            and not isinstance(comments, (str, bytes))
+                        )
+                        else ()
+                    )
                     already_recorded = any(
                         str(comment.get("body") or "").startswith(scope_error_prefix)
                         for comment in scope_error_comments
@@ -11188,14 +13583,29 @@ class CeoSupervisorService:
                     (
                         payload
                         for payload in payloads
-                        if str(
-                            payload.get("id")
-                            or payload.get("task_id")
-                            or ""
-                        ) == task_id
+                        if str(payload.get("id") or payload.get("task_id") or "")
+                        == task_id
                     ),
                     None,
                 )
+                if terminal_task_payload is not None:
+                    repaired_terminal = self._repair_terminal_result_contract(
+                        terminal_task_payload
+                    )
+                    if repaired_terminal is not terminal_task_payload:
+                        terminal_task_payload = repaired_terminal
+                        terminal_task_id = str(
+                            repaired_terminal.get("id")
+                            or repaired_terminal.get("task_id")
+                            or ""
+                        )
+                        payloads = tuple(
+                            repaired_terminal
+                            if str(payload.get("id") or payload.get("task_id") or "")
+                            == terminal_task_id
+                            else payload
+                            for payload in payloads
+                        )
                 terminal_observers_projected = False
                 terminal_progress_status: str | None = None
                 observer_started_ms = 0
@@ -11223,20 +13633,25 @@ class CeoSupervisorService:
                             )
                             if (
                                 terminal_role == "synthesis"
-                                and terminal_projection_status not in {"sent", "deduped"}
+                                and terminal_projection_status
+                                not in {"sent", "deduped"}
                             ):
                                 with self._seen_events_lock:
-                                    self._seen_terminal_transitions.discard(transition_key)
+                                    self._seen_terminal_transitions.discard(
+                                        transition_key
+                                    )
 
                             if terminal_task_payload is not None:
                                 try:
-                                    terminal_progress_status = self._deliver_department_progress(
-                                        root_task_id=root_id,
-                                        root_payload=root_payload,
-                                        task_payload=terminal_task_payload,
-                                        event=event,
+                                    terminal_progress_status = (
+                                        self._deliver_department_progress(
+                                            root_task_id=root_id,
+                                            root_payload=root_payload,
+                                            task_payload=terminal_task_payload,
+                                            event=event,
+                                        )
                                     )
-                                except Exception as exc:
+                                except Exception as exc:  # noqa: BLE001 - Discord observer is fail-open.
                                     logger.warning(
                                         "department-discord-progress-failed task=%s kind=%s error=%s",
                                         task_id,
@@ -11252,7 +13667,13 @@ class CeoSupervisorService:
                                 skip_task_ids=(
                                     (task_id,)
                                     if terminal_progress_status
-                                    in {"created", "updated", "unchanged", "deduped", "sent"}
+                                    in {
+                                        "created",
+                                        "updated",
+                                        "unchanged",
+                                        "deduped",
+                                        "sent",
+                                    }
                                     else ()
                                 ),
                             )
@@ -11288,8 +13709,7 @@ class CeoSupervisorService:
                 )
                 response_payloads = (root_payload, *payloads)
                 if terminal_task_payload is not None and not any(
-                    str(payload.get("id") or payload.get("task_id") or "")
-                    == task_id
+                    str(payload.get("id") or payload.get("task_id") or "") == task_id
                     for payload in response_payloads
                 ):
                     response_payloads = (*response_payloads, terminal_task_payload)
@@ -11300,13 +13720,12 @@ class CeoSupervisorService:
                         task_payloads=response_payloads,
                         task_id=task_id,
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - delivery remains retryable.
                     # Final delivery remains retryable through the existing
                     # idempotent helper and a later terminal/recovery wakeup.
                     # Never turn a child terminal event into a supervisor crash.
                     logger.warning(
-                        "ceo-late-child-finalization-failed root=%s child=%s "
-                        "error=%s",
+                        "ceo-late-child-finalization-failed root=%s child=%s error=%s",
                         root_id,
                         task_id,
                         type(exc).__name__,
@@ -11330,7 +13749,10 @@ class CeoSupervisorService:
                         ",".join(unmarked_primary_ids),
                     )
                 existing_wakeups = self._wakeup_comments(root_payload)
-                if event_key in existing_wakeups and "state=done" in existing_wakeups[event_key]:
+                if (
+                    event_key in existing_wakeups
+                    and "state=done" in existing_wakeups[event_key]
+                ):
                     return None
                 wakeups = self._wakeup_budget(existing_wakeups)
                 durable_replans = sum(
@@ -11345,7 +13767,9 @@ class CeoSupervisorService:
                 # primary in that compatibility path. The authoritative client
                 # already returned the same show() payloads above; re-reading
                 # them only adds latency and API load.
-                raw_selected_profiles = selected_primary_profiles_from_task(root_payload)
+                raw_selected_profiles = selected_primary_profiles_from_task(
+                    root_payload
+                )
                 selected_profiles, planner_qa_requested = split_planner_selection(
                     raw_selected_profiles
                 )
@@ -11393,6 +13817,8 @@ class CeoSupervisorService:
                 state = SupervisorState(
                     parent_task_id=root_id,
                     children=children,
+                    request_id=read_marker(root_body, "request_id"),
+                    root_body=root_body,
                     parent_status=str(root_payload.get("status") or ""),
                     # Evaluate ordinary workflow phase transitions without
                     # spending the safety budget.  If the candidate action is
@@ -11472,11 +13898,9 @@ class CeoSupervisorService:
                     )
                     return timing
 
-                initial_primary_decisions = (
-                    _initial_primary_materialization_decisions(
-                        state,
-                        root_body,
-                    )
+                initial_primary_decisions = _initial_primary_materialization_decisions(
+                    state,
+                    root_body,
                 )
                 if initial_primary_decisions:
                     for initial_primary_decision in initial_primary_decisions:
@@ -11491,7 +13915,6 @@ class CeoSupervisorService:
                             for decision in initial_primary_decisions
                         ),
                     )
-
 
                 passthrough = _single_primary_passthrough_child(state)
                 if (
@@ -11561,6 +13984,11 @@ class CeoSupervisorService:
                         or str(primary_payload.get("final_answer") or "")
                         or passthrough.result
                     )
+                    passthrough_content = _append_trading_source_coordinates(
+                        passthrough_content,
+                        root_body=root_body,
+                        task_payloads=(root_payload, *payloads, delivery_task),
+                    )
                     if passthrough.profile == canonical_profile_for_department("hr"):
                         hydrated_passthrough = _terminal_payload_mapping(passthrough)
                         enrichment_payloads = tuple(
@@ -11621,9 +14049,7 @@ class CeoSupervisorService:
                     delivery_environment = getattr(
                         self.client, "environment", os.environ
                     )
-                    hermes_home = delivery_environment.get(
-                        "HERMES_HOME", "/opt/data"
-                    )
+                    hermes_home = delivery_environment.get("HERMES_HOME", "/opt/data")
                     ceo_profile_home = os.path.join(
                         hermes_home,
                         "profiles",
@@ -11640,19 +14066,17 @@ class CeoSupervisorService:
 
                     # Single-primary/PAPER fast paths must follow the same
                     # thread-first policy as normal CEO synthesis.
-                    delivery_status = (
-                        self.discord_delivery.deliver_to_existing_thread(
-                            root_task_id=root_id,
-                            source_task=delivery_task,
-                            root_task=root_payload,
-                            content=passthrough_content,
-                            title="🧠 CEO 답변",
-                            store=delivery_store,
-                            profile=ceo_profile,
-                            response_key_suffix=(
-                                f"single-primary-detail:{passthrough.task_id}"
-                            ),
-                        )
+                    delivery_status = self.discord_delivery.deliver_to_existing_thread(
+                        root_task_id=root_id,
+                        source_task=delivery_task,
+                        root_task=root_payload,
+                        content=passthrough_content,
+                        title="🧠 CEO 답변",
+                        store=delivery_store,
+                        profile=ceo_profile,
+                        response_key_suffix=(
+                            f"single-primary-detail:{passthrough.task_id}"
+                        ),
                     )
 
                     if delivery_status == "missing_thread":
@@ -11697,11 +14121,8 @@ class CeoSupervisorService:
                 decision = deferred_decision or self.decider(state)
                 decision_completed_mono_ns = time.perf_counter_ns()
                 decision_completed_ms = time.time_ns() // 1_000_000
-                if (
-                    wakeups >= self.max_wakeups
-                    and self._consumes_wakeup_budget(
-                        decision.action if decision is not None else None
-                    )
+                if wakeups >= self.max_wakeups and self._consumes_wakeup_budget(
+                    decision.action if decision is not None else None
                 ):
                     decision = self.decider(replace(state, wakeups=wakeups))
                     decision_completed_mono_ns = time.perf_counter_ns()
@@ -11710,7 +14131,8 @@ class CeoSupervisorService:
                     logger.info(
                         "primary-ready root=%s selected=%d ready=%d",
                         root_id,
-                        len(state.selected_primary_profiles) or len(state.primary_by_profile),
+                        len(state.selected_primary_profiles)
+                        or len(state.primary_by_profile),
                         state.ready_count,
                     )
                 elif state.duplicate_primary_profiles:
@@ -11849,7 +14271,9 @@ class CeoSupervisorService:
                 return decision
         except CanonicalProfileError as exc:
             root_for_abort = locals().get("root_id", task_id)
-            self._safe_abort(str(root_for_abort), f"canonical profile validation: {exc}")
+            self._safe_abort(
+                str(root_for_abort), f"canonical profile validation: {exc}"
+            )
             return SupervisorDecision(
                 SupervisorAction.BLOCK_ABORT,
                 str(root_for_abort),
@@ -11876,17 +14300,22 @@ class CeoSupervisorService:
                         submitted = bool(
                             self._terminal_observer_submit(deferred_terminal_observer)
                         )
-                    except Exception as exc:  # queue failure remains fail-open
+                    except Exception as exc:  # noqa: BLE001 - queue failure remains fail-open
                         logger.warning(
                             "terminal observer queue rejected task=%s event=%s error=%s",
                             task_id,
                             event_key,
                             type(exc).__name__,
                         )
-                if not submitted:
+                if self._terminal_observer_submit is None:
+                    # Tests and embedders intentionally have no production
+                    # observer queue, so preserve their synchronous contract.
+                    # Production supplies a queue and never reaches this
+                    # branch; a full production queue remains backpressure
+                    # and is deferred to durable recovery below.
                     try:
                         deferred_terminal_observer()
-                    except Exception as exc:  # observer failure is non-binding
+                    except Exception as exc:
                         logger.exception(
                             "deferred terminal observer failed",
                             extra={
@@ -11895,6 +14324,12 @@ class CeoSupervisorService:
                                 "error": str(exc),
                             },
                         )
+                elif not submitted:
+                    logger.error(
+                        "terminal observer deferred to recovery task=%s event=%s",
+                        task_id,
+                        event_key,
+                    )
 
     def _qa_required_from_event(self, event: Mapping[str, Any]) -> bool:
         """Read an explicit CEO completion decision; default remains QA on."""
@@ -11970,6 +14405,7 @@ class CeoSupervisorService:
                     decision.body or f"{SUPERVISOR_MARKER} action=REQUEST_USER_INPUT",
                     state.parent_task_id,
                     role="control",
+                    request_id=state.request_id or None,
                     workflow_mode=state.workflow_mode,
                     has_mandate=state.has_mandate,
                     previous_question_context=state.previous_question_context,
@@ -11988,7 +14424,9 @@ class CeoSupervisorService:
             SupervisorAction.SYNTHESIZE,
         }:
             if not decision.assignee or not decision.title or not decision.body:
-                raise SupervisorValidationError(f"{decision.action.value} lacks create fields")
+                raise SupervisorValidationError(
+                    f"{decision.action.value} lacks create fields"
+                )
             if decision.action == SupervisorAction.RUN_QA:
                 # QA task creation moved to the terminal response observer.
                 # Keeping RUN_QA in the parser preserves legacy event
@@ -12004,9 +14442,7 @@ class CeoSupervisorService:
                 # therefore never a synthesis dependency, including binding
                 # workflows and late QA terminal events.
                 expected = {
-                    child.task_id
-                    for child in state.analysis_children
-                    if child.done
+                    child.task_id for child in state.analysis_children if child.done
                 }
                 # The trusted PAPER template is completed from the persisted
                 # Trading handoff immediately after the card is created. It
@@ -12023,9 +14459,7 @@ class CeoSupervisorService:
                     # evidence as its parent. QA is post-response and must
                     # never become a response dependency here.
                     expected = {
-                        child.task_id
-                        for child in state.analysis_children
-                        if child.done
+                        child.task_id for child in state.analysis_children if child.done
                     }
                 if requested_parent_ids != expected:
                     raise SupervisorValidationError(
@@ -12080,6 +14514,12 @@ class CeoSupervisorService:
                 synthesis_timing["t7b_ms"] = time.time_ns() // 1_000_000
                 synthesis_timing["t7b_mono_ns"] = time.perf_counter_ns()
             task_body = decision.body
+            if role == "synthesis":
+                self_improvement_section = ceo_self_improvement_section_from_root(
+                    state.root_body
+                )
+                if self_improvement_section:
+                    task_body = f"{task_body}\n\n{self_improvement_section}"
             if (
                 role == "primary"
                 and decision.assignee == canonical_profile_for_department("risk")
@@ -12117,12 +14557,21 @@ class CeoSupervisorService:
                     "state that limitation and complete the bounded answer:\n"
                     f"{state.workforce_advisory_context}"
                 )
+            if (
+                role == "primary"
+                and "Terminal result persistence contract (required):" not in task_body
+            ):
+                # Keep one canonical result handoff at the final create
+                # boundary. This also covers replan and deferred-primary
+                # paths that do not pass through initial materialization.
+                task_body = f"{task_body}\n\n{_TERMINAL_RESULT_CONTRACT_GUIDANCE}"
             created = self.client.create_task(
                 title=decision.title,
                 body=build_scoped_task_body(
                     task_body,
                     state.parent_task_id,
                     role=role,
+                    request_id=state.request_id or None,
                     workflow_mode=state.workflow_mode,
                     has_mandate=state.has_mandate,
                     previous_question_context=state.previous_question_context,
@@ -12134,9 +14583,7 @@ class CeoSupervisorService:
             )
             if decision.reason == "binding_paper_structured_template":
                 created_task = (
-                    created.get("task", created)
-                    if isinstance(created, Mapping)
-                    else {}
+                    created.get("task", created) if isinstance(created, Mapping) else {}
                 )
                 synthesis_task_id = (
                     str(created_task.get("id") or created_task.get("task_id") or "")
@@ -12172,7 +14619,7 @@ class CeoSupervisorService:
                         template_child.task_id,
                         synthesis_task_id,
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - fallback remains fail-open.
                     logger.warning(
                         "binding-paper-template-fallback root=%s task=%s error=%s",
                         state.parent_task_id,
@@ -12187,9 +14634,7 @@ class CeoSupervisorService:
                 "empty_primary_defer_template",
             }:
                 created_task = (
-                    created.get("task", created)
-                    if isinstance(created, Mapping)
-                    else {}
+                    created.get("task", created) if isinstance(created, Mapping) else {}
                 )
                 synthesis_task_id = (
                     str(created_task.get("id") or created_task.get("task_id") or "")
@@ -12242,10 +14687,14 @@ class CeoSupervisorService:
                     task_body,
                     "deferred_conditional_order_request_id",
                 )
-                created_task = created.get("task", created) if isinstance(created, Mapping) else {}
-                trading_task_id = str(
-                    created_task.get("id") or created_task.get("task_id") or ""
-                ) if isinstance(created_task, Mapping) else ""
+                created_task = (
+                    created.get("task", created) if isinstance(created, Mapping) else {}
+                )
+                trading_task_id = (
+                    str(created_task.get("id") or created_task.get("task_id") or "")
+                    if isinstance(created_task, Mapping)
+                    else ""
+                )
                 if not order_request_id or not trading_task_id:
                     logger.error(
                         "deferred-conditional-binding-missing root=%s task=%s",
@@ -12255,7 +14704,7 @@ class CeoSupervisorService:
                     return
                 try:
                     from apps.api.user_order_workflow import (
-                        user_order_repository,  # noqa: PLC0415
+                        user_order_repository,
                     )
 
                     user_order_repository().bind_trading_task(
@@ -12279,10 +14728,9 @@ class CeoSupervisorService:
                 if isinstance(created, Mapping):
                     created_task = created.get("task", created)
                     if isinstance(created_task, Mapping):
-                        synthesis_timing["synthesis_task_id"] = (
-                            created_task.get("id")
-                            or created_task.get("task_id")
-                        )
+                        synthesis_timing["synthesis_task_id"] = created_task.get(
+                            "id"
+                        ) or created_task.get("task_id")
                         synthesis_timing["task_created_at_ms"] = _task_timestamp_ms(
                             created_task,
                             "created_at",

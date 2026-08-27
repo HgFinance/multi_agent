@@ -1130,6 +1130,15 @@ def health_ready() -> dict:
 @app.get("/risk/v1/observability/runtime")
 def runtime_observability():
     snapshot = RISK_TELEMETRY.snapshot()
+    # This endpoint owns deterministic Risk API telemetry only. Hermes
+    # execution is observed at the Kanban/LangSmith boundary so this response
+    # must not present a stale API-only counter as end-to-end coverage.
+    snapshot["observability_scope"] = "risk-api-deterministic-pipeline"
+    snapshot["hermes_included"] = False
+    snapshot["hermes_observability_source"] = (
+        "Kanban task_runs + LangSmith hgfinance.risk.worker"
+    )
+    snapshot["aggregation_status"] = "PARTIAL"
     snapshot["process_pipeline_count"] = snapshot["pipeline_count"]
     snapshot["process_fallback_count"] = snapshot["fallback_count"]
     snapshot["process_p50_seconds"] = snapshot["p50_seconds"]

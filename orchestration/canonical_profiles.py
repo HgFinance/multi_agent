@@ -133,6 +133,12 @@ def department_for_canonical_profile(profile: str) -> str:
 # `ORDER BY priority DESC, created_at ASC` 라 이 한 값이 순서를 바꾼다.
 # env 로 낮출 수 있게 둔 것은 공장 처리량을 우선하려는 운영 판단을 위해서다.
 USER_QUERY_PRIORITY = int(os.getenv("KANBAN_USER_QUERY_PRIORITY", "100"))
+# Research evidence requests use the same shared priority queue, but sit just
+# above ordinary user-query children. This keeps one queue/claim authority and
+# gives the latency-sensitive Research lane a deterministic place in it.
+RESEARCH_QUERY_PRIORITY = int(
+    os.getenv("KANBAN_RESEARCH_QUERY_PRIORITY", str(USER_QUERY_PRIORITY + 10))
+)
 
 
 @dataclass(frozen=True)
@@ -158,17 +164,18 @@ class CanonicalKanbanTaskRequest:
         if not self.idempotency_key.strip():
             raise ValueError("Kanban task idempotency_key must not be empty")
         if not isinstance(self.priority, int) or isinstance(self.priority, bool):
-            raise ValueError("Kanban task priority must be an int")
+            raise ValueError("Kanban task priority must be an int")  # noqa: TRY004
 
 
 __all__ = [
-    "CANONICAL_PROFILE_BY_DEPARTMENT",
-    "LIAISON_PROFILE_BY_DEPARTMENT",
     "CANONICAL_PROFILES",
+    "CANONICAL_PROFILE_BY_DEPARTMENT",
+    "LEGACY_PROFILE_ALIASES",
+    "LIAISON_PROFILE_BY_DEPARTMENT",
+    "RESEARCH_QUERY_PRIORITY",
+    "USER_QUERY_PRIORITY",
     "CanonicalKanbanTaskRequest",
     "CanonicalProfileError",
-    "LEGACY_PROFILE_ALIASES",
-    "USER_QUERY_PRIORITY",
     "canonical_profile_for_department",
     "department_for_canonical_profile",
     "validate_canonical_profile",

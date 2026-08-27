@@ -17,6 +17,15 @@ Web/Discord human message
   └─ 전략 질의: Strategy Hermes intake
                 → labs/<request_id>/ (CEO/Kanban 없음)
                 → GET /ui/strategy-research/requests/<request_id>
+  └─ 명시적 전략 배포: exact completed lab + tested symbols
+                → POST /ui/strategy-research/requests/<request_id>/deploy
+                → AWAITING_APPROVAL + compact backtest report
+                → 명시적 사람 승인
+                → immutable PAPER Bundle + private strategy container
+                → GET /ui/strategy-research/requests/<request_id>/deployments
+                → GET .../<deployment_id> (live container state)
+                → POST .../<deployment_id>/power (start/stop)
+                → POST .../<deployment_id>/remove (retire container)
 ```
 
 기존 `POST /ui/ceo/ask`도 `source=web` canonical ingress로 보호된다. 기존 응답
@@ -24,6 +33,38 @@ Web/Discord human message
 BFF endpoint에서 `autonomous-research-request.v1`을 반환하고 `/ui/strategy-research/
 requests/<request_id>`로 상태를 조회한다. 기존 `/ui/ceo/tasks*` read API도 그대로
 사용한다.
+
+사람이 `하이닉스 전략 배포해줘`처럼 명시적으로 요청하면 중앙 라우터가 PAPER
+배포 요청으로 분기한다. 종목명은 KRX 코드로 정규화하고, 완료된 연구실이 하나로
+특정될 때만 연결한다. 요청은 결과 JSON의 SHA-256과 계획 ID를 함께 기록하고,
+사람이 보고서 요약을 확인하기 전에는 `AWAITING_APPROVAL`에서 멈춘다. 승인 시
+Strategy Hermes가 임의 코드를 실행하지 않고 allowlisted 3분봉 SMA 5/20/60
+Bundle을 만든 뒤 private runtime-control에 PAPER 컨테이너를 요청한다.
+현재 컨테이너는 `SIGNAL_ONLY`이며 Trading/Risk/OMS 주문 연결은 비활성이다.
+`LIVE`는 항상 `BLOCKED`다.
+
+승인된 배포는 Web 버튼 또는 `전략 배포 승인 <deployment_id>`로 시작할 수 있다.
+연구 결과가 `PIVOT`/`REVIEW_REQUIRED`인 경우에는 일반 승인으로 열리지 않으며,
+`STRATEGY_TOP_LEVEL_APPROVER_USER_IDS`에 등록된 최상위 사람이
+`전략 배포 예외 승인 <deployment_id>`처럼 예외 의도를 명시해야 한다. 이 경로는
+릴리스·후보 판정 게이트만 감사 기록과 함께 예외 처리하고, 결과 해시·전략 서명·2%
+익절 조건·종목·PAPER 및 신호 전용 계약은 다시 검증한다. LIVE와 주문 생성은 계속
+차단된다.
+`전략 컨테이너 중지/시작`은 해당 컨테이너만 제어하고, `전략 배포 제거`는 컨테이너를
+폐기하되 연구 원본·백테스트 결과·Bundle을 삭제하지 않고 `REMOVED` 감사 상태로
+남긴다. 모든 수명주기 명령은 요청자 소유권과 정확한 deployment ID를 재검증한다.
+
+운영 Gateway의 Discord ingress는 서비스별 허용 채널을 먼저 판정한다. CEO는
+`DISCORD_CEO_ALLOWED_CHANNELS`, QA는 `QA_DISCORD_ALLOWED_CHANNELS`, HR은
+`HR_DISCORD_ALLOWED_CHANNELS`를 사용하며, 허용 목록 밖 메시지는 mention 유무와
+무관하게 Hermes와 중앙 claim에 도달하지 않는다. 허용 채널의 mention/free-response
+정책도 adapter의 기존 설정과 함께 적용되므로 mention이 없는 미팅 메시지가 부서
+Gateway를 우회하지 않는다. CEO·QA·HR 패치 Gateway는 `/opt/kanban`의 전역 inbound
+claim을 공유해 같은 Discord message ID를 프로필별로 각각 소유하지 않는다.
+
+CEO의 `DISCORD_CEO_ALLOWED_CHANNELS`와 `DISCORD_CEO_FREE_RESPONSE_CHANNELS`는
+`DISCORD_CEO_CHANNEL_ID`와 같은 공용 CEO 채널을 가리켜야 한다. 이 값이 어긋나면
+mention이 있는 정상 질의도 BFF ingress 전에 `CHANNEL_POLICY`로 종료된다.
 
 ## 입력 계약
 
@@ -105,7 +146,7 @@ SSE는 짧은 연결 후 닫히며, 클라이언트는 마지막 `event_id`를 `
 ## Discord adapter 전달사항
 
 `deploy/hermes-discord/gateway_patch.py`가 기존 Hermes Discord gateway의 수신
-경계에 설치된다. CEO/Trading 프로필의 사람 메시지는 이 shim이
+경계에 설치된다. 패치가 활성화된 CEO/Trading 프로필의 사람 메시지는 이 shim이
 `/ui/ceo/ingress`로 전달하고, 성공(`200/202`) 또는 중복(`409`)이면 원래
 Hermes handler를 다시 호출하지 않는다. BFF가 runtime에서 응답하지 않으면
 기존의 제한된 재시도 후 `failed_closed`로 종료하며, 원래 Hermes 경로로
@@ -135,9 +176,6 @@ Discord token/API key는 계속 AWS `~/.hermes/profiles/*/.env`에만 둔다.
 4. Discord로 보낼 mirror message에는 `mirrored=true` 메타데이터를 붙인다.
 5. bot이 만든 메시지는 다시 `/ingress`에 보내지 않는다.
 6. `event_id`를 저장해 재시작/reconnect 시 중복 전송하지 않는다.
-
-Discord token/API key는 현재처럼 AWS `~/.hermes/profiles/*/.env`에만 둔다.
-프론트 번들, BFF response, event payload에 넣지 않는다.
 
 ## 운영 저장소
 
@@ -177,3 +215,10 @@ fixture까지 같은 환경변수에서 설정하려면 3칸 형식이 필요하
 매핑이 없으면 `owner_id`·`fund_id`를 만들지 않는다. `ceo_query`는 Mandate 조회를
 건너뛰고 snapshot 없이 진행하므로 “이 요청에는 사용자 한도가 없다”가 정확히
 유지된다. 임의 기본 계정이나 로그인 사용자를 만들지 않는다.
+
+이 경우 계정 범위 CEO 이력 API가 해당 root를 고정 fixture에 섞어 보여주지 않는
+것은 정상 동작이다. 대화 확인은 `GET /ui/discord/thread`의 source/thread
+projection을 사용한다. 임의의 기본 계정에 매핑해 `/ui/ceo/tasks/{id}`의 403을
+우회하지 않는다. 운영에서 계정별 CEO 이력까지 필요하면 먼저
+`DISCORD_ACTOR_MAP`을 서버 설정으로 등록하고 재처리하지 않고 새 요청부터
+적용한다.

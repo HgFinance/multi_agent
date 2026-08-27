@@ -13,6 +13,11 @@ chmod 0777 "$lab_root/intake"
 target_uid="${HERMES_UID:-$(id -u hermes)}"
 target_gid="${HERMES_GID:-$(id -g hermes)}"
 chown -R "$target_uid:$target_gid" "$lab_root"
+# Repair manifests created by older versions whose atomic tracking update
+# left the mkstemp 0600 mode in place. This makes queued requests recoverable
+# on the next container start without manual volume surgery.
+find "$lab_root/intake" -type f -name '*.json' -exec chmod 0644 {} +
+find "$lab_root/errors" -type f -name '*.json' -exec chmod 0644 {} +
 
 # Seed only the Codex credential into the dedicated Strategy Hermes home. The
 # source mount is read-only and remains owned by the existing profile; the

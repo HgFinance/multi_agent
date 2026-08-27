@@ -20,6 +20,7 @@ from orchestration.qa_discord_feedback import (
     format_qa_feedback_request,
     format_qa_terminal_report,
     format_skill_proposal_request,
+    is_actionable_feedback,
     parse_qa_feedback_command,
     proposal_id_from_text,
 )
@@ -37,6 +38,10 @@ _SPEC.loader.exec_module(gateway_patch)
 
 
 ARTIFACT_ID = "feedback-0123456789abcdef0123456789abcdef"
+
+
+def test_unverified_redaction_marker_is_actionable_for_qa_review() -> None:
+    assert is_actionable_feedback(("REDACTION_MARKER_MISSING",))
 
 
 def test_qa_terminal_report_preserves_structured_finding_statement() -> None:
@@ -66,7 +71,9 @@ def test_qa_terminal_report_preserves_structured_finding_statement() -> None:
     assert "구체적인 문제 설명이 없습니다" not in report
 
 
-def test_qa_terminal_report_humanizes_checks_and_separates_review_from_verdict() -> None:
+def test_qa_terminal_report_humanizes_checks_and_separates_review_from_verdict() -> (
+    None
+):
     report = format_qa_terminal_report(
         SimpleNamespace(
             canonical_decision="FAIL",
@@ -107,6 +114,9 @@ def test_qa_terminal_report_humanizes_post_response_check_keys() -> None:
                 {"check": "citations", "result": "WARN"},
                 {"check": "paper_read_only_safety", "result": "PASS"},
                 {"check": "response_delivery_nonblocking", "result": "PASS"},
+                {"check": "ceo_input_is_identical", "result": "PASS"},
+                {"check": "response_delivered", "result": "PASS"},
+                {"check": "qa_blocks_response", "result": "PASS"},
             ],
             findings=[],
             root_task_id="t_root",
@@ -119,7 +129,166 @@ def test_qa_terminal_report_humanizes_post_response_check_keys() -> None:
     assert "출처 인용: 주의" in report
     assert "PAPER 읽기 전용 준수: 통과" in report
     assert "CEO 응답 비차단: 통과" in report
+    assert "CEO 입력 일치 여부: 통과" in report
+    assert "CEO 응답 전달 여부: 통과" in report
+    assert "QA 응답 차단 여부: 통과" in report
     assert "추가 점검 항목" not in report
+
+
+def test_qa_terminal_report_names_live_qa_projection_checks() -> None:
+    """The production QA metadata keys must not collapse to a generic label."""
+
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="WARN",
+            evidence={"numerical_posture": "DEFER"},
+            checks={
+                "evidence_boundary": {"result": "PASS"},
+                "langsmith_authoritative_execution": {"result": "WARN"},
+                "trace_receipt_consistency": {"result": "WARN"},
+                "ceo_response_delivery": {"result": "PASS"},
+                "e2e_receipt_contract": {"result": "PASS"},
+                "research_evidence_and_reproducibility": {"result": "WARN"},
+                "claim_scope_and_metrics": {"result": "PASS"},
+                "paper_read_only_safety": {"result": "PASS"},
+            },
+            findings=[],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "권위 LangSmith 실행 기록: 주의" in report
+    assert "실행 기록·전달 영수증 일관성: 주의" in report
+    assert "CEO 응답 전달 여부: 통과" in report
+    assert "전체 흐름 전달 영수증: 통과" in report
+    assert "리서치 근거·재현성: 주의" in report
+    assert "주장 범위·수치 처리: 통과" in report
+    assert "추가 점검 항목" not in report
+
+
+def test_qa_terminal_report_uses_structured_check_label_fallback() -> None:
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="WARN",
+            evidence={"numerical_posture": "DEFER"},
+            checks=[{"label": "사내 추가 통제", "status": "WARN"}],
+            findings=[],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "사내 추가 통제: 주의" in report
+
+    unknown_report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="WARN",
+            evidence={"numerical_posture": "DEFER"},
+            checks={"new_contract_v9": "WARN"},
+            findings=[],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+    assert "검증 항목(new_contract_v9): 주의" in unknown_report
+
+
+def test_qa_terminal_report_keeps_legacy_string_checks_identifiable() -> None:
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="WARN",
+            evidence={"numerical_posture": "DEFER"},
+            checks=["evidence_boundary: PASS", "new_check_v9"],
+            findings=[],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "근거 범위: 통과" in report
+    assert "검증 항목(new_check_v9): 확인 필요" in report
+    assert "추가 점검 항목" not in report
+
+
+def test_qa_terminal_report_humanizes_runtime_evidence_keys() -> None:
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="WARN",
+            evidence={
+                "numerical_posture": "DEFER",
+                "verified_facts": [
+                    (
+                        "ceo_input_is_identical=true, response_delivered=true, "
+                        "qa_blocks_response=false, workflow_observations=available, "
+                        "ceo_response.response_task_id=t_response, "
+                        "delivery_status=sent, trace_closed=true, "
+                        "terminal_status=done, duplicate=false"
+                    )
+                ],
+            },
+            checks=[],
+            findings=[],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "CEO 입력 일치 여부=확인" in report
+    assert "CEO 응답 전달 여부=확인" in report
+    assert "QA 응답 차단 여부=미확인" in report
+    assert "업무 흐름 관측 정보=available" in report
+    assert "ceo_input_is_identical" not in report
+    assert "response_delivered" not in report
+    assert "qa_blocks_response" not in report
+    assert "workflow_observations" not in report
+    assert "CEO 응답 업무 ID=t_response" in report
+    assert "전달 상태=sent" in report
+    assert "추적 종료=확인" in report
+    assert "종료 상태=done" in report
+    assert "중복 여부=미확인" in report
+    assert "ceo_response.response_task_id" not in report
+    assert "delivery_status" not in report
+    assert "trace_closed" not in report
+    assert "terminal_status" not in report
+    assert "duplicate" not in report
+
+
+def test_qa_terminal_report_humanizes_quant_retrieval_field_names() -> None:
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="WARN",
+            evidence={
+                "numerical_posture": "DEFER",
+                "verified_facts": [
+                    (
+                        "requested_window=UNSPECIFIED, "
+                        "snapshot_hash=UNAVAILABLE, "
+                        "queried_at=2026-08-27T16:44:10Z, "
+                        "extracted_at=2026-08-27T16:44:10Z"
+                    )
+                ],
+            },
+            checks=[],
+            findings=[],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "요청 기간=UNSPECIFIED" in report
+    assert "자료 해시=UNAVAILABLE" in report
+    assert "조회 시각=2026-08-27T16:44:10Z" in report
+    assert "추출 시각=2026-08-27T16:44:10Z" in report
+    assert "requested_window" not in report
+    assert "snapshot_hash" not in report
+    assert "조회 자료_hash" not in report
 
 
 def test_qa_terminal_report_humanizes_extended_check_keys() -> None:
@@ -132,6 +301,11 @@ def test_qa_terminal_report_humanizes_extended_check_keys() -> None:
                 {"check": "workflow_e2e_coverage", "result": "WARN"},
                 {"check": "position_value_sum", "result": "PASS"},
                 {"check": "sector_mapping", "result": "WARN"},
+                {"check": "workflow_scope_and_async_timing", "result": "PASS"},
+                {
+                    "check": "e2e_reproducibility_contract",
+                    "result": "WARN_UNVERIFIABLE",
+                },
             ],
             findings=[],
             root_task_id="t_root",
@@ -144,10 +318,45 @@ def test_qa_terminal_report_humanizes_extended_check_keys() -> None:
     assert "전체 흐름 검증 범위: 주의" in report
     assert "포지션 평가액 합계: 통과" in report
     assert "섹터 분류: 주의" in report
+    assert "업무 범위·사후 QA 시점: 통과" in report
+    assert "전체 흐름 재현성: 확인 불가(주의)" in report
     assert "추가 점검 항목" not in report
 
 
-def test_qa_terminal_report_does_not_rewrite_structured_terms_into_mixed_labels() -> None:
+def test_qa_terminal_report_uses_finding_details_and_corrective_action() -> None:
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="WARN",
+            evidence={"numerical_posture": "DEFER"},
+            checks=[],
+            findings=[
+                {
+                    "finding_id": "QA-F-001",
+                    "severity": "HIGH",
+                    "title": "응답 전달 상태 확인 필요",
+                    "details": "전달 상태와 종료 상태의 근거가 서로 다릅니다.",
+                    "owner": "ceo-workflow",
+                    "status": "FAIL",
+                    "corrective_action": "전달 기록과 종료 기록을 다시 대조합니다.",
+                    "impact": "재현성 저하",
+                }
+            ],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "응답 전달 상태 확인 필요" in report
+    assert "담당: CEO 업무 흐름" in report
+    assert "상태: 실패" in report
+    assert "조치: 전달 기록과 종료 기록을 다시 대조합니다." in report
+    assert "근거 보완 필요" not in report
+
+
+def test_qa_terminal_report_does_not_rewrite_structured_terms_into_mixed_labels() -> (
+    None
+):
     report = format_qa_terminal_report(
         SimpleNamespace(
             canonical_decision="WARN",
@@ -205,7 +414,7 @@ def test_qa_card_and_commands_keep_only_redacted_contract() -> None:
     assert "보류:" in card and "`대기` 상태 유지" in card
     assert "154.91초 > 기준 60.00초 (전체 처리 시간)" in card
     assert "실행 기록 ID: run-redacted-1" in card
-    assert "실행 기록 유형: hgfinance.user-query" in card
+    assert "실행 기록 유형: 사용자 요청 실행" in card
     assert "부서 업무 ID: t_hr_primary" in card
     assert "요청 ID: request-redacted-1" in card
     assert "must-not-appear" not in card

@@ -86,8 +86,8 @@ QA_AUDIT_STAGE = "qa"
 #   `_query_selected_specs` 는 fallback 이름으로 spec 을 걸러낸다. 이름이 하나도
 #   안 맞으면 결과가 `()` 가 되고, 자유 질의에 그 부서 Worker 맥락이 **조용히
 #   통째로 빠진다.** 감사에서 리서치·퀀트 4개가 이미 없어진 이름이었다
-#   (`research-data-worker`/`evidence-rag-worker`/`strategy-hypothesis-worker`/
-#   `dataset-feature-worker`) - 아래 주석이 경고하던 바로 그 상태였다. 그래서
+#   (`holdings-analyst-worker`/`strategy-author-worker`/
+#   `result-interpretation-worker`) - 실제 레지스트리에 있는 Worker만 조회한다. 그래서
 #   이제 `assert_query_router_ids_exist()` 로 대조해서 **틀리면 죽는다.**
 _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
     # 리서치 - 사용자가 자기 보유 종목을 물을 때의 자리. 방법론 스카우트는

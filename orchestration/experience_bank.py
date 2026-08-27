@@ -21,21 +21,22 @@ import logging
 import os
 import re
 from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from time import monotonic
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
-from orchestration.experience_retention_policy import (
-    D5_WRITE_STOP_RELATION_BYTES,
-    OPERATIONAL_FAILURE_CODES,
-)
-
+from orchestration.ceo_query_routing import verify_primary_route
+from orchestration.ceo_workflow_scope import read_marker, user_query_from_body
+from orchestration.experience_retention_policy import D5_WRITE_STOP_RELATION_BYTES
 
 LOGGER = logging.getLogger(__name__)
 TABLE_NAME = "experience.workflow_experiences"
 MODES = frozenset({"off", "shadow", "active"})
+DISCORD_CEO_CASE_TYPE = "discord_ceo"
+DISCORD_CEO_VERIFIED_CASE_TYPE_PREFIX = "discord_ceo_verified"
+_SUCCESS_TERMINAL_STATUSES = frozenset({"done", "completed", "archived"})
 _CODE_RE = re.compile(r"[^A-Z0-9_.:-]+")
-_OPERATIONAL_FAILURE_CODES = OPERATIONAL_FAILURE_CODES
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,13 @@ def _safe_code(value: Any) -> str:
     return code[:64]
 
 
+def discord_experience_case_type(category: Any = None) -> str:
+    """Return the bounded D5 key for one verified Discord CEO category."""
+
+    category_code = _safe_code(category or "UNKNOWN").lower() or "unknown"
+    return f"{DISCORD_CEO_VERIFIED_CASE_TYPE_PREFIX}:{category_code}"
+
+
 def _safe_codes(values: Sequence[Any] | None) -> tuple[str, ...]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
         return ()
@@ -117,7 +125,13 @@ def _safe_departments(values: Sequence[Any] | None) -> tuple[str, ...]:
 def bounded_planner_hint(
     experience_hint: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Return the small, payload-free hint allowed to cross into D4."""
+    """Return only positive, structured signals allowed to cross into D4.
+
+    Failed experiences remain available to the improvement/audit ledger, but
+    they are not a planner memory.  In particular, failure codes, failed
+    department sets, free-form lessons, and skill names are never copied into
+    the CEO planner prompt.
+    """
 
     if not isinstance(experience_hint, Mapping):
         return None
@@ -127,11 +141,13 @@ def bounded_planner_hint(
         "matched_runs",
         "successful_runs",
         "success_rate",
-        "operational_failures_are_non_routing",
     ):
         if key in experience_hint:
             bounded[key] = experience_hint[key]
-    for key in ("successful_policies", "successful_department_sets", "lessons"):
+    for key in (
+        "successful_policies",
+        "successful_department_sets",
+    ):
         value = experience_hint.get(key)
         if not isinstance(value, list):
             continue
@@ -259,8 +275,16 @@ def build_discord_experience_record(
     root_payload: Mapping[str, Any],
     task_payloads: Sequence[Mapping[str, Any]],
     terminal_status: str,
+    qa_decision: str | None = None,
+    qa_findings: Sequence[Any] | None = None,
+    qa_task_id: str | None = None,
 ) -> ExperienceRecord:
-    """Build one safe aggregate from a finalized Discord/Kanban root."""
+    """Build one safe aggregate from a finalized Discord/Kanban root.
+
+    A record without ``qa_decision`` is an observation only. Verified records
+    are written after the asynchronous QA terminal projection and are keyed by
+    the canonical routing category.
+    """
 
     root_body = str(root_payload.get("body") or "")
     binding = _body_marker(root_body, "workflow_mode").casefold() == "binding"
@@ -289,20 +313,67 @@ def build_discord_experience_record(
                     failure_codes.append(code)
 
     normalized_status = _bounded_text(terminal_status, 32).casefold()
-    success = normalized_status not in {
-        "blocked",
-        "failed",
-        "crashed",
-        "gave_up",
-        "timed_out",
-    }
+    # A QA completion event is not proof that the workflow completed
+    # successfully.  Only the same terminal success states recognized by the
+    # supervisor may contribute a successful experience; unknown or
+    # non-terminal states fail closed.
+    success = normalized_status in _SUCCESS_TERMINAL_STATUSES
     if not success:
         failure_codes.append(_safe_code(f"ROOT_{normalized_status or 'FAILED'}"))
+    verified = qa_decision is not None
+    verification = None
+    if verified:
+        query = user_query_from_body(root_body)
+        if query:
+            verification = verify_primary_route(query, primary)
+            if not verification.valid:
+                success = False
+                failure_codes.append("ROUTING_MISMATCH")
+
+        normalized_decision = _bounded_text(qa_decision, 32).upper().replace(" ", "_")
+        if normalized_decision != "PASS":
+            success = False
+            failure_codes.append(_safe_code(f"QA_{normalized_decision or 'UNKNOWN'}"))
+        for value in qa_findings or ():
+            candidate = value
+            if isinstance(value, Mapping):
+                candidate = (
+                    value.get("finding_code")
+                    or value.get("code")
+                    or value.get("reason_code")
+                    or value.get("type")
+                )
+            code = _safe_code(candidate)
+            if code:
+                failure_codes.append(code)
+
     primary_text = "+".join(_safe_departments(primary)) or "no-primary"
     policy = "binding_qa_gate" if binding else "analysis_parallel"
     outcome = "succeeded" if success else "completed with a safe hold"
+    if verified:
+        category = (
+            verification.expected_category
+            if verification is not None
+            else read_marker(root_body, "routing_category")
+        )
+        case_type = discord_experience_case_type(category)
+        identity_root = f"{root_id}:qa:{_bounded_text(qa_task_id, 128) or 'unknown'}"
+        if "ROUTING_MISMATCH" in failure_codes and verification is not None:
+            lesson = _bounded_text(
+                "routing mismatch expected="
+                + "+".join(verification.expected_primary_profiles)
+                + " actual="
+                + "+".join(verification.actual_primary_profiles),
+                240,
+            )
+        else:
+            lesson = _bounded_text(f"{primary_text} {policy} {outcome} qa_verified", 240)
+    else:
+        case_type = DISCORD_CEO_CASE_TYPE
+        identity_root = root_id
+        lesson = _bounded_text(f"{primary_text} {policy} {outcome}", 240)
     return ExperienceRecord(
-        case_type="discord_ceo",
+        case_type=case_type,
         binding=binding,
         primary_departments=tuple(_safe_departments(primary)),
         orchestration_policy=policy,
@@ -312,9 +383,9 @@ def build_discord_experience_record(
         qa_enabled=_body_marker(root_body, "qa_enabled").casefold() != "false",
         qa_blocks_response=_body_marker(root_body, "qa_blocks_response").casefold()
         == "true",
-        lesson=_bounded_text(f"{primary_text} {policy} {outcome}", 240),
+        lesson=lesson,
         source_run_id=_bounded_text(root_id, 128) or None,
-        experience_identity=canonical_experience_identity(root_id=root_id),
+        experience_identity=canonical_experience_identity(root_id=identity_root),
     )
 
 
@@ -351,7 +422,7 @@ class ExperienceBank:
         self.statement_timeout_ms = max(100, min(int(configured_statement_timeout), 10000))
 
     @classmethod
-    def from_env(cls) -> "ExperienceBank":
+    def from_env(cls) -> ExperienceBank:
         dsn = (
             os.getenv("MEMOHARNESS_D5_DATABASE_URL", "").strip()
             or os.getenv("MEMOHARNESS_EXPERIENCE_DATABASE_URL", "").strip()
@@ -448,7 +519,7 @@ class ExperienceBank:
                 lookup_ms,
                 hint_build_ms,
             )
-        except Exception as exc:  # D5 is advisory; D4 must continue.
+        except Exception as exc:  # noqa: BLE001 - D5 is advisory; D4 must continue.
             return self._lookup_failure(
                 started,
                 type(exc).__name__,
@@ -532,7 +603,7 @@ class ExperienceBank:
                 elapsed,
             )
             return ExperienceWrite(self.mode, True, elapsed, bool(written))
-        except Exception as exc:  # D5 write failure must not fail a workflow.
+        except Exception as exc:  # noqa: BLE001 - D5 write failure is fail-open.
             if connection is not None:
                 rollback = getattr(connection, "rollback", None)
                 if callable(rollback):
@@ -598,25 +669,29 @@ class ExperienceBank:
         records: Sequence[ExperienceRecord],
         primary_departments: Sequence[str],
     ) -> dict[str, Any] | None:
-        if not records:
-            return None
-        requested = set(_safe_departments(primary_departments))
+        # A failed record is retained for audit and the separate D5
+        # improvement queue, never as a future planner memory.  Requiring an
+        # empty failure-code set also prevents a malformed/legacy record that
+        # says success=true from crossing the boundary.
         successes = [
             record
             for record in records
-            if record.success
-            and not (set(_safe_codes(record.failure_codes)) & _OPERATIONAL_FAILURE_CODES)
+            if record.success and not record.failure_codes
         ]
+        if not successes:
+            return None
+        requested = set(_safe_departments(primary_departments))
         policies = Counter(record.orchestration_policy for record in successes)
         department_sets = Counter(
             "+".join(record.primary_departments) for record in successes if record.primary_departments
         )
         hint: dict[str, Any] = {
             "source": "memo_harness_d5",
-            "matched_runs": len(records),
+            # These counters describe only records eligible for recall.  A
+            # failed row must not influence the planner's success rate.
+            "matched_runs": len(successes),
             "successful_runs": len(successes),
-            "success_rate": round(sum(record.success for record in records) / len(records), 3),
-            "operational_failures_are_non_routing": True,
+            "success_rate": 1.0,
         }
         if policies:
             hint["successful_policies"] = [
@@ -630,13 +705,6 @@ class ExperienceBank:
             ]
         if requested:
             hint["current_departments"] = sorted(requested)
-        lessons = [
-            record.lesson
-            for record in successes
-            if record.lesson
-        ][:3]
-        if lessons:
-            hint["lessons"] = lessons
         return hint
 
 
@@ -645,14 +713,17 @@ def _elapsed_ms(started: float) -> int:
 
 
 __all__ = [
+    "DISCORD_CEO_CASE_TYPE",
+    "DISCORD_CEO_VERIFIED_CASE_TYPE_PREFIX",
     "ExperienceBank",
     "ExperienceLookup",
     "ExperienceRecord",
     "ExperienceWrite",
     "bounded_planner_hint",
-    "build_experience_record",
     "build_discord_experience_record",
+    "build_experience_record",
     "canonical_experience_identity",
     "configured_mode",
+    "discord_experience_case_type",
     "experience_case_type",
 ]

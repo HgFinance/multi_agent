@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "llm_wiki"))
 
-from bm25 import BM25Index, tokenize  # noqa: E402
+from bm25 import BM25Index, tokenize
 
 
 def test_tokenize_splits_korean_words() -> None:

@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from orchestration.discord_idempotency import (
     DiscordIdempotencyStore,
@@ -166,6 +167,12 @@ class DiscordIdempotencyTests(unittest.TestCase):
                 "discord:g:thread:message-old:synthesis-detail:t_old",
                 "ceo-agent",
             )
+            self.assertIsNone(
+                store.outbound_content_hash(
+                    "discord:g:thread:message-old:synthesis-detail:t_old",
+                    "ceo-agent",
+                )
+            )
             with closing(sqlite3.connect(path)) as conn:
                 row = conn.execute(
                     "SELECT source_message_id FROM discord_idempotency_outbound"
@@ -273,6 +280,36 @@ class DiscordIdempotencyTests(unittest.TestCase):
             )
         finally:
             other_home.cleanup()
+
+    def test_global_scope_shares_one_inbound_claim_across_profiles(self) -> None:
+        key = canonical_discord_dedup_key("guild", "channel", "m-global")
+        with patch.dict("os.environ", {"DISCORD_IDEMPOTENCY_SCOPE": "global"}):
+            first = self.store.claim_inbound(
+                dedup_key=key,
+                message_id="m-global",
+                guild_id="guild",
+                channel_id="channel",
+                thread_id=None,
+                profile="ceo-agent",
+                handler="live",
+                session_id="ceo-session",
+            )
+            second = self.store.claim_inbound(
+                dedup_key=key,
+                message_id="m-global",
+                guild_id="guild",
+                channel_id="channel",
+                thread_id=None,
+                profile="hr-department",
+                handler="live",
+            )
+
+            self.assertTrue(first.admitted)
+            self.assertFalse(second.admitted)
+            self.assertEqual(
+                self.store.inbound_key_for_session("ceo-session", "hr-department"),
+                key,
+            )
 
     def test_final_response_is_published_once(self) -> None:
         key = canonical_discord_dedup_key("guild", "channel", "m-6")

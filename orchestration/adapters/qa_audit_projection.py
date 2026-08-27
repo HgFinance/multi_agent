@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib import import_module, util
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,10 @@ from orchestration.adapters.terminal_projection_utils import (
     task_id,
     terminal_success,
 )
-from orchestration.ceo_workflow_scope import selected_primary_profiles_from_task
+from orchestration.ceo_workflow_scope import (
+    langsmith_trace_run_id_from_body,
+    selected_primary_profiles_from_task,
+)
 from orchestration.discord_delivery import _token_from_env
 from orchestration.discord_idempotency import (
     DiscordIdempotencyStore,
@@ -42,12 +46,68 @@ from orchestration.qa_discord_feedback import (
     post_qa_discord_message,
 )
 
+# Department worker modules may add a local ``scripts.py`` directory to
+# ``sys.path``. Import the repository-level observability module before that
+# happens so the later lazy lookup cannot resolve the wrong ``scripts`` module.
+# The module is stdlib-only and performs no network I/O at import time.
 logger = logging.getLogger(__name__)
+
+
+def _load_worker_observability() -> Any | None:
+    """Load the canonical worker metrics module despite local ``scripts.py`` names."""
+
+    module_name = "scripts.hermes_worker_observability"
+    loaded = sys.modules.get(module_name)
+    if loaded is not None:
+        return loaded
+    try:
+        return import_module(module_name)
+    except Exception as exc:  # noqa: BLE001 - log enrichment remains fail-open.
+        logger.debug(
+            "qa_worker_observability_package_import_unavailable error=%s",
+            type(exc).__name__,
+        )
+
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "hermes_worker_observability.py"
+    )
+    spec = util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        logger.debug("qa_worker_observability_spec_unavailable path=%s", module_path)
+        return None
+
+    module = util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    parent = sys.modules.get("scripts")
+    if parent is not None:
+        parent.hermes_worker_observability = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - log enrichment remains fail-open.
+        sys.modules.pop(module_name, None)
+        if (
+            parent is not None
+            and hasattr(parent, "hermes_worker_observability")
+            and parent.hermes_worker_observability is module
+        ):
+            del parent.hermes_worker_observability
+        logger.debug(
+            "qa_worker_observability_file_import_unavailable error=%s",
+            type(exc).__name__,
+        )
+        return None
+    return module
+
+
+_WORKER_OBSERVABILITY = _load_worker_observability()
 PROJECTION_VERSION = "v2"
 EVAL_SET_VERSION = 2
 PROJECTION_MARKER = f"hgfinance.qa-audit-projection.{PROJECTION_VERSION}"
 LANGSMITH_MARKER = "hgfinance.qa-langsmith-terminal.v1"
 DISCORD_MARKER = "hgfinance.qa-terminal-discord.v1"
+QA_VERDICT_MARKER = "hgfinance.qa-verdict.v1"
 _UUID_NAMESPACE = uuid.UUID("b8a25c03-2d9d-5f4e-b542-9dcb36db3e91")
 _ALLOWED_DECISIONS = {"PASS", "WARN", "FAIL", "CONDITIONAL"}
 
@@ -64,30 +124,50 @@ _KANBAN_QA_EVAL_SET_ID = _uuid(f"kanban-qa-eval-set:{PROJECTION_VERSION}")
 
 
 def _sha256(value: Any) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode(
+        "utf-8"
+    )
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _verdict(metadata: Mapping[str, Any], task: Mapping[str, Any]) -> str:
-    value = (
-        metadata.get("verdict")
-        or metadata.get("qa_verdict")
-        or metadata.get("overall")
-        or metadata.get("qa_status")
-        or task.get("verdict")
-        or task.get("overall")
-        or metadata.get("audit_result")
-    )
-    if value:
-        return str(value).strip().upper()
+    # Hermes profiles do not all use the same descriptive field name. Accept
+    # only explicit terminal verdict values; lifecycle words such as
+    # COMPLETED/FINISHED must never become a QA decision by accident.
+    for source in (metadata, task):
+        for key in (
+            "verdict",
+            "qa_verdict",
+            "overall",
+            "qa_status",
+            "overall_decision",
+            "overall_status",
+            "audit_result",
+            "decision",
+            "audit_conclusion",
+            "audit_status",
+            "qa_result",
+            "qa_gate",
+            "independent_conclusion",
+            "executive_conclusion",
+        ):
+            value = source.get(key)
+            normalized = str(value or "").strip().upper().replace("_", " ")
+            if normalized in {
+                "PASS",
+                "WARN",
+                "FAIL",
+                "CONDITIONAL",
+                "CONDITIONAL PASS",
+            }:
+                return normalized
 
     # The QA Hermes terminal contract historically persisted a human-readable
     # verdict in the completion summary while leaving result/metadata empty.
     # Preserve that compatibility path, but only accept an explicit verdict;
     # never infer PASS from a missing field.
     terminal_text = " ".join(
-        str(task.get(key) or "")
-        for key in ("result", "latest_summary", "summary")
+        str(task.get(key) or "") for key in ("result", "latest_summary", "summary")
     )
     match = re.search(
         r"\bQA\s+overall\s*=\s*(PASS|WARN|FAIL|CONDITIONAL(?:\s+PASS)?)\b",
@@ -111,14 +191,48 @@ def _audit_input(task: Mapping[str, Any]) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _canonical_decision(original: str) -> str:
+def _canonical_decision(
+    original: str,
+    *,
+    langsmith_evidence: Mapping[str, Any] | None = None,
+    required_task_ids: Sequence[str] = (),
+) -> str:
     if original in _ALLOWED_DECISIONS:
-        return original
-    if original in {"CONDITIONAL PASS", "CONDITIONAL_PASS", "WARN", "ESCALATE"}:
-        return "WARN"
-    if original in {"FAIL", "REJECT", "BLOCK"}:
-        return "FAIL"
-    return "WARN"
+        decision = original
+    elif original in {"CONDITIONAL PASS", "CONDITIONAL_PASS", "WARN", "ESCALATE"}:
+        decision = "WARN"
+    elif original in {"FAIL", "REJECT", "BLOCK"}:
+        decision = "FAIL"
+    else:
+        decision = "WARN"
+
+    # A PASS is authoritative only when the QA task actually received the
+    # correlated LangSmith slice and every scoped primary has at least one
+    # trace. Missing telemetry is an evidence gap, never a silent PASS.
+    if decision != "PASS":
+        return decision
+    evidence = langsmith_evidence or {}
+    raw_traces = evidence.get("traces")
+    traces = (
+        tuple(item for item in raw_traces if isinstance(item, Mapping))
+        if isinstance(raw_traces, Sequence)
+        and not isinstance(raw_traces, (str, bytes, bytearray))
+        else ()
+    )
+    observed_task_ids = {str(item.get("task_id") or "") for item in traces}
+    try:
+        trace_count = int(evidence.get("trace_count") or 0)
+    except (TypeError, ValueError):
+        trace_count = -1
+    complete = (
+        str(evidence.get("status") or "").upper() == "READY"
+        and trace_count == len(traces)
+        and trace_count > 0
+        and all(str(task_id) in observed_task_ids for task_id in required_task_ids)
+        and evidence.get("raw_payloads_sent") is not True
+        and not any(item.get("raw_payloads_sent") is True for item in traces)
+    )
+    return "PASS" if complete else "WARN"
 
 
 def _profile_model(env: Mapping[str, str]) -> tuple[str | None, str | None, str | None]:
@@ -201,20 +315,20 @@ class QaAuditProjectionRecord:
     started_at: str | None
     completed_at: str | None
     evidence: Mapping[str, Any]
+    langsmith_root_run_id: str | None = None
 
     @property
     def projection_key(self) -> str:
-        return (
-            f"kanban-qa:{PROJECTION_VERSION}:"
-            f"{self.root_task_id}:{self.qa_task_id}"
-        )
+        return f"kanban-qa:{PROJECTION_VERSION}:{self.root_task_id}:{self.qa_task_id}"
 
 
 class _DefaultAuditRepository:
     """Bridge to PostgresAuditRepository without importing it at module import time."""
 
     def __init__(self, dsn: str) -> None:
-        audit_root = Path(__file__).resolve().parents[2] / "departments" / "06-ai-qa-audit"
+        audit_root = (
+            Path(__file__).resolve().parents[2] / "departments" / "06-ai-qa-audit"
+        )
         if str(audit_root) not in sys.path:
             sys.path.insert(0, str(audit_root))
         from audit.repository import (
@@ -273,7 +387,10 @@ class _DefaultAuditRepository:
             "status": "QUEUED",
             "trace_id": record.trace_id,
             "environment": "SHADOW",
-            "mock_tool_manifest": {"source": "kanban", "worker_session_id": record.worker_session_id},
+            "mock_tool_manifest": {
+                "source": "kanban",
+                "worker_session_id": record.worker_session_id,
+            },
             "model_version": "hermes-qa",
             "adapter_version": f"kanban-qa-terminal-projection.{PROJECTION_VERSION}",
             "evidence_hash": _sha256(record.evidence),
@@ -293,7 +410,9 @@ class _DefaultAuditRepository:
             "score": 1 if record.canonical_decision == "PASS" else 0,
             "passed": record.canonical_decision == "PASS",
             "evidence": dict(record.evidence),
-            "error_code": None if record.canonical_decision == "PASS" else record.original_verdict,
+            "error_code": None
+            if record.canonical_decision == "PASS"
+            else record.original_verdict,
             "created_at": created,
         }
         self.repo.insert_eval_result(result)
@@ -337,7 +456,10 @@ class QaAuditProjection:
             task_id(item)
             for item in workflow_tasks
             if is_request_scoped_role(item, root_task_id, "primary")
-            and (not selected_profiles or str(item.get("assignee") or "") in selected_profiles)
+            and (
+                not selected_profiles
+                or str(item.get("assignee") or "") in selected_profiles
+            )
             and terminal_success(item)
         )
         logger.info(
@@ -346,12 +468,14 @@ class QaAuditProjection:
             len(selected_profiles),
             len(scoped_primary),
         )
-        declared_primary = ids_from(metadata.get("evaluated_primary_task_ids")) or ids_from(
-            metadata.get("primary_task_ids")
-        )
+        declared_primary = ids_from(
+            metadata.get("evaluated_primary_task_ids")
+        ) or ids_from(metadata.get("primary_task_ids"))
         # The task graph is authoritative.  Never trust a worker-provided
         # primary_task_ids list to widen the current request scope.
-        if declared_primary and any(item not in scoped_primary for item in declared_primary):
+        if declared_primary and any(
+            item not in scoped_primary for item in declared_primary
+        ):
             logger.warning(
                 "qa_audit_foreign_primary_ids_ignored",
                 extra={"root_task_id": root_task_id},
@@ -361,25 +485,37 @@ class QaAuditProjection:
         qa_task_id = task_id(task)
         audit_envelope = _audit_input(task)
         workflow_observations = audit_envelope.get("workflow_observations")
+        langsmith_evidence = audit_envelope.get("langsmith_evidence")
+        if not isinstance(langsmith_evidence, Mapping):
+            langsmith_evidence = {}
         evidence = safe_json(
             {
                 "root_task_id": root_task_id,
                 "qa_task_id": qa_task_id,
                 "evaluated_primary_task_ids": list(primary),
                 "original_verdict": original,
-                "highest_severity": metadata.get("highest_severity") or task.get("highest_severity"),
+                "highest_severity": metadata.get("highest_severity")
+                or task.get("highest_severity"),
                 "findings": qa_projection_findings(task, metadata),
                 "checks": qa_projection_checks(task, metadata),
-                "sources_http": metadata.get("sources_http") or task.get("sources_http") or [],
+                "sources_http": metadata.get("sources_http")
+                or task.get("sources_http")
+                or [],
                 "artifacts": metadata.get("artifacts") or task.get("artifacts") or [],
                 "tests_run": metadata.get("tests_run") or task.get("tests_run") or [],
-                "worker_session_id": metadata.get("worker_session_id") or task.get("worker_session_id") or "",
+                "worker_session_id": metadata.get("worker_session_id")
+                or task.get("worker_session_id")
+                or "",
                 # Keep the bounded, worker-declared facts available to the
                 # manager-facing projections.  These are not sent as raw
                 # LangSmith payloads; the projections humanize and cap them.
-                "verified_facts": metadata.get("verified_facts") or task.get("verified_facts") or [],
+                "verified_facts": metadata.get("verified_facts")
+                or task.get("verified_facts")
+                or [],
                 "unknowns": metadata.get("unknowns") or task.get("unknowns") or [],
-                "limitations": metadata.get("limitations") or task.get("limitations") or [],
+                "limitations": metadata.get("limitations")
+                or task.get("limitations")
+                or [],
                 "safety": metadata.get("safety") or task.get("safety") or {},
                 "summary": summary(task, metadata),
                 "numerical_posture": (
@@ -392,10 +528,19 @@ class QaAuditProjection:
                     if isinstance(workflow_observations, Mapping)
                     else {}
                 ),
+                "langsmith_evidence": langsmith_evidence
+                or {
+                    "status": "UNAVAILABLE",
+                    "metadata_only": True,
+                    "raw_payloads_sent": False,
+                    "trace_count": 0,
+                },
             }
         )
         started_at = iso_timestamp(task.get("started_at"))
-        completed_at = iso_timestamp(task.get("completed_at") or task.get("finished_at"))
+        completed_at = iso_timestamp(
+            task.get("completed_at") or task.get("finished_at")
+        )
         started_dt = _timestamp(started_at)
         completed_dt = _timestamp(completed_at)
         if started_dt is not None and completed_dt is not None:
@@ -414,7 +559,11 @@ class QaAuditProjection:
             qa_task_id=qa_task_id,
             evaluated_primary_task_ids=tuple(primary),
             original_verdict=original,
-            canonical_decision=_canonical_decision(original),
+            canonical_decision=_canonical_decision(
+                original,
+                langsmith_evidence=langsmith_evidence,
+                required_task_ids=primary,
+            ),
             highest_severity=str(evidence.get("highest_severity") or "UNKNOWN"),
             findings=evidence.get("findings", []),
             checks=evidence.get("checks", []),
@@ -425,14 +574,21 @@ class QaAuditProjection:
             started_at=started_at,
             completed_at=completed_at,
             evidence=evidence if isinstance(evidence, Mapping) else {},
+            langsmith_root_run_id=langsmith_trace_run_id_from_body(
+                str(root_task.get("body") or "")
+            )
+            or None,
         )
 
     def _comment(self, record: QaAuditProjectionRecord) -> None:
         if self.kanban_client is not None:
             self.kanban_client.comment_task(
                 record.qa_task_id,
-                f"{PROJECTION_MARKER} qa_task_id={record.qa_task_id} "
-                f"eval_run_id={record.eval_run_id} status=persisted",
+                f"{PROJECTION_MARKER} {QA_VERDICT_MARKER} "
+                f"root_task_id={record.root_task_id} "
+                f"eval_run_id={record.eval_run_id} status=persisted "
+                f"qa_task_id={record.qa_task_id} verdict={record.original_verdict} "
+                f"canonical_decision={record.canonical_decision}",
             )
 
     @staticmethod
@@ -467,15 +623,15 @@ class QaAuditProjection:
             metadata = merged_run_metadata(task)
             provider, model, model_source = _profile_model(self.env)
             log_metrics: dict[str, Any] = {}
-            try:
-                from scripts.hermes_worker_observability import worker_log_metrics
-
-                log_metrics = worker_log_metrics(
-                    task_id=record.qa_task_id,
-                    env=self.env,
-                )
-            except Exception:  # noqa: BLE001 - log enrichment is fail-open
-                logger.debug("qa_worker_log_metrics_unavailable", exc_info=True)
+            if _WORKER_OBSERVABILITY is not None:
+                try:
+                    worker_log_metrics = _WORKER_OBSERVABILITY.worker_log_metrics
+                    log_metrics = worker_log_metrics(
+                        task_id=record.qa_task_id,
+                        env=self.env,
+                    )
+                except Exception:
+                    logger.debug("qa_worker_log_metrics_unavailable", exc_info=True)
             observed_llm_calls = _count_observed(
                 metadata.get("llm_calls")
                 or metadata.get("llm_call_count")
@@ -552,7 +708,9 @@ class QaAuditProjection:
                 "error_count": 0,
                 "error_class": None,
                 "output_verdict": record.original_verdict,
-                "finding_count": len(record.findings) if isinstance(record.findings, Sequence) else None,
+                "finding_count": len(record.findings)
+                if isinstance(record.findings, Sequence)
+                else None,
                 "telemetry_completeness": (
                     "runtime-and-terminal"
                     if observed_llm_calls is not None or observed_tool_calls is not None
@@ -582,6 +740,9 @@ class QaAuditProjection:
                 name="qa.hermes.terminal",
                 start_time=started_at,
                 end_time=ended_at,
+                run_id=record.trace_id,
+                parent_run_id=record.langsmith_root_run_id,
+                confirm_delivery=True,
             )
             if not published:
                 return "failed"
@@ -617,9 +778,7 @@ class QaAuditProjection:
         store = DiscordIdempotencyStore(delivery_home)
         profile = "qa-department"
         response_key = f"qa-terminal:{record.eval_run_id}"
-        dedup_key = canonical_discord_dedup_key(
-            "qa", channel_id, record.eval_run_id
-        )
+        dedup_key = canonical_discord_dedup_key("qa", channel_id, record.eval_run_id)
         existing_message_id: str | None = None
         try:
             content = format_qa_terminal_report(record)
@@ -663,8 +822,10 @@ class QaAuditProjection:
             if not existing_message_id:
                 try:
                     store.mark_outbound(response_key, "FAILED", profile)
-                except Exception:  # noqa: BLE001 - cleanup must not mask the failure
-                    logger.debug("qa_discord_outbound_failure_mark_failed", exc_info=True)
+                except Exception:
+                    logger.debug(
+                        "qa_discord_outbound_failure_mark_failed", exc_info=True
+                    )
             logger.warning(
                 "qa_discord_terminal_projection_failed",
                 extra={"error": type(exc).__name__},
@@ -686,7 +847,11 @@ class QaAuditProjection:
         record = self._record(root_task_id, task, workflow_tasks)
         repository = self.repository
         if repository is None:
-            dsn = str(self.env.get("RISK_QA_DATABASE_URL") or self.env.get("DATABASE_URL") or "")
+            dsn = str(
+                self.env.get("RISK_QA_DATABASE_URL")
+                or self.env.get("DATABASE_URL")
+                or ""
+            )
             if not dsn:
                 return {
                     "status": "failed",
@@ -718,6 +883,8 @@ class QaAuditProjection:
                 "projection_key": record.projection_key,
                 "original_verdict": record.original_verdict,
                 "canonical_decision": record.canonical_decision,
+                "findings": record.findings,
+                "checks": record.checks,
                 "duplicate": bool(result.get("duplicate")),
                 "comment_error": comment_error,
                 "langsmith_status": langsmith_status,
@@ -731,6 +898,7 @@ class QaAuditProjection:
                 "projection_key": record.projection_key,
                 "original_verdict": record.original_verdict,
                 "canonical_decision": record.canonical_decision,
+                "findings": record.findings,
                 "retryable": True,
                 "error": str(exc),
             }

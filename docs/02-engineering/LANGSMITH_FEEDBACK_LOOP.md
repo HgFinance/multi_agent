@@ -13,7 +13,15 @@ QA 승인만으로 런타임을 바꾸는 방식은 현재 경로가 아니다.
 | `HgFinance-Evals` | redacted evaluation artifact | QA가 검토할 finding | 없음 |
 | local SQLite ledger | shared runtime volume | 중복 제거·lease·QA decision·benchmark gate | 읽기 실패 시 no-op |
 | QA Discord `1541636723006775477` | Hermes 검토 + 사람 결정 | redacted artifact 제안, 승인/거부 | 업무 경로와 분리 |
+| CEO self-review guardrails | local SQLite의 verified D5 finding identity | CEO synthesis가 다음 응답에서 근거·재현성·최종판정 교정을 수행하는 내부 점검 | QA가 CEO를 직접 변경하지 않음; 라우터·권한·skill은 변경하지 않음 |
 | CEO/department advisory | 다음 요청의 bounded hint | `PASSED` benchmark를 통과한 finding만 대상 Hermes가 비권위 참고 | 실패 시 hint 없음 |
+
+Evals artifact의 분류 기준은 project 이름만으로 추론하지 않는다. 새 artifact는
+`observation_category`(`workflow`, `metrics`, `conditional`, `workforce`),
+`department_key`(표준 부서 키), `stage_status`(`PRESENT` 또는 `MISSING`)를 함께
+기록한다. 원래 trace의 alias나 누락을 숨기지 않기 위해 원본 `department`와
+`stage`도 보존한다. QA는 표준 키로 묶고, 원본 값과 `stage_status`로 데이터 품질을
+확인한다.
 
 현재의 단일 정식 흐름은 다음과 같다.
 
@@ -32,6 +40,31 @@ First/Metrics metadata
 `APPROVED`와 `PASSED`는 다른 상태다. `APPROVED`만으로 prompt, router,
 model, Hermes 동작은 바뀌지 않는다. `PASSED` 뒤에도 hint는 비권위 참고자료일
 뿐이며, 자동 prompt/model 배포는 하지 않는다.
+
+### CEO self-improvement boundary
+
+QA의 역할은 문제를 구조화해 보고하는 것이다. QA가 CEO보다 상위 권한을 갖거나
+CEO의 prompt·router·skill을 직접 수정하지는 않는다. `memo_harness_d5` 원장에
+검증된 QA finding이 남으면, CEO ingress가 finding의 **identity만** 읽어 애플리케이션
+코드에 고정된 allow-list의 corrective guardrail로 변환한다. 다음 CEO synthesis는
+그 guardrail을 내부 자기검토 항목으로 적용한다.
+
+이 경로가 전달하지 않는 것: 원문 질의, CEO/부서 답변, QA 자유서술, 실패 부서 조합,
+skill 이름 또는 실행 명령. 따라서 이것은 실패 기억의 재주입이나 QA의 직접 지시가
+아니라 CEO 소유의 bounded self-review다. guardrail은 응답의 근거·재현성·불확실성
+표현을 교정할 수 있지만 deterministic routing, mandate, Risk/PAPER 권한,
+fail-closed 상태를 덮어쓰지 않는다. 실제 코드·router·runtime skill 변경은 기존의
+CEO/사람 승인 및 benchmark/regression gate를 별도로 통과해야 한다.
+
+### LangSmith quota 장애 격리
+
+LangSmith는 업무 경로가 아니라 선택적 observer다. API key 누락·네트워크 오류·HTTP 429
+또는 tenant usage limit이 발생하면 중앙 관측 publisher가 해당 기록을 버리고,
+quota cooldown 동안 재전송을 중단한다. CEO 응답, Kanban 상태 전이, Workforce API,
+Notion projection, Discord 전달은 LangSmith 연결 여부와 무관하게 계속된다. 이때
+관측 결과는 `WARN`/`UNAVAILABLE`/`NOT_FOUND`로 남을 수 있으며, 이를 업무 실패로
+승격하거나 성공 trace로 위장하지 않는다. quota가 복구된 뒤 다음 실행부터 trace가
+다시 기록되는지 별도로 확인한다.
 
 ### Evolution Skill 분기
 
@@ -74,6 +107,14 @@ BFF의 `/ui/**/observability/feedback` 경로도 없다. 브라우저에는 QA L
 제안할 뿐 승인하거나 설정을 바꾸지 않는다.
 이 전용 채널은 `QA_DISCORD_FREE_RESPONSE_CHANNELS`에도 등록되어 self-authored
 marker가 일반 self-message/mention 규칙 때문에 유실되지 않는다.
+
+HR Langfuse 관측 feedback도 별도 중복 publisher 없이 같은 중앙 원장과 Discord
+delivery 경계를 사용한다. HR 카드 POST는 성공 응답만으로 완료 처리하지 않고, 동일
+message ID를 Discord GET으로 readback한 뒤에만 delivered로 기록한다. 카드에는 관측
+요약과 redacted metadata만 포함하며 원문 input/output과 secret은 전송하지 않는다.
+승인자는 `HR_LANGFUSE_APPROVER_USER_IDS` 또는
+`HR_LANGFUSE_APPROVER_ROLE_IDS`에 명시해야 하며, 비어 있는 상태에서는 지정된
+승인자 allowlist를 구성하지 않은 것으로 취급한다.
 
 현재 Discord guild 구성원은 사람 팀원과 내부 부서 봇뿐이다. QA 봇에는
 `Manage Channels` 권한이 없으므로 채널 visibility 정책은 서버 소유자가 관리한다.
@@ -134,10 +175,11 @@ patch에 재사용하면서 root 이름을 덮어쓴 것이었다. 종료 시에
 metadata만 갱신해 원래 이름과 시작 시각을 보존한다.
 
 긴 root를 삭제하거나 Metrics로 옮겨 P99를 낮추지 않는다. 먼저 Kanban의 root,
-primary, synthesis 실행 시간을 나눠 본다. 사용자 질의 planning/response synthesis와
-`fast_advisory`에는 task-scoped 12-turn, medium-reasoning 기본 예산을 적용하며,
-standard analysis/full experiment와 명시적 per-task override는 그대로 둔다. 단일
-primary가 계약된 `final_answer`를 내면 기존 passthrough 경로로 CEO 재종합을 생략한다.
+primary, synthesis 실행 시간을 나눠 본다. `fast_advisory`의 LangSmith 준수 검증과
+관련 trace metadata 보강은 별도 보류 사항이며, 이 문서는 그 검증 완료를 주장하지
+않는다. standard analysis/full experiment와 명시적 per-task override의 기존
+경로는 그대로 둔다. 단일 primary가 계약된 `final_answer`를 내면 기존 passthrough
+경로로 CEO 재종합을 생략한다.
 
 `active` CEO 요청은 LangSmith endpoint를 호출하지 않는다. 30초 local cache가
 유효하면 SQLite도 읽지 않고, cache miss 때만 bounded local read를 수행한다. SQLite
@@ -156,15 +198,23 @@ fallback에서 `true`로 명시되며, `cache_age_seconds`와 `cache_reason`으�
 관측 finding을 버린다. Metrics는 개별 event를 approval queue에 넣지 않고 5분당
 최대 1개 Evals 관측으로 축약하며, 같은 finding의 QA artifact는 6시간 incident
 bucket 안에서 다시 합친다. local ledger는 기본 30일 후 정리되고, 외부 LangSmith
-trace 보존은 workspace retention 정책으로 별도 관리된다.
+trace 보존은 workspace retention 정책으로 별도 관리된다. 외부 trace retention은
+`First`, `HgFinance-Metrics`, `HgFinance-Evals` 세 project만 대상으로 하며
+`default`와 미등록 project는 제외한다. 한 pass의 삭제 요청은 project별 최대
+100건이다. LangSmith의 성공 응답은 물리 삭제 완료가 아니라 삭제 요청 접수이므로
+운영 결과의 `queued`(기존 호환 필드 `deleted`), `pending_visible`,
+`visible_overflow`를 구분해 본다. `pending_visible`이 남아 있는 동안 같은 ID를
+자동 재요청하지 않아 삭제 API 중복 호출을 막고, scheduler health에는
+`LANGSMITH_DELETE_PENDING` 경고를 남긴다.
 
-### Legacy compatibility
+### Intentionally retained compatibility
 
 - `orchestration.llm_observability.publish_root_trace()`는 기존 호출자/테스트를 위한
   standalone metadata metric 호환 함수다. 현재 BFF user-query의 lifecycle root는
   `start_root_trace()`와 terminal close 경계를 사용한다.
-- `apps/api/langsmith_traces.py`는 read-only QA timeseries 조회기다. feedback evaluator,
-  approval ledger, CEO advisory source가 아니다.
+- `apps/api/langsmith_traces.py`는 현재 QA 카드가 사용하는 read-only timeseries
+  조회기다. feedback evaluator, approval ledger, CEO advisory source와 역할이
+  겹치지 않으므로 제거하지 않는다.
 - 새 producer는 `First`/`HgFinance-Metrics`/`HgFinance-Evals`의 역할을 섞지 않는다.
   `LANGCHAIN_*` 같은 legacy 환경변수나 임의 project 이름을 새 경로에 추가하지 않는다.
 
@@ -182,6 +232,8 @@ Metrics (high-frequency) ──┘             │
                               offline benchmark gate
                                          ↓
                    optional bounded CEO + department advisory hint
+
+Verified D5 finding identity ─→ CEO-owned corrective guardrails ─→ next CEO synthesis self-review
 ```
 
 The evaluator reads LangSmith run metadata only. It does not fetch `inputs`,

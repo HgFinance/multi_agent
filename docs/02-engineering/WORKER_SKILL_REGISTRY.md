@@ -116,19 +116,20 @@ guard.input_normalize
 departments/03-risk/skills/
   contracts.py          # SkillContext, SkillResult, worker output
   guards.py             # input/scope/PIT/redaction
-  context_tools.py      # market/portfolio/trading-state API adapters
-  policy_rag.py         # compliance RAG Router/Retriever adapter
-  graph_nodes.py        # LangGraph node factory
+  tools.py              # market/portfolio/trading-state API adapters
+  rag_router.py         # compliance RAG Router/Retriever adapter
   trace.py              # audit/run/replay adapter
 
 departments/06-ai-qa-audit/skills/
   contracts.py          # SkillContext, SkillResult, claim/evidence DTO
   guards.py             # scope/PIT/schema/redaction
-  evidence_rag.py       # hybrid/PIKE/LightRAG adapter
-  lineage_graph.py      # artifact/model/prompt/dataset traversal
-  incident_graph.py     # HyperExtraction candidate adapter
-  graph_nodes.py        # LangGraph node factory
+  rag_router.py         # deterministic evidence retrieval/router adapter
+  tools.py              # bounded QA tool adapters
   trace.py              # audit trace adapter
+
+QA의 CEO post-response 판정은 `orchestration/langsmith_queries.py`의 공통
+metadata-only reader와 `orchestration/adapters/qa_audit_projection.py`가 담당한다.
+LangSmith 원문 payload나 별도 QA trace reader를 추가하지 않는다.
 ```
 
 기존 `risk_engine.py`, `evidence_qa_engine.py`, `model_risk.py`, `internal_audit.py`, `tool_permission_check.py`, `incident_timeline.py`는 계산·판정 Owner다. 새 Skill이 같은 판정 로직을 복제하면 안 된다.

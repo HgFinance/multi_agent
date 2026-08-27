@@ -104,7 +104,11 @@ def _sync_plans(lab: ResearchLab) -> None:
             data_requirements=_texts_or_json(payload.get("data_requirements"), field_name="data_requirements"),
             splits=_texts_or_json(payload.get("splits"), field_name="splits"),
             cost_model=_text_or_json(payload.get("cost_model")),
-            seed=payload.get("seed"),
+            # The prompt historically described this as an "integer seed"
+            # and direct Hermes runs emitted ``integer_seed``.  Keep the
+            # persisted model canonical (``seed``), while accepting that
+            # unambiguous legacy spelling at the ingestion boundary.
+            seed=_seed_value(payload),
             signature=_mapping(payload.get("signature"), field_name="signature"),
             preregistration_hash=str(payload.get("preregistration_hash") or ""),
             status=str(payload.get("status") or "PLANNED"),
@@ -158,6 +162,14 @@ def _text_or_json(value: object) -> str:
     if isinstance(value, dict):
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     return str(value or "").strip()
+
+
+def _seed_value(payload: dict[str, Any]) -> object:
+    seed = payload.get("seed")
+    integer_seed = payload.get("integer_seed")
+    if seed is not None and integer_seed is not None and seed != integer_seed:
+        raise ValueError("seed and integer_seed do not match")
+    return seed if seed is not None else integer_seed
 
 
 __all__ = ["ingest_result", "sync_agent_artifacts"]

@@ -109,10 +109,120 @@ def test_dispatch_guard_exposes_worker_observer_registry_path(monkeypatch):
     assert str(ROOT / "scripts") in sys.path
 
 
+def test_dispatch_health_probe_filters_tracking_and_full_capacity(monkeypatch):
+    package = types.ModuleType("hermes_cli")
+    kanban_db = types.ModuleType("hermes_cli.kanban_db")
+    profiles = types.ModuleType("hermes_cli.profiles")
+
+    def original_guard(connection, task_id):
+        del connection, task_id
+        return "native"
+
+    kanban_db.check_respawn_guard = original_guard
+    kanban_db.has_spawnable_ready = lambda connection: True
+    profiles.profile_exists = lambda name: name in {
+        "ceo-agent", "research-department"
+    }
+    package.kanban_db = kanban_db
+    package.profiles = profiles
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", kanban_db)
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles)
+    monkeypatch.setenv("HGFINANCE_DISPATCH_GUARD", "1")
+    monkeypatch.setenv("KANBAN_DISPATCH_MAX_SPAWN", "2")
+    runpy.run_path(str(PATCH), run_name="hgfinance_dispatch_health_test")
+
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        "create table tasks (assignee text, body text, status text, claim_lock text)"
+    )
+    connection.execute(
+        "insert into tasks values (?, ?, ?, ?)",
+        ("ceo-agent", "strategy_research_tracking_only=true", "ready", None),
+    )
+    assert kanban_db.has_spawnable_ready(connection) is False
+
+    connection.execute(
+        "insert into tasks values (?, ?, ?, ?)",
+        ("research-department", "real work", "ready", None),
+    )
+    assert kanban_db.has_spawnable_ready(connection) is True
+
+    connection.executemany(
+        "insert into tasks values (?, ?, ?, ?)",
+        [("research-department", "running", "running", None)] * 2,
+    )
+    assert kanban_db.has_spawnable_ready(connection) is False
+
+
 def test_dispatch_worker_observer_does_not_reap_native_child(monkeypatch):
     del monkeypatch
 
     assert "os.waitpid" not in PATCH.read_text(encoding="utf-8")
+
+
+def test_dispatch_guard_ignores_budget_fallback_after_terminal_completion(monkeypatch, tmp_path):
+    package = types.ModuleType("hermes_cli")
+    kanban_db = types.ModuleType("hermes_cli.kanban_db")
+    turn_finalizer = types.ModuleType("agent.turn_finalizer")
+    calls: list[tuple[str, int, int]] = []
+    finalize_calls: list[dict] = []
+
+    def original(task_id, api_call_count, max_iterations, logger):
+        del logger
+        calls.append((task_id, api_call_count, max_iterations))
+
+    def finalize(agent, *args, **kwargs):
+        del agent, args
+        finalize_calls.append(kwargs)
+        return "finished"
+
+    turn_finalizer._record_kanban_budget_exhausted = original
+    turn_finalizer.finalize_turn = finalize
+    package.kanban_db = kanban_db
+    agent_package = types.ModuleType("agent")
+    agent_package.turn_finalizer = turn_finalizer
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", kanban_db)
+    monkeypatch.setitem(sys.modules, "agent", agent_package)
+    monkeypatch.setitem(sys.modules, "agent.turn_finalizer", turn_finalizer)
+    monkeypatch.setenv("HGFINANCE_DISPATCH_GUARD", "1")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_done")
+
+    db_path = tmp_path / "kanban.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("create table tasks (id text primary key, status text)")
+    connection.executemany(
+        "insert into tasks values (?, ?)",
+        [("t_done", "done"), ("t_running", "running")],
+    )
+    connection.commit()
+    connection.close()
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+
+    runpy.run_path(str(PATCH), run_name="hgfinance_dispatch_terminal_race_test")
+
+    turn_finalizer._record_kanban_budget_exhausted(
+        "t_done", 8, 8, types.SimpleNamespace()
+    )
+    turn_finalizer._record_kanban_budget_exhausted(
+        "t_running", 8, 8, types.SimpleNamespace()
+    )
+    turn_finalizer.finalize_turn(
+        types.SimpleNamespace(max_iterations=8),
+        final_response=None,
+        api_call_count=8,
+        _turn_exit_reason="budget_exhausted",
+    )
+
+    assert calls == [("t_running", 8, 8)]
+    assert finalize_calls == [{
+        "final_response": "",
+        "api_call_count": 8,
+        "_turn_exit_reason": "text_response(kanban_terminal)",
+        "_pending_verification_response": None,
+        "_pending_verification_response_previewed": False,
+    }]
 
 
 @pytest.mark.parametrize(("assignee", "expected"), [

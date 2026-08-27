@@ -8,13 +8,14 @@ import unittest
 from unittest import mock
 
 import orchestration.workflows.portfolio_recommendation as portfolio_pipeline
-from orchestration.adapters.ceo_task_planner import LlmCeoTaskPlanner, build_task_plan
+from orchestration.adapters.ceo_task_planner import build_task_plan
 from orchestration.ceo_workflow_scope import build_root_body
 from orchestration.experience_bank import (
     ExperienceBank,
     ExperienceLookup,
     ExperienceRecord,
     ExperienceWrite,
+    bounded_planner_hint,
     build_discord_experience_record,
     build_experience_record,
 )
@@ -106,8 +107,53 @@ class ExperienceBankTest(unittest.TestCase):
         self.assertTrue(lookup.available)
         self.assertEqual(lookup.matched_count, 2)
         self.assertEqual(lookup.planner_hint["successful_runs"], 1)
-        self.assertTrue(lookup.planner_hint["operational_failures_are_non_routing"])
+        self.assertEqual(lookup.planner_hint["success_rate"], 1.0)
         self.assertNotIn("provider failure", lookup.planner_hint.get("lessons", []))
+        self.assertNotIn("failed_failure_codes", lookup.planner_hint)
+        self.assertNotIn("failed_department_sets", lookup.planner_hint)
+
+    def test_failed_experience_is_not_recalled_even_if_legacy_success_flag_is_wrong(self):
+        connection = _Connection(
+            rows=[
+                (
+                    "investment_analysis", False, ["research"],
+                    "analysis_parallel", False, ["ROUTING_MISMATCH"],
+                    9000, True, False, "failed route",
+                ),
+                (
+                    "investment_analysis", False, ["risk"],
+                    "analysis_parallel", True, ["ROUTING_MISMATCH"],
+                    9000, True, False, "legacy false success",
+                ),
+            ]
+        )
+        bank = ExperienceBank(
+            "postgresql://test",
+            mode="active",
+            connect_factory=lambda *_args, **_kwargs: connection,
+        )
+        lookup = bank.lookup(case_type="investment_analysis", binding=False)
+        self.assertIsNone(lookup.planner_hint)
+
+    def test_planner_hint_drops_failure_memory_and_skill_names(self):
+        bounded = bounded_planner_hint(
+            {
+                "source": "memo_harness_d5",
+                "matched_runs": 4,
+                "successful_runs": 1,
+                "success_rate": 0.25,
+                "successful_policies": [{"policy": "analysis_parallel", "count": 1}],
+                "failed_failure_codes": [{"code": "ROUTING_MISMATCH", "count": 3}],
+                "failed_department_sets": [{"departments": "research+risk", "count": 3}],
+                "lessons": ["failed route"],
+                "skills": ["failed-skill"],
+            }
+        )
+        self.assertIsNotNone(bounded)
+        self.assertNotIn("failed_failure_codes", bounded)
+        self.assertNotIn("failed_department_sets", bounded)
+        self.assertNotIn("lessons", bounded)
+        self.assertNotIn("skills", bounded)
 
     def test_record_is_structured_and_idempotent_key_is_used(self):
         connection = _Connection(rowcount=1)
@@ -222,6 +268,82 @@ class ExperienceBankTest(unittest.TestCase):
         self.assertEqual(record.experience_identity, "kanban:t_root1234")
         self.assertEqual(record.primary_departments, ("research-department",))
         self.assertNotIn("q", record.lesson)
+
+    def test_verified_discord_record_rejects_a_mismatched_route(self):
+        root = {
+            "id": "t_route_mismatch",
+            "body": build_root_body(
+                "오늘 매매손익 분석해줘",
+                "req-route-mismatch",
+                selected_primary_profiles=(
+                    "research-department",
+                    "risk-management",
+                ),
+                delegation_instructions={
+                    "research-department": "research",
+                    "risk-management": "risk",
+                },
+            ),
+            "status": "done",
+        }
+        record = build_discord_experience_record(
+            root_id="t_route_mismatch",
+            root_payload=root,
+            task_payloads=(
+                root,
+                {
+                    "id": "t_research",
+                    "assignee": "research-department",
+                    "status": "done",
+                    "body": "workflow_role=primary\n",
+                },
+                {
+                    "id": "t_risk",
+                    "assignee": "risk-management",
+                    "status": "done",
+                    "body": "workflow_role=primary\n",
+                },
+            ),
+            terminal_status="done",
+            qa_decision="PASS",
+            qa_task_id="t_qa",
+        )
+        self.assertEqual(record.case_type, "discord_ceo_verified:account_status")
+        self.assertFalse(record.success)
+        self.assertIn("ROUTING_MISMATCH", record.failure_codes)
+        self.assertIn("routing mismatch", record.lesson)
+
+    def test_verified_discord_record_fails_closed_for_non_terminal_root(self):
+        root = {
+            "id": "t_root_running",
+            "body": build_root_body(
+                "오늘 매매손익 분석해줘",
+                "req-root-running",
+                selected_primary_profiles=("accounting-portfolio-department",),
+                delegation_instructions={
+                    "accounting-portfolio-department": "accounting",
+                },
+            ),
+            "status": "running",
+        }
+        record = build_discord_experience_record(
+            root_id="t_root_running",
+            root_payload=root,
+            task_payloads=(
+                root,
+                {
+                    "id": "t_accounting",
+                    "assignee": "accounting-portfolio-department",
+                    "status": "done",
+                    "body": "workflow_role=primary\n",
+                },
+            ),
+            terminal_status="running",
+            qa_decision="PASS",
+            qa_task_id="t_qa_running",
+        )
+        self.assertFalse(record.success)
+        self.assertIn("ROOT_RUNNING", record.failure_codes)
 
     def test_failure_record_does_not_turn_provider_failure_into_routing_hint(self):
         record = build_experience_record(

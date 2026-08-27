@@ -156,6 +156,7 @@ from orchestration.evolution_skills import (
     EvolutionSkillStore,
     build_resolution_report,
 )
+from orchestration.d5_improvement_pipeline import d5_regression_candidates
 from orchestration.langsmith_feedback import FeedbackConfig, FeedbackLedger
 
 # DATABASE_URL이 있을 때만 audit 및 QA Eval write-through을 활성화한다.
@@ -1210,6 +1211,27 @@ def update_observability_benchmark(
         "status": body.status,
         "artifact_id": artifact_id,
         "benchmark_id": body.benchmark_id,
+    }
+
+
+@app.get("/qa/v1/d5/improvement/regression-candidates")
+def d5_regression_improvement_candidates(
+    limit: int = 50,
+    authorization: str | None = Header(default=None),
+):
+    """Return admitted D5 candidates awaiting central-router regression work.
+
+    The response is metadata-only. This endpoint does not apply a route,
+    modify code, or turn an approved candidate into a CEO hint.
+    """
+
+    _require_eval_service_token(authorization, required_scope="qa.observability.benchmark")
+    return {
+        "status": "READY",
+        "candidates": d5_regression_candidates(
+            _observability_feedback_ledger(),
+            limit=max(1, min(int(limit), 100)),
+        ),
     }
 
 

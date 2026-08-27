@@ -61,7 +61,9 @@ def _services_with_langfuse_env() -> dict[str, str]:
     return found
 
 
-def _provides_langfuse_transport(dockerfile: Path) -> bool:
+def _provides_langfuse_transport(
+    dockerfile: Path, *, compose_path: Path | None = None
+) -> bool:
     text = dockerfile.read_text(encoding="utf-8")
     # 주석(# langfuse: ...)은 설치가 아니다 - 실제 설치 줄만 본다.
     lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
@@ -73,6 +75,13 @@ def _provides_langfuse_transport(dockerfile: Path) -> bool:
     # widen the image only to satisfy a stale package-name assumption.
     if "orchestration/langfuse_otlp.py" in body:
         return True
+    # The dispatcher deliberately keeps the standard-library OTLP transport
+    # in the repository and mounts that repository read-only at runtime. It
+    # must not grow a second SDK implementation just to satisfy this check.
+    if dockerfile.name == "Dockerfile.agent-runtime" and compose_path is not None:
+        compose_text = compose_path.read_text(encoding="utf-8")
+        if ":/app/repo:ro" in compose_text and "scripts/head_card_trace.py" in compose_text:
+            return True
     # requirements.txt 를 통째로 설치하는 이미지는 거기에 있으면 된다.
     if "requirements.txt" in body:
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
@@ -95,7 +104,13 @@ def test_service_with_langfuse_env_has_the_package(service: str, dockerfile: str
 
     path = ROOT / dockerfile
     assert path.is_file(), f"{service}: Dockerfile 을 찾을 수 없다 ({dockerfile})"
-    assert _provides_langfuse_transport(path), (
+    compose_path = next(
+        (candidate for candidate in COMPOSE_FILES if service in (
+            (yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}).get("services", {})
+        )),
+        None,
+    )
+    assert _provides_langfuse_transport(path, compose_path=compose_path), (
         f"{service} 는 LANGFUSE_* 를 받지만 {dockerfile} 이 SDK 또는 OTLP 전송 계층을 "
         "제공하지 않는다. 이 상태에서는 publish 가 조용히 False 를 돌려주고 "
         "이벤트가 0건이 된다."

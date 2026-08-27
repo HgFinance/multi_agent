@@ -138,3 +138,52 @@ def test_shared_realtime_tick_resolver_requires_instrument_id() -> None:
         resolver.snapshot("005930")
 
     assert raised.value.code == "MARKET_PRICE_INSTRUMENT_REQUIRED"
+
+
+def test_shared_snapshot_staleness_uses_the_exchange_clock() -> None:
+    """A backlogged collector must not make an old price look current.
+
+    On 2026-08-27 the shared tick for 000500 carried event_time 06:06:47 with
+    observed_at 06:10:45.  Judged on observed_at the price was one second old,
+    so the REST fallback never engaged and a +1% take-profit evaluated against
+    207,500 while the stock actually traded at 215,500.
+    """
+
+    from datetime import datetime, timedelta, timezone
+    from decimal import Decimal
+
+    from apps.api.conditional_rule_worker import HttpRuntimeClient
+    from orchestration.conditional_rules.market_data import MarketPriceSnapshot
+
+    client = HttpRuntimeClient(
+        trading_api_url="http://trading-api:8000",
+        market_api_url="http://market-api:8036",
+        shared_price_max_age_seconds=30.0,
+    )
+    now = datetime.now(timezone.utc)
+    backlogged = MarketPriceSnapshot(
+        symbol="000500",
+        price=Decimal("208000"),
+        observed_at=now - timedelta(seconds=1),
+        source="LS_REALTIME_TICK",
+        event_time=now - timedelta(seconds=240),
+    )
+    assert client._shared_snapshot_is_stale(backlogged) is True
+
+    current = MarketPriceSnapshot(
+        symbol="000500",
+        price=Decimal("215500"),
+        observed_at=now - timedelta(seconds=1),
+        source="LS_REALTIME_TICK",
+        event_time=now - timedelta(seconds=2),
+    )
+    assert client._shared_snapshot_is_stale(current) is False
+
+    # A source without a separate exchange clock still falls back to observed_at.
+    no_event_clock = MarketPriceSnapshot(
+        symbol="000500",
+        price=Decimal("215500"),
+        observed_at=now - timedelta(seconds=240),
+        source="LS_T1102_READONLY_RECEIPT",
+    )
+    assert client._shared_snapshot_is_stale(no_event_clock) is True

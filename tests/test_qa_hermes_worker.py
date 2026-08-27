@@ -208,10 +208,10 @@ def test_hr_e2e_uses_one_bounded_read_only_helper_pass(tmp_path, monkeypatch):
         "UPDATE tasks SET body = ? WHERE id = 't_qa'",
         (
             "workflow_role=primary\n"
-            "origin=user-query\n"
-            "workflow_mode=binding\n"
-            "scope=PAPER read-only Workforce API GET 3개\n"
-            "/workforce/v1/improvements /workforce/v1/departments/observability\n",
+            + "origin=user-query\n"
+            + "workflow_mode=binding\n"
+            + "scope=PAPER read-only Workforce API GET 3개\n"
+            + "/workforce/v1/improvements /workforce/v1/departments/observability\n",
         ),
     )
     conn.commit()
@@ -229,7 +229,7 @@ def test_hr_e2e_uses_one_bounded_read_only_helper_pass(tmp_path, monkeypatch):
     assert qa_worker._response_task_kind(
         qa_worker._task_body(db, "t_qa"), profile="hr-department"
     ) == "hr_e2e_readonly"
-    assert bounded[bounded.index("--max-turns") + 1] == "6"
+    assert bounded[bounded.index("--max-turns") + 1] == "8"
     assert bounded[bounded.index("--reasoning") + 1] == "low"
     assert bounded[bounded.index("--toolsets") + 1] == qa_worker.HR_E2E_TOOLSETS
     prompt = bounded[bounded.index("-q") + 1]
@@ -302,6 +302,11 @@ def test_research_fast_advisory_replaces_dispatcher_broad_toolsets(tmp_path):
     assert bounded[bounded.index("--toolsets") + 1] == (
         qa_worker.RESEARCH_FAST_ADVISORY_TOOLSETS
     )
+    prompt = bounded[bounded.index("-q") + 1]
+    assert "kanban_show" in prompt
+    assert "긍정 근거" in prompt
+    assert "자료 기준과 확인하지 못한 자료" in prompt
+    assert "Call kanban_complete once" in prompt
 
 
 def test_quant_liaison_fast_advisory_keeps_only_read_only_library(tmp_path):
@@ -336,7 +341,7 @@ def test_quant_standard_user_primary_replaces_dispatcher_broad_toolsets(tmp_path
         "UPDATE tasks SET body = ? WHERE id = 't_qa'",
         (
             "workflow_role=primary\norigin=user-query\n"
-            "analysis_mode=standard_analysis\nquestion",
+            + "analysis_mode=standard_analysis\nquestion",
         ),
     )
     conn.commit()
@@ -461,6 +466,36 @@ def test_qa_governance_review_default_stops_runaway_turns(tmp_path, monkeypatch)
 
     assert bounded[bounded.index("--max-turns") + 1] == "8"
     assert bounded[bounded.index("--reasoning") + 1] == "high"
+
+
+def test_post_response_qa_wins_over_embedded_ceo_input_markers(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        (
+            (
+                "workflow_role=qa\n"
+                "workflow_plane=governance\n"
+                'ceo_input={"workflow_role":"primary", "origin":"user-query"}'
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    assert qa_worker._response_task_kind(
+        qa_worker._task_body(db, "t_qa"), profile="qa-department"
+    ) == "qa_audit"
+    bounded = qa_worker._bounded_worker_argv(
+        ["chat", "-q", "review"],
+        db_path=db,
+        task_id="t_qa",
+        profile="qa-department",
+    )
+
+    assert bounded[bounded.index("--max-turns") + 1] == "8"
 
 
 def test_direct_qa_primary_gets_the_same_bounded_review_budget(tmp_path, monkeypatch):

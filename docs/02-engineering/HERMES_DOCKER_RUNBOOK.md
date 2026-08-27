@@ -1,6 +1,6 @@
 # Hermes 도커 운영 Runbook
 
-> **상태:** RUNBOOK · **검토일:** 2026-08-25 UTC
+> **상태:** RUNBOOK · **검토일:** 2026-08-27 UTC
 > 모든 부서장은 Hermes + `openai-codex/gpt-5.6-luna`를 사용하고, 직원은 독립 LangGraph Worker + Worker Model Gateway의 Qwen AWQ를 운영 기본으로 사용한다. Ollama `qwen3:1.7b`와 Laguna 예시는 local fallback 또는 과거 Smoke 기록이다. 로컬 서비스·profile·포트는 [LOCAL_COMPOSE_RUNTIME_BASELINE.md](LOCAL_COMPOSE_RUNTIME_BASELINE.md)가 소유한다.
 
 담당: 재일 (리서치·퀀트) — 2026-08-02 작성, 2026-08-03 상태 갱신
@@ -16,7 +16,7 @@ Department Backend Image에 설치하지 않는다”), 여기서는 그 결정�
 
 ## 1. 지금 구성 (2026-08-25 Compose 재검토)
 
-현재 Git 기준은 8개 Hermes 부서장 Profile 모두 `openai-codex/gpt-5.6-luna`를 기본으로 사용하고 Claude Code를 승인된 대체 런타임으로 둔다. 직원은 부서별 독립 LangGraph Worker이며 운영 기본은 Worker Model Gateway의 Qwen2.5-14B-Instruct-AWQ다. Ollama `qwen3:1.7b`는 명시적 local fallback이고, 아래 `poolside/laguna-s-2.1:free` 표기는 이전 Docker smoke 기록이다. 실제 Head runtime 반영은 `./scripts/sync_hermes_profiles.sh push` 후 Profile별 credential 상태로 확인한다.
+현재 Git 기준은 8개 Hermes 부서장 Profile 모두 `openai-codex/gpt-5.6-luna`를 기본으로 사용하고 Claude Code를 승인된 대체 런타임으로 둔다. Discord ingress 패치는 CEO·QA·HR에만 활성화되어 `/opt/kanban` 전역 claim과 채널 allowlist를 적용한다. 직원은 부서별 독립 LangGraph Worker이며 운영 기본은 Worker Model Gateway의 Qwen2.5-14B-Instruct-AWQ다. Ollama `qwen3:1.7b`는 명시적 local fallback이고, 아래 `poolside/laguna-s-2.1:free` 표기는 이전 Docker smoke 기록이다. 실제 Head runtime 반영은 `./scripts/sync_hermes_profiles.sh push` 후 Profile별 credential 상태로 확인한다.
 
 계획서 3.1~3.2대로 **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개**다.
 
@@ -184,11 +184,13 @@ docker compose --profile dashboard up -d
 ```yaml
 init: true
 command:
-  ["kanban", "daemon", "--force", "--interval", "60", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
+  ["kanban", "daemon", "--force", "--interval", "60", "--max", "3", "--failure-limit", "2", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
 environment:
   HERMES_HOME: /opt/data
   HERMES_KANBAN_HOME: /opt/data/shared-kanban
   HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+  KANBAN_DISPATCH_MAX_SPAWN: "3"
+  KANBAN_DISPATCH_FAILURE_LIMIT: "2"
 ```
 
 `init: true`는 Hermes 이미지가 지원하는 wrapped-runtime 경로를 선택한다. entrypoint가 PID 1이 아니므로 s6 `/init`와 `02-reconcile-profiles`가 실행되지 않고, `profiles/*`를 gateway 서비스로 reconcile/start하거나 `gateway.pid`·`processes.json`을 지우지 않는다. `/opt/data/profiles/<assignee>`는 그대로 보여 worker spawn과 profile resolution에 사용된다. 이 설정을 제거하면 중앙 컨테이너가 다시 모든 named profile gateway를 기동할 수 있다.
@@ -206,6 +208,34 @@ docker exec hedgefund-kanban-dispatcher hermes kanban show t_186cb00d --json
 ```
 
 `--help`에는 `--force`가 의도적으로 표시되지 않는다. 실제 지원 여부는 `hermes kanban daemon --force`가 “STANDALONE via --force”로 시작하는지로 확인한다. `docker logs`에 `reconcile: profile=... started`가 보이면 `init: true`가 적용되지 않은 것이므로 즉시 dispatcher를 중지하고 Compose 렌더링을 확인한다.
+
+`--max`는 shared board의 한 tick spawn 예산을 명시하고, `--failure-limit`은
+반복적인 worker spawn 실패를 빠르게 격리한다. Compose의
+`KANBAN_DISPATCH_MAX_SPAWN`과 `KANBAN_DISPATCH_FAILURE_LIMIT`가 이 값을
+소유한다. 설정 변경 후에는 dispatcher를 재생성해야 하며, 이미 실행 중인
+컨테이너에는 자동 반영되지 않는다.
+
+Research MCP는 keepalive가 event loop 정지를 감지하면
+`RESEARCH_MCP_LOOP_STALL_SECONDS`(기본 90초) 후 프로세스를 종료한다.
+Compose의 `restart: unless-stopped`가 재기동을 담당하며, 이 watchdog은
+MCP tool payload나 외부 write를 수행하지 않는다.
+
+### 완료 결과 handoff 계약 (2026-08-27)
+
+중앙 dispatcher는 `Dockerfile.agent-runtime`으로 빌드한다. 이미지가 설치하는
+`deploy/ceo-kanban/install_result_contract.py`는 Hermes의 단일 완료 트랜잭션 안에서
+`result`가 비어 있고 `summary`만 있는 호출을 보정한다. 따라서 `done` 이벤트, `tasks.result`,
+`task_runs.summary`가 서로 다른 시점에 만들어지지 않는다.
+
+```bash
+docker compose build kanban-dispatcher
+docker run --rm --entrypoint sh hedgefund-agent-runtime:latest \
+  -lc "grep -n hgfinance-canonical-result-v1 /opt/hermes/hermes_cli/kanban_db.py"
+```
+
+Quant 표준·신속 분석은 추가 위임 없이 primary가 직접 종료한다. 원본이 없을 때는
+`retrieval_attempt`에 종목·기간·source·TR·조회/추출 시각·snapshot hash와 `UNAVAILABLE` 상태를
+남기며, 검증되지 않은 성과지표는 생성하지 않는다.
 
 ### orphaned run 회수
 
@@ -586,6 +616,8 @@ rm ~/.hermes-shared-kanban/kanban.db-wal ~/.hermes-shared-kanban/kanban.db-shm
   경고 — 명령 스캔이 패턴 매칭으로 떨어진다. 에이전트에게 셸을 주지 않는
   현재 구성에서는 영향이 없지만, 도구를 붙일 때 다시 본다.
 - 대시보드 인증 미설정 (각자 1회 필요)
-- 리서치 Profile ↔ `scripts.py` 파이프라인 호출 배선 미구현 —
-  현재 Hermes는 부서 페르소나로 대화만 가능하고 우리 LangGraph 파이프라인을
-  도구로 호출하지 못한다. 이 배선이 "부서가 실제로 도는" 마지막 조각이다.
+- 리서치의 MCP keepalive/read 오류와 worker retry·latency는 배포 후 다시 측정해야
+  한다. MCP loop-stall watchdog은 재기동 경계를 제공하지만 외부 provider의
+  안정성 자체를 보장하지 않는다.
+- LangSmith·Discord·Notion 변경은 저장소에 반영되어 있으므로 dispatcher,
+  supervisor, BFF, research-mcp를 재생성한 뒤 target trace로 runtime 검증한다.

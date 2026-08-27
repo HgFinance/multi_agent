@@ -15,13 +15,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from arms import (  # noqa: E402
+from arms import (
     llm_wiki_bm25_answer,
     llm_wiki_grep_bm25_answer,
     plain_rag_answer,
 )
-from eval_metrics import exact_match, f1_score  # noqa: E402
-from llm_judge import judge  # noqa: E402
+from eval_metrics import exact_match, f1_score
+from llm_judge import judge
 
 GOLDEN_SET_PATH = Path(__file__).resolve().parent / "golden_set.json"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"

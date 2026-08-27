@@ -10,7 +10,7 @@ AUTONOMOUS_DIR = Path(__file__).resolve().parents[2] / "departments/01-research/
 if str(AUTONOMOUS_DIR) not in sys.path:
     sys.path.insert(0, str(AUTONOMOUS_DIR))
 
-from ls_market_data import OnDemandMarketDataClient
+from ls_market_data import MAX_INTRADAY_WINDOW_DAYS, OnDemandMarketDataClient
 
 
 class FakeLsClient:
@@ -106,6 +106,26 @@ def test_t1665_uses_explicit_investor_tr_contract() -> None:
             "from_date": "20240101", "to_date": "20240131", "exchgubun": "K",
         }
     }
+
+
+def test_wide_intraday_range_is_split_into_bounded_query_windows() -> None:
+    fake = FakeLsClient([
+        _page("t8452", [{"date": "20240102", "time": "090300"}]),
+        _page("t8452", [{"date": "20240401", "time": "090300"}]),
+    ])
+    batch = OnDemandMarketDataClient(fake, max_pages=2).fetch_chart(
+        "005930", "20240101", "20240401", timeframe="minute", integrated=True, interval=3,
+    )
+
+    assert len(fake.calls) == 2
+    first_block = fake.calls[0]["in_block"]["t8452InBlock"]
+    second_block = fake.calls[1]["in_block"]["t8452InBlock"]
+    assert first_block["sdate"] == "20240101"
+    assert first_block["edate"] == "20240330"
+    assert second_block["sdate"] == "20240331"
+    assert second_block["edate"] == "20240401"
+    assert batch.receipt.query_windows == (("20240101", "20240330"), ("20240331", "20240401"))
+    assert batch.receipt.pages == 2
 
 
 def test_ranking_fetch_supports_market_cap_and_idx_continuation() -> None:

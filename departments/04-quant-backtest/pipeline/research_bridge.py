@@ -28,18 +28,20 @@
 
 ▶ PIT
   오늘 인사이트로 2024 년부터 백테스트하면 우리 자신의 사후 관측을 과거에
-  넣는 셈이다. strategy_scout 의 컨셉 차용과 같은 성격이라 **씨앗에
-  observed_at 을 실어** 그 사실이 남게 한다.
+  넣는 셈이다. **씨앗에 observed_at 을 실어** 그 사실이 남게 한다.
 
 자체 점검: python departments/04-quant-backtest/pipeline/research_bridge.py
 """
 
 from __future__ import annotations
 
+import logging
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable
+
+logger = logging.getLogger(__name__)
 
 BRIDGE_VERSION = "quant-research-bridge-v1"
 
@@ -65,6 +67,7 @@ TRADABLE_KINDS = {
 @dataclass
 class HypothesisSeed:
     """가설 씨앗. **HypothesisSpec 이 아니다** - 일반화가 남아 있다."""
+
     source_claim_kind: str
     edge_type: str
     symbol: str
@@ -89,16 +92,16 @@ class HypothesisSeed:
             "observed_at": self.observed_at,
             # ▶ 이 두 줄이 씨앗을 가설로 오해하지 못하게 막는다
             "needs_generalization": self.needs_generalization,
-            "not_a_hypothesis":
-                "한 종목·한 시점 관측이다. 어느 종목이든 성립하는 규칙으로 "
-                "옮기는 것은 QNT-01 의 일이며, 그대로 백테스트하면 표본 "
-                "1개짜리 실험이 된다",
+            "not_a_hypothesis": "한 종목·한 시점 관측이다. 어느 종목이든 성립하는 규칙으로 "
+            "옮기는 것은 QNT-01 의 일이며, 그대로 백테스트하면 표본 "
+            "1개짜리 실험이 된다",
             "notes": list(self.notes),
         }
 
 
-def to_seeds(claims: Iterable[dict], *, max_seeds: int = MAX_SEEDS,
-             now: datetime | None = None) -> tuple[list[HypothesisSeed], list[dict]]:
+def to_seeds(
+    claims: Iterable[dict], *, max_seeds: int = MAX_SEEDS, now: datetime | None = None
+) -> tuple[list[HypothesisSeed], list[dict]]:
     """packet_claims 행 -> (씨앗, 거부+사유).
 
     **조용히 버리지 않는다** - 왜 안 넘어왔는지 보여야 리서치 쪽을 고친다.
@@ -108,8 +111,7 @@ def to_seeds(claims: Iterable[dict], *, max_seeds: int = MAX_SEEDS,
     for c in claims or []:
         kind = str(c.get("kind") or "")
         if kind not in TRADABLE_KINDS:
-            rejected.append({"kind": kind,
-                             "reason": "전략화 대상 종류가 아니다"})
+            rejected.append({"kind": kind, "reason": "전략화 대상 종류가 아니다"})
             continue
         fals = str(c.get("falsification_note") or "").strip()
         if not fals:
@@ -121,24 +123,29 @@ def to_seeds(claims: Iterable[dict], *, max_seeds: int = MAX_SEEDS,
         if horizon < 1:
             rejected.append({"kind": kind, "reason": "판정 지평이 없다"})
             continue
-        seeds.append(HypothesisSeed(
-            source_claim_kind=kind,
-            edge_type=TRADABLE_KINDS[kind],
-            symbol=str(c.get("symbol") or ""),
-            claim_text=str(c.get("threshold_text") or "")[:300],
-            falsifier=fals[:300],
-            horizon_days=horizon,
-            source_nodes=str(c.get("source_node") or ""),
-            observed_at=str(c.get("created_at") or c.get("as_known_at") or ""),
-        ))
+        seeds.append(
+            HypothesisSeed(
+                source_claim_kind=kind,
+                edge_type=TRADABLE_KINDS[kind],
+                symbol=str(c.get("symbol") or ""),
+                claim_text=str(c.get("threshold_text") or "")[:300],
+                falsifier=fals[:300],
+                horizon_days=horizon,
+                source_nodes=str(c.get("source_node") or ""),
+                observed_at=str(c.get("created_at") or c.get("as_known_at") or ""),
+            )
+        )
 
     # 지평이 짧은 것부터 - 빨리 채점되는 것이 먼저 배운다
     seeds.sort(key=lambda s: (s.horizon_days, s.symbol))
     if len(seeds) > max_seeds:
         # ▶ 잘라낸 사실을 남긴다. 조용히 자르면 "이게 전부" 로 읽힌다.
-        rejected.append({"kind": "-",
-                         "reason": f"상한 {max_seeds} 초과로 "
-                                   f"{len(seeds) - max_seeds}건 보류"})
+        rejected.append(
+            {
+                "kind": "-",
+                "reason": f"상한 {max_seeds} 초과로 {len(seeds) - max_seeds}건 보류",
+            }
+        )
         seeds = seeds[:max_seeds]
     return seeds, rejected
 
@@ -157,7 +164,9 @@ def fetch_insight_claims(conn, *, limit: int = 50) -> list[dict]:
             where kind like 'INSIGHT%%'
             order by created_at desc
             limit %s
-            """, (limit,))
+            """,
+            (limit,),
+        )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
@@ -169,22 +178,34 @@ def bridge(conn=None, *, limit: int = 50) -> dict:
         if own:
             import psycopg2
 
-            sys.path.insert(0, str(__import__("pathlib").Path(__file__)
-                                   .resolve().parents[2] / "01-research" / "collectors"))
+            sys.path.insert(
+                0,
+                str(
+                    __import__("pathlib").Path(__file__).resolve().parents[2]
+                    / "01-research"
+                    / "collectors"
+                ),
+            )
             from source_registry import load_project_env
 
-            conn = psycopg2.connect(load_project_env()["DATABASE_URL"],
-                                    connect_timeout=20)
+            conn = psycopg2.connect(
+                load_project_env()["DATABASE_URL"], connect_timeout=20
+            )
         claims = fetch_insight_claims(conn, limit=limit)
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "reason": f"인사이트 조회 실패: {type(e).__name__}",
-                "seeds": []}
+        return {
+            "ok": False,
+            "reason": f"인사이트 조회 실패: {type(e).__name__}",
+            "seeds": [],
+        }
     finally:
         if own and conn is not None:
             try:
                 conn.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:
+                logger.debug(
+                    "quant_research_bridge_connection_close_failed", exc_info=True
+                )
 
     seeds, rejected = to_seeds(claims)
     return {
@@ -195,28 +216,42 @@ def bridge(conn=None, *, limit: int = 50) -> dict:
         # 채점 성적은 아직 못 쓴다 - 그 사실을 숨기지 않는다
         "scoring_available": False,
         "scoring_note": "research.packet_outcomes 가 아직 비어 있다"
-                        "(5·20일 지평 미도래) - 성적 기반 선별은 그 뒤에 붙인다",
+        "(5·20일 지평 미도래) - 성적 기반 선별은 그 뒤에 붙인다",
     }
 
 
 # ── 자체 점검 ────────────────────────────────────────────────────────────────
 
-def _claim(kind="INSIGHT_CROSS_SIGNAL", horizon=5, fals="5일 내 A 가 B 를 넘으면 틀림",
-           symbol="005930", **kw):
-    d = {"kind": kind, "symbol": symbol, "threshold_text": "교차 해석 문장",
-         "falsification_note": fals, "horizon_days": horizon,
-         "source_node": "technical,regime", "created_at": "2026-08-04T00:00:00Z"}
+
+def _claim(
+    kind="INSIGHT_CROSS_SIGNAL",
+    horizon=5,
+    fals="5일 내 A 가 B 를 넘으면 틀림",
+    symbol="005930",
+    **kw,
+):
+    d = {
+        "kind": kind,
+        "symbol": symbol,
+        "threshold_text": "교차 해석 문장",
+        "falsification_note": fals,
+        "horizon_days": horizon,
+        "source_node": "technical,regime",
+        "created_at": "2026-08-04T00:00:00Z",
+    }
     d.update(kw)
     return d
 
 
 def _check_only_tradable_kinds():
     """전략화 가능한 종류만 넘긴다 - '무엇이든 전략' 이면 안 걸러진다."""
-    seeds, rej = to_seeds([
-        _claim(kind="INSIGHT_CROSS_SIGNAL"),
-        _claim(kind="INSIGHT_CAUSAL_HYPOTHESIS"),   # 인과 주장은 제외
-        _claim(kind="PRICE_RALLY"),                 # 인사이트가 아니다
-    ])
+    seeds, rej = to_seeds(
+        [
+            _claim(kind="INSIGHT_CROSS_SIGNAL"),
+            _claim(kind="INSIGHT_CAUSAL_HYPOTHESIS"),  # 인과 주장은 제외
+            _claim(kind="PRICE_RALLY"),  # 인사이트가 아니다
+        ]
+    )
     assert len(seeds) == 1 and seeds[0].edge_type == "cross_signal", seeds
     # ▶ 조용히 버리지 않는다 - 왜 안 넘어왔는지 보여야 고친다
     assert len(rej) == 2 and all(r["reason"] for r in rej), rej
@@ -251,14 +286,14 @@ def _check_short_horizon_first():
 
 def _check_cap_is_reported():
     """잘라낸 사실을 남긴다 - 조용히 자르면 '이게 전부' 로 읽힌다."""
-    seeds, rej = to_seeds([_claim(symbol=f"00000{i}") for i in range(9)],
-                          max_seeds=3)
+    seeds, rej = to_seeds([_claim(symbol=f"00000{i}") for i in range(9)], max_seeds=3)
     assert len(seeds) == 3
     assert any("보류" in r["reason"] for r in rej), rej
 
 
 def _check_failure_is_not_empty():
     """조회 실패를 '씨앗 0건' 으로 위장하지 않는다."""
+
     class _Boom:
         def cursor(self):
             raise OSError("연결 거부")
@@ -270,16 +305,32 @@ def _check_failure_is_not_empty():
 
 def _check_scoring_gap_is_declared():
     """채점이 아직 없다는 사실을 숨기지 않는다."""
+
     class _Empty:
         def cursor(self):
             class C:
-                description = [("kind",), ("symbol",), ("threshold_text",),
-                               ("falsification_note",), ("horizon_days",),
-                               ("source_node",), ("created_at",)]
-                def execute(self, *a, **k): pass
-                def fetchall(self): return []
-                def __enter__(self): return self
-                def __exit__(self, *a): return False
+                description = (
+                    ("kind",),
+                    ("symbol",),
+                    ("threshold_text",),
+                    ("falsification_note",),
+                    ("horizon_days",),
+                    ("source_node",),
+                    ("created_at",),
+                )
+
+                def execute(self, *a, **k):
+                    pass
+
+                def fetchall(self):
+                    return []
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
             return C()
 
     r = bridge(conn=_Empty())
@@ -292,11 +343,18 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
 
     print(f"{BRIDGE_VERSION} 자체 점검 (DB 없음)")
-    _check_only_tradable_kinds();        print("  전략화 종류만 통과       OK")
-    _check_falsifier_and_horizon_required(); print("  반증·지평 필수          OK")
-    _check_seed_is_not_a_hypothesis();   print("  씨앗 != 가설            OK")
-    _check_short_horizon_first();        print("  짧은 지평 우선          OK")
-    _check_cap_is_reported();            print("  상한 초과 보고          OK")
-    _check_failure_is_not_empty();       print("  조회 실패 != 0건        OK")
-    _check_scoring_gap_is_declared();    print("  채점 공백 명시          OK")
+    _check_only_tradable_kinds()
+    print("  전략화 종류만 통과       OK")
+    _check_falsifier_and_horizon_required()
+    print("  반증·지평 필수          OK")
+    _check_seed_is_not_a_hypothesis()
+    print("  씨앗 != 가설            OK")
+    _check_short_horizon_first()
+    print("  짧은 지평 우선          OK")
+    _check_cap_is_reported()
+    print("  상한 초과 보고          OK")
+    _check_failure_is_not_empty()
+    print("  조회 실패 != 0건        OK")
+    _check_scoring_gap_is_declared()
+    print("  채점 공백 명시          OK")
     print("리서치 다리 7개 영역 통과.")

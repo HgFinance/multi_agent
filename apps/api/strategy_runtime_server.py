@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """`strategy-runtime-control` sidecar 진입점.
 
 ▶ 왜 `portfolio-bff`에 바로 넣지 않았는가
@@ -20,15 +19,46 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-import strategy_runtime
+try:
+    from strategy_runtime_client import (
+        runtime_service_authorized,
+        runtime_service_token_configured,
+    )
+except ModuleNotFoundError:  # pragma: no cover - package import in tests
+    from .strategy_runtime_client import (
+        runtime_service_authorized,
+        runtime_service_token_configured,
+    )
+
+try:
+    import strategy_runtime
+except ModuleNotFoundError:  # pragma: no cover - package import in tests
+    from . import strategy_runtime
 
 app = FastAPI(
     title="strategy-runtime-control",
     description="mlpipe-paper 컨테이너 상태·전원 제어. 내부 전용 - 인터넷에 노출되지 않는다.",
 )
+
+
+@app.middleware("http")
+async def require_internal_service_auth(request: Request, call_next):
+    if request.url.path != "/health":
+        if not runtime_service_token_configured():
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "strategy_runtime_auth_unconfigured"},
+            )
+        if not runtime_service_authorized(request.headers.get("authorization")):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "strategy_runtime_auth_required"},
+            )
+    return await call_next(request)
 
 
 @app.get("/health")
@@ -52,5 +82,57 @@ class PowerRequest(BaseModel):
 def power(body: PowerRequest) -> dict:
     try:
         return {"container": strategy_runtime.set_power(body.action)}
+    except strategy_runtime.StrategyRuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+class PaperDeployRequest(BaseModel):
+    """Narrow internal handoff; Docker options are never caller-controlled."""
+
+    deployment_id: str
+    request_id: str
+    bundle_path: str
+    bundle_hash: str
+
+
+@app.post("/deploy")
+def deploy(body: PaperDeployRequest) -> dict:
+    try:
+        return strategy_runtime.deploy_paper_bundle(
+            deployment_id=body.deployment_id,
+            request_id=body.request_id,
+            bundle_path=body.bundle_path,
+            bundle_hash=body.bundle_hash,
+        )
+    except strategy_runtime.StrategyRuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/deployments/{deployment_id}")
+def deployment_status(deployment_id: str) -> dict:
+    try:
+        return strategy_runtime.paper_deployment_snapshot(deployment_id)
+    except strategy_runtime.StrategyRuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class PaperPowerRequest(BaseModel):
+    action: Literal["start", "stop"]
+
+
+@app.post("/deployments/{deployment_id}/power")
+def deployment_power(deployment_id: str, body: PaperPowerRequest) -> dict:
+    try:
+        return strategy_runtime.power_paper_deployment(
+            deployment_id=deployment_id, action=body.action
+        )
+    except strategy_runtime.StrategyRuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/deployments/{deployment_id}/remove")
+def deployment_remove(deployment_id: str) -> dict:
+    try:
+        return strategy_runtime.remove_paper_deployment(deployment_id=deployment_id)
     except strategy_runtime.StrategyRuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

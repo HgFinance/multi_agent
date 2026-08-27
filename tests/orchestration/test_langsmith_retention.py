@@ -16,6 +16,13 @@ from orchestration.langsmith_retention import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_process_retention_scope(monkeypatch) -> None:
+    """Keep repository defaults independent from a developer's .env file."""
+
+    monkeypatch.delenv("LANGSMITH_RETENTION_SCOPES", raising=False)
+
+
 class _Response:
     status = 200
 
@@ -74,6 +81,8 @@ def test_retention_dry_run_targets_only_named_projects(monkeypatch) -> None:
     assert summary.scanned == 9
     assert summary.eligible == 3
     assert summary.deleted == 0
+    assert summary.queued == 0
+    assert summary.visible_overflow == 3
     assert summary.dry_run is True
 
 
@@ -105,6 +114,9 @@ def test_retention_delete_is_bounded_and_uses_trace_delete_endpoint(monkeypatch)
     summary = worker.run_once(now=datetime(2026, 8, 26, tzinfo=timezone.utc))
 
     assert summary.deleted == 3
+    assert summary.queued == 3
+    assert summary.pending_visible == 3
+    assert summary.visible_overflow == 3
     assert len(requests) == 3
     request = requests[0]
     assert request.full_url == "https://example.test/api/v1/runs/delete"
@@ -233,5 +245,6 @@ def test_retention_does_not_requeue_pending_trace_ids(monkeypatch, tmp_path) -> 
 
     assert first.deleted == 1
     assert second.deleted == 0
+    assert second.queued == 0
     assert second.skipped == 1
     assert len(requests) == 1

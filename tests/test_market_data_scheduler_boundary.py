@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import inspect
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -230,6 +232,37 @@ def test_request_time_citations_do_not_persist_external_responses() -> None:
         "_save_corp_index_cache",
     ):
         assert forbidden not in module_source
+
+
+def test_read_sources_gathers_two_sources_with_one_attempt_each(monkeypatch) -> None:
+    external = _load_module("external_sources_bounded_gather", EXTERNAL_SOURCES_PATH)
+    started: list[str] = []
+
+    def fake_read_url(url: str, **_kwargs):
+        started.append(url)
+        time.sleep(0.05)
+        return {"url": url, "text": "bounded evidence", "citation": url[-4:]}
+
+    monkeypatch.setattr(external, "read_url", fake_read_url)
+    begin = time.perf_counter()
+    result = asyncio.run(
+        external.read_sources(
+            ["https://official.example/source", "https://secondary.example/source"],
+            timeout_seconds=1,
+        )
+    )
+    elapsed = time.perf_counter() - begin
+
+    assert result["status"] == "OK"
+    assert result["source_count"] == 2
+    assert result["attempts"] == 2
+    assert result["retries"] == 0
+    assert [item["status"] for item in result["results"]] == ["OK", "OK"]
+    assert sorted(started) == [
+        "https://official.example/source",
+        "https://secondary.example/source",
+    ]
+    assert elapsed < 0.09, "independent source fetches should overlap"
 
 
 def test_dart_corp_index_failure_cooldown_prevents_duplicate_fetches(monkeypatch) -> None:

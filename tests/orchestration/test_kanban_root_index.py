@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+import time
 
 from orchestration.adapters.ceo_supervisor import HermesKanbanClient
 from orchestration.ceo_workflow_scope import build_root_body, build_scoped_task_body
@@ -217,6 +218,49 @@ def test_recovery_candidate_rows_are_discovery_only(tmp_path) -> None:
     assert rows[0]["has_terminal_primary"] is True
     assert rows[0]["has_synthesis"] is False
     assert rows[0]["has_selection_comment"] is False
+
+
+def test_steady_state_recovery_excludes_historical_terminal_roots(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    _make_board(path)
+    now = int(time.time())
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at) VALUES (?, ?, ?, ?)",
+        ("t_ready_recent", build_root_body("new", "request-new"), "ready", now),
+    )
+    conn.commit()
+    conn.close()
+
+    index = SQLiteRootScopedIndex({"HERMES_KANBAN_DB": str(path)})
+    rows = index.recovery_candidate_rows(include_historical=False)
+
+    assert [row["id"] for row in rows] == ["t_ready_recent"]
+
+
+def test_recovery_marker_search_does_not_match_embedded_qa_prose(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    _make_board(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at) VALUES (?, ?, ?, ?)",
+        (
+            "t_qa_embedded",
+            "workflow_root_task_id=t_root\n"
+            "workflow_role=qa\n"
+            "Audit text contains workflow_role=synthesis but it is not a marker line.",
+            "running",
+            int(time.time()),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    index = SQLiteRootScopedIndex({"HERMES_KANBAN_DB": str(path)})
+
+    assert "t_qa_embedded" not in {
+        row["id"] for row in index.recovery_candidate_rows(include_historical=False)
+    }
 
 
 def test_recovery_candidate_rows_mark_selection_comments(tmp_path) -> None:

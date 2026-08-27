@@ -18,12 +18,18 @@ import re
 import tempfile
 from typing import Any, Iterator, Mapping
 
-from lab import ResearchLab
+from lab import ResearchLab, ResearchLabError
 from models import Objective, to_dict, utc_now
 
 
 REQUEST_SCHEMA = "autonomous-research-request.v1"
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
+# Intake and request manifests are the small, non-secret IPC surface shared by
+# the BFF and Strategy Hermes. The lab's experiment/state artifacts remain
+# private to the research worker; these manifests must be readable across the
+# BFF(root) -> Hermes(uid 1000) boundary.
+SHARED_MANIFEST_MODE = 0o644
+SHARED_ERROR_MODE = 0o644
 
 
 class ResearchRequestConflict(ValueError):
@@ -148,10 +154,20 @@ class ResearchIntake:
         return payload
 
     @staticmethod
-    def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    def _write_json(
+        path: Path,
+        payload: Mapping[str, Any],
+        *,
+        mode: int | None = None,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
         try:
+            # Set the final contract before the file becomes visible through
+            # os.replace(). Applying chmod after rename leaves a small race in
+            # which Hermes can observe the mkstemp 0600 mode while polling.
+            if mode is not None:
+                os.fchmod(fd, mode)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
                 handle.write("\n")
@@ -194,11 +210,7 @@ class ResearchIntake:
                         "request_id is already bound to a different research request"
                     )
                 return existing, False
-            self._write_json(intake_path, normalized)
-            try:
-                intake_path.chmod(0o644)
-            except OSError:
-                pass
+            self._write_json(intake_path, normalized, mode=SHARED_MANIFEST_MODE)
         return normalized, True
 
     def pending_ids(self) -> tuple[str, ...]:
@@ -223,7 +235,9 @@ class ResearchIntake:
                     "request_id is already bound to a different kanban_root_task_id"
                 )
             payload["kanban_root_task_id"] = task_id
-            self._write_json(path, payload)
+            # Tracking-root updates also replace the file atomically. Keep
+            # the shared manifest readable after that replacement.
+            self._write_json(path, payload, mode=SHARED_MANIFEST_MODE)
             return normalize_request(payload)
 
     def materialize(self, request_id: str, *, repo_root: Path) -> Path:
@@ -243,7 +257,11 @@ class ResearchIntake:
                     constraints=tuple(payload["constraints"]),
                 )
             )
-            self._write_json(lab_path / "request.json", payload)
+            self._write_json(
+                lab_path / "request.json",
+                payload,
+                mode=SHARED_MANIFEST_MODE,
+            )
             lab.write_resource_map([], repo_root=repo_root)
             # The lab is initialized before the marker is removed.  A worker crash
             # in between is therefore safe: the next worker sees the marker and
@@ -260,6 +278,7 @@ class ResearchIntake:
         self._write_json(
             self.errors_dir / f"{request_id}.json",
             {"request_id": request_id, "phase": phase, "error": str(error), "updated_at": utc_now()},
+            mode=SHARED_ERROR_MODE,
         )
 
     def clear_error(self, request_id: str) -> None:
@@ -286,7 +305,21 @@ class ResearchIntake:
         candidate = lab_path / "candidate.json"
         error_path = self.errors_dir / f"{request_id}.json"
         error = self._read_json(error_path) if error_path.exists() else None
-        plan_count = len(tuple((lab_path / "plans").glob("*.json"))) if lab_path.exists() else 0
+        plan_paths = tuple((lab_path / "plans").glob("*.json")) if lab_path.exists() else ()
+        plan_count = len(plan_paths)
+        if lab_path.exists():
+            try:
+                events = ResearchLab(lab_path).events()
+            except (ResearchLabError, OSError, ValueError):
+                events = []
+            registered_plan_ids = {
+                str((event.get("payload") or {}).get("plan_id") or "")
+                for event in events
+                if event.get("event_type") == "PLAN_CREATED"
+                and str((event.get("payload") or {}).get("plan_id") or "").strip()
+            }
+            if registered_plan_ids:
+                plan_count = len(registered_plan_ids)
         result_count = len(tuple((lab_path / "results").glob("*.json"))) if lab_path.exists() else 0
         latest_result: dict[str, Any] | None = None
         result_paths = sorted((lab_path / "results").glob("*.json")) if lab_path.exists() else []
@@ -301,6 +334,8 @@ class ResearchIntake:
             status = "BLOCKED"
         elif str((latest_result or {}).get("status") or "").upper() in {"BLOCKED", "FAILED"}:
             status = "BLOCKED"
+        elif str((latest_result or {}).get("status") or "").upper() == "COMPLETED":
+            status = "COMPLETED"
         elif not (lab_path / "objective.json").exists():
             status = "QUEUED"
         else:

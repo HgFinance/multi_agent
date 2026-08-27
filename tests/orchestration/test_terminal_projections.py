@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from typing import Any
 from unittest.mock import patch
@@ -110,6 +111,31 @@ def test_risk_legal_answer_accepts_flat_run_metadata() -> None:
     assert legal_evidence["status"] == "OK_but_ambiguous_escalate"
     assert legal_evidence["invocation_count"] == 1
     assert legal_evidence["source_references"][0]["clause"] == "제172조"
+
+
+def test_research_handoff_preserves_source_coordinates_and_limitations() -> None:
+    payload = _task(
+        RESEARCH,
+        "primary",
+        metadata={
+            "sources": [
+                {
+                    "title": "공식 실적 발표",
+                    "url": "https://example.com/official",
+                    "published": "2026-08-27",
+                    "accessed": "2026-08-27 18:30 KST",
+                    "citation": "abc12345",
+                }
+            ],
+            "limitations": ["기사 전문은 확인하지 못함"],
+        },
+    )
+
+    provenance = _handoff_provenance(ChildTaskState.from_hermes(payload))
+
+    assert provenance["source_references"][0]["url"] == "https://example.com/official"
+    assert provenance["source_references"][0]["citation"] == "abc12345"
+    assert provenance["limitations"] == ["기사 전문은 확인하지 못함"]
 
 
 def _task(
@@ -359,6 +385,29 @@ class TerminalProjectionWiringTests(unittest.TestCase):
         self.assertIsNone(first)
         self.assertIsNone(second)
         self.assertEqual(projection.calls, [SYNTHESIS])
+
+    def test_completed_qa_refreshes_the_existing_ceo_report(self) -> None:
+        root = {"id": ROOT, "body": build_root_body("q", "req-1"), "status": "done"}
+        primary = _task(RESEARCH, "primary", assignee="research-department")
+        qa = _task(QA, "qa", action="RUN_QA", assignee="qa-department")
+        synthesis = _task(
+            SYNTHESIS, "synthesis", action="SYNTHESIZE", assignee="ceo-agent"
+        )
+        client = FakeSupervisorClient(root, [primary, qa, synthesis])
+        qa_projection = FakeSupervisorProjection()
+        ceo_projection = FakeSupervisorProjection()
+        service = CeoSupervisorService(
+            client,
+            qa_projection=qa_projection,
+            synthesis_projection=ceo_projection,
+        )
+
+        service.handle_terminal_event(
+            {"event_id": "qa-refresh", "task_id": QA, "kind": "completed"}
+        )
+
+        self.assertEqual(qa_projection.calls, [QA])
+        self.assertEqual(ceo_projection.calls, [SYNTHESIS])
 
 
 class TerminalProjectionTests(unittest.TestCase):
@@ -616,6 +665,36 @@ class TerminalProjectionTests(unittest.TestCase):
         self.assertEqual(len(transport.pages), 1)
         self.assertIn("248250", str(transport.pages[0]))
 
+    def test_production_ceo_replay_queries_title_when_kanban_marker_is_missing(self) -> None:
+        transport = ProductionReportNotionTransport()
+        client = type(
+            "Kanban",
+            (),
+            {
+                "comments": [],
+                "comment_task": lambda self, task_id, text: self.comments.append(
+                    (task_id, text)
+                ),
+            },
+        )()
+        projection = CeoNotionProjection(
+            env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "ceo-db"},
+            transport=transport,
+            kanban_client=client,
+        )
+
+        first = projection.project(
+            root_task_id=ROOT, task=self.synthesis, workflow_tasks=self.workflow
+        )
+        client.comments.clear()
+        replay = projection.project(
+            root_task_id=ROOT, task=self.synthesis, workflow_tasks=self.workflow
+        )
+
+        self.assertEqual(first["status"], "created")
+        self.assertEqual(replay["status"], "duplicate")
+        self.assertEqual(len(transport.pages), 1)
+
     def test_primary_and_qa_done_do_not_create_notion_page(self) -> None:
         transport = FakeNotionTransport()
         projection = CeoNotionProjection(
@@ -653,6 +732,7 @@ class TerminalProjectionTests(unittest.TestCase):
         self.assertEqual(record.canonical_decision, "WARN")
         self.assertEqual(record.evaluated_primary_task_ids, (RESEARCH, RISK))
         self.assertEqual(record.findings[0]["finding_id"], "f1")
+        self.assertEqual(first["checks"], [{"check": "citation", "result": "PASS"}])
 
     def test_qa_terminal_publishes_correlated_langsmith_metadata(self) -> None:
         repository = FakeAuditRepository()
@@ -721,6 +801,31 @@ class TerminalProjectionTests(unittest.TestCase):
 
         self.assertEqual(result["original_verdict"], "FAIL")
         self.assertEqual(result["canonical_decision"], "FAIL")
+
+    def test_qa_accepts_profile_specific_terminal_verdict_field(self) -> None:
+        repository = FakeAuditRepository()
+        qa = dict(self.qa)
+        qa["metadata"] = {"overall_decision": "PASS", "overall_status": "COMPLETED"}
+        qa["body"] += json.dumps(
+            {
+                "root_task_id": ROOT,
+                "langsmith_evidence": {
+                    "status": "READY",
+                    "trace_count": 2,
+                    "traces": [
+                        {"task_id": RESEARCH, "raw_payloads_sent": False},
+                        {"task_id": RISK, "raw_payloads_sent": False},
+                    ],
+                },
+            }
+        )
+
+        result = QaAuditProjection(repository=repository).project(
+            root_task_id=ROOT, task=qa, workflow_tasks=[*self.primary, qa, self.root]
+        )
+
+        self.assertEqual(result["original_verdict"], "PASS")
+        self.assertEqual(result["canonical_decision"], "PASS")
 
     def test_qa_persistence_failure_is_not_pass(self) -> None:
         repository = FakeAuditRepository()

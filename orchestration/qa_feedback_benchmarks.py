@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import tempfile
 from collections.abc import Callable, Mapping
@@ -29,6 +30,7 @@ from orchestration.llm_observability import (
 from orchestration.semantic_qa import evaluate_prompt_answer
 
 BENCHMARK_VERSION = "qa-privacy-safe-contract-v1"
+D5_ADMISSION_BENCHMARK_VERSION = "d5-improvement-admission-v1"
 
 
 def _correlation_suite() -> dict[str, Any]:
@@ -170,6 +172,9 @@ def _candidate_failure(candidate: Mapping[str, Any]) -> tuple[bool, str, str]:
 
 
 def _run_candidate(candidate: Mapping[str, Any]) -> tuple[bool, str, str]:
+    metadata = candidate.get("metadata")
+    if isinstance(metadata, Mapping) and metadata.get("source") == "memo_harness_d5":
+        return _run_d5_candidate(candidate)
     codes = sorted({str(value).upper() for value in candidate.get("finding_codes") or ()})
     suite_names = [code for code in codes if code in _SUITES]
     results = [_run_suite(name) for name in suite_names]
@@ -203,6 +208,63 @@ def _run_candidate(candidate: Mapping[str, Any]) -> tuple[bool, str, str]:
     return passed, f"sha256:{digest}", summary
 
 
+def _run_d5_candidate(candidate: Mapping[str, Any]) -> tuple[bool, str, str]:
+    """Admit a payload-free D5 candidate to the central regression queue.
+
+    This gate checks the candidate envelope only. It deliberately does not
+    claim that a router or QA implementation has been fixed; that proof is
+    supplied by the named regression suite after human approval.
+    """
+
+    metadata = candidate.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    codes = sorted({str(value).upper() for value in candidate.get("finding_codes") or ()})
+    errors: list[str] = []
+    if metadata.get("schema_version") != "hgfinance.memo-harness.d5-improvement.v1":
+        errors.append("d5_schema_missing")
+    if metadata.get("raw_payloads_sent") is not False:
+        errors.append("payload_redaction_unproven")
+    if not str(metadata.get("root_id") or "").strip():
+        errors.append("root_identity_missing")
+    if not str(metadata.get("task_id") or "").strip():
+        errors.append("qa_identity_missing")
+    target = str(metadata.get("regression_test_target") or "")
+    if not target.startswith("tests/"):
+        errors.append("regression_target_missing")
+    case_hash = str(metadata.get("regression_case_hash") or "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", case_hash):
+        errors.append("regression_case_hash_missing")
+    if not codes or not all(code.startswith("D5_") for code in codes):
+        errors.append("d5_finding_code_missing")
+    if "D5_ROUTING_MISMATCH" in codes:
+        if metadata.get("route_verification") != "mismatch":
+            errors.append("route_verification_missing")
+        if not metadata.get("expected_primary_profiles") or not metadata.get(
+            "actual_primary_profiles"
+        ):
+            errors.append("route_profile_sets_missing")
+    manifest = {
+        "schema_version": D5_ADMISSION_BENCHMARK_VERSION,
+        "artifact_id": str(candidate.get("artifact_id") or ""),
+        "finding_codes": codes,
+        "category": str(metadata.get("category") or ""),
+        "candidate_type": str(metadata.get("candidate_type") or ""),
+        "regression_test_target": target,
+        "regression_case_hash": case_hash,
+        "errors": errors,
+        "raw_payloads_sent": False,
+    }
+    digest = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    summary = (
+        "D5 candidate envelope passed; central router regression remains pending"
+        if not errors
+        else "D5 candidate admission failed: " + ",".join(errors)
+    )
+    return not errors, f"sha256:{digest}", summary
+
+
 def run_pending_feedback_benchmarks(
     ledger: FeedbackLedger, *, limit: int = 50
 ) -> dict[str, int]:
@@ -220,11 +282,18 @@ def run_pending_feedback_benchmarks(
             ok, report_ref, summary = _run_candidate(candidate)
         except Exception:  # noqa: BLE001 - isolate a malformed candidate.
             ok, report_ref, summary = _candidate_failure(candidate)
+        candidate_metadata = candidate.get("metadata")
+        benchmark_version = (
+            D5_ADMISSION_BENCHMARK_VERSION
+            if isinstance(candidate_metadata, Mapping)
+            and candidate_metadata.get("source") == "memo_harness_d5"
+            else BENCHMARK_VERSION
+        )
         try:
             updated = ledger.update_benchmark(
                 str(candidate["artifact_id"]),
                 status="PASSED" if ok else "FAILED",
-                benchmark_id=BENCHMARK_VERSION,
+                benchmark_id=benchmark_version,
                 score=1.0 if ok else 0.0,
                 report_ref=report_ref,
                 result_summary=summary,
@@ -238,4 +307,8 @@ def run_pending_feedback_benchmarks(
     return {"passed": passed, "failed": failed, "skipped": skipped}
 
 
-__all__ = ["BENCHMARK_VERSION", "run_pending_feedback_benchmarks"]
+__all__ = [
+    "BENCHMARK_VERSION",
+    "D5_ADMISSION_BENCHMARK_VERSION",
+    "run_pending_feedback_benchmarks",
+]

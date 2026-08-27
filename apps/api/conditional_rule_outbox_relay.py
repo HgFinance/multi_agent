@@ -23,9 +23,11 @@ DEFAULT_STREAM = "hf:conditional-rule-events:v1"
 class RedisConditionalRulePublisher:
     """Publish canonical outbox envelopes to one Redis Stream."""
 
-    def __init__(self, url: str, *, stream: str, maxlen: int = 10_000) -> None:
+    def __init__(self, url: str, *, stream: str, maxlen: int | None = None) -> None:
         self.stream = stream
-        self.maxlen = max(100, min(int(maxlen), 1_000_000))
+        self.maxlen = (
+            max(100, min(int(maxlen), 1_000_000)) if maxlen is not None else None
+        )
         self.client = redis.Redis.from_url(
             url,
             decode_responses=True,
@@ -40,23 +42,41 @@ class RedisConditionalRulePublisher:
         return bool(self.client.ping())
 
     def publish(self, row: ConditionalRuleOutboxRow) -> None:
-        self.client.xadd(
-            self.stream,
-            {
-                "event_id": row.event_id,
-                "aggregate_id": row.aggregate_id,
-                "event_type": row.event_type,
-                "created_at": row.created_at.astimezone(timezone.utc).isoformat(),
-                "payload": json.dumps(
-                    row.payload,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-            },
-            maxlen=self.maxlen,
-            approximate=True,
-        )
+        fields = {
+            "event_id": row.event_id,
+            "aggregate_id": row.aggregate_id,
+            "event_type": row.event_type,
+            "created_at": row.created_at.astimezone(timezone.utc).isoformat(),
+            "payload": json.dumps(
+                row.payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+        if self.maxlen is None:
+            # The PostgreSQL outbox is the retention boundary.  Approximate
+            # trimming can delete an unclaimed stream entry while the
+            # consumer is down, which turns a temporary outage into a lost
+            # notification. Operators can opt into a bounded stream only when
+            # they have an independent replay/retention policy.
+            self.client.xadd(self.stream, fields)
+        else:
+            self.client.xadd(
+                self.stream, fields, maxlen=self.maxlen, approximate=True
+            )
+
+
+def _stream_maxlen(value: str) -> int | None:
+    normalized = value.strip()
+    if not normalized or normalized == "0":
+        return None
+    try:
+        return max(100, min(int(normalized), 1_000_000))
+    except ValueError as exc:
+        raise RuntimeError(
+            "CONDITIONAL_RULE_EVENT_STREAM_MAXLEN must be an integer or 0"
+        ) from exc
 
 
 def _settings() -> tuple[PostgresRuleWorkerStore, RedisConditionalRulePublisher, float, int]:
@@ -76,7 +96,9 @@ def _settings() -> tuple[PostgresRuleWorkerStore, RedisConditionalRulePublisher,
         redis_url,
         stream=os.getenv("CONDITIONAL_RULE_EVENT_STREAM", DEFAULT_STREAM).strip()
         or DEFAULT_STREAM,
-        maxlen=int(os.getenv("CONDITIONAL_RULE_EVENT_STREAM_MAXLEN", "10000")),
+        maxlen=_stream_maxlen(
+            os.getenv("CONDITIONAL_RULE_EVENT_STREAM_MAXLEN", "")
+        ),
     )
     poll = max(0.5, min(float(os.getenv("CONDITIONAL_RULE_OUTBOX_POLL_SECONDS", "1")), 60.0))
     batch = max(1, min(int(os.getenv("CONDITIONAL_RULE_OUTBOX_BATCH_SIZE", "100")), 1000))
@@ -103,8 +125,9 @@ def main() -> int:
         try:
             result = store.drain_outbox(publisher.publish, limit=batch)
             LOG.info(
-                "conditional rule outbox cycle picked=%d published=%d failed=%d",
+                "conditional rule outbox cycle picked=%d published=%d failed=%d lost=%d",
                 result["picked"], result["published"], result["failed"],
+                result.get("lost", 0),
             )
         except Exception:
             LOG.exception("conditional rule outbox cycle failed")

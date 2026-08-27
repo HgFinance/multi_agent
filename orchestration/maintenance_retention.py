@@ -3,6 +3,8 @@
 The domain workers remain the only implementations of their cleanup rules.
 This module only supplies process lifecycle, independent schedules, and a
 small health record so one failed maintenance job cannot stop the other jobs.
+The process remains alive after a domain failure, while its healthcheck reports
+the scheduler as degraded until that job completes successfully again.
 """
 
 from __future__ import annotations
@@ -84,7 +86,11 @@ class HealthLedger:
             self._write()
 
     def finished(
-        self, job: MaintenanceJob, *, error: BaseException | None = None
+        self,
+        job: MaintenanceJob,
+        *,
+        error: BaseException | None = None,
+        result: Any | None = None,
     ) -> None:
         with self._lock:
             now = self.wall_clock()
@@ -100,6 +106,27 @@ class HealthLedger:
                     "max_run_seconds": job.max_run_seconds,
                 }
             )
+            result_snapshot = {
+                field: getattr(result, field)
+                for field in (
+                    "scanned",
+                    "eligible",
+                    "deleted",
+                    "queued",
+                    "pending_visible",
+                    "visible_overflow",
+                    "skipped",
+                )
+                if result is not None and getattr(result, field, None) is not None
+            }
+            if result_snapshot:
+                previous["result"] = result_snapshot
+                if result_snapshot.get("pending_visible", 0) or result_snapshot.get(
+                    "visible_overflow", 0
+                ):
+                    previous["warning"] = "LANGSMITH_DELETE_PENDING"
+                else:
+                    previous.pop("warning", None)
             self._state["heartbeat"] = now
             self._state["jobs"][job.name] = previous
             self._write()
@@ -116,6 +143,7 @@ def _job_loop(
         started = time.monotonic()
         health.started(job)
         error: BaseException | None = None
+        result: Any | None = None
         try:
             result = job.run_once()
             result_error = getattr(result, "error_code", None)
@@ -130,7 +158,7 @@ def _job_loop(
             error = exc
             LOG.exception("maintenance-retention-job-failed job=%s", job.name)
         finally:
-            health.finished(job, error=error)
+            health.finished(job, error=error, result=result)
         if once:
             return
         elapsed = time.monotonic() - started
@@ -219,6 +247,8 @@ def healthcheck(
         if current - float(state["heartbeat"]) > heartbeat_max_age_seconds:
             return False
         for job in dict(state.get("jobs") or {}).values():
+            if job.get("status") == "failed":
+                return False
             if job.get("status") != "running":
                 continue
             if current - float(job["started_at"]) > float(job["max_run_seconds"]):

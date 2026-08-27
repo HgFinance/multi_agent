@@ -158,6 +158,117 @@ class DiscordDeliveryTests(unittest.TestCase):
             )
             self.assertNotIn("\\n", rendered)
 
+    def test_accounting_content_humanizes_runtime_field_names(self) -> None:
+        rendered = DiscordFinalDelivery._humanize_content(
+            "Fund f / Book b / "
+            "source_of_record=accounting.journals (Supabase) / "
+            "quality_status=WARN / authoritative=false/is_official=false / "
+            "instrument_id x / Long / Short / advisory snapshot / read-only"
+        )
+
+        self.assertIn("펀드", rendered)
+        self.assertIn("장부", rendered)
+        self.assertIn("자료 기준: 회계 시스템 원장", rendered)
+        self.assertIn("자료 품질: 주의", rendered)
+        self.assertIn("공식 확정 자료 아님", rendered)
+        self.assertNotIn("source_of_record", rendered)
+        self.assertNotIn("quality_status", rendered)
+        self.assertNotIn("instrument_id", rendered)
+        self.assertNotIn("Gross Exposure", rendered)
+        self.assertNotIn("authoritative=false", rendered)
+        self.assertNotIn("is_official=false", rendered)
+
+    def test_humanize_preserves_one_canonical_retrieval_record(self) -> None:
+        rendered = DiscordFinalDelivery._humanize_content(
+            "HOLD: 원본 시계열이 없어 검증하지 못했습니다.\n"
+            "retrieval_attempt:\n"
+            "instrument=069500.KS\n"
+            "requested_window=UNSPECIFIED\n"
+            "source=LS Securities MCP\n"
+            "tr=UNAVAILABLE\n"
+            "status=UNAVAILABLE\n"
+            "queried_at=UNAVAILABLE\n"
+            "extracted_at=UNAVAILABLE\n"
+            "snapshot_hash=UNAVAILABLE"
+        )
+
+        self.assertEqual(rendered.count("retrieval_attempt:"), 1)
+        self.assertIn("instrument=069500.KS", rendered)
+        self.assertIn("source=LS Securities MCP", rendered)
+        self.assertNotIn("종목=069500.KS", rendered)
+
+        rendered = DiscordFinalDelivery._humanize_content(
+            "snapshot as_of=2026-08-27 mark_as_of=2026-08-27 "
+            "PnL BREAK, 주요 인용: ls-tr:CSPAQ12200, ls-tr:t0424"
+        )
+        self.assertIn("조회 자료 기준 시각", rendered)
+        self.assertIn("가격 기준 시각", rendered)
+        self.assertIn("손익 대사 차이", rendered)
+        self.assertIn("조회 근거: 증권사 조회 기록", rendered)
+        self.assertNotIn("as_of", rendered)
+        self.assertNotIn("mark_as_of", rendered)
+        self.assertNotIn("ls-tr:", rendered)
+
+        rendered = DiscordFinalDelivery._humanize_content(
+            "Accounting / Portfolio Accounting Engine Strategy / "
+            "official NAV close pending, mark_price, fees, taxes, "
+            "cash_orderable, receivable, deposit, cross-check, Break"
+        )
+        self.assertIn("회계·포트폴리오", rendered)
+        self.assertIn("회계 시스템", rendered)
+        self.assertIn("공식 순자산 가치 확정 보류", rendered)
+        self.assertIn("가격", rendered)
+        self.assertIn("수수료", rendered)
+        self.assertIn("세금", rendered)
+        self.assertIn("대사 차이", rendered)
+        self.assertNotIn("Accounting Engine", rendered)
+        self.assertNotIn("mark_price", rendered)
+        self.assertNotIn("cash_orderable", rendered)
+
+    def test_accounting_department_card_is_compact_and_keeps_conclusion(self) -> None:
+        source = (
+            "📒 **회계·포트폴리오 부서**\n✅ 분석을 완료했습니다.\n\n"
+            "범위: Fund f / Book b\n"
+            "상태: PRELIMINARY / WARN — official NAV close 전입니다.\n"
+            "- Preliminary NAV: KRW 100\n"
+            "- 현금: KRW 80\n"
+            "- 증권가치: KRW 20\n"
+            "- 실현손익: KRW 1\n"
+            "- 미실현손익: KRW 2\n"
+            "- 삼성전자(005930): t0424 28주 vs t0425 29주, 차이 -1주\n"
+            "결론 및 조치 상태: PAPER 읽기 전용이며 공식 NAV 확정과 원장 변경은 수행하지 않았습니다."
+            + (" 추가 설명." * 500)
+        )
+
+        rendered = DiscordFinalDelivery._humanize_content(source)
+
+        self.assertLessEqual(len(rendered), 1900)
+        self.assertIn("### 핵심 수치", rendered)
+        self.assertIn("### 결론", rendered)
+        self.assertIn("공식 순자산 가치 확정은 수행하지 않았습니다", rendered)
+        self.assertNotIn("PRELIMINARY", rendered)
+        self.assertNotIn("t0424", rendered)
+        self.assertNotIn("reversing/additional entry", rendered)
+
+    def test_accounting_user_surface_humanizes_delegation_and_broker_labels(
+        self,
+    ) -> None:
+        rendered = DiscordFinalDelivery._humanize_content(
+            "Review the accounting, liquidity, fee, 순자산 가치, or portfolio-state "
+            "implications relevant to the request using 읽기 전용 근거 자료. "
+            "Do not mutate a ledger or confirm 순자산 가치. "
+            "BROKER_POSITION_TR_MISMATCH: CSPAQ12300 vs t0424"
+        )
+
+        self.assertIn("회계·유동성·수수료·순자산 가치·포트폴리오 상태", rendered)
+        self.assertIn("브로커 포지션 수량 대사 차이", rendered)
+        self.assertIn("손익분기·잔고 조회", rendered)
+        self.assertIn("잔고 조회", rendered)
+        self.assertNotIn("Review the accounting", rendered)
+        self.assertNotIn("BROKER_POSITION_TR_MISMATCH", rendered)
+        self.assertNotIn("CSPAQ12300", rendered)
+        self.assertNotIn("t0424", rendered)
+
     def test_missing_correlation_fails_closed_without_send(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = DiscordIdempotencyStore(Path(directory))
@@ -348,12 +459,80 @@ class DiscordDeliveryTests(unittest.TestCase):
             self.assertEqual(second, "sent")
             self.assertGreaterEqual(len(sent), 2)
 
+    def test_identical_thread_card_does_not_issue_a_second_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = DiscordIdempotencyStore(Path(directory))
+            sent: list[dict[str, object]] = []
+            edited: list[dict[str, object]] = []
+
+            def sender(channel: str, payload: str, _headers: dict[str, str]):
+                sent.append({"channel": channel, "payload": json.loads(payload)})
+                return {"id": "card-1"}
+
+            def editor(
+                channel: str,
+                message_id: str,
+                payload: str,
+                _headers: dict[str, str],
+            ):
+                edited.append(
+                    {
+                        "channel": channel,
+                        "message_id": message_id,
+                        "payload": json.loads(payload),
+                    }
+                )
+                return {"id": message_id}
+
+            delivery = DiscordFinalDelivery(
+                environment={"DISCORD_BOT_TOKEN": "test-token"},
+                sender=sender,
+                editor=editor,
+            )
+            task = {
+                "body": (
+                    "discord_message_id=message\n"
+                    "discord_channel_id=channel\n"
+                    "discord_thread_id=thread\n"
+                )
+            }
+
+            self.assertEqual(
+                delivery.upsert_thread_card(
+                    root_task_id="root-card",
+                    source_task=task,
+                    root_task=None,
+                    content="same card",
+                    store=store,
+                    profile="qa-department",
+                    response_key_suffix="department-card",
+                ),
+                "created",
+            )
+            self.assertEqual(
+                delivery.upsert_thread_card(
+                    root_task_id="root-card",
+                    source_task=task,
+                    root_task=None,
+                    content="same card",
+                    store=store,
+                    profile="qa-department",
+                    response_key_suffix="department-card",
+                ),
+                "unchanged",
+            )
+
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(edited, [])
+
     def test_deleted_existing_thread_uses_parent_fallback_signal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = DiscordIdempotencyStore(Path(directory) / "discord.sqlite3")
 
             def sender(_channel: str, _payload: str, _headers: dict[str, str]):
-                raise HTTPError("https://discord.invalid/thread", 404, "missing", {}, None)
+                raise HTTPError(
+                    "https://discord.invalid/thread", 404, "missing", {}, None
+                )
 
             delivery = DiscordFinalDelivery(
                 environment={"DISCORD_BOT_TOKEN": "test-token"},

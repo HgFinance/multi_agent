@@ -35,10 +35,12 @@ from __future__ import annotations
 import hashlib
 import importlib
 import importlib.util
+import logging
 import os
 import re
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,7 +53,9 @@ sys.path.insert(0, str(_BASE / "collectors"))
 sys.path.insert(0, str(_BASE / "evidence"))
 sys.path.insert(0, str(_BASE.parent / "04-quant-backtest" / "pipeline"))
 
-from stock_universe import governed_stock_evidence_sql  # noqa: E402
+from stock_universe import governed_stock_evidence_sql
+
+logger = logging.getLogger(__name__)
 
 _RESEARCH_EVIDENCE_PACKAGE = "_research_mcp_evidence"
 _RESEARCH_EVIDENCE_LOCK = threading.RLock()
@@ -414,6 +418,7 @@ def build_app(server, *, token: str | None):
         """매집 스캔 결과(캐시). 요청 시점에 새로 돌리지 않는다 - 84초짜리다."""
         # 이 모듈은 json 을 최상단에서 import 하지 않는다(다른 함수들도
         # 지역 import 를 쓴다). 스코프 밖이면 라우트가 500 이 된다.
+        import asyncio
         import json
         import os
         import time as _time
@@ -425,9 +430,13 @@ def build_app(server, *, token: str | None):
                  "reason": "매집 스캔 결과가 없다. scan_ownership.py 를 먼저 돌릴 것"},
                 status_code=200)
         age = int(_time.time() - os.path.getmtime(path))
-        try:
+
+        def _read_scan() -> dict:
             with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
+                return json.load(fh)
+
+        try:
+            data = await asyncio.to_thread(_read_scan)
         except (OSError, ValueError) as exc:
             return JSONResponse(
                 {"status": "UNREADABLE",
@@ -453,6 +462,92 @@ def build_app(server, *, token: str | None):
 
     app.add_middleware(_Auth, token=token)
     return app
+
+
+class _LoopStallWatchdog:
+    """Exit a wedged MCP process so Compose can restart it.
+
+    The Docker healthcheck detects a blocked event loop, but Compose does not
+    restart an otherwise-running unhealthy container. A separate thread is
+    therefore used only as a process-safety fuse; normal MCP requests do not
+    call Docker or any external service through this class.
+    """
+
+    def __init__(self, *, stall_seconds: float) -> None:
+        self.stall_seconds = max(0.0, float(stall_seconds))
+        self._heartbeat = time.monotonic()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self.stall_seconds <= 0:
+            return
+        self._thread = threading.Thread(
+            target=self._monitor,
+            name="research-mcp-loop-watchdog",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def beat(self) -> None:
+        self._heartbeat = time.monotonic()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def _monitor(self) -> None:
+        interval = min(5.0, max(1.0, self.stall_seconds / 4.0))
+        while not self._stop.wait(interval):
+            stalled_for = time.monotonic() - self._heartbeat
+            if stalled_for <= self.stall_seconds:
+                continue
+            print(
+                f"{MCP_VERSION}: event-loop stall for {stalled_for:.1f}s; "
+                "exiting for container restart",
+                flush=True,
+            )
+            os._exit(75)
+
+
+def _loop_watchdog_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv("RESEARCH_MCP_LOOP_STALL_SECONDS", "90")))
+    except ValueError:
+        return 90.0
+
+
+def _with_loop_watchdog(app, *, stall_seconds: float):
+    """Wrap an ASGI app with an event-loop heartbeat and fail-fast fuse."""
+
+    import asyncio
+
+    watchdog = _LoopStallWatchdog(stall_seconds=stall_seconds)
+
+    class _WatchdogApp:
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") != "lifespan":
+                await app(scope, receive, send)
+                return
+            watchdog.start()
+            heartbeat = asyncio.create_task(_heartbeat())
+            try:
+                await app(scope, receive, send)
+            finally:
+                heartbeat.cancel()
+                try:
+                    await heartbeat
+                except asyncio.CancelledError:
+                    pass
+                watchdog.stop()
+
+    async def _heartbeat() -> None:
+        while True:
+            watchdog.beat()
+            await asyncio.sleep(1.0)
+
+    return _WatchdogApp()
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -621,7 +716,7 @@ def render_skeptic_reviews(reviews: list[dict]) -> str:
     """Deterministically bridge typed Worker output to proposal-intake blocks."""
     blocks = []
     for review in reviews:
-        one_line = lambda value: " ".join(str(value).split())  # noqa: E731
+        one_line = lambda value: " ".join(str(value).split())
         explanation = one_line(review["competing_explanation"])
         falsification = one_line(review["falsification_test"])
         codes = ", ".join(one_line(code) for code in review["competing_codes"])
@@ -846,7 +941,7 @@ def persist_skeptic_reviews(conn, planner_text: str, reviews: list[dict], *,
             if not lead_ids:
                 continue
             review_id = "review_" + hashlib.sha256(
-                f"{draft_digest}|{title}".encode("utf-8")
+                f"{draft_digest}|{title}".encode()
             ).hexdigest()[:16]
             cur.execute("""
                 insert into research.proposal_review_outcomes
@@ -1254,8 +1349,12 @@ def _remove_registered_tools(server, names: frozenset[str]) -> set[str]:
             try:
                 remove(name)
                 continue
-            except Exception:  # noqa: BLE001 - private fallback below is audited
-                pass
+            except Exception as exc:  # noqa: BLE001 - private fallback below is audited
+                logger.debug(
+                    "mcp_tool_remove_fallback name=%s error=%s",
+                    name,
+                    type(exc).__name__,
+                )
         tm = getattr(server, "_tool_manager", None)
         tools = getattr(tm, "_tools", None)
         if isinstance(tools, dict):
@@ -2066,6 +2165,24 @@ if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
+    if "--healthcheck" in sys.argv:
+        # 호스트 메모리 압박으로 이벤트 루프가 일시 응답불가 상태에 빠지면
+        # (2026-08-27 실측: keepalive TimeoutError -> MCP 세션 증발) 로그를
+        # 뒤져야만 감지됐다. 루프백으로 아무 HTTP 응답이든 받으면 "살아있다" -
+        # 인증·도구 호출이 아니라 event loop 생존만 본다(외부 예산 소비 없음).
+        import urllib.error
+        import urllib.request
+
+        url = f"http://127.0.0.1:{DEFAULT_PORT}/mcp"
+        try:
+            urllib.request.urlopen(url, timeout=3)
+        except urllib.error.HTTPError:
+            pass  # 401/404/406 도 서버가 응답했다는 뜻이다
+        except Exception as exc:  # noqa: BLE001 - 타임아웃·연결거부는 그대로 실패
+            print(f"research-mcp 헬스체크 실패: {type(exc).__name__}: {exc}")
+            raise SystemExit(1)
+        raise SystemExit(0)
+
     if "--serve" in sys.argv:
         import uvicorn
 
@@ -2087,8 +2204,11 @@ if __name__ == "__main__":
             print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp [{face}] "
                   f"⚠ MCP_RESEARCH_API_KEY 미설정 - 인증 없이 연다. compose "
                   f"네트워크 밖으로 노출하지 말 것", flush=True)
-        uvicorn.run(build_app(srv, token=token or None),
-                    host="0.0.0.0", port=DEFAULT_PORT, log_level="info")
+        app = _with_loop_watchdog(
+            build_app(srv, token=token or None),
+            stall_seconds=_loop_watchdog_seconds(),
+        )
+        uvicorn.run(app, host="0.0.0.0", port=DEFAULT_PORT, log_level="info")
         raise SystemExit(0)
 
     print(f"{MCP_VERSION} 자체 점검 (네트워크·DB 없음)")

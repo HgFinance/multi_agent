@@ -48,6 +48,7 @@ def _responses() -> dict:
                     "IsuNo": "A005930",
                     "IsuNm": "삼성전자",
                     "BalQty": 10,
+                    "BnsBaseBalQty": 10,
                     "SellAbleQty": 9,
                     "AvrUprc": "71000.50",
                     "NowPrc": 75000,
@@ -243,3 +244,46 @@ def test_paper_completion_code_with_output_is_not_misclassified_as_error() -> No
 
     assert evidence["coverage"]["CSPAQ12200"]["status"] == "OK"
     assert evidence["coverage"]["FOCCQ33600"]["status"] == "ERROR"
+
+
+def test_execution_basis_reconciliation_does_not_compare_d2_balance() -> None:
+    responses = _responses()
+    responses["CSPAQ12300"]["CSPAQ12300OutBlock3"][0]["BalQty"] = 28
+    responses["CSPAQ12300"]["CSPAQ12300OutBlock3"][0]["BnsBaseBalQty"] = 29
+    responses["t0424"]["t0424OutBlock1"][0]["janqty"] = 29
+
+    evidence = normalize_ls_accounting_evidence(
+        responses,
+        period_start="2026-07-28",
+        period_end="2026-08-26",
+        previous_date="2026-08-25",
+        environment="PAPER",
+    )
+
+    assert evidence["position_reconciliation"]["status"] == "MATCH"
+    assert evidence["positions"][0]["quantity"] == "28"
+    assert evidence["positions"][0]["trade_basis_quantity"] == "29"
+
+
+def test_expected_empty_activity_and_paper_unsupported_are_not_incomplete() -> None:
+    responses = _responses()
+    for code in ("CSPAQ13700", "t0150", "t0151", "t0425"):
+        responses[code] = {"rsp_cd": "00000", "rsp_msg": "조회가 완료되었습니다."}
+    responses["FOCCQ33600"] = {
+        "rsp_cd": "01900",
+        "rsp_msg": "모의투자에서는 해당업무가 제공되지 않습니다.",
+    }
+
+    evidence = normalize_ls_accounting_evidence(
+        responses,
+        period_start="2026-07-28",
+        period_end="2026-08-26",
+        previous_date="2026-08-25",
+        environment="PAPER",
+    )
+
+    assert "BROKER_EVIDENCE_INCOMPLETE" not in {
+        item["kind"] for item in evidence["exceptions"]
+    }
+    assert evidence["coverage"]["t0150"]["interpretation"] == "NO_ACTIVITY"
+    assert evidence["coverage"]["FOCCQ33600"]["interpretation"] == "UNSUPPORTED_IN_PAPER"

@@ -9,6 +9,7 @@ RISK_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RISK_DIR))
 
 import risk_employee_workers
+
 from departments import worker_model_gateway
 
 

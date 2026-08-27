@@ -184,6 +184,10 @@ def to_dict(value: Any) -> dict[str, Any]:
 
 
 def from_result_dict(payload: Mapping[str, Any]) -> ExperimentResult:
+    metrics = payload.get("metrics")
+    measured_metrics = payload.get("measured_metrics")
+    if metrics is not None and measured_metrics is not None and metrics and measured_metrics and metrics != measured_metrics:
+        raise ValueError("metrics and measured_metrics do not match")
     result = ExperimentResult(
         plan_id=_text(payload.get("plan_id"), "plan_id"),
         status=_text(payload.get("status"), "status").upper(),
@@ -191,7 +195,11 @@ def from_result_dict(payload: Mapping[str, Any]) -> ExperimentResult:
         oos_evaluated=payload.get("oos_evaluated"),
         leakage_detected=payload.get("leakage_detected"),
         robustness=payload.get("robustness") or {},
-        metrics=payload.get("metrics") or {},
+        # Direct Hermes experiments have used the descriptive name
+        # ``measured_metrics``.  Normalize it to the model's canonical
+        # ``metrics`` field so a completed result cannot disappear at the
+        # ingestion boundary.
+        metrics=metrics or measured_metrics or {},
         artifacts=_texts(payload.get("artifacts"), "artifacts"),
         failure_modes=_texts(payload.get("failure_modes"), "failure_modes"),
         limitations=_texts(payload.get("limitations"), "limitations"),

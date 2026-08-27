@@ -20,7 +20,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # departments/03-risk
 
-from integrations.law_api import LawApiClient  # noqa: E402
+from integrations.law_api import LawApiClient
 
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 

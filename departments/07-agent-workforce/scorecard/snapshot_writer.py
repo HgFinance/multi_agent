@@ -8,17 +8,16 @@ HR 은 같은 성격의 수치를 **두 출처**에서 본다.
     workforce.*_snapshots ─(DB)  →  GET /workforce/v1/departments/scorecard(-brief)
 
 `POST /workforce/v1/capacity-snapshots` 와 `POST .../cost-snapshots` 는 2026-08-25
-에 생겼지만 **그 엔드포인트를 부르는 쪽이 없었다.** 그래서 두 테이블이 계속 비어
-있었고, Scorecard 브리프의 처리량·비용은 영구히 `NO_SNAPSHOT` 이었다. 정작 같은
-수치(arrivals/duration_p95/error_rate/retry_rate/tokens)는 Langfuse 쪽에 이미
-있었다 - 두 출처가 안 이어져 있었을 뿐이다. 이 모듈이 그 다리다.
+에 생겼고, 이 writer가 10분 주기로 Langfuse 집계와 Scorecard Snapshot을 연결한다.
+따라서 읽기 경로는 매번 외부 관측 API를 호출하지 않고 DB의 정시 버킷 Snapshot을
+사용한다. 다만 원천에 토큰 사용량이 없거나 가격표가 없는 경우에는 비용을 0으로
+만들지 않고 `UNKNOWN`으로 남긴다.
 
-부수 효과가 하나 더 있다. Langfuse Public API 는 **분당 15 요청** 상한이고
-(실측: `x-ratelimit-limit: 15`, 초과 시 429 + `Retry-After` 최대 60초), 관측
-1회는 Worker 8명 × 2 = **16 요청**이라 매번 정확히 한 건이 429 를 맞는다. 그래서
-읽는 쪽(HR 과제·Operator 화면)이 실시간으로 Langfuse 를 때리는 구조 자체가 지속
-불가능하다. 이 writer 가 주기적으로 한 번만 관측해 DB 에 남기면, 읽는 쪽은 DB 만
-본다.
+부수 효과가 하나 더 있다. Langfuse Public API 는 **분당 15 요청** 상한이므로
+(실측: `x-ratelimit-limit: 15`, 초과 시 429 + `Retry-After` 최대 60초), 읽는 쪽이
+Worker마다 API를 반복 호출하면 폴링이 쉽게 제한에 걸린다. 이 writer는 한 창에서
+Worker당 실행 이벤트와 미발화 이벤트를 각각 최대 한 번만 읽어 Snapshot으로 남기고,
+읽는 쪽(HR 과제·Operator 화면)은 DB를 우선 사용한다.
 
 적지 않는 것
 ============
@@ -43,18 +42,19 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any, Protocol
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:  # api/app.py 와 같은 sys.path 규약
     sys.path.insert(0, str(_HERE))
 
-from cost import CapacitySnapshot, CostSnapshot  # noqa: E402
-from observability import (  # noqa: E402
+from cost import CapacitySnapshot, CostSnapshot
+from observability import (
     CapacityObservationStatus,
     DepartmentCapacityReport,
     WorkerUsageObservationStatus,
@@ -473,7 +473,7 @@ def _heartbeat(path: Path) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
-    except OSError as exc:  # noqa: BLE001 - 계측이 본 작업을 막지 않는다
+    except OSError as exc:
         LOGGER.warning("heartbeat 기록 실패: %s", exc)
 
 
@@ -511,8 +511,8 @@ def run_scheduler(
                 repository=repository, window_hours=window_hours, dry_run=dry_run
             )
             LOGGER.info("snapshot %s", json.dumps(outcome.as_dict(), ensure_ascii=False))
-        except Exception as exc:  # noqa: BLE001 - 주기 작업은 다음 주기에 다시 온다
-            LOGGER.exception("snapshot 기록 실패 - 다음 주기에 다시 시도한다: %s", exc)
+        except Exception:
+            LOGGER.exception("snapshot 기록 실패 - 다음 주기에 다시 시도한다")
         _heartbeat(health_path)
         if once:
             return 0
@@ -564,7 +564,9 @@ def main(argv: list[str] | None = None) -> int:
         print("DATABASE_URL 미설정 - Snapshot 기록 불가", file=sys.stderr)
         return 2
 
-    from postgres_scorecard_repository import PostgresScorecardRepository  # noqa: PLC0415
+    from postgres_scorecard_repository import (
+        PostgresScorecardRepository,
+    )
 
     repository = PostgresScorecardRepository.connect(dsn)
     try:
@@ -610,8 +612,8 @@ __all__ = [
     "build_capacity_snapshot",
     "build_cost_snapshot",
     "department_code_for",
-    "main",
     "healthcheck",
+    "main",
     "model_cost_usd",
     "run_backfill",
     "run_once",

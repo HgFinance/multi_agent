@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
+import json
 import os
 import re
 import sys
@@ -13,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -64,6 +67,8 @@ _LANGSMITH_ROOT_CONTEXT_RE = re.compile(
 )
 
 WORKFLOW_LANGSMITH_PROJECT = "First"
+_LANGSMITH_QUOTA_LOCK = Lock()
+_LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
 _STAGE_PROFILES = {
     "research": "research-department",
     "quant": "quant-backtest-department",
@@ -86,6 +91,41 @@ def _root_dotted_order_from_trace_context(trace_context: str | None) -> str:
 
     value = str(trace_context or "").strip()
     return value if _LANGSMITH_ROOT_CONTEXT_RE.fullmatch(value) else ""
+
+
+def redacted_content_summary(value: Any, *, kind: str) -> dict[str, Any]:
+    """Describe content without sending the content itself to an observer.
+
+    Root traces used to send empty payloads because the workflow body may contain
+    user text and secrets from an upstream integration.  A bounded presence,
+    length and digest is enough to prove that the ingress and terminal handoff
+    were populated while keeping the raw text out of LangSmith.
+    """
+
+    if value is None:
+        normalized = ""
+    elif isinstance(value, (Mapping, list, tuple)):
+        normalized = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+    else:
+        normalized = str(value)
+    normalized = normalized.strip()
+    return {
+        "kind": str(kind),
+        "present": bool(normalized),
+        "length": len(normalized),
+        "sha256": (
+            "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+            if normalized
+            else None
+        ),
+        "raw_payloads_sent": False,
+    }
 
 
 def begin_worker_metric(
@@ -140,10 +180,43 @@ def record_llm_call(
             setattr(metric, target, int(value) + int(getattr(metric, target) or 0))
 
 
+def _langsmith_quota_pause_seconds() -> float:
+    try:
+        return max(
+            30.0,
+            min(float(os.getenv("LANGSMITH_QUOTA_COOLDOWN_SECONDS", "300")), 3600.0),
+        )
+    except (TypeError, ValueError):
+        return 300.0
+
+
+def _langsmith_quota_paused() -> bool:
+    with _LANGSMITH_QUOTA_LOCK:
+        return time.monotonic() < _LANGSMITH_QUOTA_PAUSED_UNTIL
+
+
+def _mark_langsmith_quota_pause(error: BaseException) -> None:
+    """Stop hammering an exhausted LangSmith tenant until its cooldown ends."""
+
+    message = str(error).casefold()
+    if not any(
+        marker in message for marker in ("429", "quota", "rate limit", "usage limit")
+    ):
+        return
+    global _LANGSMITH_QUOTA_PAUSED_UNTIL
+    with _LANGSMITH_QUOTA_LOCK:
+        _LANGSMITH_QUOTA_PAUSED_UNTIL = max(
+            _LANGSMITH_QUOTA_PAUSED_UNTIL,
+            time.monotonic() + _langsmith_quota_pause_seconds(),
+        )
+
+
 def langsmith_enabled() -> bool:
     tracing = os.getenv("LANGSMITH_TRACING", "")
-    return tracing.casefold() in {"1", "true", "yes", "on"} and bool(
-        os.getenv("LANGSMITH_API_KEY", "").strip()
+    return (
+        tracing.casefold() in {"1", "true", "yes", "on"}
+        and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
+        and not _langsmith_quota_paused()
     )
 
 
@@ -204,6 +277,9 @@ def _metric_metadata(
         "department",
         "workflow_role",
         "workflow_mode",
+        "analysis_mode",
+        "configured_max_turns",
+        "actual_turns",
         "provider",
         "model_source",
         "trace_kind",
@@ -327,6 +403,10 @@ def worker_graph_trace_config(
     worker_id: str,
     role: str = "",
     correlation: Mapping[str, Any] | None = None,
+    workflow_mode: str | None = None,
+    analysis_mode: str | None = None,
+    configured_max_turns: int | None = None,
+    actual_turns: int | None = None,
 ) -> dict[str, Any]:
     """LangGraph ``invoke()``/``ainvoke()`` config that tags a Worker's own root run.
 
@@ -338,7 +418,8 @@ def worker_graph_trace_config(
     Trace Count가 실제 트래픽의 1%도 못 세는 원인이었다). 이 함수가 만드는
     `config=`를 invoke 호출에 직접 넘기면 LangGraph의 `RunnableConfig` → tracer
     배선이 ambient context를 거치지 않고 그 run에 확실히 붙는다 - 읽는 쪽
-    (`apps/api/langsmith_traces.py`)도 `extra.metadata.stage`만 본다.
+    (`apps/api/langsmith_traces.py`)은 `extra.metadata.stage`를 기준으로 하며,
+    workflow/turn-budget metadata도 같은 redacted envelope에 둔다.
     """
 
     metadata: dict[str, Any] = {
@@ -346,6 +427,10 @@ def worker_graph_trace_config(
         "trace_kind": "worker_graph",
         "latency_scope": "worker_execution",
         "stage": stage,
+        "workflow_mode": str(workflow_mode or "unknown"),
+        "analysis_mode": str(analysis_mode) if analysis_mode else None,
+        "configured_max_turns": max(0, int(configured_max_turns or 0)),
+        "actual_turns": max(0, int(actual_turns or 0)),
         "profile": _STAGE_PROFILES.get(stage),
         "department": stage if stage in _STAGE_PROFILES else None,
         "worker_id": worker_id,
@@ -358,6 +443,30 @@ def worker_graph_trace_config(
         "tags": ["hgfinance", f"stage:{stage}", "redacted"],
         "metadata": metadata,
     }
+
+
+@contextlib.contextmanager
+def suppress_langsmith_automatic_tracing() -> Iterator[None]:
+    """Temporarily suppress ambient LangSmith callbacks for one graph call.
+
+    Risk employee graphs are executed inside the Hermes worker boundary, which
+    is the canonical publisher for the department trace. LangSmith's ambient
+    callback would otherwise create a second root in ``First``. The context is
+    intentionally narrow and fail-open so it cannot affect business execution.
+    """
+
+    try:
+        from langsmith import tracing_context
+    except (ImportError, ModuleNotFoundError):
+        yield
+        return
+    try:
+        context = tracing_context(enabled=False)
+    except Exception:  # noqa: BLE001 - optional observer remains fail-open
+        yield
+        return
+    with context:
+        yield
 
 
 @lru_cache(maxsize=1)
@@ -373,6 +482,7 @@ def _safe_langsmith_client() -> Any:
         # LANGSMITH_* environment snapshot (it is noisy and can expose local
         # filesystem/configuration paths).
         omit_traced_runtime_info=True,
+        tracing_error_callback=_mark_langsmith_quota_pause,
     )
 
 
@@ -387,6 +497,7 @@ def _structured_langsmith_client() -> Any:
         hide_outputs=False,
         hide_metadata=False,
         omit_traced_runtime_info=True,
+        tracing_error_callback=_mark_langsmith_quota_pause,
     )
 
 
@@ -421,8 +532,9 @@ def redacted_trace(
             enabled=True,
         )
         observer.__enter__()
-    except Exception:  # noqa: BLE001 - optional observer is fail-open.
+    except Exception as exc:  # noqa: BLE001 - optional observer is fail-open.
         # Observability setup is optional; business execution must continue.
+        _mark_langsmith_quota_pause(exc)
         yield
         return
 
@@ -451,6 +563,9 @@ def publish_metric(
     name: str = "llm.performance.metric",
     start_time: datetime | None = None,
     end_time: datetime | None = None,
+    run_id: str | None = None,
+    parent_run_id: str | None = None,
+    confirm_delivery: bool = False,
 ) -> bool:
     """Send one empty-payload performance metric to the metrics project.
 
@@ -458,7 +573,9 @@ def publish_metric(
     separated from the workflow trace project; no second metric/run is made.
     New feedback evaluation aggregates these events in bounded windows rather
     than creating one QA artifact per event. ``project_name`` is retained for
-    the compatibility root publisher below.
+    the compatibility root publisher below.  The bounded terminal projection
+    may request a synchronous queue flush with ``confirm_delivery`` so a
+    tenant quota rejection is not reported as published.
     """
 
     if not langsmith_enabled():
@@ -499,9 +616,24 @@ def publish_metric(
         }
         if start_time is not None:
             run_kwargs["start_time"] = start_time
+        if run_id:
+            run_kwargs["id"] = str(run_id)
+        if parent_run_id:
+            # For a child run LangSmith needs both the parent edge and the
+            # parent's trace id.  ``trace_id`` above remains the stable
+            # application correlation field in metadata.
+            run_kwargs["parent_run_id"] = str(parent_run_id)
+            run_kwargs["trace_id"] = str(parent_run_id)
         client.create_run(**run_kwargs)
+        if confirm_delivery:
+            flush = getattr(client, "flush", None)
+            if callable(flush):
+                flush(timeout=3.0)
+            if not langsmith_enabled():
+                return False
         return True
-    except Exception:  # noqa: BLE001 - optional metric publishing is fail-open.
+    except Exception as exc:  # noqa: BLE001 - optional metric publishing is fail-open.
+        _mark_langsmith_quota_pause(exc)
         return False
 
 
@@ -602,6 +734,7 @@ def start_root_trace(
     request_id: str,
     workflow_mode: str,
     source: str | None = None,
+    query: str | None = None,
 ) -> RootTraceHandle | None:
     """Create and post a redacted LangSmith root run, fail-open."""
 
@@ -616,6 +749,7 @@ def start_root_trace(
             task_id=f"{request_id}-task",
             trace_id=request_id,
         )
+        input_summary = redacted_content_summary(query, kind="user_query")
         metadata = _metric_metadata(
             {
                 "schema_version": "llm.workflow-root.v2",
@@ -632,12 +766,13 @@ def start_root_trace(
                 "workflow_mode": str(workflow_mode),
                 "source": str(source) if source else None,
                 "raw_payloads_sent": False,
+                "input_hash": input_summary.get("sha256"),
             }
         )
         run = RunTree(
             name="hgfinance.user-query",
             run_type="chain",
-            inputs={},
+            inputs={"summary": input_summary},
             outputs={},
             project_name=langsmith_project("workflow"),
             tags=["hgfinance", "workflow-root", "redacted"],
@@ -655,9 +790,10 @@ def start_root_trace(
             source=str(source) if source else None,
             run_id=str(getattr(run, "id", "") or "") or None,
         )
-    except Exception:  # noqa: BLE001 - root tracing is optional.
+    except Exception as exc:  # noqa: BLE001 - root tracing is optional.
         # Observability setup/post/serialization errors never become workflow
         # errors and leave the caller without a propagation marker.
+        _mark_langsmith_quota_pause(exc)
         return None
 
 
@@ -675,6 +811,7 @@ def close_root_trace(
     error_class: str | None = None,
     terminal_metadata: Mapping[str, Any] | None = None,
     semantic_qa: Mapping[str, Any] | None = None,
+    output_summary: Mapping[str, Any] | None = None,
 ) -> bool:
     """Close a root run through the single v2 update boundary."""
 
@@ -776,23 +913,38 @@ def close_root_trace(
             )
             if metadata.get(key) not in (None, "")
         }
-        dotted_order = _root_dotted_order_from_trace_context(trace_context)
+        if output_summary:
+            terminal_outputs["summary"] = dict(output_summary)
         update_kwargs: dict[str, Any] = {
             "run_id": resolved_run_id,
-            "trace_id": resolved_run_id,
             "end_time": datetime.now(timezone.utc),
             "error": str(error_class) if error_class else None,
             "outputs": terminal_outputs,
             "extra": {"metadata": metadata},
         }
-        if dotted_order:
+        # A recovered legacy context can point at an older root while the
+        # durable terminal observation already has its own run ID. LangSmith
+        # rejects a dotted order whose first UUID differs from ``trace_id``;
+        # omit that optional relationship instead of emitting a 400 from the
+        # observer or retrying the same invalid update.
+        dotted_order = _root_dotted_order_from_trace_context(trace_context)
+        context_run_id = _root_run_id_from_trace_context(trace_context)
+        if dotted_order and context_run_id.casefold() == resolved_run_id.casefold():
+            update_kwargs["trace_id"] = resolved_run_id
             update_kwargs["dotted_order"] = dotted_order
         client.update_run(**update_kwargs)
+        # The post-response QA task queries this run immediately.  Flush the
+        # terminal patch as well as the initial POST so QA cannot observe the
+        # stale ingress ``accepted`` metadata during the handoff window.
+        flush = getattr(client, "flush", None)
+        if callable(flush):
+            flush()
         return True
     except Exception as exc:  # noqa: BLE001 - root finalization is fail-open.
         # The live path and restart reconciliation can both reach the same
         # terminal root. LangSmith rejects the repeated patch, but the durable
         # terminal evidence already makes this an idempotent success.
+        _mark_langsmith_quota_pause(exc)
         return "duplicate run update requests" in str(exc).casefold()
 
 

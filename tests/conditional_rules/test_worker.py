@@ -109,6 +109,7 @@ class FakeStore:
         self.execution_decisions: list[tuple[bool, str, Decimal | None]] = []
         self.submitted: list[UUID] = []
         self.submitting: list[UUID] = []
+        self.submission_acquired = True
 
     def expire_due(self) -> int:
         return 0
@@ -147,8 +148,9 @@ class FakeStore:
             idempotency_key="rule:test:execution",
         )
 
-    def mark_submitting(self, rule_execution_id: UUID) -> None:
+    def mark_submitting(self, rule_execution_id: UUID) -> bool:
         self.submitting.append(rule_execution_id)
+        return self.submission_acquired
 
     def mark_retryable_failure(self, *args, **kwargs) -> None:
         raise AssertionError("unexpected retryable failure")
@@ -391,6 +393,24 @@ def test_true_condition_rechecks_guard_and_submits_existing_paper_lane() -> None
     assert store.execution_decisions == [(True, "READY_FOR_PAPER_DIRECTIVE", Decimal("2"))]
     assert client.submit_calls == 1
     assert store.submitted == [UUID("70000000-0000-0000-0000-000000000001")]
+
+
+def test_oco_submission_slot_loser_never_calls_external_trading_api() -> None:
+    rule = active_rule(threshold="100")
+    store = FakeStore(rule)
+    store.submission_acquired = False
+    client = FakeClient(inputs(price="110"))
+    execution = SubmitReadyExecution(
+        rule_execution_id=UUID("60000000-0000-0000-0000-000000000001"),
+        trigger_id="trg_test",
+        rule_id=rule.rule_id,
+        rule_version=rule.rule_version,
+        idempotency_key="rule:test:execution",
+    )
+
+    assert not ConditionalRuleWorker(store, client)._submit(execution)
+    assert client.submit_calls == 0
+    assert store.submitting == [execution.rule_execution_id]
 
 
 def test_market_closed_is_durable_guard_rejection_and_never_submits() -> None:

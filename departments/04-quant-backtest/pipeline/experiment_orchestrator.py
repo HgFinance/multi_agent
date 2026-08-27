@@ -2,7 +2,7 @@
 """QNT-00 실험 오케스트레이터 - 가설을 실험 체인에 태우는 결정론 상태 머신.
 
 소유: 재일 (퀀트/백테스트본부, QNT-00 supervisor 의 결정론 부분)
-근거: quant.hypotheses (strategy_hypothesis_agent 가 PROPOSED 등록),
+근거: quant.hypotheses (Research handoff가 PROPOSED 등록),
       pipeline/{pit_dataset,backtest_runner,walk_forward}.py (실험 체인),
       QNT-00 페르소나 계약("실패를 포함한 모든 실험을 Registry 에 기록,
       Production 승격은 직접 하지 않는다")

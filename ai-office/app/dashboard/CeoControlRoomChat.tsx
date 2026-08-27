@@ -4,13 +4,18 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import {
   askCeo,
+  approveStrategyDeployment,
   buildCeoProgress,
   ceoWorkflowResult,
   ceoWorkflowStatus,
   paperOrderWorkflowStatus,
+  powerStrategyDeployment,
+  removeStrategyDeployment,
   strategyResearchStatus,
+  strategyDeploymentStatus,
   type CardOutcome,
   type CeoQueryPlanning,
+  type StrategyDeploymentAccepted,
   type StrategyResearchAccepted,
   type StrategyResearchStatus,
 } from "../lib/ceoClient";
@@ -72,6 +77,11 @@ type SubmittedRequest = {
   orderRequestId: string | null;
   orderState: string | null;
   researchRequestId: string | null;
+  deploymentId: string | null;
+  deploymentStatus: StrategyDeploymentAccepted["status"] | null;
+  deploymentBacktestSummary: Record<string, unknown> | null;
+  deploymentRuntimeStatus: string | null;
+  deploymentExecutionStatus: string | null;
 };
 
 export function CeoControlRoomChat() {
@@ -112,6 +122,7 @@ function CeoControlRoomChatSession() {
   const activeTaskId = submitted?.taskId ?? null;
   const activeOrderRequestId = submitted?.orderRequestId ?? null;
   const activeResearchRequestId = submitted?.researchRequestId ?? null;
+  const activeDeploymentId = submitted?.deploymentId ?? null;
 
   // 본부별 진행 — 10초 간격. 모든 카드가 끝나면 폴링을 멈춘다.
   const statusQuery = useQuery({
@@ -156,13 +167,63 @@ function CeoControlRoomChatSession() {
     enabled: Boolean(activeResearchRequestId),
     refetchInterval: (query) => {
       const data = query.state.data;
-      return data?.status === "CANDIDATE" || data?.status === "BLOCKED" ? false : 10_000;
+      return data?.status === "CANDIDATE" || data?.status === "COMPLETED" || data?.status === "BLOCKED" ? false : 10_000;
+    },
+  });
+
+  const deploymentStatusQuery = useQuery<StrategyDeploymentAccepted>({
+    queryKey: ["autonomous-research-deployment", activeResearchRequestId, activeDeploymentId],
+    queryFn: () => strategyDeploymentStatus(activeResearchRequestId as string, activeDeploymentId as string),
+    enabled: Boolean(activeResearchRequestId && activeDeploymentId && ["ACTIVE", "PAUSED", "FAILED"].includes(submitted?.deploymentStatus ?? "")),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "REMOVED" || status === "FAILED" ? false : 5_000;
     },
   });
 
   const sendMutation = useMutation({
     mutationFn: ({ text, bookId, fundId }: { text: string; bookId?: string; fundId?: string }) =>
       askCeo(text, undefined, bookId, fundId),
+  });
+
+  const approvalMutation = useMutation({
+    mutationFn: ({
+      requestId,
+      deploymentId,
+      overrideReviewRequired,
+    }: {
+      requestId: string;
+      deploymentId: string;
+      overrideReviewRequired: boolean;
+    }) =>
+      approveStrategyDeployment(requestId, deploymentId, {
+        confirm: true,
+        override_review_required: overrideReviewRequired,
+        reason: overrideReviewRequired
+          ? "웹 CEO Control Room의 최상위 사람 예외 승인"
+          : "웹 CEO Control Room의 명시적 사람 승인",
+      }),
+  });
+
+  const lifecycleMutation = useMutation({
+    mutationFn: ({
+      requestId,
+      deploymentId,
+      action,
+    }: {
+      requestId: string;
+      deploymentId: string;
+      action: "start" | "stop" | "remove";
+    }) =>
+      action === "remove"
+        ? removeStrategyDeployment(requestId, deploymentId, {
+            confirm: true,
+            reason: "웹 CEO Control Room의 명시적 전략 제거",
+          })
+        : powerStrategyDeployment(requestId, deploymentId, {
+            action,
+            reason: `웹 CEO Control Room의 명시적 컨테이너 ${action === "start" ? "시작" : "중지"}`,
+          }),
   });
 
   async function send(text: string) {
@@ -177,6 +238,8 @@ function CeoControlRoomChatSession() {
 
     setDraft("");
     setLocalError("");
+    approvalMutation.reset();
+    lifecycleMutation.reset();
     // 서버의 최초 응답을 기다리지 않고 사용자 메시지를 먼저 보여준다.
     setSubmitted({
       taskId: null,
@@ -186,6 +249,11 @@ function CeoControlRoomChatSession() {
       orderRequestId: null,
       orderState: null,
       researchRequestId: null,
+      deploymentId: null,
+      deploymentStatus: null,
+      deploymentBacktestSummary: null,
+      deploymentRuntimeStatus: null,
+      deploymentExecutionStatus: null,
     });
 
     try {
@@ -194,7 +262,26 @@ function CeoControlRoomChatSession() {
         fundId: effectiveFundId ?? undefined,
         ...(selectedBookId ? { bookId: selectedBookId } : {}),
       });
-      if ("lab_id" in response) {
+      if ("deployment_id" in response) {
+        const deployment = response as StrategyDeploymentAccepted;
+        setSubmitted({
+          taskId: null,
+          query: value,
+          answer: deployment.message,
+          planning: null,
+          orderRequestId: null,
+          orderState: null,
+          // Deployment responses carry the same research request ID. Keep it
+          // so approval can target the exact request and the research status
+          // card remains visible while the release gate is open.
+          researchRequestId: deployment.request_id,
+          deploymentId: deployment.deployment_id,
+          deploymentStatus: deployment.status,
+          deploymentBacktestSummary: deployment.backtest_summary,
+          deploymentRuntimeStatus: deployment.runtime_status,
+          deploymentExecutionStatus: deployment.execution_status,
+        });
+      } else if ("lab_id" in response) {
         const research = response as StrategyResearchAccepted;
         setSubmitted({
           taskId: null,
@@ -204,6 +291,11 @@ function CeoControlRoomChatSession() {
           orderRequestId: null,
           orderState: null,
           researchRequestId: research.request_id,
+          deploymentId: null,
+          deploymentStatus: null,
+          deploymentBacktestSummary: null,
+          deploymentRuntimeStatus: null,
+          deploymentExecutionStatus: null,
         });
       } else {
         setSubmitted({
@@ -214,6 +306,11 @@ function CeoControlRoomChatSession() {
           orderRequestId: response.order_request_id ?? null,
           orderState: response.order_state ?? null,
           researchRequestId: null,
+          deploymentId: null,
+          deploymentStatus: null,
+          deploymentBacktestSummary: null,
+          deploymentRuntimeStatus: null,
+          deploymentExecutionStatus: null,
         });
       }
     } catch {
@@ -227,6 +324,91 @@ function CeoControlRoomChatSession() {
       ? sendMutation.error.message
       : String(sendMutation.error)
     : "");
+
+  async function approveSubmittedDeployment() {
+    const overrideReviewRequired = submitted?.deploymentStatus === "REVIEW_REQUIRED";
+    if (
+      !submitted?.deploymentId ||
+      !submitted.researchRequestId ||
+      !["AWAITING_APPROVAL", "REVIEW_REQUIRED"].includes(submitted.deploymentStatus ?? "") ||
+      approvalMutation.isPending
+    ) {
+      return;
+    }
+    setLocalError("");
+    try {
+      const deployment = await approvalMutation.mutateAsync({
+        requestId: submitted.researchRequestId,
+        deploymentId: submitted.deploymentId,
+        overrideReviewRequired,
+      });
+      setSubmitted((current) =>
+        current
+          ? {
+              ...current,
+              answer: deployment.message,
+              deploymentStatus: deployment.status,
+              deploymentBacktestSummary: deployment.backtest_summary,
+              deploymentRuntimeStatus: deployment.runtime_status,
+              deploymentExecutionStatus: deployment.execution_status,
+            }
+          : current,
+      );
+    } catch {
+      // approvalMutation.error is rendered below without losing the request.
+    }
+  }
+
+  async function changeDeploymentPower(action: "start" | "stop" | "remove") {
+    if (
+      !submitted?.deploymentId ||
+      !submitted.researchRequestId ||
+      lifecycleMutation.isPending
+    ) {
+      return;
+    }
+    if (action === "remove" && !window.confirm("이 PAPER 전략 컨테이너를 제거할까요? 연구 원본과 백테스트 증거는 보존됩니다.")) {
+      return;
+    }
+    setLocalError("");
+    try {
+      const deployment = await lifecycleMutation.mutateAsync({
+        requestId: submitted.researchRequestId,
+        deploymentId: submitted.deploymentId,
+        action,
+      });
+      setSubmitted((current) =>
+        current
+          ? {
+              ...current,
+              answer: deployment.message,
+              deploymentStatus: deployment.status,
+              deploymentBacktestSummary: deployment.backtest_summary,
+              deploymentRuntimeStatus: deployment.runtime_status,
+              deploymentExecutionStatus: deployment.execution_status,
+            }
+          : current,
+      );
+    } catch {
+      // lifecycleMutation.error is rendered below without losing the request.
+    }
+  }
+
+  const approvalError = approvalMutation.isError
+    ? approvalMutation.error instanceof Error
+      ? approvalMutation.error.message
+      : String(approvalMutation.error)
+    : "";
+  const lifecycleError = lifecycleMutation.isError
+    ? lifecycleMutation.error instanceof Error
+      ? lifecycleMutation.error.message
+      : String(lifecycleMutation.error)
+    : "";
+  const deploymentView = deploymentStatusQuery.data;
+  const deploymentStatus = deploymentView?.status ?? submitted?.deploymentStatus;
+  const deploymentSummary = deploymentView?.backtest_summary ?? submitted?.deploymentBacktestSummary;
+  const deploymentRuntimeStatus = deploymentView?.runtime_status ?? submitted?.deploymentRuntimeStatus;
+  const deploymentExecutionStatus = deploymentView?.execution_status ?? submitted?.deploymentExecutionStatus;
 
   return (
     <section className="lg:col-span-1 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
@@ -301,7 +483,11 @@ function CeoControlRoomChatSession() {
 
             <div className="self-start max-w-[92%] rounded-lg border border-outline-variant bg-surface-container-low p-3">
               <div className="font-bold text-body-sm font-body-sm text-primary mb-1">
-                {submitted.researchRequestId ? "Hermes 자율 연구실" : "CEO Hermes"}
+                {submitted.deploymentId
+                  ? "전략 배포 게이트"
+                  : submitted.researchRequestId
+                    ? "Hermes 자율 연구실"
+                    : "CEO Hermes"}
               </div>
               <p className="text-body-sm font-body-sm text-on-surface m-0 whitespace-pre-line">
                 {submitted.answer ?? "CEO Hermes가 답변을 준비하는 중입니다…"}
@@ -418,6 +604,8 @@ function CeoControlRoomChatSession() {
                 <p className="mt-1 mb-0 text-xs text-on-surface">
                   {researchStatusQuery.data?.status === "CANDIDATE"
                     ? "검증 게이트를 통과한 후보가 기록되었습니다. 별도 QA·Risk·사람 심사가 필요합니다."
+                    : researchStatusQuery.data?.status === "COMPLETED"
+                      ? "실험과 검증이 완료되었습니다. 최종 보고서를 확인하세요."
                     : researchStatusQuery.data?.status === "BLOCKED"
                       ? `연구가 일시 중단되었습니다: ${researchStatusQuery.data.error ?? "오류 원인 기록을 확인하세요."}`
                     : `Hermes가 연구 중입니다 · ${researchStatusQuery.data?.cycle ?? 0}회차 · 계획 ${researchStatusQuery.data?.plan_count ?? 0}개 · 결과 ${researchStatusQuery.data?.result_count ?? 0}개`}
@@ -433,12 +621,85 @@ function CeoControlRoomChatSession() {
                 <code className="mt-1 block text-[10px] text-outline">{activeResearchRequestId}</code>
               </div>
             ) : null}
+
+            {submitted.deploymentId ? (
+              <div
+                className="self-start max-w-[92%] border border-primary/30 rounded p-3 bg-secondary-container/20"
+                aria-live="polite"
+              >
+                <div className="text-xs font-bold text-primary">전략 배포 요청</div>
+                <p className="mt-1 mb-0 text-xs text-on-surface">
+                  상태: {deploymentStatus ?? "REVIEW_REQUIRED"} · 실행: {deploymentRuntimeStatus ?? "NOT_STARTED"} · {deploymentExecutionStatus ?? "NOT_STARTED"}
+                </p>
+                {deploymentSummary ? (
+                  <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-on-surface-variant">
+                    <span>유니버스: {String(deploymentSummary.symbols ?? deploymentSummary.symbol ?? "미확인")}</span>
+                    <span>기간: {String(deploymentSummary.period ?? "미확인")}</span>
+                    <span>타임프레임: {String(deploymentSummary.timeframe ?? "미확인")}</span>
+                    <span>거래: {String(deploymentSummary.trade_count ?? "미확인")}</span>
+                    <span>수익률: {String(deploymentSummary.return_pct ?? "미확인")}</span>
+                    <span>승률: {String(deploymentSummary.win_rate_pct ?? "미확인")}</span>
+                    <span>MDD: {String(deploymentSummary.mdd_pct ?? "미확인")}</span>
+                    <span>판정: {String(deploymentSummary.decision ?? "미확인")}</span>
+                  </div>
+                ) : null}
+                {deploymentStatus === "AWAITING_APPROVAL" || deploymentStatus === "REVIEW_REQUIRED" ? (
+                  <button
+                    type="button"
+                    className="mt-3 rounded border border-primary bg-primary px-3 py-1.5 text-xs font-bold text-on-primary disabled:opacity-50"
+                    disabled={approvalMutation.isPending}
+                    onClick={approveSubmittedDeployment}
+                  >
+                    {approvalMutation.isPending
+                      ? "승인·PAPER 컨테이너 시작 중…"
+                      : deploymentStatus === "REVIEW_REQUIRED"
+                        ? "최상위 승인으로 예외 PAPER 배포"
+                        : "백테스트 확인 후 PAPER 배포 승인"}
+                  </button>
+                ) : null}
+                {deploymentStatus === "ACTIVE" || deploymentStatus === "PAUSED" || deploymentStatus === "FAILED" ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {deploymentStatus === "PAUSED" ? (
+                      <button
+                        type="button"
+                        className="rounded border border-primary bg-primary px-3 py-1.5 text-xs font-bold text-on-primary disabled:opacity-50"
+                        disabled={lifecycleMutation.isPending}
+                        onClick={() => changeDeploymentPower("start")}
+                      >
+                        PAPER 컨테이너 시작
+                      </button>
+                    ) : deploymentStatus === "ACTIVE" ? (
+                      <button
+                        type="button"
+                        className="rounded border border-outline-variant bg-surface px-3 py-1.5 text-xs font-bold text-on-surface disabled:opacity-50"
+                        disabled={lifecycleMutation.isPending}
+                        onClick={() => changeDeploymentPower("stop")}
+                      >
+                        PAPER 컨테이너 중지
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="rounded border border-error/50 bg-error-container px-3 py-1.5 text-xs font-bold text-error disabled:opacity-50"
+                      disabled={lifecycleMutation.isPending}
+                      onClick={() => changeDeploymentPower("remove")}
+                    >
+                      전략 배포 제거
+                    </button>
+                  </div>
+                ) : null}
+                {deploymentStatusQuery.isError ? (
+                  <p className="mt-1 mb-0 text-[11px] text-error">컨테이너 실시간 상태를 다시 확인하고 있습니다.</p>
+                ) : null}
+                <code className="mt-1 block text-[10px] text-outline">{submitted.deploymentId}</code>
+              </div>
+            ) : null}
           </>
         ) : null}
 
-        {error ? (
+        {error || approvalError || lifecycleError ? (
           <p role="alert" className="self-start max-w-[92%] text-xs text-error border border-error-container bg-error-container rounded p-2">
-            ⚠️ {error}
+            ⚠️ {error || approvalError || lifecycleError}
           </p>
         ) : null}
       </div>

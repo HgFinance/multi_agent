@@ -19,20 +19,20 @@ import pytest
 pytest.importorskip("fastapi")
 pytest.importorskip("dotenv")
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from pathlib import Path
 import sys
+from pathlib import Path
+
+from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "departments/07-agent-workforce/api"))
 sys.path.insert(0, str(ROOT / "departments/07-agent-workforce/scorecard"))
 sys.path.insert(0, str(ROOT / "departments/07-agent-workforce"))
 
-from workforce_api_loader import load_workforce_api  # noqa: E402
+from workforce_api_loader import load_workforce_api
 
 workforce_api = load_workforce_api()
-from observability import WorkerRegistryUnavailable  # noqa: E402
+from observability import WorkerRegistryUnavailable
 
 PATH = "/workforce/v1/departments/observability"
 

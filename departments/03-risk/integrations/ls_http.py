@@ -86,7 +86,7 @@ class _SanitizedStream:
         ssl_context: Any,
         server_hostname: str | None = None,
         timeout: float | None = None,
-    ) -> "_SanitizedStream":
+    ) -> _SanitizedStream:
         return _SanitizedStream(
             self._stream.start_tls(ssl_context, server_hostname, timeout)
         )
@@ -115,7 +115,7 @@ class _AsyncSanitizedStream:
         ssl_context: Any,
         server_hostname: str | None = None,
         timeout: float | None = None,
-    ) -> "_AsyncSanitizedStream":
+    ) -> _AsyncSanitizedStream:
         return _AsyncSanitizedStream(
             await self._stream.start_tls(ssl_context, server_hostname, timeout)
         )

@@ -34,6 +34,12 @@ class MarketPriceSnapshot:
     price: Decimal
     observed_at: datetime
     source: str
+    # When the exchange printed this price, as distinct from when the collector
+    # wrote it.  A backlogged collector writes minutes-old prices with a
+    # just-now observed_at, so freshness judged on observed_at alone accepts a
+    # price the market has long left behind.  None when the source has no
+    # separate exchange clock.
+    event_time: datetime | None = None
 
 
 class MarketPriceResolver(Protocol):
@@ -302,13 +308,14 @@ class LSTimescaleMarketPriceResolver:
                 "no LS realtime tick is available for the instrument",
             )
         event_time, observed_at, price, market, provider = row
-        # ``observed_at`` is the freshness boundary; event_time is the broker
-        # event clock and can legitimately lag receipt during reconnects.
-        self._aware(event_time, field="event_time")
+        # Both clocks are reported.  observed_at bounds collector latency;
+        # event_time bounds how old the *price* is, which is the only one that
+        # decides whether an order may be placed against it.
         return MarketPriceSnapshot(
             symbol=normalized,
             price=_decimal_price(price, field="market.market_ticks.price"),
             observed_at=self._aware(observed_at, field="observed_at"),
+            event_time=self._aware(event_time, field="event_time"),
             source=(
                 "LS_REALTIME_TICK:"
                 f"{str(provider or 'UNKNOWN').strip()[:32]}:"

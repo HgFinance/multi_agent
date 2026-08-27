@@ -167,7 +167,7 @@ class WorkerStore(Protocol):
         quantity: Decimal | None,
     ) -> SubmitReadyExecution | None: ...
     def list_submit_ready(self, *, limit: int = 100) -> list[SubmitReadyExecution]: ...
-    def mark_submitting(self, rule_execution_id: UUID) -> None: ...
+    def mark_submitting(self, rule_execution_id: UUID) -> bool: ...
     def mark_retryable_failure(
         self, rule_execution_id: UUID, *, code: str, message: str
     ) -> None: ...
@@ -509,13 +509,18 @@ class HttpRuntimeClient:
     def _shared_snapshot_is_stale(self, snapshot: MarketPriceSnapshot) -> bool:
         """Treat an aged shared tick the same as a missing one.
 
-        ``observed_at`` is the collector's write instant, so this measures how
-        far behind the shared realtime stream is, not broker clock skew.
+        Judged on the exchange clock, not the collector's write instant.  A
+        backlogged collector writes a minutes-old price with a just-now
+        observed_at, so an observed_at test calls that price fresh and the rule
+        is evaluated against a market that has already moved: on 2026-08-27 a
+        +1% take-profit sat quiet at 207,500 while 000500 actually traded at
+        215,500, four minutes ahead of the tick the worker was reading.
         """
 
         if self._shared_price_max_age_seconds <= 0:
             return False
-        age = (datetime.now(timezone.utc) - snapshot.observed_at).total_seconds()
+        printed_at = snapshot.event_time or snapshot.observed_at
+        age = (datetime.now(timezone.utc) - printed_at).total_seconds()
         return age > self._shared_price_max_age_seconds
 
     def _rest_fallback_snapshot(
@@ -935,7 +940,14 @@ class ConditionalRuleWorker:
         return results
 
     def _submit(self, execution: SubmitReadyExecution) -> bool:
-        self.store.mark_submitting(execution.rule_execution_id)
+        # The store owns the durable OCO submission slot. A losing leg must
+        # stop before the external Trading API call; cancelling it after the
+        # call is too late because both legs may already be accepted.
+        acquired = self.store.mark_submitting(execution.rule_execution_id)
+        # ``None`` remains compatible with small legacy test/in-process stores;
+        # the Postgres store returns False explicitly for an OCO loser.
+        if acquired is False:
+            return False
         try:
             directive_id = self.client.submit(execution)
         except RuntimeDataError as exc:
