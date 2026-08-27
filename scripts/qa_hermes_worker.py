@@ -674,6 +674,60 @@ def _run_real_worker(argv: Sequence[str]) -> int:
                 f"error={type(exc).__name__}",
                 file=sys.stderr,
             )
+
+    # ▶ 부서장 카드 1장의 Langfuse span 트리 (2026-08-27 신규)
+    #
+    #   위 LangSmith 관측과 **별도 블록**이다. 하나가 실패했다고 다른 하나를
+    #   건너뛰면, 관측이 반쯤 있는 상태가 조용히 만들어진다.
+    #
+    #   위 블록과 달리 프로필 화이트리스트가 없다. 기존 관측은 accounting/qa 두
+    #   프로필만 보고 있어서 **나머지 6개 부서장은 어디에도 안 찍혔다** - 사용자
+    #   질의가 CEO 루트 카드로만 들어오는 구조라(apps/api/ceo.py), 그 카드에서
+    #   갈라지는 CEO·부서·QA·종합 턴이 전부 이 지점을 지나간다.
+    #
+    #   run_id 가 없어도 발행한다. 그건 카드가 없다는 뜻이 아니라 attempt 행을
+    #   아직 못 읽었다는 뜻이고, 그때도 지연·토큰은 재진다.
+    if task_id:
+        try:
+            from head_card_trace import publish_card_trace
+
+            task_body = _task_body(env.get("HERMES_KANBAN_DB"), task_id)
+            task_status, _current, outcome = _read_live_run_state(
+                env.get("HERMES_KANBAN_DB", ""), task_id, run_id or 0
+            )
+            from hermes_worker_observability import _request_id, _root_id, _status
+
+            root_id = _root_id(task_id=task_id, task_body=task_body)
+            status, _error_code = _status(
+                task_status=task_status or outcome or "",
+                return_code=int(completed.returncode),
+            )
+            outcome_line = publish_card_trace(
+                profile=worker_profile,
+                task_id=task_id,
+                root_id=root_id,
+                request_id=_request_id(root_id=root_id, task_body=task_body),
+                run_id=str(run_id or ""),
+                status=status.upper(),
+                started_ms=started_ms,
+                ended_ms=ended_ms,
+                attempts=_task_attempt_count(env.get("HERMES_KANBAN_DB"), task_id),
+                env=env,
+            )
+            if not outcome_line.startswith("published"):
+                # 계측 코드가 자기 실패를 관측하지 못하면 관측이 없는 것과 같다
+                # (2026-08-23 에 langfuse 미설치로 몇 시간을 태운 뒤 얻은 규칙).
+                print(
+                    f"head-card-trace task={task_id} profile={worker_profile} "
+                    f"reason={outcome_line}",
+                    file=sys.stderr,
+                )
+        except Exception as exc:  # noqa: BLE001 - observer is strictly fail-open.
+            print(
+                f"head-card-trace task={task_id} status=failed "
+                f"error={type(exc).__name__}",
+                file=sys.stderr,
+            )
     return int(completed.returncode)
 
 

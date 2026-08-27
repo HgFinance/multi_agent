@@ -2087,6 +2087,17 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      # ▶ 부서장 카드 span (2026-08-27). 여기가 **유일한** 계측 지점이다 -
+      #   사용자 질의는 CEO 루트 카드만 만들고(apps/api/ceo.py), 거기서 갈라지는
+      #   CEO·부서·QA·종합 턴을 전부 이 컨테이너가 띄운다.
+      #   SDK 는 필요 없다: scripts/head_card_trace.py 가 OTLP/JSON 을 직접 친다
+      #   (실측 2026-08-27, HTTP 200 + UI 트리 확인). LANGFUSE_TRACING=false 면
+      #   계측만 조용히 꺼지고 카드 실행은 그대로다.
+      LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-}
       # The live board has operated at a one-second tick without queue buildup;
       # keep that latency behavior on fresh deployments too. Hermes still
       # enforces the board-wide max_in_progress cap on every daemon tick.
@@ -2351,6 +2362,54 @@ services:
   # paper-search는 Hermes가 uvx stdio로 직접 연결하고, YouTube transcript는
   # 현재 비활성 상태다. 두 패키지 모두 Compose HTTP 컨테이너로 감싸면
   # 즉시 종료하거나 MCP API 호환성 오류로 재시작 루프에 들어간다.
+
+  # ── 부서장 카드 Langfuse 계측 (2026-08-27) ────────────────────────────────
+  # 사용자 질의는 `/ui/ceo/ask` 로만 들어오고 그 경로는 CEO 루트 카드만 만든다.
+  # 계획·부서·QA·종합이 전부 카드로 갈라지므로 완료된 카드를 훑는 것만으로
+  # 부서장 전원이 관측된다(실측 카드 분포: ceo 520, qa 181, trading 83, hr 80,
+  # risk 52, research 40, accounting 35, quant 27).
+  #
+  # ▶ 왜 dispatcher wrapper 가 아니라 별도 수집기인가
+  #   `scripts/qa_hermes_worker.py` 는 QA 가 아닌 프로필을 `os.execvpe` 로 실행해
+  #   프로세스를 교체한다 - 그 뒤 코드는 돌지 않으므로 wrapper 계측은 QA 에서만
+  #   발화한다. `execvpe` 를 subprocess 로 바꾸면 dispatcher 의 SIGTERM→SIGKILL
+  #   취소 계약이 wrapper 에 걸려 카드 취소가 깨진다.
+  #
+  # 읽기 전용이다. kanban.db 와 부서별 state.db 를 `?mode=ro` 로만 열고, 어떤
+  # 파일도 쓰지 않는다. `user: 1000` 은 만에 하나의 쓰기가 root 소유 파일을
+  # 만들지 않게 하는 안전장치다(2026-08-11 에 root 소유 WAL 로 워커가 전부
+  # 멈춘 전례가 있다).
+  head-trace-collector:
+    build:
+      context: .
+      dockerfile: Dockerfile.operations-runtime
+    image: hedgefund-operations-runtime:latest
+    container_name: hedgefund-head-trace-collector
+    restart: unless-stopped
+    user: "1000:1000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command:
+      ["python", "scripts/head_trace_collector.py", "--loop",
+       "--interval", "${HEAD_TRACE_INTERVAL_SECONDS:-60}",
+       "--lookback", "${HEAD_TRACE_LOOKBACK_SECONDS:-900}"]
+    volumes:
+      - /home/ubuntu/.hermes:/opt/data
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
+      LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-}
+    mem_limit: 256m
+    mem_reservation: 64m
+    cpus: 0.25
+    pids_limit: 64
 
   card-watchdog:
     build:
