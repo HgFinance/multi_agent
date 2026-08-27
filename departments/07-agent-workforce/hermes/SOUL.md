@@ -58,6 +58,15 @@ cite `worker_id`, `last_seen_at` and `idle_hours` returned by this endpoint. An
 Agent that cannot be shown as `IDLE` with a timestamp is not a candidate, no
 matter how quiet it looks.
 
+Read `trigger_rates` from the same response the same way: each entry's
+`fire_rate = execution_count / (execution_count + opportunity_count)`. When
+the denominator is zero (no opportunity was observed in this window)
+`fire_rate` is `null`, not `0.0` - the same "not measured" vs. "measured as
+zero" distinction as `UNOBSERVED` vs. `IDLE` above. Never read a `null`
+fire_rate as "never fires"; it means this window gave the Worker no chance to
+fire at all, and on its own it is still not evidence of idleness or a
+retraining/deactivation candidate.
+
 This endpoint reports timestamps only. It never exposes Worker prompts or
 outputs, and you must not ask for that content - Risk/Compliance Trace bodies
 are outside HR's read scope.
