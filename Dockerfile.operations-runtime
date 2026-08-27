@@ -37,6 +37,20 @@ COPY orchestration/qa_skill_evolution_bridge.py ./orchestration/qa_skill_evoluti
 COPY orchestration/langsmith_queries.py ./orchestration/langsmith_queries.py
 COPY orchestration/langsmith_feedback.py ./orchestration/langsmith_feedback.py
 COPY orchestration/llm_observability.py ./orchestration/llm_observability.py
+# 부서장 카드 Langfuse 계측(head-trace-collector). 전부 표준 라이브러리만 쓰므로
+# 이 이미지에 새 pip 의존성을 더하지 않는다 - langfuse SDK 도 넣지 않는다
+# (OTLP/JSON 을 직접 친다, 실측 확인 2026-08-27).
+COPY orchestration/trace_identity.py ./orchestration/trace_identity.py
+COPY orchestration/langfuse_otlp.py ./orchestration/langfuse_otlp.py
+COPY orchestration/hermes_session_usage.py ./orchestration/hermes_session_usage.py
+COPY orchestration/model_cost.py ./orchestration/model_cost.py
+COPY orchestration/head_span_builder.py ./orchestration/head_span_builder.py
+# `head_trace_collector` 가 `from scripts.head_card_trace import ...` 로 형제를
+# 부르므로 패키지 표식을 함께 넣는다. 없어도 namespace package 로 동작하지만,
+# 저장소에서는 명시적 패키지라 이미지에서만 규칙이 달라지는 상태를 만들지 않는다.
+COPY scripts/__init__.py ./scripts/__init__.py
+COPY scripts/head_card_trace.py ./scripts/head_card_trace.py
+COPY scripts/head_trace_collector.py ./scripts/head_trace_collector.py
 COPY orchestration/semantic_qa.py ./orchestration/semantic_qa.py
 COPY orchestration/answer_contract.py ./orchestration/answer_contract.py
 COPY departments/worker_model_gateway.py ./departments/worker_model_gateway.py
