@@ -7,8 +7,8 @@
 #       11.1절(Image 기준), departments/03-risk/Dockerfile·departments/06-ai-qa-audit/Dockerfile 패턴
 #
 # Build context is the repository root so the image can receive the shared
-# metadata-only Worker Registry contract. Only Workforce code plus the
-# manifest/loader are copied; other department runtime modules are excluded.
+# metadata-only Worker Registry contract and the bounded HR review bridge.
+# Other department runtime modules remain excluded.
 #
 # ▶ 하나의 Image, command만 바꿔 workforce-api와 improvement-worker를 둘 다 돌린다
 #   (research/risk와 동일 원칙). lifecycle-worker(계획서 6.8)는 아직 안 만들었다 -
@@ -52,6 +52,16 @@ COPY departments/07-agent-workforce/performance ./performance
 COPY departments/07-agent-workforce/reporting.py ./reporting.py
 # improvement-worker는 root loader로 api/app.py를 고유 모듈명에 로드한다.
 COPY departments/07-agent-workforce/workforce_api_loader.py ./workforce_api_loader.py
+
+# HR Langfuse review uses the same redacted approval ledger as QA. Keep the
+# copied surface narrow: these modules contain only bounded metadata/SQLite
+# coordination and the Discord transport; no trace payload reader is added to
+# the Workforce image.
+COPY orchestration/__init__.py /app/orchestration/__init__.py
+COPY orchestration/langsmith_queries.py /app/orchestration/langsmith_queries.py
+COPY orchestration/langsmith_feedback.py /app/orchestration/langsmith_feedback.py
+COPY orchestration/qa_discord_feedback.py /app/orchestration/qa_discord_feedback.py
+COPY orchestration/hr_langfuse_feedback.py /app/orchestration/hr_langfuse_feedback.py
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 

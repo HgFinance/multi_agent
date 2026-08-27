@@ -726,6 +726,10 @@ def format_hr_langfuse_feedback_request(
         observations.append(
             f"측정 완료 {int(measured_count or 0)}건 / 확인 불가 {int(unavailable_count or 0)}건"
         )
+    if metadata.get("langfuse_queries") is not None:
+        observations.append(f"Langfuse 조회 횟수: {int(metadata['langfuse_queries'])}회")
+    if metadata.get("llm_calls") is not None:
+        observations.append(f"모델 호출: {int(metadata['llm_calls'])}회")
     latency_ms = metadata.get("latency_ms") or metadata.get("p95_latency_ms")
     if latency_ms:
         latency = f"최장 실행 p95: {float(latency_ms) / 1000:.2f}초"

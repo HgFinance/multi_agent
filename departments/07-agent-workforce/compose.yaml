@@ -83,7 +83,7 @@ services:
       WORKFORCE_SNAPSHOT_HEALTH_PATH: /tmp/workforce-snapshot-writer.health
       # Langfuse 관측 창에 이상 신호가 있을 때만 HR 채널에 요약 카드를
       # 발행한다. shadow/off 는 카드와 승인 원장을 만들지 않는 안전한 기본값이다.
-      HR_LANGFUSE_REVIEW_MODE: ${HR_LANGFUSE_REVIEW_MODE:-shadow}
+      HR_LANGFUSE_REVIEW_MODE: ${HR_LANGFUSE_REVIEW_MODE:-${LANGSMITH_FEEDBACK_MODE:-shadow}}
       HR_LANGFUSE_CHANNEL_ID: ${HR_LANGFUSE_CHANNEL_ID:-1542405626531942432}
       DISCORD_BOT_TOKEN_HR: ${DISCORD_BOT_TOKEN_HR:-}
       LANGSMITH_FEEDBACK_LATENCY_WARN_MS: ${LANGSMITH_FEEDBACK_LATENCY_WARN_MS:-60000}

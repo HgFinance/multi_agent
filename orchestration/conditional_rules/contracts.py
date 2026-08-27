@@ -299,6 +299,11 @@ class ConditionalRuleSpec(BaseModel):
     repeat_policy: RepeatPolicy = RepeatPolicy.ONCE
     expires_at: datetime
     raw_instruction_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # One-cancels-the-other.  A take-profit and a stop-loss on the same position
+    # are alternatives, not two independent orders: once either one actually
+    # reaches the broker the other must stop watching, or a single position gets
+    # sold twice.  Rules sharing this id are mutually exclusive.
+    oco_group_id: UUID | None = None
 
     @field_validator("symbol", mode="before")
     @classmethod

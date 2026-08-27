@@ -927,6 +927,68 @@ class PostgresRuleWorkerStore:
                 retryable=True,
             ) from exc
 
+    def _cancel_oco_siblings(self, cursor, *, rule_id: UUID) -> int:
+        """Retire the alternatives once this rule's order actually went out.
+
+        A take-profit and a stop-loss on one position are two ways for the same
+        exit to happen.  Leaving the loser armed sells the position a second
+        time, and on a one-share position the second leg simply fails - either
+        way the book stops matching what the user asked for.
+
+        Runs inside the submitting transaction so the cancel cannot be lost if
+        the worker dies right after the broker accepted the order.  Only ACTIVE
+        siblings are retired: one already past its own trigger is in flight at
+        the broker and is not ours to revoke.
+        """
+
+        cursor.execute(
+            """
+            with winner as (
+              select (version.spec->>'oco_group_id') as group_id,
+                     rule.user_id, rule.fund_id, rule.book_id
+                from execution.conditional_trade_rules rule
+                join execution.conditional_trade_rule_versions version
+                  on version.rule_id=rule.rule_id
+                 and version.rule_version=rule.current_version
+               where rule.rule_id=%s
+            )
+            update execution.conditional_trade_rules sibling
+               set state='CANCELLED',version=sibling.version+1,completed_at=now()
+              from winner,
+                   execution.conditional_trade_rule_versions sibling_version
+             where winner.group_id is not null
+               and sibling_version.rule_id=sibling.rule_id
+               and sibling_version.rule_version=sibling.current_version
+               and sibling_version.spec->>'oco_group_id'=winner.group_id
+               and sibling.rule_id<>%s
+               and sibling.state='ACTIVE'
+               -- The group never crosses an authority boundary.
+               and sibling.user_id=winner.user_id
+               and sibling.fund_id=winner.fund_id
+               and sibling.book_id=winner.book_id
+            returning sibling.rule_id, sibling.current_version
+            """,
+            (rule_id, rule_id),
+        )
+        cancelled = cursor.fetchall()
+        for sibling_id, sibling_version in cancelled:
+            cursor.execute(
+                """
+                insert into execution.conditional_trade_rule_events (
+                  event_id,rule_id,rule_version,event_type,from_state,
+                  to_state,payload
+                ) values (%s,%s,%s,'OCO_CANCELLED','ACTIVE','CANCELLED',%s)
+                on conflict (event_id) do nothing
+                """,
+                (
+                    _stable_id("oco_", sibling_id, str(rule_id)),
+                    sibling_id,
+                    sibling_version,
+                    Json({"cancelled_by_rule_id": str(rule_id)}),
+                ),
+            )
+        return len(cancelled)
+
     def mark_submitted(self, rule_execution_id: UUID, *, directive_id: UUID) -> None:
         try:
             with self._connect() as connection, connection.cursor() as cursor:
@@ -1026,6 +1088,7 @@ class PostgresRuleWorkerStore:
                         "CONDITIONAL_RULE_CONCURRENT_TRANSITION",
                         "conditional rule changed before submission was recorded",
                     )
+                self._cancel_oco_siblings(cursor, rule_id=rule_id)
                 payload = {
                     "rule_execution_id": str(rule_execution_id),
                     "directive_id": str(directive_id),

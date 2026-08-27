@@ -67,6 +67,8 @@ class ConditionalRuleCandidate(BaseModel):
     action: RuleAction
     evaluation: EvaluationPolicy
     expires_at: datetime | None = None
+    # Rules sharing this id are one-cancels-the-other; see ConditionalRuleSpec.
+    oco_group_id: UUID | None = None
 
     @field_validator("expires_at")
     @classmethod
@@ -441,6 +443,7 @@ def _build_preview(
             "repeat_policy": "ONCE",
             "expires_at": _expiry(candidate.expires_at, now=instant),
             "raw_instruction_sha256": _raw_sha256(request.raw_instruction),
+            "oco_group_id": candidate.oco_group_id,
         }
     )
     _validate_semantics(spec)

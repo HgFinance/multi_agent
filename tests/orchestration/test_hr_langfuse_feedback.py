@@ -10,6 +10,7 @@ from orchestration.hr_langfuse_feedback import (
     build_hr_langfuse_evaluation,
     publish_hr_langfuse_review,
 )
+from orchestration.langsmith_feedback import FeedbackLedger
 from orchestration.qa_discord_feedback import (
     HR_LANGFUSE_FEEDBACK_MARKER,
     format_hr_langfuse_feedback_request,
@@ -112,6 +113,25 @@ def test_hr_langfuse_publisher_uses_shared_ledger_and_one_discord_attempt() -> N
     assert ledger.finished[0][1]["delivered"] is True
     post.assert_called_once()
     assert post.call_args.kwargs["channel_id"] == "1542405626531942432"
+
+
+def test_unavailable_langfuse_signal_is_approvable_as_an_actionable_finding(
+    tmp_path,
+) -> None:
+    observed = _observability()
+    observed.capacity = (SimpleNamespace(status="UNAVAILABLE", reason="reader"),)
+    result = build_hr_langfuse_evaluation(observed)
+    assert "LANGFUSE_OBSERVABILITY_UNAVAILABLE" in result.finding_codes
+
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    artifact_id = ledger.complete("hr-source-1", "hr-eval-1", result)
+    assert ledger.approve(
+        artifact_id,
+        "APPROVED",
+        "hr-admin",
+        "재현 가능한 관측 장애",
+        improvement_type="RUNTIME_CONFIG",
+    )
 
 
 def test_hr_gateway_routes_authorized_rejection_to_shared_ledger_without_hermes(

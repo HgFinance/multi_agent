@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
 from typing import Any
 
 from orchestration.langsmith_feedback import EvaluationResult, FeedbackLedger
@@ -60,7 +59,7 @@ def _safe_int(value: Any) -> int | None:
 
 
 def _report_metrics(observability: Any) -> tuple[list[Any], int, int, int, int]:
-    """Flatten the four bounded report groups without copying report payloads."""
+    """Flatten the five bounded report groups without copying report payloads."""
 
     groups = (
         getattr(observability, "idle_agents", ()),
