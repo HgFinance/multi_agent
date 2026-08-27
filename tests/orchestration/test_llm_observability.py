@@ -18,8 +18,19 @@ from orchestration.llm_observability import (
     start_root_trace,
     suppress_langsmith_automatic_tracing,
     trace_correlation_metadata,
+    trace_should_publish,
     worker_graph_trace_config,
 )
+
+
+@pytest.fixture(autouse=True)
+def _emit_observability_events_in_unit_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep contract tests deterministic while production uses sampling."""
+
+    monkeypatch.setenv("LANGSMITH_TRACE_SAMPLE_RATE", "1")
+    monkeypatch.setenv("LANGSMITH_METRIC_SAMPLE_RATE", "1")
 
 
 def test_langsmith_metric_allowlist_excludes_raw_payloads() -> None:
@@ -306,6 +317,16 @@ def test_langsmith_workflow_project_never_falls_back_to_default(
     monkeypatch.delenv("LANGSMITH_PROJECT", raising=False)
 
     assert langsmith_project("workflow") == "First"
+
+
+def test_trace_sampling_keeps_failures_and_drops_ordinary_successes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACE_SAMPLE_RATE", "0")
+
+    assert not trace_should_publish(identity="ordinary-success", status="completed")
+    assert trace_should_publish(identity="failed-worker", status="failed")
+    assert trace_should_publish(identity="slow-worker", status="completed", latency_ms=45_000)
 
 
 def test_publish_metric_uses_metrics_project_without_creating_a_second_run(

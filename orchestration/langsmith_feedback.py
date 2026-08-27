@@ -416,7 +416,7 @@ def feedback_mode(value: str | None = None) -> str:
         str(
             value
             if value is not None
-            else os.getenv("LANGSMITH_FEEDBACK_MODE", "shadow")
+            else os.getenv("LANGSMITH_FEEDBACK_MODE", "off")
         )
         .strip()
         .lower()

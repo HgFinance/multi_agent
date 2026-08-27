@@ -544,8 +544,8 @@ def _post_batch(*, env: Mapping[str, str], runs: list[dict[str, Any]]) -> bool:
 def _tool_trace_mode(env: Mapping[str, str]) -> str:
     """Return the bounded child-tool trace policy for this worker boundary."""
 
-    mode = str(env.get("LANGSMITH_TOOL_TRACE_MODE", "full")).strip().casefold()
-    return mode if mode in {"full", "aggregate", "sample"} else "full"
+    mode = str(env.get("LANGSMITH_TOOL_TRACE_MODE", "aggregate")).strip().casefold()
+    return mode if mode in {"full", "aggregate", "sample"} else "aggregate"
 
 
 def publish_department_worker_trace(
@@ -627,7 +627,29 @@ def publish_department_worker_trace(
             _LOG.info(
                 "langsmith-risk-trace-sampled task=%s sample_rate=%s",
                 _safe_id(task_id),
-                runtime_env.get("LANGSMITH_RISK_TRACE_SAMPLE_RATE", "0.10"),
+                runtime_env.get("LANGSMITH_RISK_TRACE_SAMPLE_RATE", "0.05"),
+            )
+            return False
+    else:
+        try:
+            from orchestration.llm_observability import trace_should_publish
+        except (ImportError, ModuleNotFoundError):
+            # A minimal Hermes image may not include the central policy module;
+            # keep the boundary trace rather than failing completed work.
+            trace_should_publish = None
+        if trace_should_publish is not None and not trace_should_publish(
+            identity=f"{profile}:{task_id}:{run_id}",
+            status=status,
+            error_count=tool_error_count,
+            return_code=return_code,
+            latency_ms=max(int(ended_ms) - int(started_ms), 0),
+            environment=runtime_env,
+        ):
+            _LOG.info(
+                "langsmith-worker-trace-sampled profile=%s task=%s sample_rate=%s",
+                _safe_id(profile),
+                _safe_id(task_id),
+                runtime_env.get("LANGSMITH_TRACE_SAMPLE_RATE", "0.05"),
             )
             return False
     try:
@@ -885,6 +907,25 @@ def publish_discord_worker_trace(
     request_id = f"discord:{safe_message_id}"
     safe_status = _safe_id(status, limit=40) or "completed"
     safe_session_id = _safe_id(session_id, limit=160) if session_id else None
+    try:
+        from orchestration.llm_observability import trace_should_publish
+    except (ImportError, ModuleNotFoundError):
+        trace_should_publish = None
+    if trace_should_publish is not None and not trace_should_publish(
+        identity=f"discord:{profile}:{safe_message_id}",
+        status=safe_status,
+        error_count=error_count,
+        return_code=return_code,
+        latency_ms=max(ended - started, 0),
+        environment=runtime_env,
+    ):
+        _LOG.info(
+            "langsmith-discord-trace-sampled profile=%s message=%s sample_rate=%s",
+            _safe_id(profile),
+            _safe_id(message_id),
+            runtime_env.get("LANGSMITH_TRACE_SAMPLE_RATE", "0.05"),
+        )
+        return False
     metadata = {
         "schema_version": profile_spec["schema_version"],
         "trace_kind": "discord_worker",

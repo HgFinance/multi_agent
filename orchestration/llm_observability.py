@@ -69,6 +69,11 @@ _LANGSMITH_ROOT_CONTEXT_RE = re.compile(
 WORKFLOW_LANGSMITH_PROJECT = "First"
 _LANGSMITH_QUOTA_LOCK = Lock()
 _LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
+_LANGSMITH_SUCCESS_STATUSES = frozenset(
+    {"completed", "success", "succeeded", "done", "ok"}
+)
+_DEFAULT_LANGSMITH_TRACE_SAMPLE_RATE = 0.05
+_DEFAULT_LANGSMITH_TRACE_SLOW_MS = 45_000
 _STAGE_PROFILES = {
     "research": "research-department",
     "quant": "quant-backtest-department",
@@ -218,6 +223,95 @@ def langsmith_enabled() -> bool:
         and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
         and not _langsmith_quota_paused()
     )
+
+
+def _bounded_sample_rate(
+    name: str, default: float, *, environment: Mapping[str, str] | None = None
+) -> float:
+    """Read one safe sampling knob without letting bad config break work."""
+
+    source = environment or os.environ
+    raw = source.get(name)
+    if raw is None:
+        raw = source.get("LANGSMITH_TRACE_SAMPLE_RATE", str(default))
+    try:
+        return min(max(float(raw), 0.0), 1.0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def trace_should_publish(
+    *,
+    identity: str,
+    status: str | None = None,
+    error_count: int = 0,
+    return_code: int | None = None,
+    latency_ms: int = 0,
+    sample_rate_env: str = "LANGSMITH_TRACE_SAMPLE_RATE",
+    default_sample_rate: float = _DEFAULT_LANGSMITH_TRACE_SAMPLE_RATE,
+    slow_ms_env: str = "LANGSMITH_TRACE_SLOW_MS",
+    default_slow_ms: int = _DEFAULT_LANGSMITH_TRACE_SLOW_MS,
+    environment: Mapping[str, str] | None = None,
+    force: bool = False,
+) -> bool:
+    """Keep failures and slow work while sampling ordinary successful events.
+
+    The hash makes the decision stable across retries and processes. This is a
+    policy helper only; callers remain responsible for the single canonical
+    trace/event they already own.
+    """
+
+    if force:
+        return True
+    normalized_status = str(status or "").strip().casefold()
+    try:
+        normalized_error_count = int(error_count or 0)
+    except (TypeError, ValueError):
+        normalized_error_count = 1
+    if (
+        normalized_status
+        and normalized_status not in _LANGSMITH_SUCCESS_STATUSES
+    ) or normalized_error_count > 0:
+        return True
+    try:
+        normalized_return_code = int(return_code) if return_code is not None else None
+    except (TypeError, ValueError):
+        normalized_return_code = 1
+    if normalized_return_code is not None and normalized_return_code != 0:
+        return True
+    try:
+        source = environment or os.environ
+        slow_ms = max(
+            int(source.get(slow_ms_env, str(default_slow_ms))),
+            0,
+        )
+    except (TypeError, ValueError):
+        slow_ms = default_slow_ms
+    if _safe_int(latency_ms) >= slow_ms:
+        return True
+
+    sample_rate = _bounded_sample_rate(
+        sample_rate_env, default_sample_rate, environment=environment
+    )
+    if sample_rate >= 1.0:
+        return True
+    if sample_rate <= 0.0:
+        return False
+    stable_identity = str(identity or "").strip()
+    if not stable_identity:
+        return True
+    digest = hashlib.sha256(
+        f"langsmith-trace:{sample_rate_env}:{stable_identity}".encode()
+    ).digest()
+    bucket = int.from_bytes(digest[:8], "big") / float(1 << 64)
+    return bucket < sample_rate
 
 
 def langsmith_project(
@@ -477,6 +571,9 @@ def _safe_langsmith_client() -> Any:
         hide_inputs=True,
         hide_outputs=True,
         hide_metadata=False,
+        # This client is used only after the application-owned deterministic
+        # sampling decision. Avoid applying the SDK's random sampler twice.
+        tracing_sampling_rate=1.0,
         # The explicit metadata envelope below is the only runtime context
         # this application needs.  Do not let the SDK append its own
         # LANGSMITH_* environment snapshot (it is noisy and can expose local
@@ -496,6 +593,9 @@ def _structured_langsmith_client() -> Any:
         hide_inputs=False,
         hide_outputs=False,
         hide_metadata=False,
+        # Root lifecycle retention is decided by the caller; keep the
+        # lifecycle publisher from being randomly sampled a second time.
+        tracing_sampling_rate=1.0,
         omit_traced_runtime_info=True,
         tracing_error_callback=_mark_langsmith_quota_pause,
     )
@@ -513,6 +613,12 @@ def redacted_trace(
 
     if not langsmith_enabled():
         yield
+        return
+    if not trace_should_publish(identity=trace_id, status="success"):
+        # The worker terminal metric/root is the retained operational record.
+        # This context only controls verbose nested callback detail.
+        with suppress_langsmith_automatic_tracing():
+            yield
         return
     try:
         from langsmith import tracing_context
@@ -566,6 +672,7 @@ def publish_metric(
     run_id: str | None = None,
     parent_run_id: str | None = None,
     confirm_delivery: bool = False,
+    force: bool = False,
 ) -> bool:
     """Send one empty-payload performance metric to the metrics project.
 
@@ -579,6 +686,20 @@ def publish_metric(
     """
 
     if not langsmith_enabled():
+        return False
+    if not trace_should_publish(
+        identity=str(trace_id or metric.get("trace_id") or metric.get("worker_id") or ""),
+        status=str(metric.get("status") or "success"),
+        error_count=_safe_int(metric.get("error_count")),
+        return_code=(
+            _safe_int(metric["return_code"], default=1)
+            if metric.get("return_code") is not None
+            else None
+        ),
+        latency_ms=_safe_int(metric.get("latency_ms")),
+        sample_rate_env="LANGSMITH_METRIC_SAMPLE_RATE",
+        force=force,
+    ):
         return False
     try:
         client = _safe_langsmith_client()
@@ -715,6 +836,7 @@ def publish_root_trace(
         project_name=langsmith_project("workflow"),
         start_time=started_at,
         end_time=ended_at,
+        force=True,
     )
 
 

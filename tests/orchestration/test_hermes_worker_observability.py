@@ -57,6 +57,13 @@ def test_langsmith_unique_trace_quota_fails_open_and_stops_retries() -> None:
         worker_observability._LANGSMITH_USAGE_LIMITED = False
 
 
+def test_worker_trace_defaults_to_aggregate_tool_children() -> None:
+    assert worker_observability._tool_trace_mode({}) == "aggregate"
+    assert worker_observability._tool_trace_mode(
+        {"LANGSMITH_TOOL_TRACE_MODE": "invalid"}
+    ) == "aggregate"
+
+
 def test_accounting_worker_trace_correlates_task_model_and_tools(tmp_path: Path):
     profile_dir = tmp_path / "profiles" / "accounting-portfolio-department"
     profile_dir.mkdir(parents=True)
@@ -79,6 +86,8 @@ def test_accounting_worker_trace_correlates_task_model_and_tools(tmp_path: Path)
         "LANGSMITH_API_KEY": "test-key",
         "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
         "LANGSMITH_PROJECT": "First",
+        "LANGSMITH_TOOL_TRACE_MODE": "full",
+        "LANGSMITH_TRACE_SAMPLE_RATE": "1",
         "HERMES_HOME": str(tmp_path),
         "HERMES_KANBAN_HOME": str(kanban_home),
     }
@@ -152,6 +161,7 @@ def test_worker_trace_aggregates_tool_children_when_configured(tmp_path: Path):
         "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
         "LANGSMITH_PROJECT": "First",
         "LANGSMITH_TOOL_TRACE_MODE": "aggregate",
+        "LANGSMITH_TRACE_SAMPLE_RATE": "1",
         "HERMES_HOME": str(tmp_path),
         "HERMES_KANBAN_HOME": str(kanban_home),
     }
@@ -195,6 +205,8 @@ def test_worker_trace_keeps_request_id_separate_from_kanban_root(tmp_path: Path)
         "LANGSMITH_API_KEY": "test-key",
         "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
         "LANGSMITH_PROJECT": "First",
+        "LANGSMITH_TOOL_TRACE_MODE": "full",
+        "LANGSMITH_TRACE_SAMPLE_RATE": "1",
         "HERMES_HOME": str(tmp_path),
         "HERMES_KANBAN_HOME": str(kanban_home),
     }
@@ -245,6 +257,8 @@ def test_ceo_synthesis_uses_the_same_redacted_worker_trace_contract(tmp_path: Pa
         "LANGSMITH_API_KEY": "test-key",
         "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
         "LANGSMITH_PROJECT": "First",
+        "LANGSMITH_TOOL_TRACE_MODE": "full",
+        "LANGSMITH_TRACE_SAMPLE_RATE": "1",
         "HERMES_HOME": str(tmp_path),
         "HERMES_KANBAN_HOME": str(kanban_home),
     }
@@ -293,6 +307,8 @@ def test_risk_blocked_worker_is_business_block_not_langsmith_error(tmp_path: Pat
         "LANGSMITH_API_KEY": "test-key",
         "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
         "LANGSMITH_PROJECT": "First",
+        "LANGSMITH_TOOL_TRACE_MODE": "full",
+        "LANGSMITH_TRACE_SAMPLE_RATE": "1",
         "HERMES_HOME": str(tmp_path),
         "HERMES_KANBAN_HOME": str(kanban_home),
     }
@@ -490,6 +506,7 @@ def test_discord_worker_trace_uses_redacted_gateway_boundary() -> None:
         "LANGSMITH_API_KEY": "test-key",
         "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
         "LANGSMITH_PROJECT": "First",
+        "LANGSMITH_TRACE_SAMPLE_RATE": "1",
     }
 
     with patch(
@@ -544,6 +561,8 @@ def test_qa_worker_trace_uses_the_same_task_correlated_redacted_contract(tmp_pat
         "LANGSMITH_API_KEY": "test-key",
         "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
         "LANGSMITH_PROJECT": "First",
+        "LANGSMITH_TOOL_TRACE_MODE": "full",
+        "LANGSMITH_TRACE_SAMPLE_RATE": "1",
         "HERMES_HOME": str(tmp_path),
         "HERMES_KANBAN_HOME": str(kanban_home),
     }
@@ -649,6 +668,7 @@ def test_worker_trace_records_workflow_mode_and_fast_advisory_budget(tmp_path: P
         "LANGSMITH_API_KEY": "test-key",
         "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
         "LANGSMITH_PROJECT": "First",
+        "LANGSMITH_TRACE_SAMPLE_RATE": "1",
         "HERMES_KANBAN_HOME": str(kanban_home),
         "HGFINANCE_FAST_ADVISORY_MAX_TURNS": "8",
     }

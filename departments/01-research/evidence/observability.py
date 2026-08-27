@@ -17,8 +17,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
-from orchestration.llm_observability import langsmith_project
-
+from orchestration.llm_observability import langsmith_project, trace_should_publish
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _SENSITIVE_METADATA_PARTS = (
@@ -104,7 +103,13 @@ def _langsmith_client():
 
     from langsmith import Client
 
-    return Client(hide_inputs=True, hide_outputs=True, hide_metadata=False)
+    return Client(
+        hide_inputs=True,
+        hide_outputs=True,
+        hide_metadata=False,
+        # ``redacted_span`` owns the explicit full/sample/off decision.
+        tracing_sampling_rate=1.0,
+    )
 
 
 def _update_span_metadata(run: Any, metadata: dict[str, Any]) -> None:
@@ -144,6 +149,17 @@ def redacted_span(
     if not langsmith_enabled():
         yield None
         return
+    mode = os.getenv("LANGSMITH_RESEARCH_TRACE_MODE", "off").strip().casefold()
+    if mode not in {"full", "sample"}:
+        yield None
+        return
+    if mode == "sample" and not trace_should_publish(
+        identity=str((metadata or {}).get("trace_id") or name),
+        status="success",
+        sample_rate_env="LANGSMITH_TRACE_SAMPLE_RATE",
+    ):
+        yield None
+        return
 
     try:
         from langsmith import trace
@@ -181,7 +197,7 @@ def redacted_span(
             trace_context._end_on_exit = False
             run.patch()
             trace_context.__exit__(None, None, None)
-        except Exception:  # noqa: BLE001 - tracing must remain fail-open
+        except Exception:  # noqa: BLE001, S110 - tracing must remain fail-open
             pass
         raise
     else:
@@ -194,7 +210,7 @@ def redacted_span(
         )
         try:
             trace_context.__exit__(None, None, None)
-        except Exception:  # noqa: BLE001 - tracing must remain fail-open
+        except Exception:  # noqa: BLE001, S110 - tracing must remain fail-open
             pass
 
 

@@ -60,7 +60,6 @@ agent-ops-monitor/incident-postmortem-agent/tool-permission-security-reviewer는
 
 # The standalone QA script bootstraps its sibling modules before importing them.
 # Keep E402 disabled only for this deliberate path setup.
-# ruff: noqa: E402
 from __future__ import annotations
 
 # Current runtime: Evidence QA is always evaluated first; Model Risk and Internal
@@ -80,7 +79,6 @@ from uuid import UUID, uuid4
 
 import yaml
 from langgraph.graph import END, StateGraph
-from langsmith.wrappers import wrap_openai
 from openai import OpenAI
 
 _BASE = Path(__file__).resolve().parent
@@ -138,12 +136,10 @@ def _ollama_base_url() -> str:
 
 # 직원 LLM은 부서장 Hermes와 분리된 로컬/팀 Ollama 런타임이다.
 # 주소와 모델은 환경변수로 주입해 개발·CI·운영 환경을 섞지 않는다.
-internal_llm = wrap_openai(
-    OpenAI(
-        base_url=_ollama_base_url(),
-        api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
-        timeout=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "8")),
-    )
+internal_llm = OpenAI(
+    base_url=_ollama_base_url(),
+    api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
+    timeout=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "8")),
 )
 
 

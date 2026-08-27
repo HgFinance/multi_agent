@@ -81,19 +81,17 @@ for _sub in ("ledger", "portfolio", "reconciliation", "reporting", "corporate_ac
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import fees as fee_accrual
+from break_triage import BreakTriageError, check_aging, triage, triage_context
 from daily_report import DailyReport, ReportError, build_daily_report
 from langgraph.graph import END, StateGraph
-from langsmith import tracing_context
-import fees as fee_accrual
 from ledger import Ledger
-from statements import StatementError, build_statements
 from portfolio import (
     MarkPrice,
     PortfolioSnapshot,
     ValuationError,
     value_portfolio,
 )
-from break_triage import BreakTriageError, check_aging, triage, triage_context
 from reconciliation import (
     Break,
     ReconResult,
@@ -101,6 +99,9 @@ from reconciliation import (
     reconcile_fills,
     reconcile_positions,
 )
+from statements import StatementError, build_statements
+
+from orchestration.llm_observability import suppress_langsmith_automatic_tracing
 
 PIPELINE_VERSION = "accounting-close-pipeline-v1"
 
@@ -821,9 +822,11 @@ def run_accounting_close(
                      "triage_corpus": triage_corpus or [],
                      "trace_id": trace_id, "fallbacks": []}
     try:
-        # tracing_context 는 enabled 를 건드리지 않는다 - LANGSMITH_TRACING 이 꺼져 있으면
-        # 그대로 꺼진 채고, 켜져 있을 때만 회계본부 Project 로 보낸다.
-        with tracing_context(project_name=_ls_project()):
+        # The dispatcher owns the canonical worker trace. Suppress the
+        # LangGraph ambient callback here so a single accounting task does not
+        # create a second root/graph tree. The local handoff metadata remains
+        # available for standalone reports.
+        with suppress_langsmith_automatic_tracing():
             state = build_pipeline(chat=chat, uploader=uploader).invoke(initial)
     except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         state = {**initial, "nav_status": NAV_BLOCKED, "breaks": [], "recon": {},
@@ -903,8 +906,8 @@ def _render_report_md(out: dict) -> str:
     aging = out.get("break_aging") or {}
     if aging:
         lines += ["", "### Break Aging / SLA (결정론)", "",
-                  f"- **SLA 초과:** {'**있음**' if aging.get('sla_breached') else '없음'} "
-                  f"(미종결 {_md_cell(aging.get('total_open'))}건)"]
+                  (f"- **SLA 초과:** {'**있음**' if aging.get('sla_breached') else '없음'} "
+                   f"(미종결 {_md_cell(aging.get('total_open'))}건)")]
         lines += [f"- 기한 초과 `{_md_cell(o.get('break_id'))}` "
                   f"{_md_cell(o.get('severity'))} — 경과 {_md_cell(o.get('age_hours'))}h / "
                   f"기한 {_md_cell(o.get('sla_hours'))}h (초과 {_md_cell(o.get('overdue_hours'))}h)"
@@ -1208,7 +1211,7 @@ def _check_daily_report_produced():
     assert accrued["management_fee"] == "5479", accrued
     assert len(accrued["journals"]) == 1, accrued
     assert Decimal(rep["nav"]["change"]) == (
-        Decimal("700000") - Decimal("1050") - Decimal(accrued["management_fee"])
+        Decimal(700000) - Decimal(1050) - Decimal(accrued["management_fee"])
     ), (rep["nav"], accrued)
     # 그리고 미설명 손익은 여전히 0이다 - 보수가 비용에 잡히지 않으면 여기서 깨진다
     # 보수까지 비용에 잡히므로 잔차는 0이다. 이 값이 0이 아니면 어딘가의 비용이
@@ -1428,7 +1431,12 @@ def _check_break_aging_and_triage():
 def _check_close_memory_boundary():
     """마감 기억은 비공식이고 is_official 을 못 바꾼다."""
     sys.path.insert(0, str(_BASE))
-    from nav_close_memory import CloseMemoryError, close_memory_context, recall, remember
+    from nav_close_memory import (
+        CloseMemoryError,
+        close_memory_context,
+        recall,
+        remember,
+    )
 
     # 기억이 있든 없든 마감 산출의 is_official 은 False 다
     out = _run(chat=_stub())

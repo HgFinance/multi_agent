@@ -265,8 +265,9 @@ changing the QA approval API.
 ## Runtime modes
 
 - `off`: no evaluator and no feedback hint.
-- `shadow` (default): evaluate asynchronously and publish redacted findings to
-  `HgFinance-Evals`; no business behavior changes.
+- `shadow`: evaluate asynchronously and publish redacted findings to
+  `HgFinance-Evals`; no business behavior changes. It is opt-in because each
+  evaluation is another LangSmith run.
 - `active`: the CEO boundary may read only QA-approved and benchmark-passed
   bounded findings from the local ledger. The root carries the advice and the
   supervisor projects only the matching department item into that department's
@@ -275,6 +276,12 @@ changing the QA approval API.
 The active hint is never read from LangSmith on the CEO hot path. It is a
 short-lived local cache backed by the shared feedback ledger. A missing, locked,
 or malformed ledger returns no hint.
+
+Ordinary successful metric and nested callback events use deterministic
+`LANGSMITH_TRACE_SAMPLE_RATE` sampling (default `0.05`). Failure, error, and
+slow-execution events remain observable. The dispatcher publishes one
+canonical worker batch with aggregate tool metadata by default;
+`LANGSMITH_TOOL_TRACE_MODE=full` is reserved for short investigations.
 
 ## Backpressure and retention
 

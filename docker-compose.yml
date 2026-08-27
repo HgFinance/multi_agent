@@ -38,6 +38,10 @@ name: hedgefund
 x-langsmith-redaction: &langsmith-redaction
   LANGSMITH_HIDE_INPUTS: "true"
   LANGSMITH_HIDE_OUTPUTS: "true"
+  LANGSMITH_TRACE_SAMPLE_RATE: ${LANGSMITH_TRACE_SAMPLE_RATE:-0.05}
+  LANGCHAIN_TRACING_SAMPLING_RATE: ${LANGCHAIN_TRACING_SAMPLING_RATE:-0.05}
+  LANGSMITH_TRACE_SLOW_MS: ${LANGSMITH_TRACE_SLOW_MS:-45000}
+  LANGSMITH_RESEARCH_TRACE_MODE: ${LANGSMITH_RESEARCH_TRACE_MODE:-off}
 
 # Shared only by Risk processes that may execute the conditional compliance
 # worker. Keeping this mapping singular prevents the API and Hermes MCP bridge
@@ -199,7 +203,7 @@ services:
       # Feedback evaluation is background-only.  `shadow` publishes redacted
       # findings to Evals; only `active` permits QA-approved bounded hints to
       # reach a later CEO planning request.
-      LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-shadow}
+      LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-off}
       LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
       # The root deadline is carried into every new CEO workflow so the
       # supervisor can close stalled response planes deterministically.
@@ -730,7 +734,7 @@ services:
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
       LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
-      LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-shadow}
+      LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-off}
       LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
       # The feedback worker owns this SQLite volume. It also deletes only
       # resolved QA/review cards after seven days; pending cards remain.
@@ -1785,7 +1789,7 @@ services:
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
       LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
-      LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-shadow}
+      LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-off}
       LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
       REDIS_URL: redis://redis:6379/0
       RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
@@ -2215,7 +2219,7 @@ services:
       # Risk ordinary successful worker traces are sampled; errors, legal-Wiki
       # calls and slow executions remain 100% observable. The dispatcher is
       # the single canonical publisher for this policy.
-      LANGSMITH_RISK_TRACE_SAMPLE_RATE: ${LANGSMITH_RISK_TRACE_SAMPLE_RATE:-0.10}
+      LANGSMITH_RISK_TRACE_SAMPLE_RATE: ${LANGSMITH_RISK_TRACE_SAMPLE_RATE:-0.05}
       LANGSMITH_RISK_TRACE_SLOW_MS: ${LANGSMITH_RISK_TRACE_SLOW_MS:-45000}
       # ▶ 부서장 카드 span (2026-08-27). 여기가 **유일한** 계측 지점이다 -
       #   사용자 질의는 CEO 루트 카드만 만들고(apps/api/ceo.py), 거기서 갈라지는
@@ -2289,8 +2293,8 @@ services:
     container_name: hedgefund-ceo-kanban-supervisor
     restart: unless-stopped
     entrypoint: ["/usr/local/bin/ceo-supervisor-entrypoint"]
-    # The shared SQLite ledger is root:root 0660. Hermes still runs as its
-    # configured non-root uid, but needs root's group for the journal/WAL.
+    # The supervisor entrypoint assigns the D5-only SQLite ledger to runtime
+    # uid 1000 before upstream Hermes drops supplementary groups.
     group_add:
       - "0"
     logging:
@@ -2342,7 +2346,7 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
-      LANGSMITH_RISK_TRACE_SAMPLE_RATE: ${LANGSMITH_RISK_TRACE_SAMPLE_RATE:-0.10}
+      LANGSMITH_RISK_TRACE_SAMPLE_RATE: ${LANGSMITH_RISK_TRACE_SAMPLE_RATE:-0.05}
       LANGSMITH_RISK_TRACE_SLOW_MS: ${LANGSMITH_RISK_TRACE_SLOW_MS:-45000}
       # Hermes enforces SIGTERM -> SIGKILL for each worker task. The supervisor
       # also passes these values to primary/QA/synthesis cards and applies the

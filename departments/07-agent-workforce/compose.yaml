@@ -83,7 +83,7 @@ services:
       WORKFORCE_SNAPSHOT_HEALTH_PATH: /tmp/workforce-snapshot-writer.health
       # Langfuse 관측 창에 이상 신호가 있을 때만 HR 채널에 요약 카드를
       # 발행한다. shadow/off 는 카드와 승인 원장을 만들지 않는 안전한 기본값이다.
-      HR_LANGFUSE_REVIEW_MODE: ${HR_LANGFUSE_REVIEW_MODE:-${LANGSMITH_FEEDBACK_MODE:-shadow}}
+      HR_LANGFUSE_REVIEW_MODE: ${HR_LANGFUSE_REVIEW_MODE:-shadow}
       HR_LANGFUSE_CHANNEL_ID: ${HR_LANGFUSE_CHANNEL_ID:-1542405626531942432}
       DISCORD_BOT_TOKEN_HR: ${DISCORD_BOT_TOKEN_HR:-}
       LANGSMITH_FEEDBACK_LATENCY_WARN_MS: ${LANGSMITH_FEEDBACK_LATENCY_WARN_MS:-60000}
@@ -138,10 +138,14 @@ services:
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       LANGSMITH_HIDE_INPUTS: "true"
       LANGSMITH_HIDE_OUTPUTS: "true"
-      LANGSMITH_TRACING: ${HR_LANGSMITH_TRACING:-true}
+      LANGSMITH_TRACING: ${HR_LANGSMITH_TRACING:-false}
+      LANGCHAIN_TRACING_SAMPLING_RATE: ${LANGCHAIN_TRACING_SAMPLING_RATE:-0.05}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_TRACE_SAMPLE_RATE: ${LANGSMITH_TRACE_SAMPLE_RATE:-0.05}
+      LANGSMITH_TRACE_SLOW_MS: ${LANGSMITH_TRACE_SLOW_MS:-45000}
+      LANGSMITH_TOOL_TRACE_MODE: ${LANGSMITH_TOOL_TRACE_MODE:-aggregate}
       DISCORD_IDEMPOTENCY_HOME: /opt/kanban
       DISCORD_IDEMPOTENCY_SCOPE: global
       # Avoid repeated Discord command-management calls on worker restarts.
@@ -160,3 +164,6 @@ services:
     cpus: 1.0
     pids_limit: 256
     stop_grace_period: 20s
+
+volumes:
+  portfolio_runtime_data:

@@ -7,6 +7,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 RESEARCH_ROOT = Path(__file__).resolve().parents[2] / "departments" / "01-research"
@@ -22,16 +23,20 @@ for _name in tuple(sys.modules):
         sys.modules.pop(_name, None)
 sys.path.insert(0, _research_path)
 try:
-    from agents.article_reader import ArticleReader  # noqa: E402
-    from evidence.api_client import get_json  # noqa: E402
-    from evidence.bundle import _dedup_source_records, evidence_index  # noqa: E402
-    from evidence.cache import EvidenceCache, activate_cache, canonical_url  # noqa: E402
-    from evidence.handoff import (  # noqa: E402
+    from agents.article_reader import ArticleReader
+    from evidence.api_client import get_json
+    from evidence.bundle import _dedup_source_records, evidence_index
+    from evidence.cache import (
+        EvidenceCache,
+        activate_cache,
+        canonical_url,
+    )
+    from evidence.handoff import (
         build_evidence_handoff,
         reusable_evidence_refs,
     )
-    from evidence.llm_client import chat  # noqa: E402
-    from evidence.observability import (  # noqa: E402
+    from evidence.llm_client import chat
+    from evidence.observability import (
         ResearchRunMetrics,
         activate_metrics,
         redacted_span,
@@ -45,7 +50,7 @@ class _Response:
     def __init__(self, payload: object) -> None:
         self.payload = payload
 
-    def __enter__(self) -> _Response:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -91,31 +96,34 @@ class Phase0LatencyHygieneTest(unittest.TestCase):
         def fake_trace(name: str, **kwargs: object) -> FakeTrace:
             return FakeTrace(name, kwargs)
 
-        with patch.dict(
-            os.environ,
-            {
-                "LANGSMITH_TRACING": "true",
-                "LANGSMITH_API_KEY": "configured-but-not-recorded",
-                "LANGSMITH_PROJECT": "First",
-            },
-        ), patch("evidence.observability._langsmith_client", return_value=fake_client), patch(
-            "langsmith.trace", side_effect=fake_trace
-        ):
-            with redacted_span(
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "LANGSMITH_TRACING": "true",
+                    "LANGSMITH_API_KEY": "configured-but-not-recorded",
+                    "LANGSMITH_PROJECT": "First",
+                    "LANGSMITH_RESEARCH_TRACE_MODE": "full",
+                },
+            ),
+            patch("evidence.observability._langsmith_client", return_value=fake_client),
+            patch("langsmith.trace", side_effect=fake_trace),
+            redacted_span(
                 "research.department",
                 metadata={"department": "research", "task_id": "t-root"},
-            ):
-                with redacted_span(
-                    "research.llm.call",
-                    run_type="llm",
-                    metadata={
-                        "model": "qwen3:14b",
-                        "prompt": "do not send",
-                        "output": "do not send",
-                        "api_key": "do not send",
-                    },
-                ):
-                    pass
+            ),
+            redacted_span(
+                "research.llm.call",
+                run_type="llm",
+                metadata={
+                    "model": "qwen3:14b",
+                    "prompt": "do not send",
+                    "output": "do not send",
+                    "api_key": "do not send",
+                },
+            ),
+        ):
+            pass
 
         self.assertEqual(
             [record["name"] for record in records],
@@ -139,19 +147,17 @@ class Phase0LatencyHygieneTest(unittest.TestCase):
         ), patch(
             "evidence.observability._langsmith_client",
             side_effect=RuntimeError("client unavailable"),
-        ):
-            with redacted_span("research.department") as span:
-                self.assertIsNone(span)
-                self.assertEqual(2 + 2, 4)
+        ), redacted_span("research.department") as span:
+            self.assertIsNone(span)
+            self.assertEqual(2 + 2, 4)
 
     def test_tracing_disabled_preserves_workflow_body(self) -> None:
         with patch.dict(
             os.environ,
             {"LANGSMITH_TRACING": "false"},
-        ):
-            with redacted_span("research.department") as span:
-                self.assertIsNone(span)
-                self.assertEqual("unchanged", "unchanged")
+        ), redacted_span("research.department") as span:
+            self.assertIsNone(span)
+            self.assertEqual("unchanged", "unchanged")
 
     def test_same_api_url_fetches_once_and_hits_task_cache(self) -> None:
         calls: list[str] = []
@@ -289,12 +295,13 @@ class Phase0LatencyHygieneTest(unittest.TestCase):
     def test_llm_duration_and_generation_timestamps_are_recorded(self) -> None:
         metrics = ResearchRunMetrics(trace_id="trace-llm")
         response = _Response({"choices": [{"message": {"content": "{}"}}]})
-        with patch("evidence.llm_client.urllib.request.urlopen", return_value=response):
-            with activate_metrics(metrics):
-                self.assertEqual(
-                    chat("system", "user", base="http://ollama.test", model="model", timeout=1),
-                    "{}",
-                )
+        with patch(
+            "evidence.llm_client.urllib.request.urlopen", return_value=response
+        ), activate_metrics(metrics):
+            self.assertEqual(
+                chat("system", "user", base="http://ollama.test", model="model", timeout=1),
+                "{}",
+            )
         self.assertIsNotNone(metrics.generation_started_at)
         self.assertIsNotNone(metrics.generation_finished_at)
         self.assertGreaterEqual(metrics.llm_duration_ms, 0)
