@@ -462,6 +462,31 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         forwarded = ceo_query.call_args.args[0]
         self.assertEqual(forwarded.source, "discord")
 
+    def test_bff_forwards_the_shared_deterministic_route_to_ceo_boundary(self) -> None:
+        response = {"task_id": "t_deterministic_route", "status": "accepted"}
+        with (
+            patch.object(ceo_mirror_api, "post_question", return_value=None),
+            patch("apps.api.ceo.ceo_query", return_value=response) as ceo_query,
+        ):
+            actual = ceo_mirror_api._ceo_query(
+                CanonicalIngress(
+                    query="삼성전자 시장 위험을 분석해줘",
+                    request_id="request-deterministic-route",
+                    source="web",
+                    source_message_id="web:deterministic-route",
+                    actor_id="web-user",
+                )
+            )
+
+        self.assertIs(actual, response)
+        route = ceo_query.call_args.kwargs["deterministic_routing_plan"]
+        self.assertEqual(
+            route["selected_primary_profiles"],
+            ("research-department", "risk-management"),
+        )
+        self.assertEqual(route["producer"], "portfolio-bff-deterministic")
+        self.assertEqual(route["routing_basis"], "bounded_query_intent_router")
+
     def test_ceo_query_carries_previous_question_context_in_request(self) -> None:
         response = {"task_id": "t_context", "status": "planned", "binding": False}
         with (

@@ -11,23 +11,25 @@ research lab, CEO/Kanban, order, broker, or accounting paths.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 import re
 import tempfile
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 import httpx
-
 
 DISCORD_API = "https://discord.com/api/v10"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _MENTION_RE = re.compile(r"<@!?\d+>")
 _LOGGER = logging.getLogger("strategy-research-discord-notifier")
+_MAX_SENT_ENTRIES = 2048
 
 
 def _truthy(name: str, *, default: bool = False) -> bool:
@@ -235,7 +237,7 @@ def _primary_metrics(result: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]
         if isinstance(value, Mapping)
         and any(name in value for name in ("development", "validation", "out_of_sample", "full"))
     ]
-    return sorted(candidates, key=lambda item: item[0])[0] if candidates else None
+    return min(candidates, key=lambda item: item[0]) if candidates else None
 
 
 def _decision(events: list[dict[str, Any]], plan_id: str) -> str:
@@ -328,6 +330,43 @@ def _events(path: Path) -> list[dict[str, Any]]:
     return result
 
 
+def _file_signature(path: Path) -> str:
+    try:
+        stat = path.stat()
+    except OSError:
+        return "missing"
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _lab_signature(lab_path: Path) -> str:
+    """Fingerprint artifact metadata without rereading every report body."""
+
+    entries = [
+        ("request", _file_signature(lab_path / "request.json")),
+        ("events", _file_signature(lab_path / "events.jsonl")),
+        ("error", _file_signature(lab_path.parent.parent / "errors" / f"{lab_path.name}.json")),
+    ]
+    results_dir = lab_path / "results"
+    try:
+        result_paths = sorted(results_dir.glob("*.json"))
+    except OSError:
+        result_paths = []
+    entries.extend(
+        (f"result:{path.name}", _file_signature(path)) for path in result_paths
+    )
+    encoded = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _prune_sent(sent: dict[str, Any]) -> bool:
+    overflow = len(sent) - _MAX_SENT_ENTRIES
+    if overflow > 0:
+        for key in list(sent)[:overflow]:
+            sent.pop(key, None)
+        return True
+    return False
+
+
 class StrategyReportNotifier:
     def __init__(self, lab_root: Path, state_root: Path) -> None:
         self.lab_root = lab_root
@@ -343,6 +382,7 @@ class StrategyReportNotifier:
             sent = {}
             state["sent"] = sent
         sent[key] = _now()
+        _prune_sent(sent)
         _write_object(self.state_path, state)
 
     def _initialize_baseline(self, state: dict[str, Any]) -> None:
@@ -352,9 +392,19 @@ class StrategyReportNotifier:
         if not isinstance(sent, dict):
             sent = {}
             state["sent"] = sent
+        lab_signatures = state.setdefault("lab_signatures", {})
+        if not isinstance(lab_signatures, dict):
+            lab_signatures = {}
+            state["lab_signatures"] = lab_signatures
+        lab_counts = state.setdefault("lab_counts", {})
+        if not isinstance(lab_counts, dict):
+            lab_counts = {}
+            state["lab_counts"] = lab_counts
         for lab_path in sorted(
             path for path in (self.lab_root / "labs").iterdir() if path.is_dir()
         ):
+            lab_signatures[lab_path.name] = _lab_signature(lab_path)
+            lab_counts[lab_path.name] = 0
             request = _read_object(lab_path / "request.json")
             if not request or str(request.get("source") or "") != "discord":
                 continue
@@ -370,6 +420,7 @@ class StrategyReportNotifier:
                     for event in events
                 ):
                     sent.setdefault(f"{lab_path.name}:result:{plan_id}", _now())
+        _prune_sent(sent)
         state["initialized_at"] = _now()
         _write_object(self.state_path, state)
         _LOGGER.info("strategy-discord-report status=baseline_initialized")
@@ -381,6 +432,16 @@ class StrategyReportNotifier:
         token, configured_channel_id = configured
         state = self._state()
         sent = state.get("sent") if isinstance(state.get("sent"), dict) else {}
+        state["sent"] = sent
+        sent_pruned = _prune_sent(sent)
+        lab_signatures = state.get("lab_signatures")
+        if not isinstance(lab_signatures, dict):
+            lab_signatures = {}
+            state["lab_signatures"] = lab_signatures
+        lab_counts = state.get("lab_counts")
+        if not isinstance(lab_counts, dict):
+            lab_counts = {}
+            state["lab_counts"] = lab_counts
         labs_dir = self.lab_root / "labs"
         if not labs_dir.exists():
             return {"status": "READY", "scanned": 0, "posted": 0, "failed": 0}
@@ -389,9 +450,19 @@ class StrategyReportNotifier:
             return {"status": "BASELINE_INITIALIZED", "scanned": 0, "posted": 0, "failed": 0}
         scanned = posted = failed = 0
         recent_messages: list[dict[str, Any]] | None = None
+        current_lab_names: set[str] = set()
+        state_dirty = sent_pruned
         for lab_path in sorted(path for path in labs_dir.iterdir() if path.is_dir()):
+            current_lab_names.add(lab_path.name)
+            signature = _lab_signature(lab_path)
+            if lab_signatures.get(lab_path.name) == signature:
+                scanned += int(lab_counts.get(lab_path.name) or 0)
+                continue
             request = _read_object(lab_path / "request.json")
             if not request or str(request.get("source") or "") != "discord":
+                lab_signatures[lab_path.name] = signature
+                lab_counts[lab_path.name] = 0
+                state_dirty = True
                 continue
             correlation, recent_messages = _correlation(
                 request,
@@ -404,6 +475,8 @@ class StrategyReportNotifier:
             events = _events(lab_path / "events.jsonl")
             result_paths = sorted((lab_path / "results").glob("*.json"))
             decision_plan_ids: set[str] = set()
+            lab_scanned = 0
+            cycle_complete = True
             for result_path in result_paths:
                 result = _read_object(result_path)
                 if not result:
@@ -417,6 +490,7 @@ class StrategyReportNotifier:
                     continue
                 decision_plan_ids.add(plan_id)
                 scanned += 1
+                lab_scanned += 1
                 key = f"{lab_path.name}:result:{plan_id}"
                 if key in sent:
                     continue
@@ -431,6 +505,7 @@ class StrategyReportNotifier:
                         plan_id,
                     )
                 else:
+                    cycle_complete = False
                     failed += 1
             error = _read_object(self.lab_root / "errors" / f"{lab_path.name}.json")
             if error and not decision_plan_ids:
@@ -455,7 +530,20 @@ class StrategyReportNotifier:
                             str(error.get("phase") or "UNKNOWN"),
                         )
                     else:
+                        cycle_complete = False
                         failed += 1
+            if cycle_complete:
+                lab_signatures[lab_path.name] = signature
+                lab_counts[lab_path.name] = lab_scanned
+                state_dirty = True
+        stale_labs = set(lab_signatures) - current_lab_names
+        if stale_labs:
+            for lab_name in stale_labs:
+                lab_signatures.pop(lab_name, None)
+                lab_counts.pop(lab_name, None)
+            state_dirty = True
+        if state_dirty:
+            _write_object(self.state_path, state)
         return {"status": "READY", "scanned": scanned, "posted": posted, "failed": failed}
 
 
@@ -480,7 +568,7 @@ def main(argv: list[str] | None = None) -> int:
     while True:
         try:
             print(json.dumps(notifier.run_once(), ensure_ascii=False), flush=True)
-        except Exception:  # noqa: BLE001 - delivery must retry, not crash the service
+        except Exception:
             _LOGGER.exception("strategy-discord-report cycle failed")
         if not args.loop:
             return 0

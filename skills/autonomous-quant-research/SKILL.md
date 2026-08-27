@@ -53,7 +53,9 @@ a new strategy objective must receive a new identifier.
 
 Strategy Hermes receives a read-only LS REST credential boundary for one research turn. For
 market data use only `departments/01-research/autonomous/ls_market_data.py` and its allow-list:
-`t1665`, `t8410`, `t8411`, `t8412`, `t8451`, `t8452`, `t8453` on `/stock/chart`. Select the
+`t1665`, `t8410`, `t8411`, `t8412`, `t8451`, `t8452`, `t8453` on `/stock/chart`, plus the
+allow-listed market-ranking TRs `t1441`, `t1444`, `t1452`, `t1463`, `t1466`, `t1481`,
+`t1482`, `t1489`, and `t1492` on `/stock/high-item`. Select the
 integrated `t8451/t8452/t8453` family when KRX+NXT coverage is required; use the non-integrated
 family only when that distinction is part of the hypothesis. Query the smallest explicit symbol
 set and date range that can answer the preregistered question, and respect the one-request-per-

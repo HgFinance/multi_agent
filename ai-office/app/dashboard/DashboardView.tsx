@@ -12,6 +12,7 @@ import {
   type NotionReportDetail,
 } from "../lib/notionReportClient";
 import { CeoControlRoomChat } from "./CeoControlRoomChat";
+import ActiveOrdersPanel from "./ActiveOrdersPanel";
 import { MarketRankingCard } from "./MarketRankingCard";
 import { PanelBar } from "./PanelBar";
 import { TodayTradingSummaryCard } from "./TodayTradingSummaryCard";
@@ -326,6 +327,7 @@ export default function DashboardView() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-gutter items-start">
           <div className="flex min-w-0 flex-col gap-gutter">
             <CeoControlRoomChat />
+            <ActiveOrdersPanel />
             <TodayTradingSummaryCard />
             <MarketRankingCard />
           </div>

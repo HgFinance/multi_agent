@@ -18,8 +18,8 @@ from __future__ import annotations
 import json
 import os
 import sys
-from hashlib import sha256
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -29,8 +29,8 @@ from reporting import notion_rich_text_chunks
 
 from departments.notion_markdown import markdown_to_notion_blocks
 from departments.risk_notion_schema import RISK_PROPERTY_NAMES, risk_property_name
-from orchestration.adapters.notion_idempotency import NotionIdempotency
 from orchestration.adapters.notion_http import NotionHttpError, request_json
+from orchestration.adapters.notion_idempotency import NotionIdempotency
 from orchestration.adapters.notion_schema_cache import BoundedNotionSchemaCache
 
 _DEV_VARS = Path(__file__).resolve().parent.parent.parent / "ai-office" / ".dev.vars"
@@ -92,6 +92,52 @@ def _report_path(risk_request_id: object) -> Path:
     )
 
 
+def _manager_title(
+    order_intent: dict,
+    context: dict,
+    out: dict,
+) -> str:
+    """Build a stable, human-readable title without runtime identifiers.
+
+    The request hash remains the idempotency key; it must not be exposed in the
+    manager-facing title.  A point-in-time date keeps otherwise similar PAPER
+    cases distinguishable while remaining stable across retries.
+    """
+
+    instrument = str(
+        order_intent.get("instrument_name")
+        or order_intent.get("symbol")
+        or order_intent.get("ticker")
+        or ""
+    ).strip()
+    side = {
+        "BUY": "매수",
+        "SELL": "매도",
+    }.get(str(order_intent.get("side") or "").strip().upper(), "")
+    quantity = order_intent.get("quantity")
+    if instrument and side and quantity not in (None, ""):
+        subject = f"{instrument} {side} {quantity}주"
+    elif instrument and side:
+        subject = f"{instrument} {side} 검토"
+    elif instrument:
+        subject = f"{instrument} 리스크 검토"
+    else:
+        subject = "리스크 사례"
+
+    snapshot = context.get("snapshot")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    as_of = (
+        context.get("as_of")
+        or snapshot.get("as_of")
+        or out.get("created_at")
+        or datetime.now(timezone.utc).date().isoformat()
+    )
+    date_text = str(as_of).strip()[:10]
+    if len(date_text) == 10 and date_text[4] == "-" and date_text[7] == "-":
+        return f"리스크 심사 · {subject} · {date_text}"
+    return f"리스크 심사 · {subject}"
+
+
 def upload_case(
     order_intent: dict,
     context: dict,
@@ -131,6 +177,7 @@ def upload_case(
         return risk_property_name(field, properties_schema)
 
     cp = out.get("counterparty") or {}
+    title = _manager_title(order_intent, context, out)
     compliance_verdict = ((out.get("compliance") or {}).get("answer") or {}).get(
         "verdict"
     )
@@ -139,9 +186,7 @@ def upload_case(
         prop("title"): {
             "title": [
                 {
-                    "text": {
-                        "content": f"리스크 심사 · {out['risk_request_id']}"
-                    }
+                    "text": {"content": title}
                 }
             ]
         },
@@ -187,19 +232,24 @@ def upload_case(
                 f"**결정론적 MD 리포트 저장:** `{report_path}`\n\n{report_md}"
             )
             payload["children"] = markdown_to_notion_blocks(report_intro)
-        title = f"리스크 심사 · {out['risk_request_id']}"
         idempotency = NotionIdempotency(env, namespace="risk-reporter")
 
         def lookup():
+            input_hash = str(out.get("input_hash") or "").strip()
+            input_hash_property = prop("input_hash")
+            if input_hash and input_hash_property in properties_schema:
+                query_filter = {
+                    "property": input_hash_property,
+                    "rich_text": {"equals": input_hash},
+                }
+            else:
+                query_filter = {
+                    "property": prop("title"),
+                    "title": {"equals": title},
+                }
             query_status, query_body = _post(
                 f"databases/{db_id}/query",
-                {
-                    "filter": {
-                        "property": prop("title"),
-                        "title": {"equals": title},
-                    },
-                    "page_size": 1,
-                },
+                {"filter": query_filter, "page_size": 1},
                 token,
             )
             if query_status != 200:
@@ -292,6 +342,11 @@ def _check_payload_shape():
         assert captured["body"]["parent"]["database_id"] == "db1"
         assert captured["body"]["properties"]["리스크 판정"]["select"]["name"] == "approve"
         assert captured["body"]["properties"]["승인 수량"]["number"] == 100.0
+        title = captured["body"]["properties"]["제목"]["title"][0]["text"][
+            "content"
+        ]
+        assert title == "리스크 심사 · 리스크 사례"
+        assert "r1" not in title
         assert "법률·컴플라이언스 판정" not in captured["body"]["properties"]
     finally:
         globals()["_get"], globals()["_post"] = orig_get, orig_post

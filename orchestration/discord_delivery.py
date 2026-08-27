@@ -297,6 +297,15 @@ class DiscordFinalDelivery:
 
         return tuple(chunks)
 
+    @staticmethod
+    def _response_message_id(response: Any) -> str | None:
+        """Accept a Discord send only when it returns a durable message id."""
+
+        if not isinstance(response, Mapping):
+            return None
+        message_id = str(response.get("id") or "").strip()
+        return message_id or None
+
     def upsert_thread_card(
         self,
         *,
@@ -505,15 +514,22 @@ class DiscordFinalDelivery:
             )
             return "failed"
 
-        response_message_id = (
-            str(response.get("id") or "") if isinstance(response, Mapping) else ""
-        )
+        response_message_id = self._response_message_id(response)
+        if response_message_id is None:
+            store.mark_outbound(response_key, "FAILED", profile)
+            logger.error(
+                "discord-thread-card root=%s profile=%s status=failed "
+                "error=missing_message_id",
+                root_task_id,
+                profile,
+            )
+            return "failed"
 
         store.mark_outbound(
             response_key,
             "COMPLETED",
             profile,
-            response_message_id or None,
+            response_message_id,
         )
 
         logger.info(
@@ -704,15 +720,24 @@ class DiscordFinalDelivery:
                 )
                 return "failed"
 
-            response_message_id = (
-                str(response.get("id") or "") if isinstance(response, Mapping) else ""
-            )
+            response_message_id = self._response_message_id(response)
+            if response_message_id is None:
+                store.mark_outbound(response_key, "FAILED", profile)
+                logger.error(
+                    "discord-detail-thread root=%s profile=%s "
+                    "chunk=%d/%d status=failed error=missing_message_id",
+                    root_task_id,
+                    profile,
+                    index,
+                    total,
+                )
+                return "failed"
 
             store.mark_outbound(
                 response_key,
                 "COMPLETED",
                 profile,
-                response_message_id or None,
+                response_message_id,
             )
 
         logger.info(
@@ -861,11 +886,17 @@ class DiscordFinalDelivery:
             )
             return "failed"
 
-        response_message_id = (
-            str(response.get("id") or "") if isinstance(response, Mapping) else ""
-        )
+        response_message_id = self._response_message_id(response)
+        if response_message_id is None:
+            store.mark_outbound(response_key, "FAILED", profile)
+            logger.error(
+                "discord-final-delivery root=%s status=failed "
+                "error=missing_message_id",
+                root_task_id,
+            )
+            return "failed"
         store.mark_outbound(
-            response_key, "COMPLETED", profile, response_message_id or None
+            response_key, "COMPLETED", profile, response_message_id
         )
         logger.info(
             "discord-final-delivery root=%s channel_id=%s message_id=%s status=sent",

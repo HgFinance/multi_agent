@@ -204,6 +204,48 @@ MARKET_RANKINGS: dict[str, dict[str, Any]] = {
             }
         },
     },
+    "market_cap": {
+        "tr_cd": "t1444",
+        "label": "시가총액 상위",
+        "metric_label": "시가총액",
+        "out_block": "t1444OutBlock1",
+        "payload": {"t1444InBlock": {"upcode": "001", "idx": 0}},
+    },
+    "volume_surge": {
+        "tr_cd": "t1466",
+        "label": "전일 동시간 대비 거래급증",
+        "metric_label": "거래급증률",
+        "out_block": "t1466OutBlock1",
+        "payload": {"t1466InBlock": {"gubun": "0", "type1": "0", "type2": "0", "jc_num": 0, "sprice": 0, "eprice": 0, "volume": 0, "idx": 0, "jc_num2": 0, "exchgubun": "0"}},
+    },
+    "after_hours_change": {
+        "tr_cd": "t1481",
+        "label": "시간외 등락률 상위",
+        "metric_label": "등락률",
+        "out_block": "t1481OutBlock1",
+        "payload": {"t1481InBlock": {"gubun1": "0", "gubun2": "0", "jongchk": "0", "volume": "0", "idx": 0}},
+    },
+    "after_hours_volume": {
+        "tr_cd": "t1482",
+        "label": "시간외 거래량 상위",
+        "metric_label": "거래량",
+        "out_block": "t1482OutBlock1",
+        "payload": {"t1482InBlock": {"sort_gbn": 1, "gubun": "0", "jongchk": "0", "idx": 0}},
+    },
+    "expected_volume": {
+        "tr_cd": "t1489",
+        "label": "예상 체결량 상위",
+        "metric_label": "예상거래량",
+        "out_block": "t1489OutBlock1",
+        "payload": {"t1489InBlock": {"gubun": "0", "jgubun": "0", "jongchk": "0", "idx": 0, "yesprice": 0, "yeeprice": 0, "yevolume": 0}},
+    },
+    "single_price_change": {
+        "tr_cd": "t1492",
+        "label": "단일가 예상 등락률 상위",
+        "metric_label": "예상 등락률",
+        "out_block": "t1492OutBlock1",
+        "payload": {"t1492InBlock": {"gubun1": "0", "gubun2": "0", "jongchk": "0", "volume": "0", "idx": 0}},
+    },
 }
 
 # 브로커 TR → 도메인 어휘. **이 표가 LS가 새어 나가는 마지막 지점이다.**
@@ -279,7 +321,7 @@ def _number(value: Any) -> str | None:
 def normalize_market_ranking(
     payload: dict[str, Any], ranking: str, limit: int = MARKET_RANKING_LIMIT
 ) -> dict[str, Any]:
-    """t1441/t1452/t1463 응답을 화면용 상위 종목 목록으로 줄인다."""
+    """허용된 시장 순위 TR 응답을 화면용 상위 종목 목록으로 줄인다."""
     definition = MARKET_RANKINGS.get(ranking)
     if definition is None:
         raise ValueError(f"지원하지 않는 시장 순위 종류입니다: {ranking}")
@@ -301,6 +343,9 @@ def normalize_market_ranking(
                 "change_rate": _number(row.get("diff")),
                 "volume": _number(row.get("volume")),
                 "amount": _number(_pick(row, "value", "trade_amt")),
+                "market_cap": _number(row.get("total")),
+                "expected_volume": _number(row.get("yevolume")),
+                "volume_surge_rate": _number(row.get("voldiff")),
             }
         )
     return {
@@ -2539,7 +2584,7 @@ async def market_rankings(kind: str = "volume") -> dict[str, Any]:
             "(ENABLE_LS_MARKET_DATA=true 로 엽니다).",
         )
     if kind not in MARKET_RANKINGS:
-        raise HTTPException(400, "kind는 volume, change, amount 중 하나여야 합니다.")
+        raise HTTPException(400, "지원하지 않는 시장 순위 종류입니다.")
     try:
         ranking = await _load_market_ranking(kind)
     except Exception as exc:  # noqa: BLE001 - 화면에서 조회 실패와 빈 결과를 구분한다

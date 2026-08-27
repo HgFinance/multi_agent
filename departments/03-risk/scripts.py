@@ -1069,6 +1069,242 @@ def run_risk_department(
     return result
 
 
+_REPORT_AGENT_LABELS = {
+    "risk-supervisor": "리스크 총괄 Hermes",
+    "risk-runner": "결정론적 리스크 검사 담당",
+    "compliance-policy-worker": "법률·정책 근거 담당 작업자",
+    "compliance-policy-agent": "법률·컴플라이언스 담당",
+    "market-liquidity-risk-agent": "시장·유동성 위험 담당",
+    "pre-trade-risk-analyst": "사전 거래 위험 담당",
+    "operational-counterparty-risk-agent": "거래상대방·브로커 위험 담당",
+    "derivatives-margin-risk-agent": "파생상품·증거금 위험 담당",
+}
+
+_REPORT_TOOL_LABELS = {
+    "risk.case.check": "리스크 사례 점검",
+    "risk.compliance.check": "법률·컴플라이언스 점검",
+    "risk.trading_state.read": "거래 상태 확인",
+    "risk.trading_state.record.read": "거래상대방 상태 확인",
+    "case.read": "사례 조회",
+}
+
+_REPORT_EVALUATION_LABELS = {
+    "verdict": "판정 후보",
+    "deterministic_check_count": "결정론적 검사 수",
+    "passed_check_count": "통과한 검사 수",
+    "failed_check_count": "실패한 검사 수",
+    "fallback_count": "안전 기본값 적용 횟수",
+    "escalated": "사람 검토 요청",
+    "notion_upload_ok": "Notion 기록 성공 여부",
+    "report_markdown_chars": "보고서 분량(문자 수)",
+    "langsmith_enabled": "LangSmith 연결 여부",
+}
+
+_REPORT_CHECK_LABELS = {
+    "data_freshness": "자료 최신성",
+    "market_tradable": "시장 거래 가능 여부",
+    "mandate": "투자지침",
+    "restricted_list": "거래 제한 목록",
+    "notional_bounds": "주문 금액 한도",
+    "buying_power": "매수 여력",
+    "concentration": "포트폴리오 집중도",
+    "turnover": "거래량·회전율",
+    "trading_state": "거래 상태",
+    "counterparty_health": "거래상대방 상태",
+}
+
+_REPORT_STAGE_LABELS = {
+    "pipeline": "리스크 파이프라인",
+    "trading_state": "거래 상태 확인",
+    "pre_trade_check": "사전 거래 점검",
+    "compliance": "법률·컴플라이언스 점검",
+    "supervisor": "리스크 총괄 판단",
+}
+
+
+def _report_agent_label(value: object) -> str:
+    raw = str(value or "").strip()
+    return _REPORT_AGENT_LABELS.get(raw, raw or "미확인 담당")
+
+
+def _report_tool_label(value: object) -> str:
+    raw = str(value or "").strip()
+    return _REPORT_TOOL_LABELS.get(raw, raw or "없음")
+
+
+def _report_check_label(value: object) -> str:
+    raw = str(value or "").strip()
+    return _REPORT_CHECK_LABELS.get(raw, raw or "미확인 점검")
+
+
+def _report_worker_status(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    return {
+        "success": "완료",
+        "done": "완료",
+        "failed": "실패",
+        "error": "오류",
+        "skipped": "미실행",
+    }.get(raw, raw or "미확인")
+
+
+def _report_stage_label(value: object) -> str:
+    raw = str(value or "").strip()
+    return _REPORT_STAGE_LABELS.get(raw, raw or "미확인 단계")
+
+
+def _report_error_label(value: object) -> str:
+    raw = str(value or "").strip()
+    return {
+        "RuntimeError": "실행 오류",
+        "TimeoutError": "시간 초과",
+        "ValidationError": "입력값 검증 오류",
+    }.get(raw, raw or "오류 미확인")
+
+
+def _report_bool(value: object, *, none_label: str = "—") -> str:
+    if value is None:
+        return none_label
+    return "예" if bool(value) else "아니오"
+
+
+def _report_verdict(value: object) -> str:
+    return {
+        "approve": "승인 후보",
+        "resize": "수량 조정 후보",
+        "reject": "거부 후보",
+    }.get(str(value or "").strip().lower(), str(value or "미확인"))
+
+
+def _report_status(value: object) -> str:
+    return {
+        "FINAL": "확정",
+        "DEGRADED": "의존성 저하",
+        "INCONCLUSIVE": "확정 불가(추가 확인 필요)",
+    }.get(str(value or "").strip().upper(), str(value or "미확인"))
+
+
+def _report_origin(value: object) -> str:
+    return {
+        "DETERMINISTIC_RISK_ENGINE": "결정론적 리스크 엔진",
+        "DEGRADED_RISK_ENGINE": "결정론적 리스크 엔진(의존성 저하)",
+        "FALLBACK": "안전 기본값 적용(리스크 엔진 미실행)",
+    }.get(str(value or "").strip().upper(), str(value or "미확인"))
+
+
+def _report_safe_action(value: object) -> str:
+    return {
+        "HOLD": "거래 보류",
+        "RESIZE": "수량 조정",
+        "NOT_REQUIRED": "추가 조치 없음",
+        "ESCALATE": "사람 검토로 전달",
+    }.get(str(value or "").strip().upper(), str(value or "미확인"))
+
+
+def _report_order_summary(order_intent: dict) -> str:
+    side = {
+        "BUY": "매수",
+        "SELL": "매도",
+    }.get(str(order_intent.get("side") or "").strip().upper(), "")
+    quantity = order_intent.get("quantity")
+    instrument = str(
+        order_intent.get("instrument_name")
+        or order_intent.get("symbol")
+        or order_intent.get("instrument_id")
+        or ""
+    ).strip()
+    fund = str(order_intent.get("fund_name") or order_intent.get("fund_id") or "").strip()
+    if not any((side, quantity not in (None, ""), instrument, fund)):
+        return "주문 정보 없음(입력 자료 미제공)"
+    parts = [
+        value
+        for value in (
+            side,
+            f"수량 {quantity}" if quantity not in (None, "") else "",
+            instrument,
+            f"운용 계정 {fund}" if fund else "",
+        )
+        if value
+    ]
+    return " · ".join(parts)
+
+
+def _report_narrative(value: object) -> str:
+    """Keep fallback diagnostics readable without hiding their evidence."""
+
+    rendered = str(value or "").strip()
+    rendered = rendered.replace("Risk pipeline Agent", "리스크 파이프라인")
+    rendered = rendered.replace("Risk pipeline", "리스크 파이프라인")
+    rendered = rendered.replace("Risk Engine", "결정론적 리스크 엔진")
+    rendered = rendered.replace("리스크 파이프라인를", "리스크 파이프라인을")
+    rendered = rendered.replace("비바인딩 fallback", "구속력 없는 안전 기본값")
+    rendered = rendered.replace("HOLD/수동 검토", "거래 보류·사람 검토")
+    rendered = re.sub(
+        r"\(node=(?P<node>[^,]+), error=(?P<error>[^,]+), fingerprint=(?P<fp>[^)]+)\)",
+        r"(실패 위치: \g<node> · 오류 유형: \g<error> · 추적 지문: \g<fp>)",
+        rendered,
+    )
+    rendered = rendered.replace("pre_trade_check", "사전 거래 점검")
+    rendered = rendered.replace("RuntimeError", "실행 오류")
+    rendered = rendered.replace("ValidationError", "입력값 검증 오류")
+    rendered = rendered.replace("error=", "오류=")
+    return rendered
+
+
+def _report_error_message(value: object) -> str:
+    """Summarize dependency errors for a manager without losing the cause."""
+
+    rendered = str(value or "").strip()
+    rendered = re.sub(
+        r"\d+ validation errors for OrderIntent",
+        "주문 입력값 검증 실패",
+        rendered,
+    )
+    rendered = rendered.replace("Field required", "필수 값 누락")
+    rendered = rendered.replace("input_value={}", "입력값 없음")
+    rendered = rendered.replace("input_type=dict", "입력 형식 오류")
+    rendered = rendered.replace("trade_case_id", "거래 사례 ID")
+    rendered = rendered.replace("fund_id", "운용 계정 ID")
+    rendered = rendered.replace("instrument_id", "종목·상품 ID")
+    rendered = rendered.replace("OrderIntent", "주문 정보")
+    rendered = re.sub(r"\s*For further information visit.*", "", rendered)
+    rendered = re.sub(r"\s*\[type=[^\]]+\]", "", rendered)
+    return re.sub(r"\s+", " ", rendered).strip()[:600]
+
+
+def _report_metric_value(key: str, value: object) -> str:
+    if key == "verdict":
+        return _report_verdict(value)
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return _report_bool(value)
+    return json_cell(value)
+
+
+def _report_compliance_answer(value: object) -> str:
+    if not isinstance(value, dict):
+        return str(value or "검토 결과 없음")
+    verdict = {
+        "no_breach": "현재 입력만으로 위반을 확인하지 못함",
+        "breach": "위반 가능성 있음",
+        "ambiguous": "판단 보류",
+    }.get(str(value.get("verdict") or "").strip().lower(), value.get("verdict"))
+    rows = []
+    if verdict:
+        rows.append(f"판정: {verdict}")
+    rationale = str(value.get("rationale") or "").strip()
+    if rationale:
+        rows.append(f"근거 요약: {rationale}")
+    cited = value.get("cited_documents") or []
+    if isinstance(cited, (list, tuple)) and cited:
+        rows.append("확인 문서: " + ", ".join(str(item) for item in cited))
+    confidence = value.get("confidence")
+    if confidence not in (None, ""):
+        rows.append(f"신뢰도: {confidence}")
+    return "<br>".join(rows) or "검토 결과 없음"
+
+
 def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
     """out(run_risk_department 반환값)을 그대로 옮겨 적는 순수 함수 - LLM이 리포트 구조나
     내용을 창작하지 않는다(QA 패턴, departments/06-ai-qa-audit/scripts.py 동일)."""
@@ -1076,103 +1312,111 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
     compliance = out.get("compliance")
     decision_origin = out.get("decision_origin", "DETERMINISTIC_RISK_ENGINE")
     engine_label = {
-        "DETERMINISTIC_RISK_ENGINE": "departments/03-risk/engine/risk_engine.py",
-        "DEGRADED_RISK_ENGINE": "departments/03-risk/engine/risk_engine.py (degraded dependency)",
-    }.get(decision_origin, "fallback boundary (Risk Engine not executed)")
+        "DETERMINISTIC_RISK_ENGINE": "결정론적 리스크 엔진",
+        "DEGRADED_RISK_ENGINE": "결정론적 리스크 엔진(의존성 저하)",
+    }.get(decision_origin, "안전 기본값 경계(리스크 엔진 미실행)")
 
     lines = [
-        "# 리스크본부 — Case 심사 보고서 (결정론적 생성, LLM 자유 서술 아님)",
+        "# 리스크본부 — 사례 심사 보고서",
+        "> 결정론적 검사 결과를 기준으로 작성된 비바인딩 검토 문서입니다.",
         "",
         "| 항목 | 값 |",
         "|---|---|",
-        f"| **risk_request_id** | `{out['risk_request_id']}` |",
-        f"| **판정 후보 (verdict)** | **{out['verdict']}** |",
-        f"| **판정 상태** | **{md_cell(out.get('decision_status', 'FINAL'))}** |",
-        f"| **판정 출처** | {md_cell(out.get('decision_origin', 'DETERMINISTIC_RISK_ENGINE'))} |",
-        f"| **안전 조치** | {md_cell(out.get('safe_action') or 'NOT_REQUIRED')} |",
-        f"| **Risk 검사 실행** | {md_cell(out.get('risk_checks_executed', bool(checks)))} |",
-        f"| **승인 수량** | {out['approved_quantity']} |",
-        f"| **판정 엔진** | {engine_label} (`{out['calculation_version']}`) |",
-        f"| **input_hash** | `{out['input_hash']}` (같은 OrderIntent·Context면 재현 가능) |",
-        f"| **trading_state** | {md_cell(out['trading_state'])} |",
-        (
-            f"| **주문** | {md_cell(order_intent.get('side'))} {md_cell(order_intent.get('quantity'))} x "
-            f"{md_cell(order_intent.get('instrument_id'))} (fund {md_cell(order_intent.get('fund_id'))}) |"
-        ),
-        f"| **escalate** | {md_cell(out['escalate'])} |",
-        f"| **생성** | {PIPELINE_VERSION}, {datetime.now(timezone.utc).isoformat()} |",
+        f"| **심사 요청 번호** | `{md_cell(out.get('risk_request_id'))}` |",
+        f"| **판정 후보** | **{md_cell(_report_verdict(out.get('verdict')))}** |",
+        f"| **판정 상태** | **{md_cell(_report_status(out.get('decision_status', 'FINAL')))}** |",
+        f"| **판정 출처** | {md_cell(_report_origin(out.get('decision_origin', 'DETERMINISTIC_RISK_ENGINE')))} |",
+        f"| **안전 조치** | {md_cell(_report_safe_action(out.get('safe_action') or 'NOT_REQUIRED'))} |",
+        f"| **리스크 검사 실행 여부** | {md_cell(_report_bool(out.get('risk_checks_executed', bool(checks))))} |",
+        f"| **승인 수량** | {md_cell(out.get('approved_quantity'))} |",
+        f"| **판정 엔진** | {engine_label} · 로직 버전 `{md_cell(out.get('calculation_version'))}` |",
+        f"| **재현 확인용 입력 해시** | `{md_cell(out.get('input_hash'))}` |",
+        f"| **거래 상태** | {md_cell({'HALTED': '거래 중지', 'ENABLED': '거래 가능', 'REDUCE_ONLY': '축소 거래만 가능'}.get(str(out.get('trading_state') or '').upper(), str(out.get('trading_state') or '미확인')))} |",
+        f"| **주문 정보** | {md_cell(_report_order_summary(order_intent))} |",
+        f"| **사람 검토 필요** | {md_cell(_report_bool(out.get('escalate')))} |",
+        f"| **생성 시각** | 리스크 파이프라인 v1 · {datetime.now(timezone.utc).isoformat()} |",
         "",
         "---",
         "",
-        "## Pre-trade 검사 결과",
+        "## 사전 거래 위험 점검",
         "",
-        "| Check | 통과 | 상세 |",
+        "| 점검 항목 | 통과 여부 | 상세 내용 |",
         "|---|---|---|",
     ]
     lines += [
-        f"| {md_cell(c.get('name'))} | {md_cell(c.get('passed'))} | {md_cell(c.get('detail'))} |"
+        f"| {md_cell(_report_check_label(c.get('name')))} | "
+        f"{md_cell(_report_bool(c.get('passed')))} | {md_cell(c.get('detail'))} |"
         for c in checks
     ]
     if not checks:
-        lines.append("| — | — | (check_results 없음) |")
+        lines.append("| — | — | 결정론적 검사를 실행하지 못했습니다. 파이프라인 오류 원인을 확인하세요. |")
 
     lines += [
         "",
-        "## Counterparty / Broker 점검 (operational-counterparty-risk-agent)",
+        "## 거래상대방·브로커 점검",
         "",
     ]
     counterparty = out.get("counterparty")
     if counterparty:
         lines += [
             md_cell(counterparty.get("counterparty_narrative")),
-            f"(escalate: {md_cell(counterparty.get('escalate'))})",
+            f"사람 검토 필요: {md_cell(_report_bool(counterparty.get('escalate')))}",
         ]
     else:
-        lines.append("counterparty_health 미플래그 - 조건부 노드 미호출")
+        lines.append("확인 대상 없음 — 조건부 거래상대방 점검 단계는 실행되지 않았습니다.")
 
     lines += [
         "",
-        "## Reason Codes",
+        "## 판정 사유",
         "",
-        ", ".join(f"`{r}`" for r in out["reason_codes"])
-        if out["reason_codes"]
+        ", ".join(
+            md_cell(
+                {
+                    "pipeline_fallback": "리스크 파이프라인 오류로 안전 기본값 적용",
+                    "trading_state_blocked": "거래 상태가 중지되어 주문 차단",
+                }.get(str(r), str(r))
+            )
+            for r in out.get("reason_codes", [])
+        )
+        if out.get("reason_codes")
         else "없음",
         "",
-        "## Compliance (compliance-policy-agent, Agentic RAG)",
+        "## 법률·컴플라이언스 검토",
         "",
     ]
     if compliance:
         lines += [
-            "| 필드 | 값 |",
+            "| 확인 항목 | 내용 |",
             "|---|---|",
-            f"| grounded | {md_cell(compliance.get('grounded'))} |",
-            f"| attempts | {md_cell(compliance.get('attempts'))} |",
-            f"| answer | {json_cell(compliance.get('answer'))} |",
+            f"| 근거 확인 여부 | {md_cell(_report_bool(compliance.get('grounded')))} |",
+            f"| 확인 시도 횟수 | {md_cell(compliance.get('attempts'))} |",
+            f"| 검토 결과 | {md_cell(_report_compliance_answer(compliance.get('answer')))} |",
             "",
         ]
         docs = compliance.get("relevant_documents") or []
         if docs:
-            lines += ["| 참조 문서 | version | score |", "|---|---|---|"]
+            lines += ["| 확인 문서 | 문서 버전 | 관련도 |", "|---|---|---|"]
             lines += [
-                f"| {md_cell(d.get('title'))} (`{md_cell(d.get('document_id'))}`) | "
+                f"| {md_cell(d.get('title') or d.get('document_id'))} | "
                 f"{md_cell(d.get('version'))} | {md_cell(d.get('score'))} |"
                 for d in docs
             ]
     else:
-        lines.append("REJECT 조기 종료 - compliance_check 생략됨")
+        lines.append("파이프라인이 중단되어 법률·컴플라이언스 검토를 실행하지 않았습니다. 사람 검토가 필요합니다.")
 
     lines += [
         "",
-        "## 종합 서술 (risk-supervisor, Hermes)",
+        "## 종합 판단 (리스크 Hermes)",
         "",
-        md_cell(out["narrative"]),
+        md_cell(_report_narrative(out.get("narrative"))),
     ]
 
     evaluation = out.get("evaluation") or {}
     if evaluation:
         lines += ["", "## 평가 지표", "", "| 지표 | 값 |", "|---|---|"]
         lines += [
-            f"| {md_cell(key)} | {json_cell(value)} |"
+            f"| {md_cell(_REPORT_EVALUATION_LABELS.get(key, key))} | "
+            f"{md_cell(_report_metric_value(key, value))} |"
             for key, value in evaluation.items()
         ]
 
@@ -1180,99 +1424,110 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
     if observability:
         lines += [
             "",
-            "## LangSmith / HR 관측성 전달",
+            "## LangSmith 추적·감사 기록",
             "",
-            "| 필드 | 값 |",
+            "| 확인 항목 | 내용 |",
             "|---|---|",
-            f"| trace_id | `{md_cell(observability.get('trace_id'))}` |",
-            f"| LangSmith | {json_cell(observability.get('langsmith'))} |",
+            f"| 추적 식별자 | `{md_cell(observability.get('trace_id'))}` |",
         ]
+        langsmith = observability.get("langsmith") or {}
+        if isinstance(langsmith, dict):
+            lines += [
+                f"| 연결 상태 | {md_cell('연결됨' if langsmith.get('enabled') else '연결되지 않음')} |",
+                f"| 프로젝트 | {md_cell(langsmith.get('project'))} |",
+                f"| 실행 기록 | {md_cell(langsmith.get('run_id'))} |",
+                f"| 전달 상태 | {md_cell({'configured': '설정됨', 'not_configured': '설정되지 않음'}.get(str(langsmith.get('handoff_status')), str(langsmith.get('handoff_status') or '미확인')))} |",
+            ]
+        else:
+            lines.append(f"| LangSmith 전달 정보 | {json_cell(langsmith)} |")
 
     agent_execution = out.get("agent_execution") or {}
     if agent_execution:
-        lines += ["", "## Agent 실행 매니페스트", "", "| 구분 | Agent |", "|---|---|"]
+        lines += ["", "## 담당 Agent 실행 현황", "", "| 구분 | 담당 역할 |", "|---|---|"]
         lines += [
-            f"| 실행 | {md_cell(agent)} |"
+            f"| 실행 | {md_cell(_report_agent_label(agent))} |"
             for agent in agent_execution.get("executed", [])
         ]
         lines += [
-            f"| 실패 | {md_cell(agent)} |"
+            f"| 실패 | {md_cell(_report_agent_label(agent))} |"
             for agent in agent_execution.get("failed", [])
         ]
         lines += [
-            f"| 미실행/조건부 | {md_cell(agent)} |"
+            f"| 미실행/조건부 | {md_cell(_report_agent_label(agent))} |"
             for agent in agent_execution.get("not_executed", [])
         ]
         worker_execution = out.get("employee_workers") or {}
         if worker_execution:
             lines += [
                 "",
-                "### LangGraph Employee Workers",
+                "### 보조 작업자 실행 현황",
                 "",
-                "| Worker | 상태 | 도구 |",
+                "| 담당 작업자 | 상태 | 사용 도구 |",
                 "|---|---|---|",
             ]
             lines += [
-                f"| `{md_cell(item.get('worker_id'))}` | {md_cell(item.get('status'))} | "
-                f"{md_cell(', '.join(item.get('tools') or []))} |"
+                f"| {md_cell(_report_agent_label(item.get('worker_id')))} | {md_cell(_report_worker_status(item.get('status')))} | "
+                f"{md_cell(', '.join(_report_tool_label(tool) for tool in item.get('tools') or []))} |"
                 for item in worker_execution.get("workers", [])
             ]
             lines += [
-                f"- executor: `{md_cell((worker_execution.get('runtime') or {}).get('executor'))}`",
-                f"- model: `{md_cell((worker_execution.get('runtime') or {}).get('model'))}`",
+                f"- 실행기: `{md_cell((worker_execution.get('runtime') or {}).get('executor'))}`",
+                f"- 모델: `{md_cell((worker_execution.get('runtime') or {}).get('model'))}`",
             ]
         runtime = out.get("hermes_runtime") or {}
         if runtime:
             lines += [
                 "",
-                "### Hermes Runtime",
+                "### Hermes 실행 정보",
                 "",
-                f"- profile: `{md_cell(runtime.get('profile'))}`",
-                f"- provider/model: `{md_cell(runtime.get('provider'))}` / `{md_cell(runtime.get('model'))}`",
-                f"- runtime config matches source: `{md_cell(runtime.get('runtime_config_matches_source'))}`",
-                f"- supervisor call: `{md_cell(out.get('supervisor_call_status'))}`",
-                f"- skills: `{md_cell(runtime.get('skill_file_count'))}`; memory files: `{md_cell(runtime.get('memory_file_count'))}`",
+                f"- 운영 프로필: `{md_cell(runtime.get('profile'))}`",
+                f"- 제공 방식·모델: `{md_cell(runtime.get('provider'))}` / `{md_cell(runtime.get('model'))}`",
+                f"- 설정 일치 여부: `{md_cell(_report_bool(runtime.get('runtime_config_matches_source')) )}`",
+                f"- 총괄 호출 상태: `{md_cell(out.get('supervisor_call_status'))}`",
+                f"- 등록 기술 수: `{md_cell(runtime.get('skill_file_count'))}` · 메모리 파일 수: `{md_cell(runtime.get('memory_file_count'))}`",
             ]
 
     fallbacks = out.get("fallbacks") or []
     if fallbacks:
         fallback_note = (
-            "> `reject`는 Risk Engine이 실행되지 않은 비바인딩 fallback 후보입니다. "
-            "거래 조치는 HOLD이며 수동 검토가 필요합니다."
+            "> 리스크 엔진이 실행되지 않아 거부 후보만 안전 기본값으로 기록했습니다. "
+            "거래는 보류되며 사람 검토가 필요합니다."
             if decision_origin == "FALLBACK"
-            else "> 의존성 fallback이 기록되었습니다. Risk Engine은 fail-closed로 실행됐으며, "
-            "정상 승인 경로로 해석하지 말고 안전 조치를 우선합니다."
+            else "> 의존성 문제가 기록되었습니다. 리스크 엔진은 안전하게 차단 방향으로 처리했으며, "
+            "정상 승인으로 해석하지 말고 안전 조치를 우선해야 합니다."
         )
         lines += [
             "",
-            "## Fallback / Escalation",
+            "## 안전 기본값 적용 및 추가 검토",
             "",
             fallback_note,
             "",
-            "| 단계 | 노드 | 오류 | 메시지 | 조치 |",
+            "| 처리 단계 | 확인 위치 | 오류 유형 | 오류 내용 | 후속 조치 |",
             "|---|---|---|---|---|",
         ]
         lines += [
-            f"| {md_cell(item.get('stage'))} | {md_cell(item.get('node'))} | "
-            f"{md_cell(item.get('error'))} | {md_cell(item.get('error_message'))} | "
-            f"{md_cell(item.get('action'))} |"
+            f"| {md_cell(_report_stage_label(item.get('stage')))} | "
+            f"{md_cell(_report_stage_label(item.get('node')))} | "
+            f"{md_cell(_report_error_label(item.get('error')))} | "
+            f"{md_cell(_report_error_message(item.get('error_message')))} | "
+            f"{md_cell(_report_safe_action(item.get('action')))} |"
             for item in fallbacks
         ]
 
     notion = out.get("notion_upload")
     if notion is not None:
-        lines += ["", "## Notion 업로드 (Reporter Node)", ""]
+        lines += ["", "## Notion 기록", ""]
         lines.append(
             f"업로드 성공: {notion['url']}"
             if notion.get("ok")
-            else f"업로드 생략/실패: {notion.get('reason') or notion.get('error')}"
+            else f"기록 생략/실패: {notion.get('reason') or notion.get('error')}"
         )
 
     lines += [
         "",
         "---",
-        "> 이 문서는 risk_engine.py의 결정론적 판정과 스키마 검증된 LLM 서술을 Python이 그대로",
-        "> 옮긴 것이다 - LLM이 이 파일의 형식이나 내용을 자유롭게 창작하지 않았다.",
+        "> 이 문서는 결정론적 리스크 엔진 판정과 검증된 설명을 시스템이 그대로 기록한 것입니다.",
+        "> LLM은 판정과 거래 실행을 결정하지 않으며, 실제 주문은 발생하지 않았습니다.",
     ]
     return "\n".join(lines)
 
@@ -1502,9 +1757,7 @@ def _check_notion_report_node():
     assert result["notion_upload"] == {"ok": True, "url": "https://notion.so/fake"}
     assert result["report_markdown"]
     assert captured["out"]["risk_request_id"] == "r1"
-    assert (
-        "risk_request_id" in captured["report_md"]
-    )  # _render_report_md 가 실제로 불렸는지
+    assert "심사 요청 번호" in captured["report_md"]  # _render_report_md 호출 확인
     print("  Notion Reporter 노드        OK")
 
 

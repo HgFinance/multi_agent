@@ -31,6 +31,63 @@ _PROJECT_ID_CACHE: dict[str, tuple[float, str]] = {}
 _PROJECT_ID_CACHE_LOCK = threading.Lock()
 
 
+def _http_status_code(error: BaseException) -> int | None:
+    """Extract an HTTP status without importing a transport-specific client."""
+
+    current: BaseException | None = error
+    visited: set[int] = set()
+    for _ in range(3):
+        if current is None or id(current) in visited:
+            return None
+        visited.add(id(current))
+        for candidate in (
+            getattr(current, "status_code", None),
+            getattr(current, "status", None),
+            getattr(getattr(current, "response", None), "status_code", None),
+        ):
+            try:
+                if candidate is not None:
+                    return int(candidate)
+            except (TypeError, ValueError):
+                continue
+        next_error = current.__cause__ or current.__context__
+        current = next_error if isinstance(next_error, BaseException) else None
+    return None
+
+
+def _is_sdk_transport_compatibility_error(error: BaseException) -> bool:
+    """Allow REST fallback only for known pre-response SDK incompatibilities.
+
+    A server response, authentication failure, validation error, timeout, or
+    socket failure may already have reached LangSmith. Retrying it through a
+    second client can duplicate the request and doubles query latency. The
+    fallback exists only for the deployed SDK's pre-response async adapter
+    failures (httpx/anyio/paginator shape problems).
+    """
+
+    if _http_status_code(error) is not None:
+        return False
+    if isinstance(error, (OSError, TimeoutError, ConnectionError)):
+        return False
+    if isinstance(error, (TypeError, AttributeError, NotImplementedError)):
+        return True
+    if not isinstance(error, RuntimeError):
+        return False
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "async",
+            "anyio",
+            "httpx",
+            "paginator",
+            "transport",
+            "coroutine",
+            "event loop",
+        )
+    )
+
+
 def _cache_key(client: Any, project_name: str) -> str:
     # The endpoint is non-secret and prevents a long-lived process that talks
     # to more than one workspace from reusing the wrong UUID.
@@ -74,11 +131,14 @@ async def _resolve_project_id(client: Any, project_name: str) -> str:
         raise RuntimeError("langsmith_sdk_missing_aread_project")
     try:
         project = await reader(project_name=name)
-    except Exception:
+    except Exception as exc:
         # langsmith 0.11.x can load a workspace through the synchronous
         # client while its generated async transport fails under some
         # httpx2/anyio combinations. Project listing is not a run-query path;
         # use it only to resolve the UUID and keep the v2 query boundary below.
+        if not _is_sdk_transport_compatibility_error(exc):
+            raise
+
         def _read_sync() -> Any:
             projects = list(client.list_projects(name=name, limit=1))
             return projects[0] if projects else None
@@ -216,10 +276,12 @@ async def _query_runs_async(
             if len(results) >= max(1, int(max_results)):
                 break
         return results
-    except Exception:
+    except Exception as exc:
         # Some deployed langsmith/httpx2 combinations fail before an HTTP
         # request is made. The fallback is still exactly /api/v2/runs/query;
         # it never falls back to a retired SDK compatibility path.
+        if not _is_sdk_transport_compatibility_error(exc):
+            raise
         return await asyncio.to_thread(
             _direct_v2_query,
             client,

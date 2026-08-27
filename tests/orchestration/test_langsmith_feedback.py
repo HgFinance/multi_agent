@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import orchestration.qa_feedback_benchmarks as qa_benchmarks
 from orchestration.ceo_workflow_scope import (
     approved_feedback_section_from_root,
     build_root_body,
@@ -530,6 +531,68 @@ def test_privacy_safe_runner_executes_registered_code_fix_suite(tmp_path) -> Non
     candidate = ledger.approved_hints(None, limit=3, max_chars=1200)
     assert candidate is not None
     assert "LATENCY_ABOVE_THRESHOLD" in candidate["items"][0]["finding_codes"]
+
+
+def test_benchmark_suite_exception_isolated_from_sibling_suite(monkeypatch) -> None:
+    calls = []
+
+    def broken_suite():
+        calls.append("broken")
+        raise RuntimeError("must not escape")
+
+    def healthy_suite():
+        calls.append("healthy")
+        return {"suite": "wrong-name", "passed": True}
+
+    monkeypatch.setitem(qa_benchmarks._SUITES, "BROKEN_SUITE", broken_suite)
+    monkeypatch.setitem(qa_benchmarks._SUITES, "HEALTHY_SUITE", healthy_suite)
+
+    ok, _report_ref, summary = qa_benchmarks._run_candidate(
+        {
+            "artifact_id": "feedback-isolated-suite",
+            "improvement_type": "CODE_FIX",
+            "finding_codes": ["BROKEN_SUITE", "HEALTHY_SUITE"],
+        }
+    )
+
+    assert ok is False
+    assert calls == ["broken", "healthy"]
+    assert "BROKEN_SUITE:suite_exception" in summary
+
+
+def test_benchmark_candidate_exception_does_not_stop_later_candidates(monkeypatch) -> None:
+    class FakeLedger:
+        def __init__(self):
+            self.candidates = [
+                {"artifact_id": "feedback-bad", "benchmark_status": "PENDING", "improvement_type": "CODE_FIX"},
+                {"artifact_id": "feedback-good", "benchmark_status": "PENDING", "improvement_type": "CODE_FIX"},
+            ]
+            self.updated = []
+
+        def benchmark_candidates(self, _limit):
+            return self.candidates
+
+        def update_benchmark(self, artifact_id, **kwargs):
+            self.updated.append((artifact_id, kwargs["status"]))
+            return True
+
+    def fail_once(candidate):
+        if candidate["artifact_id"] == "feedback-bad":
+            raise RuntimeError("must not escape")
+        return True, "sha256:good", "passed"
+
+    ledger = FakeLedger()
+    monkeypatch.setattr(qa_benchmarks, "_run_candidate", fail_once)
+
+    assert run_pending_feedback_benchmarks(ledger) == {
+        "passed": 1,
+        "failed": 1,
+        "skipped": 0,
+    }
+    assert ledger.updated == [
+        ("feedback-bad", "FAILED"),
+        ("feedback-good", "PASSED"),
+    ]
 
 
 def test_pass_or_no_action_cannot_enter_approved_feedback(tmp_path) -> None:

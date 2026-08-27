@@ -166,6 +166,8 @@ services:
       PORTFOLIO_AUTH_MODE: fixture
       PORTFOLIO_LIVE_MODE: broker
       PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: "${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}"
+      CEO_BFF_DETERMINISTIC_ROUTING_ENABLED: ${CEO_BFF_DETERMINISTIC_ROUTING_ENABLED:-true}
+      CEO_BFF_ANALYSIS_MODE: ${CEO_BFF_ANALYSIS_MODE:-standard_analysis}
       # Closed-network local PAPER runtime. This uses the fixed demo identity
       # and the isolated order logins above; it does not add user login/Auth.
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
@@ -1487,7 +1489,7 @@ services:
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
       LS_DATA_ACCESS_MODE: readonly
-      LS_ALLOWED_TR_CODES: t1665,t8410,t8411,t8412,t8451,t8452,t8453
+      LS_ALLOWED_TR_CODES: t1665,t8410,t8411,t8412,t8451,t8452,t8453,t1441,t1444,t1452,t1463,t1466,t1481,t1482,t1489,t1492
       STRATEGY_MARKET_DATA_PARENT: /tmp/strategy-market-data
       STRATEGY_MARKET_DATA_DIR: /tmp/strategy-market-data
       LS_TOKEN_CACHE_DIR: /tmp/strategy-market-data/token-cache
@@ -1495,6 +1497,7 @@ services:
       # a manual wake-up. The supervisor still enforces a 30-second floor.
       AUTONOMOUS_RESEARCH_INTERVAL_MIN: ${AUTONOMOUS_RESEARCH_INTERVAL_MIN:-0.5}
       AUTONOMOUS_RESEARCH_TIMEOUT_SECONDS: ${AUTONOMOUS_RESEARCH_TIMEOUT_SECONDS:-1800}
+      AUTONOMOUS_RESEARCH_MAX_CONCURRENCY: ${AUTONOMOUS_RESEARCH_MAX_CONCURRENCY:-2}
       AUTONOMOUS_RESEARCH_MAX_AGENT_ATTEMPTS: ${AUTONOMOUS_RESEARCH_MAX_AGENT_ATTEMPTS:-3}
       <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
@@ -1951,7 +1954,7 @@ services:
       HERMES_BIN: /opt/hgfinance/scripts/qa_hermes_worker.py
       # QA terminal work is evidence-bound and must finish within the
       # dispatcher lease; retain high reasoning but cap runaway tool loops.
-      HGFINANCE_QA_AUDIT_MAX_TURNS: ${HGFINANCE_QA_AUDIT_MAX_TURNS:-16}
+      HGFINANCE_QA_AUDIT_MAX_TURNS: ${HGFINANCE_QA_AUDIT_MAX_TURNS:-8}
       HGFINANCE_QA_AUDIT_REASONING: ${HGFINANCE_QA_AUDIT_REASONING:-high}
       # Primary QA handoffs use a separate short budget and Kanban completion
       # only; detailed evidence remains in the asynchronous post-response QA.
@@ -2183,9 +2186,13 @@ services:
       # Fast user-facing control-plane tasks only; standard analysis and
       # experiments keep profile budgets. The wrapper preserves explicit
       # per-task overrides and clamps these defaults to bounded ranges.
-      HGFINANCE_FAST_ADVISORY_MAX_TURNS: ${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-12}
+      HGFINANCE_FAST_ADVISORY_MAX_TURNS: ${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-8}
       HGFINANCE_USER_RESPONSE_MAX_TURNS: ${HGFINANCE_USER_RESPONSE_MAX_TURNS:-12}
       HGFINANCE_USER_RESPONSE_REASONING: ${HGFINANCE_USER_RESPONSE_REASONING:-medium}
+      # Post-response QA is already evidence-bound and asynchronous. Keep a
+      # short hard ceiling so an audit loop cannot consume the worker lease.
+      HGFINANCE_QA_AUDIT_MAX_TURNS: ${HGFINANCE_QA_AUDIT_MAX_TURNS:-8}
+      HGFINANCE_QA_AUDIT_REASONING: ${HGFINANCE_QA_AUDIT_REASONING:-high}
       # Hermes enforces SIGTERM -> SIGKILL at the task boundary. One retry is
       # enough for a transient provider/worker failure; the supervisor's
       # 1200-second workflow deadline handles the aggregate response budget.
@@ -2396,9 +2403,9 @@ services:
       LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
       LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
       LANGSMITH_RETENTION_ENABLED: ${LANGSMITH_RETENTION_ENABLED:-true}
-      # This cleanup request is scoped to First. `default` and other named
+      # Clean the three named application projects. `default` and other named
       # projects remain untouched unless an operator explicitly opts in.
-      LANGSMITH_RETENTION_SCOPES: ${LANGSMITH_RETENTION_SCOPES:-workflow}
+      LANGSMITH_RETENTION_SCOPES: ${LANGSMITH_RETENTION_SCOPES:-workflow,metrics,evals}
       LANGSMITH_RETENTION_DRY_RUN: ${LANGSMITH_RETENTION_DRY_RUN:-false}
       LANGSMITH_RETENTION_WORKFLOW_DAYS: ${LANGSMITH_RETENTION_WORKFLOW_DAYS:-30}
       LANGSMITH_RETENTION_METRICS_DAYS: ${LANGSMITH_RETENTION_METRICS_DAYS:-7}

@@ -31,15 +31,18 @@ REAL_HERMES = (
     os.environ.get("HGFINANCE_QA_REAL_HERMES") or "/opt/hermes/.venv/bin/hermes"
 ).strip()
 QA_PROFILE = "qa-department"
+HR_PROFILE = "hr-department"
 RISK_PROFILE = "risk-management"
+RESEARCH_PROFILE = "research-department"
 QUANT_PROFILE = "quant-backtest-department"
 QUANT_LIAISON_PROFILE = "quant-liaison"
 RISK_USER_PRIMARY_TOOLSETS = "kanban,risk-legal"
+RESEARCH_FAST_ADVISORY_TOOLSETS = "kanban,research"
 QUANT_FAST_ADVISORY_TOOLSETS = "kanban,ls-securities"
 QUANT_LIAISON_FAST_ADVISORY_TOOLSETS = "kanban,research"
 _TASK_ID_RE = re.compile(r"\bt_[A-Za-z0-9_-]+\b")
 FAST_ADVISORY_MODE = "analysis_mode=fast_advisory"
-DEFAULT_FAST_ADVISORY_MAX_TURNS = 12
+DEFAULT_FAST_ADVISORY_MAX_TURNS = 8
 MIN_FAST_ADVISORY_MAX_TURNS = 8
 MAX_FAST_ADVISORY_MAX_TURNS = 64
 DEFAULT_QA_PRIMARY_MAX_TURNS = 6
@@ -50,12 +53,17 @@ DEFAULT_USER_RESPONSE_MAX_TURNS = 12
 MIN_USER_RESPONSE_MAX_TURNS = 8
 MAX_USER_RESPONSE_MAX_TURNS = 32
 DEFAULT_USER_RESPONSE_REASONING = "medium"
-DEFAULT_QA_AUDIT_MAX_TURNS = 16
+DEFAULT_QA_AUDIT_MAX_TURNS = 8
 MIN_QA_AUDIT_MAX_TURNS = 8
 MAX_QA_AUDIT_MAX_TURNS = 32
 DEFAULT_QA_AUDIT_REASONING = "high"
 QA_AUDIT_TOOLSETS = "kanban"
 QA_PRIMARY_TOOLSETS = "kanban"
+HR_E2E_TOOLSETS = "kanban,terminal"
+DEFAULT_HR_E2E_MAX_TURNS = 6
+MIN_HR_E2E_MAX_TURNS = 4
+MAX_HR_E2E_MAX_TURNS = 12
+DEFAULT_HR_E2E_REASONING = "low"
 _REASONING_LEVELS = frozenset(
     {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
@@ -246,8 +254,50 @@ def _qa_audit_reasoning() -> str:
     return configured if configured in _REASONING_LEVELS else DEFAULT_QA_AUDIT_REASONING
 
 
+def _hr_e2e_max_turns() -> int:
+    """Return a bounded budget for the exact HR read-only E2E contract."""
+
+    raw = os.environ.get(
+        "HGFINANCE_HR_E2E_MAX_TURNS",
+        str(DEFAULT_HR_E2E_MAX_TURNS),
+    ).strip()
+    try:
+        configured = int(raw)
+    except ValueError:
+        configured = DEFAULT_HR_E2E_MAX_TURNS
+    return min(MAX_HR_E2E_MAX_TURNS, max(MIN_HR_E2E_MAX_TURNS, configured))
+
+
+def _hr_e2e_reasoning() -> str:
+    configured = os.environ.get(
+        "HGFINANCE_HR_E2E_REASONING", DEFAULT_HR_E2E_REASONING
+    ).strip().casefold()
+    return configured if configured in _REASONING_LEVELS else DEFAULT_HR_E2E_REASONING
+
+
+def _is_hr_e2e_body(body: str, *, profile: str) -> bool:
+    """Recognize only the CEO-created HR E2E card, not generic HR work."""
+
+    if profile != HR_PROFILE:
+        return False
+    normalized = str(body or "").casefold()
+    return all(
+        marker in normalized
+        for marker in (
+            "workflow_role=primary",
+            "origin=user-query",
+            "paper read-only",
+            "workforce api get 3개",
+            "/workforce/v1",
+        )
+    )
+
+
 def _response_task_kind(body: str, *, profile: str = "") -> str | None:
     """Classify only bounded tasks on the user-facing response plane."""
+
+    if _is_hr_e2e_body(body, profile=profile):
+        return "hr_e2e_readonly"
 
     # Every dispatcher-owned Risk worker is a bounded advisory boundary.  A
     # manually-created card may omit the CEO workflow markers, but it must not
@@ -307,6 +357,16 @@ def _bounded_worker_argv(
     args = list(argv)
     body = _task_body(db_path, task_id)
     task_kind = _response_task_kind(body, profile=profile)
+    # Standard Quant user requests are also on the bounded response plane.
+    # They do not carry the fast-advisory marker, so classify them explicitly;
+    # otherwise the dispatcher falls through with its broad default toolset.
+    quant_user_primary = (
+        profile in {QUANT_PROFILE, QUANT_LIAISON_PROFILE}
+        and "workflow_role=primary" in body
+        and "origin=user-query" in body
+    )
+    if task_kind is None and quant_user_primary:
+        task_kind = "quant_user_primary"
     if task_kind is None:
         return args
     try:
@@ -335,6 +395,8 @@ def _bounded_worker_argv(
                 str(
                     _fast_advisory_max_turns()
                     if task_kind == "fast_advisory"
+                    else _hr_e2e_max_turns()
+                    if task_kind == "hr_e2e_readonly"
                     else _qa_primary_max_turns()
                     if task_kind == "qa_primary"
                     else _qa_audit_max_turns()
@@ -347,14 +409,45 @@ def _bounded_worker_argv(
         additions.extend(
             [
                 "--reasoning",
-                _qa_primary_reasoning()
+                _hr_e2e_reasoning()
+                if task_kind == "hr_e2e_readonly"
+                else _qa_primary_reasoning()
                 if task_kind == "qa_primary"
                 else _qa_audit_reasoning()
                 if task_kind == "qa_audit"
                 else _user_response_reasoning(),
             ]
         )
-    if task_kind == "fast_advisory" and profile in {
+    if task_kind == "hr_e2e_readonly":
+        # HR's verification card already defines the exact three GETs. Keep
+        # only the terminal handoff and read-only terminal tool available so
+        # Hermes cannot spend turns scanning skills/files or opening unrelated
+        # connectors before executing the evidence helper.
+        allowed_toolsets = HR_E2E_TOOLSETS
+        if toolsets_index is None:
+            additions.extend(["--toolsets", allowed_toolsets])
+        else:
+            option = args[toolsets_index]
+            if option in {"-t", "--toolsets"} and toolsets_index + 1 < len(args):
+                args[toolsets_index + 1] = allowed_toolsets
+            elif option.startswith("--toolsets="):
+                args[toolsets_index] = f"--toolsets={allowed_toolsets}"
+    elif task_kind == "fast_advisory" and profile == RESEARCH_PROFILE:
+        # Research fast-advisory work needs the read-only Research MCP edge and
+        # the Kanban terminal handoff. Leaving the global tool surface open
+        # lets tool discovery select unrelated browser/paper/secondary-MCP
+        # paths, which adds LLM turns without adding evidence to this bounded
+        # memo. The profile's own MCP allowlist remains authoritative.
+        allowed_toolsets = RESEARCH_FAST_ADVISORY_TOOLSETS
+        if toolsets_index is None:
+            additions.extend(["--toolsets", allowed_toolsets])
+        else:
+            option = args[toolsets_index]
+            if option in {"-t", "--toolsets"} and toolsets_index + 1 < len(args):
+                args[toolsets_index + 1] = allowed_toolsets
+            elif option.startswith("--toolsets="):
+                args[toolsets_index] = f"--toolsets={allowed_toolsets}"
+    elif task_kind in {"fast_advisory", "quant_user_primary"} and profile in {
         QUANT_PROFILE,
         QUANT_LIAISON_PROFILE,
     }:
@@ -406,13 +499,47 @@ def _bounded_worker_argv(
             args[toolsets_index + 1] = RISK_USER_PRIMARY_TOOLSETS
         elif option.startswith("--toolsets="):
             args[toolsets_index] = f"--toolsets={RISK_USER_PRIMARY_TOOLSETS}"
-    if not additions:
-        return args
-    return [
-        *args[: chat_index + 1],
-        *additions,
-        *args[chat_index + 1 :],
-    ]
+    bounded = (
+        args
+        if not additions
+        else [
+            *args[: chat_index + 1],
+            *additions,
+            *args[chat_index + 1 :],
+        ]
+    )
+    if task_kind == "hr_e2e_readonly":
+        return _hr_e2e_worker_argv(bounded)
+    return bounded
+
+
+def _hr_e2e_worker_argv(argv: Sequence[str]) -> list[str]:
+    """Replace HR E2E free-form planning with one bounded evidence pass."""
+
+    prompt = (
+        "Perform exactly one HR PAPER/read-only E2E verification using the "
+        "repository helper below. Do not inspect Kanban tasks, skills, files, "
+        "web, code, or other connectors, and do not delegate. Run this command "
+        "exactly once: python3 "
+        "/app/repo/departments/07-agent-workforce/scripts/hr_e2e_readonly.py "
+        "--output hr_e2e_evidence.json. The helper performs exactly three "
+        "approved Workforce API GET requests and writes bounded evidence. "
+        "After the command, call kanban_complete exactly once with a structured "
+        "summary, result, error, block_reason, and final_answer. Include the "
+        "helper's bounded status/latency/failure/retry/duplicate summary and "
+        "artifact hash, but never include raw response bodies or secrets. Do not "
+        "submit orders, change investments, edit ledgers, change permissions, "
+        "write to external systems, or change configuration."
+    )
+    args = list(argv)
+    for index, arg in enumerate(args):
+        if arg in {"-q", "--query"} and index + 1 < len(args):
+            args[index + 1] = prompt
+            return args
+        if arg.startswith("--query="):
+            args[index] = f"--query={prompt}"
+            return args
+    return [*args, "--query", prompt]
 
 
 def _qa_audit_worker_argv(

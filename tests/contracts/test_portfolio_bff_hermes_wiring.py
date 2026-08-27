@@ -70,6 +70,10 @@ def test_ceo_gateway_exposes_only_authenticated_internal_api() -> None:
         "CEO_INGRESS_ALERT_COOLDOWN_SECONDS: "
         "${CEO_INGRESS_ALERT_COOLDOWN_SECONDS:-60}"
     ) in ceo
+    assert (
+        "HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY: "
+        "${HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY:-8}"
+    ) in ceo
     assert "ports:" not in ceo
 
 
@@ -87,6 +91,10 @@ def test_trading_gateway_uses_the_same_authenticated_paper_ingress() -> None:
         "CEO_DISCORD_INGRESS_API_KEY: "
         "${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}"
     ) in trading
+    assert (
+        "HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY: "
+        "${HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY:-8}"
+    ) in trading
 
 
 def test_example_environment_declares_private_discord_ingress_contract() -> None:
@@ -94,6 +102,7 @@ def test_example_environment_declares_private_discord_ingress_contract() -> None
 
     assert "CEO_DISCORD_INGRESS_API_KEY=" in example
     assert "CEO_INGRESS_ALERT_WEBHOOK_URL=" in example
+    assert "HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY=8" in example
     assert "DISCORD_ACTOR_MAP=" in example
 
 

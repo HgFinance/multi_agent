@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import urllib.error
-import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from departments.notion_markdown import markdown_to_notion_blocks
+from orchestration.adapters.notion_http import NotionHttpError, request_json
 from orchestration.adapters.notion_idempotency import (
     NotionIdempotency,
     NotionIdempotencyError,
@@ -72,82 +71,32 @@ class _NotionHttpTransport:
     def __init__(self, token: str) -> None:
         self.token = token
 
-    def _post(self, path: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
-        request = urllib.request.Request(
-            f"https://api.notion.com/v1/{path}",
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Notion-Version": self.version,
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                decoded = json.loads(response.read())
-        except urllib.error.HTTPError as exc:
-            try:
-                detail = json.loads(exc.read())
-            except (TypeError, ValueError):
-                detail = str(exc)
-            raise NotionProjectionError(str(detail), status=exc.code) from exc
-        except (OSError, ValueError) as exc:
-            raise NotionProjectionError(str(exc)) from exc
-        if not isinstance(decoded, Mapping):
-            raise NotionProjectionError("Notion returned a non-object response")
-        return decoded
+            return request_json(
+                method,
+                path,
+                self.token,
+                body=body,
+                version=self.version,
+            )
+        except NotionHttpError as exc:
+            detail = exc.detail if exc.detail is not None else str(exc)
+            raise NotionProjectionError(str(detail), status=exc.status) from exc
+
+    def _post(self, path: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self._request("POST", path, body)
 
     def _patch(self, path: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
-        request = urllib.request.Request(
-            f"https://api.notion.com/v1/{path}",
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Notion-Version": self.version,
-                "Content-Type": "application/json",
-            },
-            method="PATCH",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                decoded = json.loads(response.read())
-        except urllib.error.HTTPError as exc:
-            try:
-                detail = json.loads(exc.read())
-            except (TypeError, ValueError):
-                detail = str(exc)
-            raise NotionProjectionError(str(detail), status=exc.code) from exc
-        except (OSError, ValueError) as exc:
-            raise NotionProjectionError(str(exc)) from exc
-        if not isinstance(decoded, Mapping):
-            raise NotionProjectionError("Notion returned a non-object response")
-        return decoded
+        return self._request("PATCH", path, body)
 
     def database_schema(self, database_id: str) -> Mapping[str, Any]:
-        request = urllib.request.Request(
-            f"https://api.notion.com/v1/databases/{database_id}",
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Notion-Version": self.version,
-                "Content-Type": "application/json",
-            },
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                decoded = json.loads(response.read())
-        except urllib.error.HTTPError as exc:
-            try:
-                detail = json.loads(exc.read())
-            except (TypeError, ValueError):
-                detail = str(exc)
-            raise NotionProjectionError(str(detail), status=exc.code) from exc
-        except (OSError, ValueError) as exc:
-            raise NotionProjectionError(str(exc)) from exc
-        if not isinstance(decoded, Mapping):
-            raise NotionProjectionError("Notion database response was not an object")
-        return decoded
+        return self._request("GET", f"databases/{database_id}")
 
     def query_projection(
         self, database_id: str, projection_key: str

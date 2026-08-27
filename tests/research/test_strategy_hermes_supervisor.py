@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import sys
+import threading
+import time
 from argparse import Namespace
 from pathlib import Path
-import sys
-
 
 AUTONOMOUS_DIR = Path(__file__).resolve().parents[2] / "departments/01-research/autonomous"
 if str(AUTONOMOUS_DIR) not in sys.path:
     sys.path.insert(0, str(AUTONOMOUS_DIR))
 
-from autonomous_research_ingress import ResearchIntake  # noqa: E402
-import strategy_hermes_supervisor as supervisor  # noqa: E402
+import strategy_hermes_supervisor as supervisor
+from autonomous_research_ingress import ResearchIntake
 
 
 def _args(root: Path, *, retry_blocked: bool = False) -> Namespace:
@@ -19,6 +20,7 @@ def _args(root: Path, *, retry_blocked: bool = False) -> Namespace:
         repo_root=root,
         interval_min=0.5,
         timeout_seconds=30,
+        max_concurrency=2,
         request_id=None,
         retry_blocked=retry_blocked,
     )
@@ -66,3 +68,44 @@ def test_blocked_retry_requires_an_explicit_operator_flag(tmp_path: Path, monkey
     report = supervisor.run_once(_args(root, retry_blocked=True))
 
     assert report["labs"] == [{"lab_id": "research-02", "status": "RETRIED"}]
+
+
+def test_independent_active_labs_execute_concurrently_in_stable_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "research"
+    intake = ResearchIntake(root)
+    for request_id in ("research-03", "research-04"):
+        intake.submit(
+            {
+                "request_id": request_id,
+                "goal": f"Find strategy {request_id}",
+                "source": "web",
+            }
+        )
+        intake.materialize(request_id, repo_root=tmp_path)
+
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def fake_run(_args, lab_path):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.08)
+        with lock:
+            active -= 1
+        return {"lab_id": lab_path.name, "status": "CYCLE_COMPLETED"}
+
+    monkeypatch.setattr(supervisor, "_run_lab", fake_run)
+
+    report = supervisor.run_once(_args(root))
+
+    assert max_active == 2
+    assert [lab["lab_id"] for lab in report["labs"]] == [
+        "research-03",
+        "research-04",
+    ]
+    assert report["execution"]["max_concurrency"] == 2

@@ -1,8 +1,10 @@
 """CEO Office query boundary and closed-loop Kanban workflow APIs.
 
-`/ui/ceo/ask` creates only the CEO root task.  The CEO Supervisor owns
-planning, department-task creation, QA, and final synthesis.  All read paths
-use the normalized Kanban reader; the BFF never opens Hermes' database.
+`/ui/ceo/ask` creates only the CEO root task.  The BFF may attach the shared
+deterministic department route to that root; the CEO Supervisor then
+materializes the already-selected department tasks, owns QA, and performs
+final synthesis.  All read paths use the normalized Kanban reader; the BFF
+never opens Hermes' database.
 """
 
 from __future__ import annotations
@@ -1535,9 +1537,12 @@ def _route_compound_user_paper_order(
         "task_id": str(immediate_response.get("task_id") or ""),
         "task": immediate_response.get("task") or {},
         "status": "planned",
+        # The trigger was hard-coded to one example price, so every compound
+        # order was reported back as "265,000원 초과" no matter what the user
+        # actually asked for (2026-08-27).  Describe the rule that was stored.
         "answer": (
             "PAPER 매수 주문을 기존 Trading 경로로 접수했습니다. 매수 수량이 전량 "
-            "체결된 뒤 기존 조건주문 worker가 265,000원 초과 시 매도 규칙을 "
+            f"체결된 뒤 기존 조건주문 worker가 {plan.conditional_instruction} 규칙을 "
             "자동 활성화합니다. 부분체결·실패 시 조건주문은 활성화하지 않습니다."
         ),
         "planning": {
@@ -2011,6 +2016,7 @@ def ceo_query(
     discord_message_id: str | None = None,
     discord_guild_id: str | None = None,
     discord_thread_id: str | None = None,
+    deterministic_routing_plan: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Create the CEO root task; supervisor execution remains asynchronous.
 
@@ -2131,6 +2137,16 @@ def ceo_query(
         )
 
     workflow_mode = infer_workflow_mode(req.query)
+    # The BFF may have already supplied the bounded deterministic route.  The
+    # special read-only E2E lanes retain their existing CEO-owned handling;
+    # they must not inherit a generic research/risk fallback from free text.
+    bff_routing_plan = (
+        deterministic_routing_plan
+        if workflow_mode == "analysis"
+        and not read_only_hr_e2e
+        and not read_only_risk_e2e
+        else None
+    )
     d5_bank = ExperienceBank.from_env()
     d5_lookup = None
     if d5_bank.enabled:
@@ -2213,6 +2229,36 @@ def ceo_query(
                 approved_feedback_hint=approved_feedback,
                 include_accounting_advisory=(
                     not read_only_hr_e2e and not read_only_risk_e2e
+                ),
+                producer=(
+                    str(bff_routing_plan.get("producer") or "")
+                    if bff_routing_plan
+                    else None
+                ),
+                selected_primary_profiles=(
+                    bff_routing_plan.get("selected_primary_profiles")
+                    if bff_routing_plan
+                    else None
+                ),
+                delegation_instructions=(
+                    bff_routing_plan.get("delegation_instructions")
+                    if bff_routing_plan
+                    else None
+                ),
+                analysis_mode=(
+                    str(bff_routing_plan.get("analysis_mode") or "")
+                    if bff_routing_plan
+                    else None
+                ),
+                routing_basis=(
+                    str(bff_routing_plan.get("routing_basis") or "")
+                    if bff_routing_plan
+                    else None
+                ),
+                routing_category=(
+                    str(bff_routing_plan.get("category") or "")
+                    if bff_routing_plan
+                    else None
                 ),
             ),
             idempotency_key=req.request_id,

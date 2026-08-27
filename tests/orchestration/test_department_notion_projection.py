@@ -3,8 +3,10 @@ import pytest
 from orchestration.adapters.department_notion_projection import (
     DepartmentNotionProjection,
     DepartmentNotionProjectionError,
+    _body_markdown,
     _humanize_risk_result,
     _NotionTransport,
+    _task_title,
 )
 from orchestration.adapters.terminal_projection_utils import (
     qa_projection_checks,
@@ -71,10 +73,117 @@ def test_notion_transport_replaces_existing_body_without_recreating_page():
 
     assert transport.calls == [
         ("GET", "blocks/page-1/children?page_size=100", None),
-        ("PATCH", "blocks/page-1/children", {"children": children}),
         ("PATCH", "blocks/old-1", {"in_trash": True}),
         ("PATCH", "blocks/old-2", {"in_trash": True}),
+        ("PATCH", "blocks/page-1/children", {"children": children}),
     ]
+
+
+def test_notion_transport_chunks_page_creation_children_at_api_limit():
+    class RecordingTransport(_NotionTransport):
+        def __init__(self):
+            super().__init__("token")
+            self.calls = []
+
+        def _request(self, method, path, body=None):
+            self.calls.append((method, path, body))
+            if method == "POST":
+                return {"id": "page-1"}
+            return {"id": "page-1"}
+
+    transport = RecordingTransport()
+    children = [
+        {"object": "block", "type": "paragraph", "paragraph": {"n": index}}
+        for index in range(205)
+    ]
+
+    transport.create_page("db-1", {}, children)
+
+    assert len(transport.calls) == 3
+    assert len(transport.calls[0][2]["children"]) == 100
+    assert [len(call[2]["children"]) for call in transport.calls[1:]] == [100, 5]
+
+
+def test_notion_transport_append_only_sends_missing_tail_after_readback():
+    first = {"object": "block", "type": "paragraph", "paragraph": {"n": 1}}
+    second = {"object": "block", "type": "paragraph", "paragraph": {"n": 2}}
+    third = {"object": "block", "type": "paragraph", "paragraph": {"n": 3}}
+
+    class RecordingTransport(_NotionTransport):
+        def __init__(self):
+            super().__init__("token")
+            self.calls = []
+
+        def _request(self, method, path, body=None):
+            self.calls.append((method, path, body))
+            if method == "GET":
+                return {"results": [first, second], "has_more": False}
+            return {"id": "page-1"}
+
+    transport = RecordingTransport()
+    transport.append_blocks("page-1", [first, second, third])
+
+    assert transport.calls == [
+        ("GET", "blocks/page-1/children?page_size=100", None),
+        ("PATCH", "blocks/page-1/children", {"children": [third]}),
+    ]
+
+
+def test_notion_transport_retry_after_ambiguous_append_does_not_duplicate():
+    first = {"object": "block", "type": "paragraph", "paragraph": {"n": 1}}
+    second = {"object": "block", "type": "paragraph", "paragraph": {"n": 2}}
+
+    class RecordingTransport(_NotionTransport):
+        def __init__(self):
+            super().__init__("token")
+            self.blocks = [first]
+            self.append_attempts = 0
+
+        def _request(self, method, path, body=None):
+            if method == "GET":
+                return {"results": list(self.blocks), "has_more": False}
+            if path == "blocks/page-1/children":
+                self.append_attempts += 1
+                self.blocks.extend(body["children"])
+                if self.append_attempts == 1:
+                    raise DepartmentNotionProjectionError("response lost")
+            return {"id": "page-1"}
+
+    transport = RecordingTransport()
+    with pytest.raises(DepartmentNotionProjectionError):
+        transport.append_blocks("page-1", [second])
+
+    transport.append_blocks("page-1", [second])
+
+    assert transport.blocks == [first, second]
+    assert transport.append_attempts == 1
+
+
+def test_notion_transport_skips_archived_blocks_when_replacing_body():
+    class RecordingTransport(_NotionTransport):
+        def __init__(self):
+            super().__init__("token")
+            self.calls = []
+
+        def _request(self, method, path, body=None):
+            self.calls.append((method, path, body))
+            if method == "GET":
+                return {
+                    "results": [
+                        {"id": "archived-1", "archived": True},
+                        {"id": "trash-1", "in_trash": True},
+                        {"id": "active-1"},
+                    ],
+                    "has_more": False,
+                }
+            return {"id": "page-1"}
+
+    transport = RecordingTransport()
+    transport.replace_blocks("page-1", [{"object": "block"}])
+
+    assert ("PATCH", "blocks/active-1", {"in_trash": True}) in transport.calls
+    assert not any("archived-1" in str(call) for call in transport.calls)
+    assert not any("trash-1" in str(call) for call in transport.calls)
 
 
 def test_notion_title_lookup_never_uses_a_shared_human_title_as_a_contains_key():
@@ -95,6 +204,38 @@ def test_notion_title_lookup_never_uses_a_shared_human_title_as_a_contains_key()
     assert transport.query_title("db", "제목", "t_trade1 · 사용자 PAPER 조건주문") == []
     assert len(transport.calls) == 3
     assert transport.calls[-1][2]["filter"]["title"] == {"contains": "t_trade1"}
+
+
+def test_quant_notion_projection_is_manager_facing_and_hides_runtime_fields():
+    task = {
+        "id": "t_quant1",
+        "title": "quant-liaison primary",
+        "assignee": "quant-liaison",
+        "status": "done",
+        "completed_at": 1787802033,
+        "run_metadata": {
+            "final_answer": "검증된 성과지표는 자료 부족으로 산출하지 않고 보류했습니다.",
+            "symbol": "069500.KS",
+            "as_of": "2026-08-27T03:20:00Z",
+            "source": "research-liaison-mcp",
+            "evidence_refs": ["ls-tr:example"],
+        },
+    }
+
+    title = _task_title(task, "quant-backtest")
+    body = _body_markdown(
+        task=task,
+        root_task_id="t_root1",
+        department="quant-backtest",
+        result_text=task["run_metadata"]["final_answer"],
+    )
+
+    assert title.startswith("퀀트·백테스트 검토 결과")
+    assert "Task ID" not in body
+    assert "Workflow Root Task ID" not in body
+    assert "Terminal Metadata" not in body
+    assert "research-liaison-mcp" in body
+    assert "확인된 근거 좌표: 1건" in body
 
 
 def _trading_task():
@@ -599,6 +740,9 @@ def test_risk_projection_renders_structured_result_and_populates_columns():
     assert "필수 검증 항목" in rendered
     assert "리스크 검사 결과" in props
     assert "계산 요약" in props["리스크 검사 결과"]["rich_text"][0]["text"]["content"]
+    risk_summary = props["리스크 검토 요약"]["rich_text"][0]["text"]["content"]
+    assert "###" not in risk_summary
+    assert "**" not in risk_summary
     assert props["상위·법무 검토 필요"]["checkbox"] is True
     assert "Department Task Result" not in rendered
     assert "Original Instruction" not in rendered
@@ -620,6 +764,12 @@ def test_risk_humanization_keeps_contextual_terms_grammatical():
     assert "결정론적 리스크 검증 시스템이 필요" in rendered
     assert "섹터 분류는 5개 모두 확인되지 않음" in rendered
     assert "결정론적 결정론적" not in rendered
+
+
+def test_risk_humanization_labels_quality_status_for_managers():
+    rendered = _humanize_risk_result("포트폴리오 조회 자료는 비권위적(WARN)입니다.")
+
+    assert rendered == "포트폴리오 조회 자료는 비권위적(자료 품질: 주의)입니다."
 
 
 def test_risk_humanization_does_not_corrupt_unavailable_status():

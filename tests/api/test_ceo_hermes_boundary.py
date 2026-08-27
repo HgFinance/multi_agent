@@ -129,6 +129,28 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         self.assertIsNone(response["session_id"])
 
     @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
+    def test_deterministic_bff_plan_is_persisted_without_a_second_ceo_plan(self) -> None:
+        from orchestration.ceo_query_routing import build_deterministic_bff_plan
+
+        request = ceo.CeoAsk(query="삼성전자 시장 위험을 분석해줘", request_id="request-bff-plan")
+        plan = build_deterministic_bff_plan(request.query)
+        task = {"task_id": "t_bff_root", "status": "ready"}
+        with (
+            patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create,
+            patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True),
+            patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None),
+        ):
+            response = ceo.ceo_query(request, deterministic_routing_plan=plan)
+
+        assert response["task_id"] == "t_bff_root"
+        body = create.call_args.kwargs["body"]
+        assert "producer=portfolio-bff-deterministic" in body
+        assert "selected_primary_profiles=research-department,risk-management" in body
+        assert "delegation_instruction.research-department=" in body
+        assert "delegation_instruction.risk-management=" in body
+        assert "analysis_mode=standard_analysis" in body
+
+    @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
     def test_root_trace_context_is_optional_root_body_metadata(self) -> None:
         request = ceo.CeoAsk(
             query="q",

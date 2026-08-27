@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from hashlib import sha256
@@ -85,9 +86,41 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-mirror"])
 MIRROR_STORE: MirrorStore = build_default_mirror_store()
+logger = logging.getLogger(__name__)
 
 
 _ANONYMOUS_ACTOR_IDS = frozenset({"anonymous", "web-user"})
+
+
+def _deterministic_bff_routing_enabled() -> bool:
+    """Keep the restored route on unless an operator explicitly disables it."""
+
+    configured = os.getenv("CEO_BFF_DETERMINISTIC_ROUTING_ENABLED")
+    if configured is None:
+        return True
+    return configured.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _build_deterministic_bff_plan(query: str) -> dict[str, Any] | None:
+    """Build the shared route without importing the full graph at module load."""
+
+    if not _deterministic_bff_routing_enabled():
+        return None
+    try:
+        from orchestration.ceo_query_routing import build_deterministic_bff_plan
+    except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+        from ceo_query_routing import (  # type: ignore[no-redef]
+            build_deterministic_bff_plan,
+        )
+    started = time.perf_counter()
+    plan = build_deterministic_bff_plan(query)
+    logger.info(
+        "ceo-bff-deterministic-route route_ms=%.3f departments=%s basis=%s",
+        (time.perf_counter() - started) * 1000,
+        ",".join(str(value) for value in plan.get("selected_primary_profiles", ())),
+        plan.get("routing_basis", ""),
+    )
+    return plan
 
 
 def _resolved_owner(owner_id: object) -> str | None:
@@ -252,12 +285,19 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
         # Preserve the exact thread correlation supplied by that gateway.
         discord_thread_id = request.discord_thread_id
     else:
-        mirror = post_question(request.query, asked_by=owner_id)
+        mirror = post_question(
+            request.query,
+            asked_by=owner_id,
+            mirror_store=MIRROR_STORE,
+            mirror_key=f"{request.source}:{request.source_message_id}",
+            request_id=request.request_id,
+        )
         discord_channel_id = mirror.channel_id if mirror else None
         discord_message_id = mirror.message_id if mirror else None
         discord_guild_id = mirror.guild_id if mirror else None
         discord_thread_id = mirror.thread_id if mirror else None
 
+    deterministic_routing_plan = _build_deterministic_bff_plan(request.query)
     response = ceo.ceo_query(
         CeoAsk(
             query=request.query,
@@ -275,6 +315,7 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
         discord_message_id=discord_message_id,
         discord_guild_id=discord_guild_id,
         discord_thread_id=discord_thread_id,
+        deterministic_routing_plan=deterministic_routing_plan,
     )
 
     return response
@@ -317,7 +358,8 @@ def mirror_ask(
     독자적으로 들고 있다가 조용히 갈라지는 상태가 구조적으로 불가능하다.
     일반 CEO 질의는 dedup(`_execute`/`MirrorStore`)과 Web/Discord 공용 event journal
     (`publish_workflow_projection`)이 감싼다. 전략 생성 의도는 이 지점에서 먼저
-    독립 intake로 분기되어 CEO root와 Kanban을 만들지 않는다.
+    독립 intake로 분기되며, intake가 실행용 CEO/전략 child가 아닌
+    blocked tracking-only root만 만든다.
 
     `owner_id`는 로컬 모의투자에서 BFF가 선택한 고정 데모 ID다. 브라우저 로그인이나
     외부 JWT를 검증하지 않으며, 같은 의존성이 `X-User-Id`를 읽는다. `actor_id`를 그대로 재사용하는
@@ -327,7 +369,8 @@ def mirror_ask(
     """
 
     # Central routing belongs to the BFF.  The strategy lane has its own
-    # ownership/intake contract and must not create a CEO root or touch Kanban.
+    # ownership/intake contract. Its Kanban root is tracking-only and cannot be
+    # claimed as an execution task.
     if looks_like_strategy_research(request.query):
         return _strategy_query(
             CanonicalIngress(

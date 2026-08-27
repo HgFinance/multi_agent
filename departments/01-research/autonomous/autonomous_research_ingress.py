@@ -99,6 +99,11 @@ def normalize_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         "discord_thread_id": _optional_text(
             payload.get("discord_thread_id"), "discord_thread_id", maximum=128
         ),
+        # Control-plane correlation only. This points to a blocked,
+        # tracking-only Kanban root; it is never a Hermes execution parent.
+        "kanban_root_task_id": _optional_text(
+            payload.get("kanban_root_task_id"), "kanban_root_task_id", maximum=128
+        ),
     }
 
 
@@ -200,6 +205,27 @@ class ResearchIntake:
         self.intake_dir.mkdir(parents=True, exist_ok=True)
         return tuple(path.stem for path in sorted(self.intake_dir.glob("*.json")))
 
+    def bind_kanban_root(self, request_id: str, task_id: str) -> dict[str, Any]:
+        """Persist a tracking root without changing the request identity."""
+
+        request_id = _safe_request_id(request_id)
+        task_id = _text(task_id, "kanban_root_task_id", maximum=128)
+        with self._locked():
+            path = self.lab_path(request_id) / "request.json"
+            if not path.exists():
+                path = self.intake_dir / f"{request_id}.json"
+            if not path.exists():
+                raise FileNotFoundError(request_id)
+            payload = self._read_json(path)
+            existing = str(payload.get("kanban_root_task_id") or "").strip()
+            if existing and existing != task_id:
+                raise ResearchRequestConflict(
+                    "request_id is already bound to a different kanban_root_task_id"
+                )
+            payload["kanban_root_task_id"] = task_id
+            self._write_json(path, payload)
+            return normalize_request(payload)
+
     def materialize(self, request_id: str, *, repo_root: Path) -> Path:
         request_id = _safe_request_id(request_id)
         intake_path = self.intake_dir / f"{request_id}.json"
@@ -292,6 +318,10 @@ class ResearchIntake:
             "active_plan_id": state.get("active_plan_id"),
             "plan_count": plan_count,
             "result_count": result_count,
+            # Control-plane correlation only.  The tracking root is not the
+            # research execution parent; Strategy Hermes remains the sole
+            # owner of the research cycle.
+            "kanban_root_task_id": request.get("kanban_root_task_id"),
             "candidate_available": candidate.exists(),
             "updated_at": state.get("updated_at") or request["created_at"],
             "actor_id": request["actor_id"],

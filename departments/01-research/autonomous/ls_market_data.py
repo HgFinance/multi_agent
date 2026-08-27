@@ -3,9 +3,9 @@
 This module is intentionally a narrow boundary around the existing LS REST
 transport.  It is not a collector, scheduler, database writer, universe
 builder, broker client, or research planner.  A Hermes experiment may query
-the allow-listed chart/investor TRs for the current research turn, keep the
-rows in memory (or in the turn's temporary directory), and persist only the
-receipt/fingerprint in its lab.
+the allow-listed chart/investor/ranking TRs for the current research turn,
+keep the rows in memory (or in the turn's temporary directory), and persist
+only the receipt/fingerprint in its lab.
 
 The TR contracts are documented in
 ``docs/06-integrations/ls-openapi/03-stock/12-12320341.md``.  Raw responses
@@ -41,6 +41,12 @@ RATE_LIMIT_PER_SECOND = 1.0
 DEFAULT_MAX_PAGES = 200
 ALLOWED_TR_CODES = frozenset({
     "t1665", "t8410", "t8411", "t8412", "t8451", "t8452", "t8453",
+    "t1441", "t1444", "t1452", "t1463", "t1466", "t1481", "t1482",
+    "t1489", "t1492",
+})
+RANKING_TR_CODES = frozenset({
+    "t1441", "t1444", "t1452", "t1463", "t1466", "t1481", "t1482",
+    "t1489", "t1492",
 })
 
 _DATE_RE = re.compile(r"^\d{8}$")
@@ -169,6 +175,37 @@ class MarketDataBatch:
 
     rows: tuple[dict[str, Any], ...]
     receipt: DataReceipt
+
+
+@dataclass(frozen=True)
+class RankingReceipt:
+    """Safe lineage metadata for a point-in-time ranking snapshot."""
+
+    tr_code: str
+    as_of: str
+    pages: int
+    row_count: int
+    data_sha256: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "source": "ls-openapi",
+            "path": "/stock/high-item",
+            "tr_code": self.tr_code,
+            "as_of": self.as_of,
+            "pages": self.pages,
+            "row_count": self.row_count,
+            "data_sha256": self.data_sha256,
+            "raw_data_persisted": False,
+        }
+
+
+@dataclass(frozen=True)
+class RankingBatch:
+    """Rows for one ranking snapshot plus a safe lineage receipt."""
+
+    rows: tuple[dict[str, Any], ...]
+    receipt: RankingReceipt
 
 
 class OnDemandMarketDataClient:
@@ -310,6 +347,82 @@ class OnDemandMarketDataClient:
             has_time=False,
         )
 
+    def fetch_ranking(
+        self,
+        tr_code: str,
+        request_block: Mapping[str, Any],
+        *,
+        as_of: str | date | None = None,
+    ) -> RankingBatch:
+        """Fetch one allow-listed LS market-ranking snapshot on demand.
+
+        ``request_block`` must match the documented ``<TR>InBlock`` fields
+        for the selected ranking TR.  Keeping it explicit avoids silently
+        choosing a market, exclusion set, or session.  ``idx`` is managed by
+        this adapter for continuation pages.  No raw ranking rows are written
+        to a persistent research or market-data store.
+        """
+
+        code = str(tr_code or "").strip().lower()
+        if code not in RANKING_TR_CODES:
+            raise ValueError(f"ranking TR code is not allow-listed: {tr_code}")
+        if not isinstance(request_block, Mapping):
+            raise ValueError("request_block must be a mapping")
+        block_name = f"{code}InBlock"
+        request = dict(request_block)
+        request["idx"] = 0
+        as_of_text = _date_text(as_of or date.today(), "as_of")
+        rows: list[dict[str, Any]] = []
+        seen_rows: set[str] = set()
+        seen_idx: set[int] = set()
+        tr_cont = "N"
+        tr_cont_key = ""
+        pages = 0
+        for _ in range(self.max_pages):
+            pages += 1
+            response, headers = self._client.call_tr(
+                path="/stock/high-item",
+                tr_cd=code,
+                in_block={block_name: dict(request)},
+                rate_limit_per_sec=RATE_LIMIT_PER_SECOND,
+                tr_cont=tr_cont,
+                tr_cont_key=tr_cont_key,
+                return_headers=True,
+            )
+            if not isinstance(response, Mapping) or not isinstance(headers, Mapping):
+                raise ValueError("LS transport must return (mapping, headers) for continuation")
+            page_rows = _rows(response, code)
+            for row in page_rows:
+                identity = _row_key(row)
+                if identity not in seen_rows:
+                    seen_rows.add(identity)
+                    rows.append(row)
+            out_block = _out_block(response, code)
+            try:
+                next_idx = int(out_block.get("idx") or 0)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{code} response idx is invalid") from exc
+            header_more = _text(headers.get("tr_cont")).upper() == "Y"
+            next_key = _text(headers.get("tr_cont_key"))
+            if not page_rows or not header_more or next_idx <= 0:
+                break
+            if next_idx in seen_idx or next_idx == int(request.get("idx") or 0):
+                raise ValueError(f"LS ranking continuation cursor repeated for {code}")
+            seen_idx.add(next_idx)
+            request["idx"] = next_idx
+            tr_cont, tr_cont_key = "Y", next_key
+        else:
+            raise ValueError(f"LS ranking continuation exceeded max_pages={self.max_pages}")
+
+        receipt = RankingReceipt(
+            tr_code=code,
+            as_of=as_of_text,
+            pages=pages,
+            row_count=len(rows),
+            data_sha256=_canonical_hash(rows),
+        )
+        return RankingBatch(tuple(rows), receipt)
+
     def _fetch_pages(
         self,
         *,
@@ -419,9 +532,12 @@ def write_temp_json(batch: MarketDataBatch, filename: str) -> Path:
 
 __all__ = [
     "ALLOWED_TR_CODES",
+    "RANKING_TR_CODES",
     "CHART_PATH",
     "DataReceipt",
     "MarketDataBatch",
+    "RankingBatch",
+    "RankingReceipt",
     "OnDemandMarketDataClient",
     "write_temp_json",
 ]

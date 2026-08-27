@@ -200,6 +200,62 @@ def test_fast_advisory_gets_task_scoped_turn_budget(tmp_path, monkeypatch):
     ]
 
 
+def test_hr_e2e_uses_one_bounded_read_only_helper_pass(tmp_path, monkeypatch):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        (
+            "workflow_role=primary\n"
+            "origin=user-query\n"
+            "workflow_mode=binding\n"
+            "scope=PAPER read-only Workforce API GET 3개\n"
+            "/workforce/v1/improvements /workforce/v1/departments/observability\n",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.delenv("HGFINANCE_HR_E2E_MAX_TURNS", raising=False)
+    monkeypatch.delenv("HGFINANCE_HR_E2E_REASONING", raising=False)
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["--profile", "hr-department", "chat", "--toolsets", "all", "-q", "old"],
+        db_path=db,
+        task_id="t_qa",
+        profile="hr-department",
+    )
+
+    assert qa_worker._response_task_kind(
+        qa_worker._task_body(db, "t_qa"), profile="hr-department"
+    ) == "hr_e2e_readonly"
+    assert bounded[bounded.index("--max-turns") + 1] == "6"
+    assert bounded[bounded.index("--reasoning") + 1] == "low"
+    assert bounded[bounded.index("--toolsets") + 1] == qa_worker.HR_E2E_TOOLSETS
+    prompt = bounded[bounded.index("-q") + 1]
+    assert "hr_e2e_readonly.py" in prompt
+    assert "exactly once" in prompt
+    assert "kanban_complete exactly once" in prompt
+    assert "raw response bodies" in prompt
+
+
+def test_generic_hr_work_is_not_rewritten_as_e2e(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("workflow_role=primary\norigin=user-query\n채용 정책 검토",),
+    )
+    conn.commit()
+    conn.close()
+
+    argv = ["chat", "-q", "채용 정책 검토"]
+    assert qa_worker._bounded_worker_argv(
+        argv, db_path=db, task_id="t_qa", profile="hr-department"
+    ) == argv
+
+
 def test_quant_fast_advisory_replaces_dispatcher_broad_toolsets(tmp_path):
     db = tmp_path / "kanban.db"
     _db_with_running_run(db)
@@ -224,6 +280,30 @@ def test_quant_fast_advisory_replaces_dispatcher_broad_toolsets(tmp_path):
     )
 
 
+def test_research_fast_advisory_replaces_dispatcher_broad_toolsets(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("analysis_mode=fast_advisory\nquestion",),
+    )
+    conn.commit()
+    conn.close()
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["chat", "--toolsets", "all", "-q", "work"],
+        db_path=db,
+        task_id="t_qa",
+        profile="research-department",
+    )
+
+    assert bounded.count("--toolsets") == 1
+    assert bounded[bounded.index("--toolsets") + 1] == (
+        qa_worker.RESEARCH_FAST_ADVISORY_TOOLSETS
+    )
+
+
 def test_quant_liaison_fast_advisory_keeps_only_read_only_library(tmp_path):
     db = tmp_path / "kanban.db"
     _db_with_running_run(db)
@@ -245,6 +325,33 @@ def test_quant_liaison_fast_advisory_keeps_only_read_only_library(tmp_path):
     assert bounded.count("--toolsets") == 1
     assert bounded[bounded.index("--toolsets") + 1] == (
         qa_worker.QUANT_LIAISON_FAST_ADVISORY_TOOLSETS
+    )
+
+
+def test_quant_standard_user_primary_replaces_dispatcher_broad_toolsets(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        (
+            "workflow_role=primary\norigin=user-query\n"
+            "analysis_mode=standard_analysis\nquestion",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["--profile", "quant-backtest-department", "chat", "--toolsets", "all", "-q", "work"],
+        db_path=db,
+        task_id="t_qa",
+        profile="quant-backtest-department",
+    )
+
+    assert bounded.count("--toolsets") == 1
+    assert bounded[bounded.index("--toolsets") + 1] == (
+        qa_worker.QUANT_FAST_ADVISORY_TOOLSETS
     )
 
 
@@ -332,6 +439,30 @@ def test_qa_governance_review_gets_bounded_high_reasoning_budget(tmp_path, monke
     ]
 
 
+def test_qa_governance_review_default_stops_runaway_turns(tmp_path, monkeypatch):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("workflow_role=qa\nworkflow_plane=governance",),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.delenv("HGFINANCE_QA_AUDIT_MAX_TURNS", raising=False)
+    monkeypatch.delenv("HGFINANCE_QA_AUDIT_REASONING", raising=False)
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["chat", "-q", "review"],
+        db_path=db,
+        task_id="t_qa",
+        profile="qa-department",
+    )
+
+    assert bounded[bounded.index("--max-turns") + 1] == "8"
+    assert bounded[bounded.index("--reasoning") + 1] == "high"
+
+
 def test_direct_qa_primary_gets_the_same_bounded_review_budget(tmp_path, monkeypatch):
     db = tmp_path / "kanban.db"
     _db_with_running_run(db)
@@ -392,7 +523,7 @@ def test_qa_governance_review_replaces_broad_explicit_toolsets(tmp_path):
     assert bounded == [
         "chat",
         "--max-turns",
-        "16",
+        "8",
         "--reasoning",
         "high",
         "--toolsets",

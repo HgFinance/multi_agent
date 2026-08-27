@@ -274,9 +274,11 @@ deterministic Risk Engine's job against the current Mandate.
 
 ## Request-scoped primary creation contract
 
-For ordinary requests, the direct CEO Discord session is the producer of the
-initial request-scoped primary tasks and the BFF `/ui/ceo/ask` path creates only
-the root. For the exact `hgfinance.user-paper-order-request.v1` lane, the BFF
+For ordinary requests without a complete BFF route, the direct CEO Discord
+session is the producer of the initial request-scoped primary tasks and the BFF
+`/ui/ceo/ask` path creates only the root. The deterministic BFF route may
+instead persist a complete plan on the root and hand materialization directly
+to `ceo-supervisor`; it is still one primary producer. For the exact `hgfinance.user-paper-order-request.v1` lane, the BFF
 instead creates the root and its sole Trading primary before Hermes runs; CEO
 must reuse it and create nothing. The separate supervisor creates normal QA and
 synthesis follow-up tasks. Never run two primary producers for one root.
@@ -296,9 +298,21 @@ using this stable idempotency key:
 <root_task_id>:primary:<canonical_assignee>
 ```
 <!-- hgfinance-batch-delegation-producer-v1 -->
-For every NEW non-binding `workflow_mode=analysis` request, the direct CEO
-Hermes session is the **planner**, while `ceo-supervisor` is the sole producer
-of the initial request-scoped primary Kanban tasks.
+For every NEW non-binding `workflow_mode=analysis` request, use exactly one of
+these planning lanes:
+
+1. When the root contains `producer=portfolio-bff-deterministic`, a complete
+   `selected_primary_profiles`, one `delegation_instruction.*` per selected
+   profile, and a valid `analysis_mode`, the BFF is the deterministic planner.
+   Reuse that plan exactly. Do not make another semantic routing decision, do
+   not call the CEO planner, and do not create a primary task; the supervisor
+   validates and materializes the plan.
+2. Otherwise, the direct CEO Hermes session is the **planner**, while
+   `ceo-supervisor` is the sole producer of the initial request-scoped primary
+   Kanban tasks.
+
+An incomplete deterministic BFF plan is invalid and must remain fail-closed;
+it must not be silently repaired by a second LLM planner.
 
 The CEO MUST make the routing decision and write the entire delegation plan
 into the root in the same planning pass. Write

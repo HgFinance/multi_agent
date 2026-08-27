@@ -96,6 +96,44 @@ def test_explicit_korean_condition_endings_route_to_conditional_lane(raw: str) -
     assert looks_like_conditional_paper_rule(raw) is True
 
 
+def test_semantic_rejection_is_a_client_error_that_names_the_field(monkeypatch) -> None:
+    """A bad field name is the caller's mistake, not a server fault.
+
+    This escaped as an unhandled 500 on 2026-08-27, so the rejection reached
+    the user as a bare UNSUPPORTED_PORTFOLIO_FIELD with nothing to correct.
+    """
+
+    install_scope(monkeypatch)
+    candidate = {
+        "symbol": "한온시스템",
+        "condition": {
+            "type": "COMPARISON",
+            "operator": "GTE",
+            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+            "right": {
+                "type": "ARITHMETIC",
+                "operator": "MUL",
+                "left": {"type": "PORTFOLIO", "field": "AVG_BUY_PRICE"},
+                "right": {"type": "LITERAL", "value": "1.01", "unit": "NUMBER"},
+            },
+        },
+        "action": {"side": "SELL", "sizing": {"type": "ALL"}},
+        "evaluation": {"clock": "QUOTE"},
+        "expires_at": (NOW + timedelta(days=1)).isoformat(),
+    }
+
+    with pytest.raises(api.HTTPException) as raised:
+        api._build_preview(
+            preview_request("한온시스템 매수가 대비 1% 오르면 전량 매도", candidate),
+            subject=USER_ID,
+            now=NOW,
+        )
+
+    assert raised.value.status_code == 422
+    assert raised.value.detail["code"] == "UNSUPPORTED_PORTFOLIO_FIELD"
+    assert "AVG_BUY_PRICE" in raised.value.detail["message"]
+
+
 @pytest.mark.parametrize(
     "raw",
     (

@@ -61,12 +61,17 @@ def _services_with_langfuse_env() -> dict[str, str]:
     return found
 
 
-def _installs_langfuse(dockerfile: Path) -> bool:
+def _provides_langfuse_transport(dockerfile: Path) -> bool:
     text = dockerfile.read_text(encoding="utf-8")
     # 주석(# langfuse: ...)은 설치가 아니다 - 실제 설치 줄만 본다.
     lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
     body = "\n".join(lines)
     if re.search(r"\blangfuse\b", body):
+        return True
+    # The head-trace collector deliberately uses the Langfuse OTLP HTTP
+    # endpoint through the standard library. Requiring the SDK here would
+    # widen the image only to satisfy a stale package-name assumption.
+    if "orchestration/langfuse_otlp.py" in body:
         return True
     # requirements.txt 를 통째로 설치하는 이미지는 거기에 있으면 된다.
     if "requirements.txt" in body:
@@ -90,7 +95,8 @@ def test_service_with_langfuse_env_has_the_package(service: str, dockerfile: str
 
     path = ROOT / dockerfile
     assert path.is_file(), f"{service}: Dockerfile 을 찾을 수 없다 ({dockerfile})"
-    assert _installs_langfuse(path), (
-        f"{service} 는 LANGFUSE_* 를 받지만 {dockerfile} 이 langfuse 를 설치하지 않는다. "
-        "이 상태에서는 publish 가 조용히 False 를 돌려주고 이벤트가 0건이 된다."
+    assert _provides_langfuse_transport(path), (
+        f"{service} 는 LANGFUSE_* 를 받지만 {dockerfile} 이 SDK 또는 OTLP 전송 계층을 "
+        "제공하지 않는다. 이 상태에서는 publish 가 조용히 False 를 돌려주고 "
+        "이벤트가 0건이 된다."
     )

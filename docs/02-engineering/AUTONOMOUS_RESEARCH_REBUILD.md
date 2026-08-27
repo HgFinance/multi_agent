@@ -62,6 +62,8 @@ research session, and leaves
 the candidate and lineage under that lab. Status is read through the matching status route. The
 worker reports `BLOCKED` errors durably so a transient failure is visible and retryable; it never
 routes the request through CEO Kanban, the retired factory, order, broker or OMS paths.
+Independent active labs run with the bounded `AUTONOMOUS_RESEARCH_MAX_CONCURRENCY` setting
+(default 2); intake materialization and report ordering remain deterministic.
 
 ## Safe cutover sequence
 

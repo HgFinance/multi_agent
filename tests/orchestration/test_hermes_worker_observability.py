@@ -119,6 +119,38 @@ def test_zero_duration_tool_markers_are_not_reported_as_available_latency(tmp_pa
     assert metrics["tool_timing_source"] == "unavailable"
 
 
+def test_worker_log_metrics_reads_terminal_and_file_tool_durations(tmp_path: Path):
+    kanban_home = tmp_path / "shared-kanban"
+    log_dir = kanban_home / "kanban" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "t_hr.log").write_text(
+        "┊ ⚡ kanban_sh 0.0s\n"
+        "┊ 💻 $         python3 helper.py  2.3s\n"
+        "┊ 📖 read      evidence.json L1-20  0.3s\n"
+        "┊ 💻 $         sha256sum evidence.json  0.1s\n"
+        "┊ ⚡ kanban_co 0.0s\n"
+        "Messages: 7 (1 user, 5 tool calls)\n",
+        encoding="utf-8",
+    )
+
+    from scripts.hermes_worker_observability import worker_log_metrics
+
+    metrics = worker_log_metrics(
+        task_id="t_hr",
+        env={"HERMES_KANBAN_HOME": str(kanban_home)},
+    )
+
+    assert metrics["tool_names"] == [
+        "kanban_sh",
+        "kanban_co",
+        "terminal",
+        "read",
+    ]
+    assert metrics["tool_duration_total_ms"] == 2700
+    assert metrics["tool_latency_available"] is True
+    assert metrics["tool_timing_source"] == "hermes-log-duration"
+
+
 def test_worker_log_metrics_counts_structured_tool_errors(tmp_path: Path):
     kanban_home = tmp_path / "shared-kanban"
     log_dir = kanban_home / "kanban" / "logs"

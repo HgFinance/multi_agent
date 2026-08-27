@@ -68,7 +68,10 @@ class StrategyHermesAgent:
             environment["STRATEGY_MARKET_DATA_DIR"] = data_dir
             environment["LS_TOKEN_CACHE_DIR"] = str(Path(data_dir) / "token-cache")
             environment["LS_DATA_ACCESS_MODE"] = "readonly"
-            environment["LS_ALLOWED_TR_CODES"] = "t1665,t8410,t8411,t8412,t8451,t8452,t8453"
+            environment["LS_ALLOWED_TR_CODES"] = (
+                "t1665,t8410,t8411,t8412,t8451,t8452,t8453,"
+                "t1441,t1444,t1452,t1463,t1466,t1481,t1482,t1489,t1492"
+            )
             Path(environment["LS_TOKEN_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
             try:
                 completed = subprocess.run(
@@ -133,9 +136,10 @@ Ephemeral raw-market-data root (deleted after this Hermes turn): $STRATEGY_MARKE
 
 For market data, use only the repository module
 {self.repo_root}/departments/01-research/autonomous/ls_market_data.py. It is a
-read-only allow-list for LS /stock/chart TRs t1665, t8410, t8411, t8412, t8451,
-t8452 and t8453. Query only the symbols and date range needed for the current
-experiment. Prefer the returned rows in memory; if a dataframe library needs a
+read-only allow-list for LS chart/investor/ranking TRs t1665, t8410, t8411,
+t8412, t8451, t8452, t8453, t1441, t1444, t1452, t1463, t1466, t1481, t1482,
+t1489 and t1492. Query only the symbols/date range or ranking snapshot needed
+for the current experiment. Prefer the returned rows in memory; if a dataframe library needs a
 file, use its temporary-data helper and write only below $STRATEGY_MARKET_DATA_DIR.
 Never read or write quant-data, the legacy discovery cache, market/research
 databases, collector backfill tables, or any other persistent raw-data path.

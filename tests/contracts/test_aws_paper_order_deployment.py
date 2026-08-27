@@ -238,10 +238,16 @@ def test_discord_ingress_secret_is_scoped_to_bff_and_order_gateways() -> None:
     assert ceo_environment["HGFINANCE_DISCORD_INGRESS_URL"] == (
         "http://portfolio-bff:8000/ui/ceo/ingress"
     )
+    assert ceo_environment["HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY"] == (
+        "${HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY:-8}"
+    )
     trading_environment = services["trading-hermes"]["environment"]
     assert trading_environment[secret_key] == required_value
     assert trading_environment["HGFINANCE_DISCORD_INGRESS_URL"] == (
         "http://portfolio-bff:8000/ui/ceo/ingress"
+    )
+    assert trading_environment["HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY"] == (
+        "${HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY:-8}"
     )
 
 

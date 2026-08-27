@@ -35,32 +35,49 @@ class BoundedNotionSchemaCache:
         if not key:
             raise ValueError("database_id is required")
 
-        now = time.monotonic()
+        started_at = time.monotonic()
         with self._lock:
             cached = self._entries.get(key)
-            if cached is not None and now - cached[0] < self.ttl_seconds:
+            if cached is not None and started_at - cached[0] < self.ttl_seconds:
                 return cached[1], True
 
-            try:
-                schema = loader()
-            except Exception:
-                # A failed read must not preserve stale metadata as if it were
-                # authoritative. The projection retains its existing retry /
-                # fail-closed behavior.
-                self._entries.pop(key, None)
-                raise
+        # Do not hold the cache lock over the network-bound loader. A slow
+        # Notion request for one database must not serialize other owners.
+        try:
+            schema = loader()
+        except Exception:
+            with self._lock:
+                current = self._entries.get(key)
+                if current is cached or (
+                    current is not None and current[0] < started_at
+                ):
+                    self._entries.pop(key, None)
+            raise
 
-            if not isinstance(schema, Mapping):
-                self._entries.pop(key, None)
-                raise TypeError("Notion schema must be a mapping")
+        if not isinstance(schema, Mapping):
+            with self._lock:
+                current = self._entries.get(key)
+                if current is cached or (
+                    current is not None and current[0] < started_at
+                ):
+                    self._entries.pop(key, None)
+            raise TypeError("Notion schema must be a mapping")
 
-            if key not in self._entries and len(self._entries) >= self.max_entries:
+        loaded_at = time.monotonic()
+        with self._lock:
+            # Another caller may have completed a newer lookup while this
+            # request was in flight. Prefer that result rather than replacing
+            # it with an older response.
+            current = self._entries.get(key)
+            if current is not None and current[0] >= started_at:
+                return current[1], True
+            if len(self._entries) >= self.max_entries and key not in self._entries:
                 oldest_key = min(
                     self._entries,
                     key=lambda entry_key: self._entries[entry_key][0],
                 )
                 self._entries.pop(oldest_key, None)
-            self._entries[key] = (now, schema)
+            self._entries[key] = (loaded_at, schema)
             return schema, False
 
     def invalidate(self, database_id: str) -> None:

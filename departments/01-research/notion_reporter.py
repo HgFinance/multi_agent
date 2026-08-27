@@ -25,12 +25,10 @@
 """
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +36,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from orchestration.adapters.notion_http import request_json_status
 from orchestration.adapters.notion_idempotency import NotionIdempotency
 
 _DEV_VARS = _REPO_ROOT / "ai-office" / ".dev.vars"
@@ -110,21 +109,13 @@ def describe_source(env: dict | None = None) -> str:
 
 def _post(path: str, body: dict, token: str, *,
           method: str = "POST") -> tuple[int, dict]:
-    req = urllib.request.Request(
-        f"https://api.notion.com/v1/{path}",
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={"Authorization": f"Bearer {token}",
-                 "Notion-Version": _NOTION_VERSION,
-                 "Content-Type": "application/json"},
-        method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return r.status, json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        try:
-            return e.code, json.loads(e.read())
-        except Exception:  # noqa: BLE001
-            return e.code, {"message": "본문 파싱 실패"}
+    return request_json_status(
+        method,
+        path,
+        token,
+        body=body,
+        version=_NOTION_VERSION,
+    )
 
 
 def _rich_text(s) -> dict:

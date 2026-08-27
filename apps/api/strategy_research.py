@@ -3,11 +3,14 @@
 This module admits and reads request manifests; it is not the Strategy Hermes
 researcher and it is not a Research HQ execution surface. The direct Hermes
 worker owns hypothesis, code, backtest, result and lineage writes after intake.
+It may create one blocked, tracking-only Kanban root for observability; that
+root is never an execution parent and never dispatches a second researcher.
 """
 
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 import sys
 from typing import Any, Literal
@@ -26,6 +29,12 @@ from autonomous_research_ingress import (  # noqa: E402
     ResearchRequestConflict,
     looks_like_strategy_research,
 )
+from orchestration.ceo_workflow_scope import build_root_body  # noqa: E402
+from orchestration.canonical_profiles import canonical_profile_for_department  # noqa: E402
+try:
+    from . import hermes_boundary  # noqa: E402
+except ImportError:  # pragma: no cover
+    import hermes_boundary  # type: ignore[no-redef]
 
 try:
     from .current_user import optional_current_user
@@ -34,6 +43,7 @@ except ImportError:  # pragma: no cover
 
 
 router = APIRouter(prefix="/ui/strategy-research", tags=["autonomous-strategy-research"])
+_LOGGER = logging.getLogger("strategy-research-intake")
 
 
 def _lab_root() -> Path:
@@ -57,6 +67,8 @@ class StrategyResearchAccepted(BaseModel):
     status: Literal["QUEUED", "RESEARCHING", "BLOCKED", "CANDIDATE"] = "QUEUED"
     message: str
     status_url: str
+    kanban_root_task_id: str | None = None
+    kanban_tracking_status: Literal["CREATED", "UNAVAILABLE"] = "UNAVAILABLE"
 
 
 class StrategyResearchStatus(BaseModel):
@@ -75,6 +87,8 @@ class StrategyResearchStatus(BaseModel):
     candidate_available: bool = False
     updated_at: str
     error: str | None = None
+    kanban_root_task_id: str | None = None
+    kanban_tracking_status: Literal["CREATED", "UNAVAILABLE"] = "UNAVAILABLE"
 
 
 def _owner(actor: str | None) -> str:
@@ -93,6 +107,60 @@ def _request_payload(request: StrategyResearchAsk, actor: str | None) -> dict[st
     }
 
 
+def _ensure_tracking_root(
+    *, payload: dict[str, Any], intake: ResearchIntake, request_id: str
+) -> tuple[str | None, str]:
+    """Create a blocked Kanban tracking root without creating an execution task."""
+
+    existing = str(payload.get("kanban_root_task_id") or "").strip()
+    if existing:
+        return existing, "CREATED"
+    root_body = build_root_body(
+        str(payload["goal"]),
+        request_id,
+        workflow_mode="analysis",
+        source=str(payload.get("source") or "web"),
+        requested_by=str(payload.get("actor_id") or "anonymous"),
+        discord_channel_id=payload.get("discord_channel_id"),
+        discord_message_id=payload.get("discord_message_id"),
+        discord_guild_id=payload.get("discord_guild_id"),
+        discord_thread_id=payload.get("discord_thread_id"),
+        qa_enabled=False,
+        qa_blocks_response=False,
+    )
+    root_body = "\n".join(
+        (
+            root_body,
+            "strategy-research-tracking.v1",
+            "strategy_research_tracking_only=true",
+            f"strategy_request_id={request_id}",
+            "strategy_execution_owner=strategy-hermes",
+            "strategy_execution_parent=none",
+        )
+    )
+    try:
+        root = hermes_boundary.create_kanban_task(
+            assignee=canonical_profile_for_department("ceo"),
+            title=f"Strategy Hermes 추적: {str(payload['goal'])[:120]}",
+            body=root_body,
+            idempotency_key=f"strategy-research-root:{request_id}",
+            initial_status="blocked",
+        )
+        root_id = str((root or {}).get("task_id") or "").strip()
+        if not root_id:
+            _LOGGER.error(
+                "strategy-research tracking root unavailable request_id=%s", request_id
+            )
+            return None, "UNAVAILABLE"
+        intake.bind_kanban_root(request_id, root_id)
+        return root_id, "CREATED"
+    except Exception:  # noqa: BLE001 - tracking failure must not drop research intake
+        _LOGGER.exception(
+            "strategy-research tracking root create failed request_id=%s", request_id
+        )
+        return None, "UNAVAILABLE"
+
+
 def accept_strategy_research_query(
     *,
     query: str,
@@ -108,10 +176,12 @@ def accept_strategy_research_query(
     discord_guild_id: str | None = None,
     discord_thread_id: str | None = None,
 ) -> StrategyResearchAccepted:
-    """Admit one strategy objective without touching CEO/Kanban state.
+    """Admit one strategy objective and create its tracking-only root.
 
     Both the dedicated strategy endpoint and the central CEO/Discord router use
-    this function so they cannot drift into separate intake contracts.
+    this function so they cannot drift into separate intake contracts. Kanban
+    creation is idempotent and best-effort: research intake remains durable if
+    the tracking board is temporarily unavailable.
     """
 
     request = StrategyResearchAsk(
@@ -139,6 +209,9 @@ def accept_strategy_research_query(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     admitted_id = str(payload["request_id"])
+    root_id, tracking_status = _ensure_tracking_root(
+        payload=payload, intake=intake, request_id=admitted_id
+    )
     current = intake.status(admitted_id)
     current_status = str((current or {}).get("status") or "QUEUED")
     return StrategyResearchAccepted(
@@ -151,6 +224,8 @@ def accept_strategy_research_query(
             "가설·실험·검증을 반복합니다."
         ),
         status_url=f"/ui/strategy-research/requests/{admitted_id}",
+        kanban_root_task_id=root_id,
+        kanban_tracking_status=tracking_status,
     )
 
 
@@ -185,6 +260,9 @@ def strategy_research_status(
     if owner_id and status.get("actor_id") != owner_id:
         raise HTTPException(status_code=403, detail="strategy_research_request_forbidden")
     status.pop("actor_id", None)
+    status["kanban_tracking_status"] = (
+        "CREATED" if status.get("kanban_root_task_id") else "UNAVAILABLE"
+    )
     return StrategyResearchStatus.model_validate(status)
 
 

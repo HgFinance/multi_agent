@@ -91,7 +91,53 @@ def test_pipeline_build_failure_returns_reject_report(monkeypatch):
     assert out["failure"]["error_message"] == "graph"
     assert out["evaluation"]["fallback_count"] >= 1
     assert out["report_markdown"]
-    assert "비바인딩 fallback" in out["report_markdown"]
+    assert "구속력 없는 안전 기본값" in out["report_markdown"]
+    assert "심사 요청 번호" in out["report_markdown"]
+    assert "사전 거래 위험 점검" in out["report_markdown"]
+    assert "check_results 없음" not in out["report_markdown"]
+    assert "counterparty_health 미플래그" not in out["report_markdown"]
+    assert "pre_trade_check" not in out["report_markdown"]
+
+
+def test_native_notion_title_hides_runtime_identifier(monkeypatch):
+    captured = {}
+
+    def fake_get(path, token):
+        return 200, {"properties": {"제목": {"type": "title"}}}
+
+    def fake_post(path, body, token):
+        captured[path] = body
+        if path.endswith("/query"):
+            return 200, {"results": []}
+        return 200, {"id": "page-1", "url": "https://notion.so/page-1"}
+
+    monkeypatch.setattr(
+        notion_reporter,
+        "_SCHEMA_CACHE",
+        notion_reporter.BoundedNotionSchemaCache(ttl_seconds=60, max_entries=8),
+    )
+    monkeypatch.setattr(notion_reporter, "_get", fake_get)
+    monkeypatch.setattr(notion_reporter, "_post", fake_post)
+    result = notion_reporter.upload_case(
+        {"instrument_name": "삼성전자", "side": "BUY", "quantity": "100"},
+        {"as_of": "2026-08-27T00:00:00+00:00"},
+        {
+            "risk_request_id": "fallback-secret-id",
+            "input_hash": "hash-1",
+            "verdict": "reject",
+            "trading_state": "HALTED",
+            "reason_codes": [],
+            "check_results": [],
+            "calculation_version": "v1",
+            "escalate": True,
+            "narrative": "검토 보류",
+        },
+        env={"NOTION_TOKEN": "tok", "NOTION_RISK_DB": "db1"},
+    )
+    assert result["ok"]
+    title = captured["pages"]["properties"]["제목"]["title"][0]["text"]["content"]
+    assert title == "리스크 심사 · 삼성전자 매수 100주 · 2026-08-27"
+    assert "fallback-secret-id" not in title
 
 
 def test_fallback_preserves_node_and_redacts_error_message():
@@ -265,4 +311,4 @@ def test_markdown_table_escapes_untrusted_values():
     assert "test\\|check" in report
     assert "line one<br>line two" in report
     assert "## 평가 지표" in report
-    assert "## Fallback / Escalation" in report
+    assert "## 안전 기본값 적용 및 추가 검토" in report

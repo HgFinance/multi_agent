@@ -19,6 +19,7 @@ from orchestration.conditional_rules import (
     ExpressionNode,
     Timeframe,
     RuleAction,
+    RuleSemanticError,
     RuleState,
     rule_fingerprint,
     validate_rule_spec,
@@ -390,6 +391,25 @@ def _summary(
     return result
 
 
+def _validate_semantics(spec: ConditionalRuleSpec) -> None:
+    """Turn a semantic rejection into a client error that names the cause.
+
+    ``validate_rule_spec`` raises ``RuleSemanticError``, which is a ValueError
+    and used to escape as an unhandled 500.  The caller then saw only the bare
+    code with no offending field or operator, which is how an AST rejected for
+    naming a non-existent portfolio field looked like a server fault
+    (2026-08-27).  The message carries the name; keep it.
+    """
+
+    try:
+        validate_rule_spec(spec)
+    except RuleSemanticError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
 def _build_preview(
     request: ConditionalRulePreviewRequest,
     *,
@@ -423,7 +443,7 @@ def _build_preview(
             "raw_instruction_sha256": _raw_sha256(request.raw_instruction),
         }
     )
-    validate_rule_spec(spec)
+    _validate_semantics(spec)
     clarifications = list(clarification_codes(request.raw_instruction, spec))
     if timeframe_mismatch:
         clarifications.append("TIMEFRAME_3M_UNSUPPORTED")
@@ -467,7 +487,7 @@ def _validate_create(
     now = datetime.now(timezone.utc)
     if spec.expires_at <= now or spec.expires_at > now + timedelta(days=365):
         raise HTTPException(status_code=422, detail="conditional_rule_expiry_invalid")
-    validate_rule_spec(spec)
+    _validate_semantics(spec)
     clarifications = clarification_codes(request.raw_instruction, spec)
     if clarifications:
         raise HTTPException(

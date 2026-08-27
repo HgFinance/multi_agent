@@ -84,6 +84,15 @@ _TOOL_RE = re.compile(r"⚡\s+(?P<name>[A-Za-z0-9_.-]+)")
 _TOOL_DURATION_RE = re.compile(
     r"⚡\s+(?P<name>[A-Za-z0-9_.-]+)\s+(?P<duration>\d+(?:\.\d+)?)s\b"
 )
+# Hermes renders terminal/file tools with an icon and a label instead of the
+# ``⚡ tool`` form. Keep the parser line-scoped and read only the final duration;
+# command text and file contents are never copied into metadata.
+_TOOL_LOG_LINE_RE = re.compile(
+    r"^\s*┊\s+(?P<icon>[^\w\s])?\s*"
+    r"(?P<label>[A-Za-z][A-Za-z0-9_.-]*|\$)(?=\s).*?"
+    r"(?P<duration>\d+(?:\.\d+)?)s\b[^\n]*$",
+    re.MULTILINE,
+)
 _TOOL_SUMMARY_RE = re.compile(r"(?:\(|,|\s)(?P<count>\d+)\s+tool calls?\b", re.IGNORECASE)
 _TOOL_ERROR_RE = re.compile(
     r"(?:\bTool\s+[A-Za-z0-9_.-]+\s+returned\s+error\b|"
@@ -166,6 +175,14 @@ def _observed_tools(log_text: str) -> tuple[list[str], int | None]:
         name = _safe_id(match.group("name"), limit=80)
         if name and name not in names:
             names.append(name)
+    for match in _TOOL_LOG_LINE_RE.finditer(log_text):
+        if match.group("icon") == "⚡":
+            # The legacy regex above already accounts for this rendering.
+            continue
+        label = match.group("label")
+        name = "terminal" if label == "$" else _safe_id(label, limit=80)
+        if name and name not in names:
+            names.append(name)
     summary = _TOOL_SUMMARY_RE.search(log_text)
     tool_count = int(summary.group("count")) if summary else None
     if tool_count is None and names:
@@ -179,6 +196,20 @@ def _observed_tool_stats(log_text: str) -> dict[str, tuple[int, int]]:
     stats: dict[str, tuple[int, int]] = {}
     for match in _TOOL_DURATION_RE.finditer(log_text):
         name = _safe_id(match.group("name"), limit=80)
+        if not name:
+            continue
+        try:
+            duration_ms = max(0, int(float(match.group("duration")) * 1000))
+        except (TypeError, ValueError):
+            duration_ms = 0
+        count, total = stats.get(name, (0, 0))
+        stats[name] = (count + 1, total + duration_ms)
+    for match in _TOOL_LOG_LINE_RE.finditer(log_text):
+        if match.group("icon") == "⚡":
+            # The legacy regex above already accounts for this rendering.
+            continue
+        label = match.group("label")
+        name = "terminal" if label == "$" else _safe_id(label, limit=80)
         if not name:
             continue
         try:
@@ -237,7 +268,6 @@ def worker_log_metrics(
     tool_duration_total_ms = sum(total for _count, total in tool_stats.values())
     return {
         "tool_names": tool_names,
-        "tool_calls": tool_count,
         "tool_duration_total_ms": tool_duration_total_ms,
         "tool_latency_available": tool_duration_total_ms > 0,
         "tool_timing_source": (

@@ -7,6 +7,15 @@ import pytest
 from apps.api import strategy_research
 
 
+@pytest.fixture(autouse=True)
+def no_real_kanban_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        strategy_research,
+        "_ensure_tracking_root",
+        lambda **_kwargs: (None, "UNAVAILABLE"),
+    )
+
+
 def test_strategy_research_api_enqueues_a_natural_language_goal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(strategy_research, "_lab_root", lambda: tmp_path / "research")
     request = strategy_research.StrategyResearchAsk(
@@ -50,3 +59,27 @@ def test_duplicate_submission_reports_the_current_lab_status(tmp_path: Path, mon
 
     assert replay.duplicate is True
     assert replay.status == "RESEARCHING"
+
+
+def test_strategy_tracking_root_is_persisted_when_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(strategy_research, "_lab_root", lambda: tmp_path / "research")
+    def fake_tracking_root(**kwargs):
+        kwargs["intake"].bind_kanban_root(kwargs["request_id"], "t_strategy_root")
+        return "t_strategy_root", "CREATED"
+
+    monkeypatch.setattr(strategy_research, "_ensure_tracking_root", fake_tracking_root)
+
+    accepted = strategy_research.strategy_research_ask(
+        strategy_research.StrategyResearchAsk(
+            query="코스피 돌파 전략을 연구하고 백테스트해줘",
+            request_id="research-root-01",
+        ),
+        "user-a",
+    )
+
+    assert accepted.kanban_root_task_id == "t_strategy_root"
+    assert accepted.kanban_tracking_status == "CREATED"
+    request = (tmp_path / "research" / "intake" / "research-root-01.json").read_text()
+    assert "t_strategy_root" in request

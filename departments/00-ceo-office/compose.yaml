@@ -76,6 +76,7 @@ services:
       # fail-closed 하며, 값 자체는 이미지나 프로필에 저장하지 않는다.
       HGFINANCE_DISCORD_INGRESS_URL: http://portfolio-bff:8000/ui/ceo/ingress
       CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
+      HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY: ${HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY:-8}
       # Optional operations-only alert sink for failed_closed events. It is
       # separate from the user-facing mirror webhook and sent asynchronously.
       CEO_INGRESS_ALERT_WEBHOOK_URL: ${CEO_INGRESS_ALERT_WEBHOOK_URL:-}

@@ -307,6 +307,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  "20260826000600_active_conditional_subscription_symbols.sql",
                  # 로컬 고정 사용자에서 외부/Supabase Auth 투영 흔적을 제거한다.
                  "20260826000650_remove_external_auth_subject_projection.sql",
+                 # 조건주문 bundle 활성화에 필요한 worker UPDATE 권한만 추가한다.
+                 "20260827000100_conditional_rule_worker_bundle_activation_grant.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

@@ -110,6 +110,50 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
 
             kb.create_task = _hgfinance_guarded_create_task
 
+        # Strategy Hermes requests get a Kanban root for observability, but
+        # that card is deliberately not an execution task.  A blocked create
+        # can still be observed as ``running`` for a short interval while the
+        # dispatcher races the CLI transaction, so status alone is not a safe
+        # boundary.  Guard the atomic claim primitive instead: even if a
+        # tracking card is briefly visible in the ready lane, this dispatcher
+        # can never claim or spawn it.  Keep the card durable for dashboard /
+        # correlation and leave its state untouched.
+        def _is_strategy_tracking_task(conn, task_id):
+            try:
+                row = conn.execute(
+                    "SELECT body FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                return bool(
+                    row is not None
+                    and "strategy_research_tracking_only=true" in str(
+                        row["body"] or ""
+                    )
+                )
+            except Exception:  # noqa: BLE001 - dispatcher guard fails open
+                return False
+
+        _original_claim_task = getattr(kb, "claim_task", None)
+        if callable(_original_claim_task):
+            @wraps(_original_claim_task)
+            def _hgfinance_guarded_claim_task(conn, task_id, *args, **kwargs):
+                if _is_strategy_tracking_task(conn, task_id):
+                    return None
+                return _original_claim_task(conn, task_id, *args, **kwargs)
+
+            kb.claim_task = _hgfinance_guarded_claim_task
+
+        _original_claim_review_task = getattr(kb, "claim_review_task", None)
+        if callable(_original_claim_review_task):
+            @wraps(_original_claim_review_task)
+            def _hgfinance_guarded_claim_review_task(
+                conn, task_id, *args, **kwargs
+            ):
+                if _is_strategy_tracking_task(conn, task_id):
+                    return None
+                return _original_claim_review_task(conn, task_id, *args, **kwargs)
+
+            kb.claim_review_task = _hgfinance_guarded_claim_review_task
+
         _original_check_respawn_guard = kb.check_respawn_guard
         _original_guard_accepts_lane = (
             "lane" in inspect.signature(_original_check_respawn_guard).parameters
@@ -131,7 +175,10 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                         and assignee == "ceo-agent"
                         and "workflow_role=root" in body
                         and "workflow_mode=analysis" in body
-                        and "producer=ceo-hermes-direct" in body
+                        and (
+                            "producer=ceo-hermes-direct" in body
+                            or "producer=portfolio-bff-deterministic" in body
+                        )
                         and "selected_primary_profiles=" in body
                     ):
                         return "hgfinance_control_plane_root"

@@ -146,6 +146,8 @@ def test_strategy_hermes_runs_directly_with_codex_high_and_no_plan_delegate(
     assert environment["LS_DATA_ACCESS_MODE"] == "readonly"
     assert environment["LS_ALLOWED_TR_CODES"].split(",") == [
         "t1665", "t8410", "t8411", "t8412", "t8451", "t8452", "t8453",
+        "t1441", "t1444", "t1452", "t1463", "t1466", "t1481", "t1482",
+        "t1489", "t1492",
     ]
 
 

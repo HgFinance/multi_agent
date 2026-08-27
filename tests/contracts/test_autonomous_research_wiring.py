@@ -4,7 +4,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -26,8 +25,11 @@ def test_strategy_hermes_service_is_opt_in_and_has_no_department_or_order_surfac
     assert service["environment"]["LS_DATA_ACCESS_MODE"] == "readonly"
     assert service["environment"]["LS_ALLOWED_TR_CODES"].split(",") == [
         "t1665", "t8410", "t8411", "t8412", "t8451", "t8452", "t8453",
+        "t1441", "t1444", "t1452", "t1463", "t1466", "t1481", "t1482",
+        "t1489", "t1492",
     ]
     assert service["environment"]["STRATEGY_MARKET_DATA_PARENT"] == "/tmp/strategy-market-data"
+    assert service["environment"]["AUTONOMOUS_RESEARCH_MAX_CONCURRENCY"] == "${AUTONOMOUS_RESEARCH_MAX_CONCURRENCY:-2}"
     assert "/app/repo/quant-data" in service["tmpfs"]
     assert "/tmp/strategy-market-data" in service["tmpfs"]
     assert not any("quant-data" in volume for volume in service["volumes"])
@@ -40,6 +42,8 @@ def test_strategy_hermes_service_is_opt_in_and_has_no_department_or_order_surfac
     assert 'chmod 0777 "$lab_root/intake"' in entrypoint
     supervisor = (ROOT / "departments/01-research/autonomous/strategy_hermes_supervisor.py").read_text(encoding="utf-8")
     assert '"--retry-blocked"' in supervisor
+    assert "ThreadPoolExecutor" in supervisor
+    assert "_configured_max_concurrency" in supervisor
 
 
 def test_strategy_hermes_owns_the_autonomous_namespace_not_research_hq() -> None:

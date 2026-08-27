@@ -191,6 +191,7 @@ services:
       # channel.  The gateway never submits an OMS directive directly.
       HGFINANCE_DISCORD_INGRESS_URL: http://portfolio-bff:8000/ui/ceo/ingress
       CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
+      HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY: ${HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY:-8}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

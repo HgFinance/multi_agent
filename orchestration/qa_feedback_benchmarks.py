@@ -123,11 +123,63 @@ _SUITES: dict[str, Callable[[], dict[str, Any]]] = {
 }
 
 
+def _failed_suite_result(suite_name: str, error_code: str) -> dict[str, Any]:
+    """Return a bounded failure record without persisting exception details."""
+
+    return {
+        "suite": suite_name,
+        "passed": False,
+        "status": "ERROR",
+        "error_code": error_code,
+    }
+
+
+def _run_suite(suite_name: str) -> dict[str, Any]:
+    """Isolate one suite so its exception cannot abort sibling suites."""
+
+    try:
+        result = _SUITES[suite_name]()
+    except Exception:  # noqa: BLE001 - one broken gate must not stop the cycle.
+        return _failed_suite_result(suite_name, "suite_exception")
+    if not isinstance(result, Mapping):
+        return _failed_suite_result(suite_name, "invalid_suite_result")
+    normalized = dict(result)
+    normalized["suite"] = suite_name
+    normalized["passed"] = bool(result.get("passed"))
+    return normalized
+
+
+def _candidate_failure(candidate: Mapping[str, Any]) -> tuple[bool, str, str]:
+    """Build a redacted deterministic failure result for candidate isolation."""
+
+    artifact_id = str(candidate.get("artifact_id") or "")
+    improvement_type = str(candidate.get("improvement_type") or "")
+    manifest = {
+        "schema_version": BENCHMARK_VERSION,
+        "artifact_id": artifact_id,
+        "improvement_type": improvement_type,
+        "finding_codes": [],
+        "suites": [],
+        "errors": ["candidate_exception"],
+        "raw_payloads_sent": False,
+    }
+    digest = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return False, f"sha256:{digest}", "privacy-safe benchmark failed: candidate_exception"
+
+
 def _run_candidate(candidate: Mapping[str, Any]) -> tuple[bool, str, str]:
     codes = sorted({str(value).upper() for value in candidate.get("finding_codes") or ()})
     suite_names = [code for code in codes if code in _SUITES]
-    results = [_SUITES[name]() for name in suite_names]
-    errors = [result["suite"] for result in results if not result["passed"]]
+    results = [_run_suite(name) for name in suite_names]
+    errors = [
+        f"{result['suite']}:{result.get('error_code')}"
+        if result.get("status") == "ERROR"
+        else result["suite"]
+        for result in results
+        if not result["passed"]
+    ]
     if not results:
         errors.append("no_registered_executable_suite")
     manifest = {
@@ -164,15 +216,21 @@ def run_pending_feedback_benchmarks(
         if candidate.get("improvement_type") in {"SKILL_CREATE", "SKILL_EVOLVE"}:
             skipped += 1
             continue
-        ok, report_ref, summary = _run_candidate(candidate)
-        updated = ledger.update_benchmark(
-            str(candidate["artifact_id"]),
-            status="PASSED" if ok else "FAILED",
-            benchmark_id=BENCHMARK_VERSION,
-            score=1.0 if ok else 0.0,
-            report_ref=report_ref,
-            result_summary=summary,
-        )
+        try:
+            ok, report_ref, summary = _run_candidate(candidate)
+        except Exception:  # noqa: BLE001 - isolate a malformed candidate.
+            ok, report_ref, summary = _candidate_failure(candidate)
+        try:
+            updated = ledger.update_benchmark(
+                str(candidate["artifact_id"]),
+                status="PASSED" if ok else "FAILED",
+                benchmark_id=BENCHMARK_VERSION,
+                score=1.0 if ok else 0.0,
+                report_ref=report_ref,
+                result_summary=summary,
+            )
+        except Exception:  # noqa: BLE001 - continue with later candidates.
+            updated = False
         if updated and ok:
             passed += 1
         elif updated:

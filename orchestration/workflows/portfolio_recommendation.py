@@ -35,6 +35,15 @@ from departments.employee_worker_runtime import (
 )
 from departments.worker_model_gateway import llm_for_worker
 from orchestration.adapters.ceo_task_planner import build_task_plan
+from orchestration.ceo_query_routing import (
+    CATEGORY_DEPARTMENTS,
+    CATEGORY_WORKFLOWS,
+    DEPARTMENTS,
+    PORTFOLIO_WORKFLOW,
+    STRATEGY_WORKFLOW,
+    _QUERY_STAGE_KEYWORDS,
+    build_ceo_task_plan,
+)
 from orchestration.contracts.mas import (
     DepartmentHandoff,
     build_replay_metadata,
@@ -70,16 +79,7 @@ RuntimeEventCallback = Callable[[Mapping[str, Any]], None]
 #
 # QA is not a response-plane department. It is scheduled after CEO response
 # delivery by ``schedule_post_response_qa_audit``. The response-plane list is
-# intentionally separate so adding a QA worker cannot recreate a blocking
-# QA -> CEO edge by accident.
-DEPARTMENTS: tuple[str, ...] = (
-    "research",
-    "quant",
-    "trading",
-    "risk",
-    "accounting",
-    "ceo",
-)
+# owned by ``orchestration.ceo_query_routing`` and shared with the BFF.
 QA_AUDIT_STAGE = "qa"
 
 # ▶ 이 두 표는 **실재하는 worker_id 만** 담는다 (2026-08-11 감사).
@@ -128,52 +128,9 @@ _QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
     "ceo": ("executive-briefing-worker",),
 }
 
-# 카테고리는 두 가지를 따로 결정한다 - (1) 어느 Workflow 소속인가, (2) 그 Workflow
-# 안에서 어느 부서를 부르는가. 이 둘을 분리해 두는 이유는 CLAUDE.md "5개 흐름 - 서로
-# 분리, 섞지 않는다"와 MAS_PIPELINE_CONTRACTS.md "Quant와 HR은 포트폴리오 추천 그래프에
-# 암묵적으로 끼워 넣지 않는다"를 코드에서도 지키기 위해서다.
-#
-# 특히 전략 연구 요청("이런 전략 어때?")은 quant-backtest 를 아래 DEPARTMENTS 에
-# 추가해서 푸는 문제가 **아니다.** 전략 승격은 별도 strategy-research 체인이
-# 소유하는 거버넌스 문제이며, 일반 CEO 응답의 QA는 응답 후 감사 레인이다.
-PORTFOLIO_WORKFLOW = "portfolio-recommendation"
-STRATEGY_WORKFLOW = "strategy-research"
-
-CATEGORY_WORKFLOWS: dict[str, str] = {
-    "PORTFOLIO_RECOMMENDATION": PORTFOLIO_WORKFLOW,
-    "MARKET_RESEARCH": PORTFOLIO_WORKFLOW,
-    "RISK_REVIEW": PORTFOLIO_WORKFLOW,
-    "TAX_LIQUIDITY": PORTFOLIO_WORKFLOW,
-    "REBALANCING_PROPOSAL": PORTFOLIO_WORKFLOW,
-    # 이 그래프가 처리할 수 없다 - task_plan.workflow 로 호출부에 알린다.
-    "STRATEGY_PROPOSAL": STRATEGY_WORKFLOW,
-}
-
-# Category is the first routing hint. The free-form query may expand this
-# bounded set when it clearly needs another domain.
-# quant 는 **포트폴리오·전략을 구성하는 카테고리에만** 넣는다. 팀 합의는 "요청마다
-# research -> quant"였지만 그 대상은 구성 요청이다 - "삼전 지금 사도 돼?" 같은 단순
-# 종목 질문(MARKET_RESEARCH)까지 백테스트를 돌리면 3단계가 4단계 + 실제 연산으로
-# 늘어나 대화 응답성이 무너진다. RISK_REVIEW·TAX_LIQUIDITY 도 기존 보유분에 대한
-# 질문이라 새 후보를 만들지 않으므로 제외한다.
-CATEGORY_DEPARTMENTS: dict[str, tuple[str, ...]] = {
-    "PORTFOLIO_RECOMMENDATION": ("research", "quant", "risk", "ceo"),
-    "MARKET_RESEARCH": ("research", "ceo"),
-    "RISK_REVIEW": ("research", "risk", "ceo"),
-    "TAX_LIQUIDITY": ("research", "risk", "accounting", "ceo"),
-    "REBALANCING_PROPOSAL": (
-        "research",
-        "quant",
-        "trading",
-        "risk",
-        "accounting",
-        "ceo",
-    ),
-    # 전략 제안. 정식 승격 흐름은 별도 strategy-research가 소유하지만
-    # (task_plan.workflow 참고), 대화에서 들어온 전략 질문에 답하려면
-    # 이 그래프에서도 백테스트 근거가 필요하다. 주문·원장 부서는 넣지 않는다.
-    "STRATEGY_PROPOSAL": ("research", "quant", "ceo"),
-}
+# The routing table lives in the lightweight shared module above.  The worker
+# routing tables below remain local because they describe this graph's actual
+# employee registry, not the BFF department boundary.
 
 
 def _configured_worker_runtime() -> str:
@@ -187,88 +144,10 @@ def _configured_worker_runtime() -> str:
     return "deterministic_test"
 
 
-# 자유 질의 -> **부서** 라우팅 표. `_QUERY_WORKER_TERMS`(질의 -> 워커)와 짝이다.
+# 자유 질의 -> **워커** 라우팅 표. The department-level table is shared above.
 # 모듈 상수인 이유: 아래 build_ceo_task_plan 안에 지역 변수로 두었더니
 # `assert_query_router_ids_exist()` 가 이 표를 못 봐서, **quant 가 통째로 빠진 것을
 # 아무도 못 잡았다**(2026-08-12 발견). 두 표는 한 곳에서 같이 검사돼야 한다.
-_QUERY_STAGE_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "trading": ("주문", "매수", "매도", "체결", "리밸런싱", "거래"),
-    "accounting": ("세금", "수수료", "원장", "nav", "현금", "현금흐름", "대사", "회계"),
-    "research": ("종목", "주식", "etf", "뉴스", "시장", "수익", "유니버스", "업종", "국내", "글로벌"),
-    "risk": ("위험", "리스크", "손실", "변동", "헤지", "레버리지", "공매도", "보수적"),
-    "qa": ("검증", "근거", "신뢰", "감사", "오류", "검토", "출처"),
-    # ▶ quant 가 여기 없었다. `_QUERY_WORKER_TERMS` 에는 quant 워커 용어
-    #   ("전략"·"백테스트"·"과적합"·"레짐"…)가 있는데 이 표에 부서가 없어서
-    #   requested_departments 에 quant 가 안 들어갔고, `_selected_specs` 가
-    #   워커 라우터를 타기 전에 `()` 를 반환했다 - **그 용어들이 죽은 코드**였다.
-    #   실측: "이런 전략 어때?" -> ['research','risk','ceo']; QA는 응답 후 감사다.
-    #
-    #   용어는 좁게 잡는다. "결과"·"해석"·"최적화" 같은 일반어를 넣으면 거의 모든
-    #   질의가 백테스트를 끌고 와 응답성이 무너진다 - CATEGORY_DEPARTMENTS 주석이
-    #   MARKET_RESEARCH 에서 quant 를 뺀 이유가 그것이다. 백테스트·전략 작업을
-    #   명시적으로 가리키는 말만 둔다.
-    "quant": ("전략", "백테스트", "가설", "과적합", "레짐", "데이터셋", "피처"),
-}
-
-
-def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
-    """Create a bounded department plan from a free-form user request.
-
-    The request remains available to the workers. This deterministic first pass
-    is a safety guard: it limits which department may be called, while the CEO
-    worker can explain and refine the plan. It never creates orders or changes
-    financial state.
-    """
-    query = " ".join(str(profile.get("query", "")).split())
-    category = str(profile.get("category", "")).strip().upper()
-    category_departments = CATEGORY_DEPARTMENTS.get(category)
-    # 알 수 없는 카테고리를 거절하지 않는다 - 표에 없으면 더 넓은 집합으로 떨어져
-    # 자문 결과가 비는 대신 부서를 더 부른다(개발 원칙 9: 실패는 확대가 아니라
-    # 차단 방향이나, 여기서 "확대"는 주문이 아니라 읽기 부서 호출이라 안전하다).
-    # 다만 조용히 넘기지 않고 category_recognized 로 호출부·감사에 드러낸다.
-    category_recognized = category in CATEGORY_WORKFLOWS
-    workflow = CATEGORY_WORKFLOWS.get(category, PORTFOLIO_WORKFLOW)
-    if not query:
-        requested_departments = list(category_departments or DEPARTMENTS)
-        return {
-            "mode": "category_default" if category_departments else "portfolio_default",
-            "category": category or "PORTFOLIO_RECOMMENDATION",
-            "workflow": workflow,
-            "category_recognized": category_recognized,
-            "original_query": "",
-            "rewritten_query": "카테고리와 사용자 프로필에 맞는 비구속적 포트폴리오 후보를 검토한다.",
-            "requested_departments": requested_departments,
-            "routing_basis": "category_default" if category_departments else "structured_suitability_default",
-            "matched_terms": {},
-        }
-
-    normalized = query.lower()
-    stages: set[str] = set(category_departments or ("research", "risk", "ceo"))
-    matched_terms: dict[str, list[str]] = {}
-    for stage, terms in _QUERY_STAGE_KEYWORDS.items():
-        hits = [term for term in terms if term in normalized]
-        if hits:
-            stages.add(stage)
-            matched_terms[stage] = hits
-
-    # QA keyword matches are audit intent, never a response-plane primary.
-    # Materialization is handled after CEO response by the runtime scheduler.
-    ordered = [stage for stage in DEPARTMENTS if stage in stages]
-    return {
-        "mode": "free_query",
-        "category": category or "PORTFOLIO_RECOMMENDATION",
-        "workflow": workflow,
-        "category_recognized": category_recognized,
-        "original_query": query,
-        "rewritten_query": (
-            f"{query} 사용자 요청을 적합성·근거·리스크 관점에서 검토하고, "
-            "주문이나 장부 변경 없이 결과를 설명한다."
-        ),
-        "requested_departments": ordered,
-        "matched_terms": matched_terms,
-        "routing_basis": "bounded_query_intent_router",
-    }
-
 _MODULE_PATHS = {
     "research": ROOT / "departments/01-research/employee_workers.py",
     "quant": ROOT / "departments/04-quant-backtest/employee_workers.py",

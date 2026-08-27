@@ -75,6 +75,30 @@ def test_dispatch_guard_keeps_legacy_lane_signature_compatible(monkeypatch):
     assert observed == [("t_plain", "blocked")]
 
 
+def test_dispatch_guard_skips_a_complete_deterministic_bff_root(monkeypatch):
+    def original(connection, task_id):
+        del connection, task_id
+        return "native"
+
+    patched = _load_patch(monkeypatch, original)
+    connection = _database()
+    connection.execute(
+        "insert into tasks values (?, ?, ?)",
+        (
+            "t_bff_route",
+            "ceo-agent",
+            (
+                "workflow_role=root\n"
+                "workflow_mode=analysis\n"
+                "producer=portfolio-bff-deterministic\n"
+                "selected_primary_profiles=research-department"
+            ),
+        ),
+    )
+
+    assert patched(connection, "t_bff_route") == "hgfinance_control_plane_root"
+
+
 def test_dispatch_guard_exposes_worker_observer_registry_path(monkeypatch):
     def original(connection, task_id):
         del connection, task_id

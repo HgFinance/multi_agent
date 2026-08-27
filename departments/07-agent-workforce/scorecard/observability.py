@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -872,44 +873,64 @@ class WindowedActivityReader(LangfuseTraceReader):
         #    실행 건수는 여기 안 담는다 - ②가 레코드를 끝까지 모으므로 그 길이가
         #    곧 정확한 건수다. 굳이 같이 물으면 배치를 못 하는 reader(테스트 대역)
         #    에서 왕복이 오히려 늘어난다.
-        if opportunity_names:
-            try:
-                batch_counter = getattr(
-                    self._inner, "count_many_worker_activity", None
+        # ①과 ②는 서로 다른 read-only 요청이고 결과를 공유하지 않는다. 같은
+        # Langfuse client의 네트워크 호출만 병렬화해 전체 GET 시간을 두 요청의
+        # 합이 아니라 느린 요청 하나에 가깝게 제한한다. 결과를 캐시에 쓰는 일과
+        # queries 카운트는 메인 스레드에서 수행해 reader 대역의 thread-safety
+        # 가정을 넓히지 않는다.
+        def fetch_opportunity_counts() -> dict[str, int]:
+            batch_counter = getattr(
+                self._inner, "count_many_worker_activity", None
+            )
+            if callable(batch_counter):
+                return batch_counter(
+                    event_names=opportunity_names, since=since, until=until,
                 )
-                if callable(batch_counter):
-                    counts = batch_counter(
-                        event_names=opportunity_names, since=since, until=until,
-                    )
-                else:
-                    # Compatibility path for older test/local readers that
-                    # only implement the original single-name interface.
-                    counts = {
-                        name: self._inner.count_worker_activity(
-                            event_name=name, since=since,
-                        )
-                        for name in opportunity_names
-                    }
-                self.queries += 1
-                for name, count in counts.items():
-                    self._counts.setdefault(self._key(name, since), count)
-            except LangfuseQueryError as exc:
-                for name in opportunity_names:
-                    self._failures.setdefault(self._key(name, since), str(exc))
+            # Compatibility path for older test/local readers that only
+            # implement the original single-name interface.
+            return {
+                name: self._inner.count_worker_activity(
+                    event_name=name, since=since,
+                )
+                for name in opportunity_names
+            }
 
-        # ② 실행 레코드 - 유휴·Capacity·LLM 사용량·Worker 사용량·발화율 분자가
-        #    전부 이 한 묶음에서 나온다.
-        if not execution_names:
-            return
-        try:
-            pages = self._inner.fetch_many_worker_activity(
+        def fetch_execution_pages() -> dict[str, WorkerActivityPage]:
+            return self._inner.fetch_many_worker_activity(
                 event_names=execution_names, since=since,
             )
-            self.queries += 1
-        except LangfuseQueryError as exc:
-            for name in execution_names:
-                self._failures.setdefault(self._key(name, since), str(exc))
-            return
+
+        opportunity_future = None
+        execution_future = None
+        with ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="hr-observability"
+        ) as executor:
+            if opportunity_names:
+                opportunity_future = executor.submit(fetch_opportunity_counts)
+            if execution_names:
+                execution_future = executor.submit(fetch_execution_pages)
+
+            if opportunity_future is not None:
+                try:
+                    counts = opportunity_future.result()
+                    self.queries += 1
+                    for name, count in counts.items():
+                        self._counts.setdefault(self._key(name, since), count)
+                except LangfuseQueryError as exc:
+                    for name in opportunity_names:
+                        self._failures.setdefault(self._key(name, since), str(exc))
+
+            # ② 실행 레코드 - 유휴·Capacity·LLM 사용량·Worker 사용량·발화율
+            #    분자가 전부 이 한 묶음에서 나온다.
+            if execution_future is None:
+                return
+            try:
+                pages = execution_future.result()
+                self.queries += 1
+            except LangfuseQueryError as exc:
+                for name in execution_names:
+                    self._failures.setdefault(self._key(name, since), str(exc))
+                return
 
         # 잘린 묶음은 이름별 건수를 못 믿는다 - 서버 meta 는 묶음 전체 합이고
         # len(records) 는 표본이다. 그때만 Metrics 로 정확한 건수를 따로 받는다

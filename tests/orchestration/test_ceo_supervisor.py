@@ -232,6 +232,48 @@ def test_hr_status_normalization_preserves_fractional_iso_timestamp() -> None:
     assert "UNAVAILABLE 0" not in enriched
 
 
+def test_hr_projection_does_not_publish_unknown_delivery_status_without_receipt() -> None:
+    primary = {
+        "id": "hr",
+        "assignee": "hr-department",
+        "status": "done",
+        "body": "workflow_root_task_id=root\nworkflow_role=primary",
+        "comments": [
+            {
+                "body": (
+                    "hgfinance.department-notion-delivery.v1 "
+                    "delivery_status=DELIVERED readback_status=VERIFIED"
+                )
+            }
+        ],
+        "metadata": {
+            "result": {
+                "candidate_snapshot": {"http_status": 200, "candidate_count": 0},
+                "observability": {
+                    "http_status": 200,
+                    "statuses": {"IDLE": 2, "UNOBSERVED": 6},
+                    "window_start": "2026-08-26T00:00:00Z",
+                    "window_end": "2026-08-27T00:00:00Z",
+                },
+                "scorecard": {
+                    "http_status": 200,
+                    "window_start": "2026-08-26T00:00:00Z",
+                    "window_end": "2026-08-27T00:00:00Z",
+                },
+            }
+        },
+    }
+
+    enriched = _augment_hr_final_answer(
+        "검증 결과 PASS입니다.",
+        root_task_id="root",
+        task_payloads=(primary,),
+    )
+
+    assert "상태 확인 필요" not in enriched
+    assert "### 전달 확인" not in enriched
+
+
 def test_active_unscoped_child_does_not_poison_root_cache() -> None:
     class Client:
         environment = {}

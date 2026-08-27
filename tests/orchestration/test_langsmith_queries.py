@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
+import orchestration.langsmith_queries as langsmith_queries
 from orchestration.langsmith_queries import query_runs
 
 
@@ -75,3 +78,62 @@ def test_query_runs_caches_project_uuid() -> None:
     query_runs(client, project_name="Cached-SmithDB", min_start_time=start, max_results=1)
 
     assert client.project_reads == 1
+
+
+class _HttpStatusError(Exception):
+    def __init__(self, status_code: int):
+        super().__init__(f"http {status_code}")
+        self.status_code = status_code
+
+
+class _FailingRuns:
+    def __init__(self, error):
+        self.error = error
+        self.query_calls = 0
+
+    async def query(self, **_kwargs):
+        self.query_calls += 1
+        raise self.error
+
+
+class _ErrorClient(_Client):
+    def __init__(self, error):
+        super().__init__()
+        self.runs = _FailingRuns(error)
+
+
+def test_query_runs_does_not_rest_fallback_after_http_error(monkeypatch) -> None:
+    client = _ErrorClient(_HttpStatusError(422))
+    monkeypatch.setattr(
+        langsmith_queries,
+        "_direct_v2_query",
+        lambda *_args, **_kwargs: pytest.fail("HTTP validation must not be retried"),
+    )
+
+    with pytest.raises(_HttpStatusError):
+        query_runs(
+            client,
+            project_name="No-Duplicate-Query",
+            min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
+            max_results=1,
+        )
+
+
+def test_query_runs_keeps_rest_fallback_for_async_transport_compatibility(
+    monkeypatch,
+) -> None:
+    client = _ErrorClient(RuntimeError("async paginator transport unavailable"))
+    monkeypatch.setattr(
+        langsmith_queries,
+        "_direct_v2_query",
+        lambda *_args, **_kwargs: [SimpleNamespace(id="rest-run")],
+    )
+
+    rows = query_runs(
+        client,
+        project_name="Transport-Fallback",
+        min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
+        max_results=1,
+    )
+
+    assert [row.id for row in rows] == ["rest-run"]

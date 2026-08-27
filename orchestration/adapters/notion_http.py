@@ -13,7 +13,7 @@ import json
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from email.message import Message
 from typing import Any
 
@@ -31,6 +31,69 @@ class NotionHttpError(RuntimeError):
         super().__init__(message)
         self.status = status
         self.detail = detail
+
+
+NOTION_MAX_CHILDREN = 100
+
+
+def notion_children_chunks(
+    children: Sequence[Mapping[str, Any]],
+    *,
+    limit: int = NOTION_MAX_CHILDREN,
+) -> list[list[Mapping[str, Any]]]:
+    """Split page children at Notion's request limit."""
+
+    if limit <= 0:
+        raise ValueError("Notion children limit must be positive")
+    return [
+        list(children[index : index + limit])
+        for index in range(0, len(children), limit)
+    ]
+
+
+def notion_block_signature(block: Mapping[str, Any]) -> str:
+    """Return a stable signature that ignores Notion-assigned block metadata."""
+
+    block_type = str(block.get("type") or "").strip()
+    if block_type:
+        comparable: Mapping[str, Any] = {
+            "type": block_type,
+            block_type: block.get(block_type),
+        }
+    else:
+        comparable = {
+            key: value
+            for key, value in block.items()
+            if key not in {"id", "object", "parent", "created_time", "last_edited_time"}
+        }
+    return json.dumps(
+        comparable,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def missing_notion_block_suffix(
+    existing: Sequence[Mapping[str, Any]],
+    desired: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Return the desired suffix not already present at the page tail.
+
+    This makes a retry after an ambiguous append response safe when Notion's
+    read-after-write view includes the blocks that were actually appended.
+    """
+
+    if not desired:
+        return []
+    existing_signatures = [notion_block_signature(block) for block in existing]
+    desired_signatures = [notion_block_signature(block) for block in desired]
+    max_overlap = min(len(existing_signatures), len(desired_signatures))
+    for overlap in range(max_overlap, 0, -1):
+        if existing_signatures[-overlap:] == desired_signatures[:overlap]:
+            return list(desired[overlap:])
+    return list(desired)
 
 
 def _response_detail(response: Any) -> Any:
@@ -138,4 +201,42 @@ def request_json(
     raise AssertionError("unreachable Notion retry loop")
 
 
-__all__ = ["NotionHttpError", "request_json"]
+def request_json_status(
+    method: str,
+    path: str,
+    token: str,
+    *,
+    body: Mapping[str, Any] | None = None,
+    version: str = "2022-06-28",
+    timeout_seconds: float = 10.0,
+    max_attempts: int = 3,
+) -> tuple[int, dict[str, Any]]:
+    """Keep the legacy ``(status, body)`` reporter contract on shared HTTP."""
+
+    try:
+        response = request_json(
+            method,
+            path,
+            token,
+            body=body,
+            version=version,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+        )
+    except NotionHttpError as exc:
+        detail = exc.detail
+        if isinstance(detail, Mapping):
+            return int(exc.status or 599), dict(detail)
+        return int(exc.status or 599), {"message": str(detail or exc)}
+    return 200, dict(response)
+
+
+__all__ = [
+    "NOTION_MAX_CHILDREN",
+    "NotionHttpError",
+    "missing_notion_block_suffix",
+    "notion_block_signature",
+    "notion_children_chunks",
+    "request_json",
+    "request_json_status",
+]

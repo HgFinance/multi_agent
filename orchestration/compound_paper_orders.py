@@ -36,13 +36,38 @@ from orchestration.user_order_language import (
 )
 
 
-_COMPOUND_SPLIT = re.compile(r"(?:\.|;)?\s*그리고\s*", re.IGNORECASE)
+# "그리고" was the only recognized seam, so the very common
+# "…매수하고 …매도해줘" shape fell through to the single-order lane, which
+# flags it MULTIPLE_COMMANDS and refuses (2026-08-27).  The verb stays with
+# the first leg, so only the connective is consumed.
+_COMPOUND_SPLIT = re.compile(
+    r"(?:\.|;)?\s*그리고\s*"
+    r"|(?<=매수)\s*(?:하고|한\s*뒤(?:에)?|한\s*후(?:에)?|해\s*놓고)\s*"
+    r"|(?<=매수)\s*(?:하고|한\s*뒤(?:에)?|한\s*후(?:에)?)\s*(?:그\s*)?(?:다음|후)\s*",
+    re.IGNORECASE,
+)
 _DISCORD_PREFIX = re.compile(r"^(?:<@!?\d+>|@[^\s]+)\s*")
 _TRIGGER = re.compile(
     r"^(?P<price>[1-9]\d{0,2}(?:,\d{3})*|[1-9]\d*)\s*원?\s*"
     r"(?P<operator>초과|넘으면|이상이면|이상(?:일\s*때)?)\s*"
     r"(?:즉시\s*)?(?P<quantity>[1-9]\d{0,2}(?:,\d{3})*|[1-9]\d*)\s*"
     r"(?:주|주식|개)\s*매도(?:해\s*(?:줘|주세요|줘요)|해줘|해주세요|해)?\s*$",
+    re.IGNORECASE,
+)
+# "매수가 대비 1% 상승하면 매도" / "매수가 대비 2% 하락하면 매도" - the trigger
+# is a percentage away from the entry price rather than an absolute number, so
+# no literal price exists to compare against.  Both directions are the same
+# shape: take-profit compares upward, stop-loss downward.  The quantity may be
+# omitted; the leg then sells exactly what the first leg just bought.
+_ENTRY_RELATIVE_TRIGGER = re.compile(
+    r"^(?:매수가|매입가|평단가?|매수\s*단가)\s*(?:대비|보다|에서)?\s*"
+    r"(?P<percent>\d{1,2}(?:\.\d{1,2})?)\s*%\s*(?:이상\s*)?"
+    r"(?:(?P<up>상승|오르|올라가|올라|올랐)"
+    r"|(?P<down>하락|떨어지|내리|내려가|빠지|손절))(?:하)?\s*"
+    r"(?:면|시|할\s*때|했을\s*때|하면)\s*"
+    r"(?:즉시\s*)?"
+    r"(?:(?P<quantity>[1-9]\d{0,2}(?:,\d{3})*|[1-9]\d*)\s*(?:주|주식|개)\s*)?"
+    r"(?:시장가로?\s*)?매도(?:해\s*(?:줘|주세요|줘요)|해줘|해주세요|해)?\s*$",
     re.IGNORECASE,
 )
 _ANALYSIS_THEN_CONDITIONAL = re.compile(
@@ -66,9 +91,12 @@ class CompoundPaperOrderPlan:
     instrument_mention: str
     immediate_quantity: int
     conditional_quantity: int
-    trigger_price: Decimal
+    trigger_price: Decimal | None
     trigger_operator: str
     immediate_candidate: HermesOrderCandidate
+    # Set instead of `trigger_price` when the trigger is a percentage above the
+    # entry price.  Exactly one of the two is populated.
+    trigger_entry_percent: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -118,29 +146,62 @@ def parse_compound_paper_order(raw_text: str) -> CompoundPaperOrderPlan | None:
     if candidate.order_type is None or candidate.order_type.value != "MARKET":
         return None
 
-    trigger = _TRIGGER.fullmatch(conditional)
-    if trigger is None:
-        return None
-    trigger_price = Decimal(trigger.group("price").replace(",", ""))
-    conditional_quantity = _integer(trigger.group("quantity"))
     immediate_quantity = int(candidate.quantity)
+
+    trigger = _TRIGGER.fullmatch(conditional)
+    if trigger is not None:
+        conditional_quantity = _integer(trigger.group("quantity"))
+        if conditional_quantity != immediate_quantity:
+            return None
+        trigger_price = Decimal(trigger.group("price").replace(",", ""))
+        operator = "GTE" if trigger.group("operator").startswith("이상") else "GT"
+        return CompoundPaperOrderPlan(
+            immediate_instruction=immediate,
+            conditional_instruction=(
+                f"{candidate.instrument_mention} {trigger_price}원 "
+                f"{'이상' if operator == 'GTE' else '초과'} 시 "
+                f"{conditional_quantity}주 시장가 매도"
+            ),
+            instrument_mention=candidate.instrument_mention,
+            immediate_quantity=immediate_quantity,
+            conditional_quantity=conditional_quantity,
+            trigger_price=trigger_price,
+            trigger_operator=operator,
+            immediate_candidate=candidate,
+        )
+
+    entry = _ENTRY_RELATIVE_TRIGGER.fullmatch(conditional)
+    if entry is None:
+        return None
+    percent = Decimal(entry.group("percent"))
+    if not (Decimal("0") < percent <= Decimal("50")):
+        return None
+    raw_quantity = entry.group("quantity")
+    # Omitting the quantity means "sell what the first leg just bought"; any
+    # explicit number still has to match, so the pair can never go net short.
+    conditional_quantity = (
+        immediate_quantity if raw_quantity is None else _integer(raw_quantity)
+    )
     if conditional_quantity != immediate_quantity:
         return None
-
-    operator = "GTE" if trigger.group("operator").startswith("이상") else "GT"
+    falling = entry.group("down") is not None
     return CompoundPaperOrderPlan(
         immediate_instruction=immediate,
+        # "매수가" must survive into the generated instruction: the preview
+        # flags AMBIGUOUS_RETURN_BASELINE when an entry-price rule cannot point
+        # at the baseline word in its own text.
         conditional_instruction=(
-            f"{candidate.instrument_mention} {trigger_price}원 "
-            f"{'이상' if operator == 'GTE' else '초과'} 시 "
+            f"{candidate.instrument_mention} 매수가 대비 {percent}% 이상 "
+            f"{'하락' if falling else '상승'} 시 "
             f"{conditional_quantity}주 시장가 매도"
         ),
         instrument_mention=candidate.instrument_mention,
         immediate_quantity=immediate_quantity,
         conditional_quantity=conditional_quantity,
-        trigger_price=trigger_price,
-        trigger_operator=operator,
+        trigger_price=None,
+        trigger_operator="LTE" if falling else "GTE",
         immediate_candidate=candidate,
+        trigger_entry_percent=-percent if falling else percent,
     )
 
 
@@ -182,15 +243,31 @@ def build_compound_conditional_candidate(
 ):
     """Build the validated-shape candidate; resolution/authority remain upstream."""
 
+    if plan.trigger_entry_percent is not None:
+        # LAST_PRICE >= AVG_ENTRY_PRICE * (1 + pct/100).  The entry price is
+        # read from the book at evaluation time, so the rule stays correct even
+        # if the first leg fills at a different price than quoted.
+        threshold = ExpressionNode(
+            type=ExpressionType.ARITHMETIC,
+            operator="MUL",
+            left=ExpressionNode(type=ExpressionType.PORTFOLIO, field="AVG_ENTRY_PRICE"),
+            right=ExpressionNode(
+                type=ExpressionType.LITERAL,
+                value=Decimal(1) + plan.trigger_entry_percent / Decimal(100),
+                unit=ValueUnit.NUMBER,
+            ),
+        )
+    else:
+        threshold = ExpressionNode(
+            type=ExpressionType.LITERAL,
+            value=plan.trigger_price,
+            unit=ValueUnit.PRICE,
+        )
     condition = ExpressionNode(
         type=ExpressionType.COMPARISON,
         operator=plan.trigger_operator,
         left=ExpressionNode(type=ExpressionType.MARKET, field="LAST_PRICE"),
-        right=ExpressionNode(
-            type=ExpressionType.LITERAL,
-            value=plan.trigger_price,
-            unit=ValueUnit.PRICE,
-        ),
+        right=threshold,
     )
     return {
         "symbol": plan.instrument_mention,

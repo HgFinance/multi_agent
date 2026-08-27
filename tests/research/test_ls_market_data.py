@@ -30,6 +30,13 @@ def _page(tr: str, rows: list[dict], *, more: str = "N", cursor: str = "", key: 
     )
 
 
+def _ranking_page(tr: str, rows: list[dict], *, more: str = "N", idx: int = 0, key: str = ""):
+    return (
+        {f"{tr}OutBlock": {"idx": idx}, f"{tr}OutBlock1": rows},
+        {"tr_cont": more, "tr_cont_key": key},
+    )
+
+
 def test_integrated_daily_uses_t8451_and_header_continuation() -> None:
     fake = FakeLsClient([
         _page("t8451", [{"date": "20240102", "close": 102}, {"date": "20240101", "close": 101}], more="Y", cursor="20231229", key="next-1"),
@@ -98,6 +105,35 @@ def test_t1665_uses_explicit_investor_tr_contract() -> None:
             "market": "1", "upcode": "001", "gubun2": "2", "gubun3": "1",
             "from_date": "20240101", "to_date": "20240131", "exchgubun": "K",
         }
+    }
+
+
+def test_ranking_fetch_supports_market_cap_and_idx_continuation() -> None:
+    fake = FakeLsClient([
+        _ranking_page("t1444", [{"shcode": "005930", "total": 500}], more="Y", idx=7, key="next-1"),
+        _ranking_page("t1444", [{"shcode": "000660", "total": 300}], idx=9),
+    ])
+    client = OnDemandMarketDataClient(fake, max_pages=3)
+    batch = client.fetch_ranking(
+        "t1444", {"upcode": "001", "idx": 0}, as_of="20260827"
+    )
+
+    assert [row["shcode"] for row in batch.rows] == ["005930", "000660"]
+    assert batch.receipt.tr_code == "t1444"
+    assert batch.receipt.as_of == "20260827"
+    assert fake.calls[0]["path"] == "/stock/high-item"
+    assert fake.calls[0]["in_block"] == {"t1444InBlock": {"upcode": "001", "idx": 0}}
+    assert fake.calls[1]["tr_cont"] == "Y"
+    assert fake.calls[1]["tr_cont_key"] == "next-1"
+    assert fake.calls[1]["in_block"] == {"t1444InBlock": {"upcode": "001", "idx": 7}}
+
+
+def test_all_requested_ranking_trs_are_allow_listed() -> None:
+    from ls_market_data import RANKING_TR_CODES
+
+    assert RANKING_TR_CODES == {
+        "t1441", "t1444", "t1452", "t1463", "t1466", "t1481", "t1482",
+        "t1489", "t1492",
     }
 
 

@@ -35,6 +35,11 @@ Web/Discord → BFF 중앙 라우터 → autonomous_research_ingress
 해당 경로에 카드를 만들거나 연구를 위임하지 않습니다. BFF는 접수·상태 조회를 위한
 파일 경계를 사용하지만 연구실의 가설·계획·결과를 작성하지 않습니다.
 
+활성 연구실은 각자 격리된 lab 디렉터리와 Hermes subprocess를 가지므로
+`AUTONOMOUS_RESEARCH_MAX_CONCURRENCY`까지 병렬 실행합니다(기본 2, 컨테이너 CPU
+예산에 맞춘 제한). intake materialize와 결과 JSON 출력 순서는 직렬·정렬로 유지하고,
+한 lab의 실패 기록은 다른 lab의 실행을 막지 않습니다.
+
 ## 보존·삭제 규칙
 
 `factory/`, `contracts/factory_contracts.py`, `pipeline/factory_bridge.py`, 과거

@@ -266,17 +266,78 @@ def build_content(query: str, *, asked_by: object = None) -> str:
     return body[:keep] + suffix
 
 
-def post_question(query: str, *, asked_by: object = None) -> MirrorPost | None:
+def _mirror_post_from_record(record: Any) -> MirrorPost | None:
+    """Convert a durable posted record back to the public mirror coordinates."""
+
+    if getattr(record, "state", None) != "POSTED":
+        return None
+    channel_id = str(getattr(record, "channel_id", "") or "").strip()
+    message_id = str(getattr(record, "message_id", "") or "").strip()
+    if not channel_id or not message_id:
+        return None
+    return MirrorPost(
+        channel_id=channel_id,
+        message_id=message_id,
+        guild_id=str(getattr(record, "guild_id", "") or "").strip() or None,
+        thread_id=str(getattr(record, "thread_id", "") or "").strip() or None,
+    )
+
+
+def post_question(
+    query: str,
+    *,
+    asked_by: object = None,
+    mirror_store: Any | None = None,
+    mirror_key: str | None = None,
+    request_id: str | None = None,
+) -> MirrorPost | None:
     """질의를 채널에 게시하고 그 메시지의 좌표를 준다. 실패하면 `None`.
 
     예외를 올리지 않는다 - 이 게시가 실패했다고 사용자의 질문 접수까지 실패하면,
     Discord 장애가 곧 CEO 장애가 된다.
+
+    ``mirror_store``가 전달된 운영 경로에서는 Discord POST 전에 durable claim을
+    만든다. 같은 Web 요청의 재실행은 기존 좌표를 재사용하고, 진행 중인 claim에는
+    다시 POST하지 않는다. 네트워크 timeout은 Discord가 이미 게시했을 수 있어
+    claim을 해제하지 않는다.
     """
 
     config = _config()
     if not config:
         return None
     token, channel_id = config
+
+    claim = None
+    claim_created = False
+    if mirror_store is not None:
+        if not mirror_key or not request_id:
+            _LOGGER.error("discord-mirror status=failed reason=claim_context_missing")
+            return None
+        try:
+            claim, claim_created = mirror_store.claim_mirror_post(
+                mirror_key=mirror_key,
+                request_id=request_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - never POST without durable dedup.
+            _LOGGER.error(
+                "discord-mirror status=failed reason=claim_unavailable exception_type=%s",
+                type(exc).__name__,
+            )
+            return None
+        if not claim_created:
+            existing_post = _mirror_post_from_record(claim)
+            if existing_post is not None:
+                _LOGGER.info(
+                    "discord-mirror status=deduped mirror_key=%s message=%s",
+                    mirror_key,
+                    existing_post.message_id,
+                )
+                return existing_post
+            _LOGGER.info(
+                "discord-mirror status=in_progress mirror_key=%s",
+                mirror_key,
+            )
+            return None
 
     try:
         response = httpx.post(
@@ -334,18 +395,39 @@ def post_question(query: str, *, asked_by: object = None) -> MirrorPost | None:
     guild_id = str(payload.get("guild_id") or "").strip() or None
     resolved_channel_id = str(payload.get("channel_id") or channel_id)
     thread_id = _start_thread(token, resolved_channel_id, message_id, query)
+    post = MirrorPost(
+        channel_id=resolved_channel_id,
+        message_id=message_id,
+        guild_id=guild_id,
+        thread_id=thread_id,
+    )
+    if mirror_store is not None and claim_created:
+        try:
+            completed = mirror_store.complete_mirror_post(
+                mirror_key=str(mirror_key),
+                request_id=str(request_id),
+                channel_id=post.channel_id,
+                message_id=post.message_id,
+                guild_id=post.guild_id,
+                thread_id=post.thread_id,
+            )
+            if not completed:
+                _LOGGER.error(
+                    "discord-mirror status=failed reason=claim_completion_rejected mirror_key=%s",
+                    mirror_key,
+                )
+        except Exception as exc:  # noqa: BLE001 - keep the POST claim to prevent replay.
+            _LOGGER.error(
+                "discord-mirror status=posted claim_persist=failed exception_type=%s",
+                type(exc).__name__,
+            )
     _LOGGER.info(
         "discord-mirror status=posted channel=%s message=%s thread=%s",
         channel_id,
         message_id,
         thread_id or "",
     )
-    return MirrorPost(
-        channel_id=resolved_channel_id,
-        message_id=message_id,
-        guild_id=guild_id,
-        thread_id=thread_id,
-    )
+    return post
 
 
 # 스레드 이름 상한(Discord). 넘으면 400이라 자른다.

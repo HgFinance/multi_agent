@@ -393,6 +393,12 @@ def process_user_conditional_paper_rule(
             or getattr(exc, "code", None)
             or type(exc).__name__
         )
+        # The code alone ("UNSUPPORTED_PORTFOLIO_FIELD") does not say which
+        # field was wrong, so Hermes could not correct its own AST and the user
+        # saw an unactionable rejection.  Keep the message beside the code.
+        message = str(exc).strip()
+        if getattr(exc, "detail", None) is None and message and message != str(detail):
+            detail = f"{detail}: {message}"
         code = str(detail)[:500]
         orders.mark_outcome(
             admission.order_request_id,

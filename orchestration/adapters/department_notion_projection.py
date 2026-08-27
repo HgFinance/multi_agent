@@ -24,7 +24,12 @@ from departments.risk_notion_schema import (
     human_metadata_rows,
     risk_property_name,
 )
-from orchestration.adapters.notion_http import NotionHttpError, request_json
+from orchestration.adapters.notion_http import (
+    NotionHttpError,
+    missing_notion_block_suffix,
+    notion_children_chunks,
+    request_json,
+)
 from orchestration.adapters.notion_idempotency import (
     NotionIdempotency,
 )
@@ -158,15 +163,28 @@ class _NotionTransport:
         properties: Mapping[str, Any],
         children: Sequence[Mapping[str, Any]],
     ) -> Mapping[str, Any]:
-        return self._request(
+        chunks = notion_children_chunks(children)
+        page = self._request(
             "POST",
             "pages",
             {
                 "parent": {"database_id": database_id},
                 "properties": dict(properties),
-                "children": list(children),
+                "children": chunks[0] if chunks else [],
             },
         )
+        page_id = str(page.get("id") or "").strip()
+        if len(chunks) > 1:
+            if not page_id:
+                raise DepartmentNotionProjectionError(
+                    "Notion page creation returned no page id for block append"
+                )
+            self._append_missing_blocks(
+                page_id,
+                children[len(chunks[0]) :],
+                existing=(),
+            )
+        return page
 
     def update_page(
         self, page_id: str, properties: Mapping[str, Any]
@@ -181,41 +199,76 @@ class _NotionTransport:
     def append_blocks(
         self, page_id: str, children: Sequence[Mapping[str, Any]]
     ) -> Mapping[str, Any]:
-        return self._request(
-            "PATCH", f"blocks/{page_id}/children", {"children": list(children)}
+        existing = [
+            block
+            for block in self._list_blocks(page_id)
+            if not block.get("archived") and not block.get("in_trash")
+        ]
+        return self._append_missing_blocks(
+            page_id,
+            children,
+            existing=existing,
         )
 
-    def replace_blocks(
-        self, page_id: str, children: Sequence[Mapping[str, Any]]
-    ) -> None:
-        """Replace a projection body while preserving the Notion page itself."""
-
-        existing: list[Mapping[str, Any]] = []
+    def _list_blocks(self, page_id: str) -> list[Mapping[str, Any]]:
+        blocks: list[Mapping[str, Any]] = []
         cursor: str | None = None
         while True:
             suffix = (
                 f"?page_size=100&start_cursor={cursor}" if cursor else "?page_size=100"
             )
             page = self._request("GET", f"blocks/{page_id}/children{suffix}")
-            existing.extend(
+            blocks.extend(
                 item for item in page.get("results", []) if isinstance(item, Mapping)
             )
             if not page.get("has_more"):
-                break
+                return blocks
             cursor = str(page.get("next_cursor") or "").strip() or None
             if cursor is None:
                 raise DepartmentNotionProjectionError(
                     "Notion block pagination omitted next_cursor"
                 )
 
-        self.append_blocks(page_id, children)
+    def _append_missing_blocks(
+        self,
+        page_id: str,
+        children: Sequence[Mapping[str, Any]],
+        *,
+        existing: Sequence[Mapping[str, Any]] | None = None,
+    ) -> Mapping[str, Any]:
+        current = list(existing) if existing is not None else self._list_blocks(page_id)
+        missing = missing_notion_block_suffix(current, children)
+        if not missing:
+            return {"id": page_id, "deduplicated": True, "appended_blocks": 0}
+        response: Mapping[str, Any] = {"id": page_id}
+        for chunk in notion_children_chunks(missing):
+            response = self._request(
+                "PATCH",
+                f"blocks/{page_id}/children",
+                {"children": chunk},
+            )
+        return response
+
+    def replace_blocks(
+        self, page_id: str, children: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Replace a projection body while preserving the Notion page itself."""
+
+        existing = self._list_blocks(page_id)
         for block in existing:
             block_id = str(block.get("id") or "").strip()
-            if block_id:
+            # Notion rejects PATCH on an already archived block.  Archived
+            # children are not visible in the manager page, so leave them in
+            # place and only remove active blocks before appending the fresh
+            # projection body.
+            if block_id and not block.get("archived") and not block.get("in_trash"):
                 # ``in_trash`` is the effective Notion API field for block
                 # removal.  ``archived`` alone can return HTTP 200 while
                 # leaving the old block visible, creating duplicate reports.
                 self._request("PATCH", f"blocks/{block_id}", {"in_trash": True})
+        # Delete first so a retry after an ambiguous append response never
+        # mistakes newly appended blocks for stale blocks and trashes them.
+        self._append_missing_blocks(page_id, children, existing=())
 
 
 @dataclass(frozen=True)
@@ -298,6 +351,15 @@ def _task_title(task: Mapping[str, Any], department: str) -> str:
 
     if department == "qa":
         raw = "QA 감사 결과"
+    elif department == "quant-backtest":
+        # Quant pages are manager-facing records.  Do not lead with the
+        # opaque Kanban task ID or the internal English profile name.
+        completed = iso_timestamp(
+            task.get("completed_at") or task.get("updated_at") or task.get("created_at")
+        )
+        if completed:
+            return f"퀀트·백테스트 검토 결과 · {completed[:19].replace('T', ' ')}"[:1900]
+        return "퀀트·백테스트 검토 결과"
     elif department == "hr":
         raw = raw.removeprefix("HR:").strip() or "Agent Workforce 검토 결과"
     elif department == "risk":
@@ -357,6 +419,133 @@ def _result_text(task: Mapping[str, Any], metadata: Mapping[str, Any]) -> str:
         or text_value(task.get("result")).strip()
         or summary(task, metadata).strip()
     )
+
+
+def _humanize_quant_result(value: Any) -> str:
+    """Render Quant output for managers without runtime field names."""
+
+    text = str(value or "").strip()
+    replacements = (
+        ("fast_advisory", "신속 검토"),
+        ("standard_analysis", "일반 분석"),
+        ("full_experiment", "전체 실험 분석"),
+        ("as_of", "기준 시각"),
+        ("data_status", "자료 상태"),
+        ("quality_status", "자료 품질"),
+        ("evidence_refs", "근거 자료"),
+        ("raw_close", "원시 종가"),
+        ("raw price", "원시 가격"),
+        ("unavailable", "확인 불가"),
+        ("insufficient", "자료 부족"),
+        ("DEFER", "판단 보류"),
+        ("WARN", "주의"),
+        ("PASS", "확인"),
+        ("PAPER", "분석용 가상거래"),
+    )
+    for internal, friendly in replacements:
+        text = text.replace(internal, friendly)
+    return text
+
+
+def _quant_body_markdown(
+    *,
+    task: Mapping[str, Any],
+    result_text: str,
+    metadata: Mapping[str, Any],
+) -> str:
+    """Build a concise Korean Quant report for the manager-facing Notion page."""
+
+    status = str(task.get("status") or "").strip().casefold()
+    status_label = {
+        "done": "완료",
+        "completed": "완료",
+        "blocked": "보류",
+        "failed": "실패",
+        "crashed": "실패",
+    }.get(status, "확인 필요")
+    completed = iso_timestamp(
+        task.get("completed_at") or task.get("updated_at") or task.get("created_at")
+    )
+    as_of = (
+        metadata.get("as_of")
+        or metadata.get("data_as_of")
+        or metadata.get("observed_at")
+        or completed
+    )
+    symbol = metadata.get("symbol") or metadata.get("ticker") or metadata.get("instrument")
+    source = metadata.get("source") or metadata.get("data_source")
+    evidence_refs = metadata.get("evidence_refs") or metadata.get("citations")
+    if isinstance(evidence_refs, Sequence) and not isinstance(
+        evidence_refs, (str, bytes, bytearray)
+    ):
+        evidence_count = len(evidence_refs)
+    else:
+        evidence_count = 0
+
+    lines = [
+        "# 퀀트·백테스트 검토 결과",
+        "",
+        "## 검토 정보",
+        "",
+        f"- 처리 상태: {status_label}",
+    ]
+    if symbol:
+        lines.append(f"- 대상: {_humanize_quant_result(symbol)}")
+    if as_of:
+        lines.append(f"- 기준 시각: {iso_timestamp(as_of) or _humanize_quant_result(as_of)}")
+    if completed and completed != as_of:
+        lines.append(f"- 완료 시각: {completed}")
+
+    lines.extend(
+        [
+            "",
+            "## 핵심 결론",
+            "",
+            _humanize_quant_result(result_text) or "결과 내용이 기록되지 않았습니다.",
+            "",
+            "## 데이터와 근거",
+        ]
+    )
+    if source:
+        lines.append(f"- 자료 기준: {_humanize_quant_result(source)}")
+    lines.append(
+        f"- 확인된 근거 좌표: {evidence_count}건"
+        if evidence_count
+        else "- 확인된 근거 좌표: 별도 좌표 없음"
+    )
+
+    metric_labels = (
+        ("sharpe", "샤프지수"),
+        ("sharpe_ratio", "샤프지수"),
+        ("mdd", "최대낙폭"),
+        ("max_drawdown", "최대낙폭"),
+        ("return", "누적수익률"),
+        ("return_rate", "누적수익률"),
+        ("total_return", "누적수익률"),
+    )
+    rendered_metrics: list[str] = []
+    seen_labels: set[str] = set()
+    for key, label in metric_labels:
+        value = metadata.get(key)
+        if label in seen_labels or not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        seen_labels.add(label)
+        rendered_metrics.append(f"- {label}: {value}")
+    if rendered_metrics:
+        lines.extend(["", "## 확인된 성과지표", "", *rendered_metrics])
+    else:
+        lines.extend(["", "## 확인된 성과지표", "", "- 검증된 성과지표: 산출 보류"])
+
+    lines.extend(
+        [
+            "",
+            "## 주의사항",
+            "",
+            "- 자료가 충분하지 않은 지표는 0 또는 추정치로 대체하지 않았습니다.",
+            "- 이 페이지는 읽기 전용 검토 기록이며 주문·체결·전략 승격을 의미하지 않습니다.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 _RISK_RESULT_LABELS = {
@@ -680,6 +869,8 @@ def _humanize_risk_result(value: str) -> str:
         ("max_concurrent_positions", "동시 보유 종목 수 한도"),
         ("quality_status=WARN", "자료 품질 상태: 주의"),
         ("quality_status=PASS", "자료 품질 상태: 확인"),
+        ("(WARN)", "(자료 품질: 주의)"),
+        ("(PASS)", "(자료 품질: 확인)"),
         ("quality_status", "자료 품질 상태"),
         ("authoritative=false", "공식 확정 자료가 아님"),
         ("authoritative=true", "공식 확정 자료"),
@@ -765,6 +956,25 @@ def _humanize_risk_result(value: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines).strip()
+
+
+def _risk_column_summary(value: Any, *, limit: int = 900) -> str:
+    """Render a compact, plain-text value for the Notion summary column.
+
+    The page body remains the structured Markdown report.  The database column
+    is a scan-friendly manager summary, so headings, bullets, emphasis and code
+    markers must not appear as literal Markdown syntax.
+    """
+
+    rendered = _humanize_risk_result(str(value or ""))
+    lines: list[str] = []
+    for line in rendered.splitlines():
+        line = re.sub(r"^\s*#{1,6}\s*", "", line)
+        line = re.sub(r"^\s*[-*]\s+", "• ", line)
+        line = line.replace("**", "").replace("`", "").strip()
+        if line and line != "---":
+            lines.append(line)
+    return "\n".join(lines).strip()[:limit]
 
 
 def _risk_body_markdown(
@@ -2148,6 +2358,12 @@ def _body_markdown(
             result_text=result_text,
             metadata=metadata,
         )
+    if department == "quant-backtest":
+        return _quant_body_markdown(
+            task=task,
+            result_text=result_text,
+            metadata=metadata,
+        )
 
     original_instruction = task_body(task)
 
@@ -2390,6 +2606,8 @@ class DepartmentNotionProjection:
             result_text = _humanize_accounting_result(result_text)
         elif department == "hr":
             result_text = _humanize_hr_result(result_text)
+        elif department == "quant-backtest":
+            result_text = _humanize_quant_result(result_text)
 
         props: dict[str, Any] = {
             title_property: _title(title),
@@ -2466,7 +2684,12 @@ class DepartmentNotionProjection:
             else "서술"
         )
         if narrative_property and narrative_property in properties_schema:
-            props[narrative_property] = _rich_text(result_text)
+            narrative_value = (
+                _risk_column_summary(result_text)
+                if department == "risk"
+                else result_text
+            )
+            props[narrative_property] = _rich_text(narrative_value)
 
         original_report_property = (
             risk_property_name("original_report", properties_schema)

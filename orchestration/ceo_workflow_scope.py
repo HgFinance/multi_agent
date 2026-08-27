@@ -15,6 +15,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from orchestration.canonical_profiles import validate_canonical_profile
+
 CEO_WORKFLOW_SCOPE_MARKER = "hgfinance.ceo-workflow-scope.v1"
 USER_PAPER_ORDER_SCOPE_MARKER = "hgfinance.user-paper-order-request.v1"
 USER_PAPER_ORDER_MODE = "PAPER"
@@ -721,6 +723,12 @@ def build_root_body(
     user_paper_order_include_primary_selection: bool = True,
     deferred_conditional_analysis: bool = False,
     include_accounting_advisory: bool = True,
+    producer: str | None = None,
+    selected_primary_profiles: Sequence[str] | None = None,
+    delegation_instructions: Mapping[str, str] | None = None,
+    analysis_mode: str | None = None,
+    routing_basis: str | None = None,
+    routing_category: str | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -753,6 +761,54 @@ def build_root_body(
 
     if workflow_mode not in WORKFLOW_MODES:
         raise ValueError("workflow_mode must be analysis or binding")
+    selected_profiles = tuple(
+        validate_canonical_profile(str(profile).strip())
+        for profile in (selected_primary_profiles or ())
+    )
+    if len(set(selected_profiles)) != len(selected_profiles):
+        raise ValueError("selected_primary_profiles must not contain duplicates")
+    instructions = {
+        validate_canonical_profile(str(profile).strip()): str(instruction).strip()
+        for profile, instruction in (delegation_instructions or {}).items()
+    }
+    if bool(selected_profiles) != bool(instructions) or set(selected_profiles) != set(instructions):
+        raise ValueError(
+            "selected_primary_profiles and delegation_instructions must match"
+        )
+    if any(
+        not instruction or "\n" in instruction or "\r" in instruction
+        for instruction in instructions.values()
+    ):
+        raise ValueError("delegation instructions must be non-empty single lines")
+    if analysis_mode is not None and analysis_mode not in {
+        "fast_advisory",
+        "standard_analysis",
+        "full_experiment",
+    }:
+        raise ValueError("unknown analysis_mode")
+
+    routing_lines = ""
+    if producer:
+        normalized_producer = str(producer).strip()
+        if not normalized_producer or any(
+            char.isspace() or char == "=" for char in normalized_producer
+        ):
+            raise ValueError("producer must be a single token")
+        routing_lines += f"producer={normalized_producer}\n"
+    if selected_profiles:
+        routing_lines += (
+            f"{PRIMARY_SELECTION_FIELD}={','.join(selected_profiles)}\n"
+        )
+        for profile in selected_profiles:
+            routing_lines += (
+                f"delegation_instruction.{profile}={instructions[profile]}\n"
+            )
+    if analysis_mode:
+        routing_lines += f"analysis_mode={analysis_mode}\n"
+    if routing_basis:
+        routing_lines += f"routing_basis={str(routing_basis).strip()}\n"
+    if routing_category:
+        routing_lines += f"routing_category={str(routing_category).strip()}\n"
     # New roots carry the split QA intent explicitly. QA is a post-response
     # governance audit for every response lane, including PAPER. Its legacy
     # blocking marker remains readable below but is always normalized false.
@@ -852,6 +908,7 @@ def build_root_body(
         f"request_id={request_id}\n"
         f"{source_line}"
         f"workflow_mode={workflow_mode}\n"
+        f"{routing_lines}"
         f"{requested_by_line}"
         f"{paper_order_block}"
         f"{discord_lines}"

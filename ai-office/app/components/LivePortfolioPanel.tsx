@@ -68,7 +68,7 @@ function SummaryTile({ label, value }: { label: string; value: string }) {
   );
 }
 
-const ALLOCATION_COLORS = ["#3f5f9a", "#4b8f8c", "#c47b35", "#8b6aa9", "#c15c63", "#6c8195", "#7a8f4b"];
+const ALLOCATION_COLORS = ["#7c9cff", "#63c9c2", "#ffc266", "#bd91e8", "#ff8f9c", "#93b1d0", "#b5cf65"];
 
 type PortfolioAllocation = {
   key: string;
@@ -228,7 +228,7 @@ function HoldingReturnChart({ rows }: { rows: Holding[] }) {
                 </div>
                 <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-surface-container-lowest">
                   <div
-                    className={`h-full rounded-full ${positive ? "bg-primary" : "bg-error"}`}
+                    className={`h-full rounded-full ${positive ? "bg-[#6684d8]" : "bg-[#d86f6f]"}`}
                     style={{ width: `${Math.max(widthPercent, 2)}%` }}
                   />
                 </div>

@@ -10,9 +10,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
@@ -24,18 +25,19 @@ from autonomous_research_ingress import ResearchIntake
 from hermes_agent import StrategyHermesAgent
 from lab import ResearchLab, ResearchLabError
 
-
 DEFAULT_LAB_ROOT = Path(os.getenv("AUTONOMOUS_RESEARCH_LAB_ROOT", "/var/lib/autonomous-research"))
 DEFAULT_REPO_ROOT = Path(os.getenv("AUTONOMOUS_RESEARCH_REPO_ROOT", str(HERE.parents[3])))
 MANAGED_MARKER = ".strategy-hermes-managed"
 
 
 def run_once(args: argparse.Namespace) -> dict[str, Any]:
+    cycle_started = time.monotonic()
     intake = ResearchIntake(args.lab_root)
     for path in (intake.root, intake.intake_dir, intake.labs_dir, intake.errors_dir):
         path.mkdir(parents=True, exist_ok=True)
 
     reports: list[dict[str, Any]] = []
+    lab_reports: dict[Path, dict[str, Any]] = {}
     request_filter = str(getattr(args, "request_id", "") or "").strip()
     retry_blocked = bool(getattr(args, "retry_blocked", False))
     pending_ids = intake.pending_ids()
@@ -51,12 +53,17 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
     lab_paths = sorted(path for path in intake.labs_dir.iterdir() if path.is_dir())
     if request_filter:
         lab_paths = [path for path in lab_paths if path.name == request_filter]
+    runnable_labs: list[Path] = []
+    max_concurrency = 1
     for lab_path in lab_paths:
         if not _is_strategy_hermes_lab(lab_path):
             # Existing labs from the retired Python/factory-era worker remain
             # readable for rollback and audit, but are never re-executed by the
             # new direct Strategy Hermes worker.
-            reports.append({"lab_id": lab_path.name, "status": "PRESERVED_LEGACY_LAB"})
+            lab_reports[lab_path] = {
+                "lab_id": lab_path.name,
+                "status": "PRESERVED_LEGACY_LAB",
+            }
             continue
         error_path = intake.errors_dir / f"{lab_path.name}.json"
         if error_path.exists() and not retry_blocked:
@@ -69,21 +76,87 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
                 error = intake._read_json(error_path)
             except (OSError, json.JSONDecodeError, ValueError):
                 error = {"error": "unreadable persisted worker error"}
-            reports.append(
-                {
-                    "lab_id": lab_path.name,
-                    "status": "BLOCKED",
-                    "error": str(error.get("error") or "persisted worker error"),
-                }
-            )
+            lab_reports[lab_path] = {
+                "lab_id": lab_path.name,
+                "status": "BLOCKED",
+                "error": str(error.get("error") or "persisted worker error"),
+            }
             continue
-        try:
-            reports.append(_run_lab(args, lab_path))
-            intake.clear_error(lab_path.name)
-        except (ResearchLabError, ValueError, OSError, json.JSONDecodeError) as exc:
-            intake.record_error(lab_path.name, phase="HERMES_OR_VERIFY", error=f"{type(exc).__name__}: {exc}")
-            reports.append({"lab_id": lab_path.name, "status": "BLOCKED", "error": f"{type(exc).__name__}: {exc}"})
-    return {"status": "STRATEGY_HERMES_CYCLE_COMPLETED", "labs": reports}
+        runnable_labs.append(lab_path)
+
+    max_concurrency = _configured_max_concurrency(args, len(runnable_labs))
+    if max_concurrency == 1:
+        for lab_path in runnable_labs:
+            lab_reports[lab_path] = _run_managed_lab(args, intake, lab_path)
+    else:
+        # Each lab owns a separate directory and subprocess workspace. The
+        # shared intake was fully materialized above, so only independent lab
+        # execution is concurrent. Results are restored to sorted lab order to
+        # keep JSON output and replay comparisons deterministic.
+        results: dict[Path, dict[str, Any]] = {}
+        with ThreadPoolExecutor(
+            max_workers=max_concurrency,
+            thread_name_prefix="strategy-hermes-lab",
+        ) as pool:
+            futures = {
+                pool.submit(_run_managed_lab, args, intake, lab_path): lab_path
+                for lab_path in runnable_labs
+            }
+            for future in as_completed(futures):
+                lab_path = futures[future]
+                results[lab_path] = future.result()
+        lab_reports.update(results)
+
+    reports.extend(lab_reports[lab_path] for lab_path in lab_paths if lab_path in lab_reports)
+
+    return {
+        "status": "STRATEGY_HERMES_CYCLE_COMPLETED",
+        "labs": reports,
+        "execution": {
+            "managed_lab_count": len(runnable_labs),
+            "max_concurrency": max_concurrency,
+            "duration_seconds": round(time.monotonic() - cycle_started, 3),
+        },
+    }
+
+
+def _configured_max_concurrency(args: argparse.Namespace, lab_count: int) -> int:
+    """Return a bounded execution fan-out for independent research labs."""
+
+    if lab_count <= 0:
+        return 1
+    configured = getattr(args, "max_concurrency", None)
+    if configured is None:
+        configured = os.getenv("AUTONOMOUS_RESEARCH_MAX_CONCURRENCY", "2")
+    try:
+        requested = int(configured)
+    except (TypeError, ValueError):
+        requested = 2
+    return max(1, min(requested, lab_count))
+
+
+def _run_managed_lab(
+    args: argparse.Namespace,
+    intake: ResearchIntake,
+    lab_path: Path,
+) -> dict[str, Any]:
+    """Run one isolated lab and preserve the previous durable error policy."""
+
+    try:
+        report = _run_lab(args, lab_path)
+        intake.clear_error(lab_path.name)
+        return report
+    except (ResearchLabError, ValueError, OSError, json.JSONDecodeError) as exc:
+        intake.record_error(
+            lab_path.name,
+            phase="HERMES_OR_VERIFY",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return {
+            "lab_id": lab_path.name,
+            "status": "BLOCKED",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def _run_lab(args: argparse.Namespace, lab_path: Path) -> dict[str, Any]:
@@ -170,6 +243,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=DEFAULT_REPO_ROOT)
     parser.add_argument("--interval-min", type=float, default=float(os.getenv("AUTONOMOUS_RESEARCH_INTERVAL_MIN", "0.5")))
     parser.add_argument("--timeout-seconds", type=int, default=int(os.getenv("AUTONOMOUS_RESEARCH_TIMEOUT_SECONDS", "1800")))
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=int(os.getenv("AUTONOMOUS_RESEARCH_MAX_CONCURRENCY", "2")),
+        help="Maximum number of independent labs to execute concurrently",
+    )
     parser.add_argument(
         "--request-id",
         help="Process only this request/lab (manual tracing; the service loop remains unfiltered)",

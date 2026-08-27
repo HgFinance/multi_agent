@@ -3689,7 +3689,13 @@ def _augment_hr_final_answer(
 
     delivery_marker = _marker_fields("hgfinance.hr-response-delivery.v1")
     notion_marker = _marker_fields("hgfinance.department-notion-delivery.v1")
-    if delivery_marker or notion_marker:
+    # The synthesis answer is rendered before Discord/LangSmith delivery is
+    # attempted.  A Notion receipt alone must not make the user-facing answer
+    # claim that the other two channels are "status 확인 필요"; their exact
+    # states are recorded in the supervisor delivery receipts and audited by
+    # the post-response QA task.  Only append the channel-status card when the
+    # scoped HR delivery receipt is actually present.
+    if delivery_marker:
         # The worker's helper may correctly fail-closed because it cannot
         # perform downstream delivery itself.  Once the Supervisor has its
         # delivery receipts, retaining that worker-level NOT_READY sentence
@@ -7905,12 +7911,13 @@ class CeoSupervisorService:
                         "",
                     )
                     notion_values = {
-                        key: value.split("=", 1)[1]
+                        key: value
                         for key, value in (
                             token.split("=", 1)
                             for token in notion_marker.split()
                             if "=" in token
                         )
+                        if key and value
                     }
                     qa_downstream_evidence["hermes"] = {
                         "profile": "hr-department",

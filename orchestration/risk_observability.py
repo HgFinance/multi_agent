@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+from urllib.parse import quote
 from uuid import NAMESPACE_URL, uuid5
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,38 @@ def _log_epoch_ms(line: str) -> int | None:
     except ValueError:
         return None
     return int(parsed.timestamp() * 1000)
+
+
+def _langsmith_project_id(environment: Mapping[str, str]) -> str | None:
+    """Resolve the LangSmith project UUID for direct batch ingestion.
+
+    The v1 ``/runs/batch`` endpoint accepts ``session_name`` for compatibility,
+    but current SmithDB indexing only associates the run when ``session_id`` is
+    also present.  Resolution is observer-only and fail-open: an outage must
+    never affect Risk completion or delivery.
+    """
+
+    project_name = str(environment.get("LANGSMITH_PROJECT") or "First").strip()
+    api_key = str(environment.get("LANGSMITH_API_KEY") or "").strip()
+    endpoint = str(
+        environment.get("LANGSMITH_ENDPOINT") or "https://api.smith.langchain.com"
+    ).rstrip("/")
+    if not project_name or not api_key:
+        return None
+    request = urllib_request.Request(
+        f"{endpoint}/sessions?name={quote(project_name)}&limit=1",
+        headers={"Accept": "application/json", "x-api-key": api_key},
+        method="GET",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=3.0) as response:
+            payload = json.loads(response.read() or b"[]")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, list) or not payload:
+        return None
+    project_id = payload[0].get("id") if isinstance(payload[0], Mapping) else None
+    return str(project_id or "").strip() or None
 
 
 def profile_risk_hermes_session(
@@ -283,6 +316,9 @@ def publish_risk_hermes_profile(
         "extra": {"metadata": metadata},
         "tags": ["hgfinance", "risk", "hermes", "redacted", "worker-profile"],
     }
+    project_id = _langsmith_project_id(env)
+    if project_id:
+        payload["session_id"] = project_id
     endpoint = str(
         env.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
     ).rstrip("/")

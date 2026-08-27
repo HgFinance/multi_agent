@@ -153,8 +153,21 @@ class MirrorRequestRecord:
     response: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class MirrorPostRecord:
+    """Durable claim and Discord coordinates for one Web mirror post."""
+
+    mirror_key: str
+    request_id: str
+    state: Literal["POSTING", "POSTED"]
+    channel_id: str | None = None
+    message_id: str | None = None
+    guild_id: str | None = None
+    thread_id: str | None = None
+
+
 class MirrorStore(Protocol):
-    """Small store interface; Redis is production, memory is test fallback."""
+    """Small store interface; memory is permitted only in local/test runs."""
 
     def claim_request(
         self, request: CanonicalIngress
@@ -169,6 +182,21 @@ class MirrorStore(Protocol):
     def save_projection_state(self, request_id: str, fingerprint: str) -> None: ...
 
     def save_response(self, request_id: str, response: dict[str, Any]) -> None: ...
+
+    def claim_mirror_post(
+        self, *, mirror_key: str, request_id: str
+    ) -> tuple[MirrorPostRecord, bool]: ...
+
+    def complete_mirror_post(
+        self,
+        *,
+        mirror_key: str,
+        request_id: str,
+        channel_id: str,
+        message_id: str,
+        guild_id: str | None,
+        thread_id: str | None,
+    ) -> bool: ...
 
     def release_request(self, request: CanonicalIngress) -> bool: ...
 
@@ -215,7 +243,7 @@ def _same_canonical_request(
 
 
 class InMemoryMirrorStore:
-    """Deterministic store used by tests and as a safe local fallback."""
+    """Deterministic store used by tests and explicitly local runs."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -224,6 +252,7 @@ class InMemoryMirrorStore:
         self._events: dict[str, MirrorEvent] = {}
         self._event_order: list[str] = []
         self._projection_state: dict[str, str] = {}
+        self._mirror_posts: dict[str, MirrorPostRecord] = {}
 
     @staticmethod
     def _source_key(request: CanonicalIngress) -> str:
@@ -277,6 +306,46 @@ class InMemoryMirrorStore:
             self._requests[request_id] = MirrorRequestRecord(
                 record.request, dict(response)
             )
+
+    def claim_mirror_post(
+        self, *, mirror_key: str, request_id: str
+    ) -> tuple[MirrorPostRecord, bool]:
+        with self._lock:
+            existing = self._mirror_posts.get(mirror_key)
+            if existing is not None:
+                return existing, False
+            claim = MirrorPostRecord(
+                mirror_key=mirror_key,
+                request_id=request_id,
+                state="POSTING",
+            )
+            self._mirror_posts[mirror_key] = claim
+            return claim, True
+
+    def complete_mirror_post(
+        self,
+        *,
+        mirror_key: str,
+        request_id: str,
+        channel_id: str,
+        message_id: str,
+        guild_id: str | None,
+        thread_id: str | None,
+    ) -> bool:
+        with self._lock:
+            existing = self._mirror_posts.get(mirror_key)
+            if existing is None or existing.request_id != request_id:
+                return False
+            self._mirror_posts[mirror_key] = MirrorPostRecord(
+                mirror_key=mirror_key,
+                request_id=request_id,
+                state="POSTED",
+                channel_id=channel_id,
+                message_id=message_id,
+                guild_id=guild_id,
+                thread_id=thread_id,
+            )
+            return True
 
     def release_request(self, request: CanonicalIngress) -> bool:
         """Release only the same unfinished claim after execution raised."""
@@ -376,6 +445,8 @@ class RedisMirrorStore:
         self.source_prefix = "hf:ui-ceo-mirror:source:"
         self.event_prefix = "hf:ui-ceo-mirror:event:"
         self.projection_state_prefix = "hf:ui-ceo-mirror:projection-state:"
+        self.mirror_post_prefix = "hf:ui-ceo-mirror:post:"
+        self.mirror_post_pending_ttl_seconds = min(ttl_seconds, 600)
         # SCAN is incremental. Keep the cursor on the long-lived worker store
         # so a large request backlog is visited over successive cycles instead
         # of returning the same first keys forever.
@@ -495,6 +566,99 @@ class RedisMirrorStore:
         payload["response"] = response
         self.client.set(key, json.dumps(payload), ex=self.ttl_seconds)
 
+    def _mirror_post_storage_key(self, mirror_key: str) -> str:
+        digest = hashlib.sha256(str(mirror_key).encode("utf-8")).hexdigest()
+        return self.mirror_post_prefix + digest
+
+    @staticmethod
+    def _mirror_post_from_payload(payload: Any) -> MirrorPostRecord:
+        if not isinstance(payload, dict):
+            raise ValueError("invalid mirror post record")
+        state = str(payload.get("state") or "POSTING")
+        if state not in {"POSTING", "POSTED"}:
+            raise ValueError("invalid mirror post state")
+        return MirrorPostRecord(
+            mirror_key=str(payload.get("mirror_key") or ""),
+            request_id=str(payload.get("request_id") or ""),
+            state=state,  # type: ignore[arg-type]
+            channel_id=str(payload.get("channel_id") or "") or None,
+            message_id=str(payload.get("message_id") or "") or None,
+            guild_id=str(payload.get("guild_id") or "") or None,
+            thread_id=str(payload.get("thread_id") or "") or None,
+        )
+
+    def claim_mirror_post(
+        self, *, mirror_key: str, request_id: str
+    ) -> tuple[MirrorPostRecord, bool]:
+        storage_key = self._mirror_post_storage_key(mirror_key)
+        existing = self.client.get(storage_key)
+        if existing:
+            return self._mirror_post_from_payload(json.loads(existing)), False
+        claim = MirrorPostRecord(
+            mirror_key=mirror_key,
+            request_id=request_id,
+            state="POSTING",
+        )
+        inserted = bool(
+            self.client.set(
+                storage_key,
+                json.dumps(claim.__dict__),
+                nx=True,
+                ex=self.mirror_post_pending_ttl_seconds,
+            )
+        )
+        if inserted:
+            return claim, True
+        existing = self.client.get(storage_key)
+        if not existing:
+            raise MirrorStoreUnavailable("mirror post claim disappeared")
+        return self._mirror_post_from_payload(json.loads(existing)), False
+
+    def complete_mirror_post(
+        self,
+        *,
+        mirror_key: str,
+        request_id: str,
+        channel_id: str,
+        message_id: str,
+        guild_id: str | None,
+        thread_id: str | None,
+    ) -> bool:
+        storage_key = self._mirror_post_storage_key(mirror_key)
+        existing = self.client.get(storage_key)
+        if not existing:
+            return False
+        current = self._mirror_post_from_payload(json.loads(existing))
+        if current.request_id != request_id:
+            return False
+        posted = MirrorPostRecord(
+            mirror_key=mirror_key,
+            request_id=request_id,
+            state="POSTED",
+            channel_id=channel_id,
+            message_id=message_id,
+            guild_id=guild_id,
+            thread_id=thread_id,
+        )
+        # The pending claim can expire between the GET above and this write.
+        # Compare the exact payload atomically so an older Discord POST cannot
+        # overwrite a newer request's claim after expiry.
+        completed = self.client.eval(
+            """
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+              redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+              return 1
+            end
+            return 0
+            """,
+            1,
+            storage_key,
+            existing,
+            json.dumps(posted.__dict__),
+            self.ttl_seconds,
+        )
+        return bool(completed)
+
     def release_request(self, request: CanonicalIngress) -> bool:
         """Atomically release one exact unfinished canonical ingress claim."""
 
@@ -580,7 +744,7 @@ class LockedRedisMirrorStore(RedisMirrorStore):
 
 
 class ResilientMirrorStore:
-    """Prefer Redis in AWS, but keep the BFF alive when Redis is unavailable."""
+    """Use Redis as the durable boundary; fallback is explicit local/test only."""
 
     def __init__(
         self, primary: MirrorStore, fallback: InMemoryMirrorStore | None = None
@@ -620,6 +784,35 @@ class ResilientMirrorStore:
     def save_response(self, request_id: str, response: dict[str, Any]) -> None:
         self._call("save_response", request_id, response)
 
+    def claim_mirror_post(
+        self, *, mirror_key: str, request_id: str
+    ) -> tuple[MirrorPostRecord, bool]:
+        return self._call(
+            "claim_mirror_post", mirror_key=mirror_key, request_id=request_id
+        )
+
+    def complete_mirror_post(
+        self,
+        *,
+        mirror_key: str,
+        request_id: str,
+        channel_id: str,
+        message_id: str,
+        guild_id: str | None,
+        thread_id: str | None,
+    ) -> bool:
+        return bool(
+            self._call(
+                "complete_mirror_post",
+                mirror_key=mirror_key,
+                request_id=request_id,
+                channel_id=channel_id,
+                message_id=message_id,
+                guild_id=guild_id,
+                thread_id=thread_id,
+            )
+        )
+
     def release_request(self, request: CanonicalIngress) -> bool:
         return bool(self._call("release_request", request))
 
@@ -634,6 +827,11 @@ class ResilientMirrorStore:
 
 def build_default_mirror_store() -> ResilientMirrorStore:
     url = os.getenv("UI_MIRROR_REDIS_URL") or os.getenv("REDIS_URL")
+    runtime_environment = os.getenv("APP_ENV", "production").strip().casefold()
+    # A local-looking container can still be the live operational BFF. Keep
+    # the escape hatch test-only so a Redis outage never silently changes the
+    # durable dedup boundary into per-process memory.
+    allow_in_memory = runtime_environment == "test"
     if url:
         try:
             return ResilientMirrorStore(
@@ -647,12 +845,20 @@ def build_default_mirror_store() -> ResilientMirrorStore:
                 fallback=None,
             )
         except (TypeError, ValueError):
-            # Invalid local configuration is treated as an unavailable mirror,
-            # while the CEO Kanban boundary remains usable.
-            return ResilientMirrorStore(InMemoryMirrorStore())
-        except Exception:  # noqa: BLE001 - import/config failure falls back to local memory.
-            return ResilientMirrorStore(InMemoryMirrorStore())
-    return ResilientMirrorStore(InMemoryMirrorStore())
+            if allow_in_memory:
+                return ResilientMirrorStore(InMemoryMirrorStore())
+            raise MirrorStoreUnavailable(
+                "invalid Redis mirror configuration in production"
+            ) from None
+        except Exception:  # noqa: BLE001 - local-only fallback is explicit.
+            if allow_in_memory:
+                return ResilientMirrorStore(InMemoryMirrorStore())
+            raise MirrorStoreUnavailable(
+                "Redis mirror store unavailable in production"
+            ) from None
+    if allow_in_memory:
+        return ResilientMirrorStore(InMemoryMirrorStore())
+    raise MirrorStoreUnavailable("Redis mirror URL is required in production")
 
 
 def stable_event_id(*parts: object) -> str:
@@ -810,6 +1016,7 @@ __all__ = [
     "InMemoryMirrorStore",
     "MirrorEvent",
     "MirrorEventListResponse",
+    "MirrorPostRecord",
     "MirrorIngressResponse",
     "MirrorRequestConflict",
     "MirrorRequestRecord",

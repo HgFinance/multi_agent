@@ -50,11 +50,8 @@ Notion 은 Projection 일 뿐이다 - 이 모듈이 실패해도 마감의 nav_s
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -65,6 +62,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from departments.notion_markdown import markdown_to_notion_blocks
+from orchestration.adapters.notion_http import request_json_status
 from orchestration.adapters.notion_idempotency import NotionIdempotency
 
 # 앞에 오는 파일이 이긴다. root .env 가 정본(모듈 상단 참고).
@@ -128,18 +126,13 @@ def _load_env() -> dict:
 
 
 def _post(path: str, body: dict, token: str) -> tuple[int, dict]:
-    req = urllib.request.Request(
-        f"https://api.notion.com/v1/{path}",
-        data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {token}", "Notion-Version": _NOTION_VERSION,
-                 "Content-Type": "application/json"},
-        method="POST",
+    return request_json_status(
+        "POST",
+        path,
+        token,
+        body=body,
+        version=_NOTION_VERSION,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status, json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
 
 
 def _chunks(value: Any) -> list[dict]:

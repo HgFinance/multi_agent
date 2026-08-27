@@ -950,8 +950,11 @@ INGRESS_SECRET_ENV = "CEO_DISCORD_INGRESS_API_KEY"
 INGRESS_ALERT_WEBHOOK_ENV = "CEO_INGRESS_ALERT_WEBHOOK_URL"
 INGRESS_ALERT_COOLDOWN_ENV = "CEO_INGRESS_ALERT_COOLDOWN_SECONDS"
 INGRESS_PROFILES = frozenset({"ceo-agent", "trading-department"})
+INGRESS_CONCURRENCY_ENV = "HGFINANCE_DISCORD_INGRESS_MAX_CONCURRENCY"
 _INGRESS_RETRY_DELAYS_SECONDS = (0.25, 0.75, 1.5)
 _INGRESS_DEFAULT_TIMEOUT_SECONDS = 5.0
+_INGRESS_DEFAULT_MAX_CONCURRENCY = 8
+_INGRESS_MAX_CONCURRENCY = 32
 _INGRESS_ALERT_DEFAULT_COOLDOWN_SECONDS = 60.0
 _INGRESS_ALERT_TIMEOUT_SECONDS = 1.0
 _THREAD_CONTEXT_FETCH_TIMEOUT_SECONDS = 2.0
@@ -965,6 +968,22 @@ _INGRESS_FAILURE_MESSAGE = (
 _ingress_alert_lock = threading.Lock()
 _ingress_alert_in_flight = False
 _ingress_alert_last_attempt: dict[str, float] = {}
+
+
+def _ingress_max_concurrency() -> int:
+    try:
+        configured = int(
+            os.getenv(
+                INGRESS_CONCURRENCY_ENV,
+                str(_INGRESS_DEFAULT_MAX_CONCURRENCY),
+            )
+        )
+    except (TypeError, ValueError):
+        return _INGRESS_DEFAULT_MAX_CONCURRENCY
+    return max(1, min(configured, _INGRESS_MAX_CONCURRENCY))
+
+
+_ingress_slots = threading.BoundedSemaphore(_ingress_max_concurrency())
 
 
 def _ingress_url() -> str:
@@ -1381,7 +1400,34 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
 async def _forward_to_ingress_async(message: Any, adapter: Any) -> bool:
     """Forward without blocking Discord's heartbeat/event-loop thread."""
 
-    return await asyncio.to_thread(_forward_to_ingress, message, adapter)
+    # Only human messages headed to the canonical BFF use the bounded
+    # semaphore below. Keep the existing executor boundary for all other
+    # Hermes messages so the gateway event loop never runs an upstream hook.
+    if not (
+        _ingress_url()
+        and _profile_name() in INGRESS_PROFILES
+        and str(getattr(message, "id", "") or "")
+        and not _author_is_bot(message)
+    ):
+        return await asyncio.to_thread(_forward_to_ingress, message, adapter)
+
+    if not _ingress_slots.acquire(blocking=False):
+        message_id = str(getattr(message, "id", "") or "")
+        _mark_ingress_failure(message, "concurrency_limit")
+        try:
+            _mark_ingress_failed(adapter, message_id)
+        except Exception:  # noqa: BLE001 - bounded rejection must not escape.
+            logger.debug(
+                "discord-ingress ledger_fail_ack=failed reason=concurrency_limit",
+                exc_info=True,
+            )
+        _log_ingress_failed_closed("concurrency_limit", message_id)
+        return True
+
+    try:
+        return await asyncio.to_thread(_forward_to_ingress, message, adapter)
+    finally:
+        _ingress_slots.release()
 
 
 def _is_ceo_repeat_command(adapter: Any, message: Any) -> bool:

@@ -341,18 +341,41 @@ def is_authorized(header: str | None, token: str | None) -> bool:
 
 def build_app(server, *, token: str | None):
     """MCP Starlette 앱 + Bearer 검사 미들웨어."""
-    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
 
     app = server.streamable_http_app()
 
-    class _Auth(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):
-            if not is_authorized(request.headers.get("authorization"), token):
-                return JSONResponse(
+    class _Auth:
+        """Pure ASGI auth wrapper that preserves streamable HTTP responses.
+
+        BaseHTTPMiddleware uses an in-memory receive/send bridge. With MCP's
+        long-lived GET stream, a client disconnect can close that bridge before
+        ``call_next`` returns and Starlette raises ``No response returned``.
+        Authentication does not need request rewriting, so a direct ASGI
+        wrapper avoids that extra lifecycle and leaves streaming to FastMCP.
+        """
+
+        def __init__(self, app, *, token):
+            self.app = app
+            self.token = token
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") != "http":
+                await self.app(scope, receive, send)
+                return
+            headers = {
+                key.decode("latin-1"): value.decode("latin-1")
+                for key, value in scope.get("headers", ())
+            }
+            if not is_authorized(headers.get("authorization"), self.token):
+                response = JSONResponse(
                     {"error": "unauthorized",
-                     "detail": "MCP_RESEARCH_API_KEY 가 필요하다"}, status_code=401)
-            return await call_next(request)
+                     "detail": "MCP_RESEARCH_API_KEY 가 필요하다"},
+                    status_code=401,
+                )
+                await response(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
 
     # ── 종목 근거 REST 조회면 ────────────────────────────────────────
     # 뉴스·공시 자격은 여기에만 있다. 다른 서비스가 자격을 갖는 대신
@@ -428,7 +451,7 @@ def build_app(server, *, token: str | None):
     app.router.add_route("/evidence/ownership-scan", ownership_scan,
                          methods=["GET"], name="ownership_scan")
 
-    app.add_middleware(_Auth)
+    app.add_middleware(_Auth, token=token)
     return app
 
 

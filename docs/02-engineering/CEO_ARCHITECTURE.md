@@ -67,6 +67,11 @@ Head provider/auth와 직원의 LangGraph Worker Model을 같은 것으로 세�
 Web과 Discord는 모두 `portfolio-bff`의 canonical ingress로 들어온다.
 
 - 일반 CEO 질의의 `POST /ui/ceo/ask`와 `POST /ui/ceo/ingress`는 같은 root Kanban·권한·멱등 경계를 쓴다.
+- BFF는 `orchestration.ceo_query_routing.build_ceo_task_plan()`을 한 번 호출해
+  논리 부서를 결정하고, canonical Hermes profile과 `delegation_instruction.*`을
+  root에 고정한다. 이후 supervisor는 그 계획만 검증·materialize하며 CEO가 같은
+  라우팅 판단을 다시 하지 않는다. `CEO_BFF_DETERMINISTIC_ROUTING_ENABLED=false`는
+  호환용 이전 CEO planner 경로다.
 - 전략 생성 의도는 두 진입점에서 중앙 분기되어 `POST /ui/strategy-research/ask`와
   동일한 파일 기반 intake를 사용하며 CEO root·Kanban·주문 경계에 들어가지 않는다.
 - Discord 원문은 `source=discord`와 메시지 좌표를 가진 metadata로만 전달된다.
@@ -88,6 +93,11 @@ Web과 Discord는 모두 `portfolio-bff`의 canonical ingress로 들어온다.
 라우터는 먼저 workflow 소유권을 정하고, 그 다음 해당 workflow 안의 부서를
 결정한다. 기본 경로는 결정론이며 CEO Hermes 기반 planner는 명시적 opt-in일 때만
 사용한다. LLM planner가 실패하면 결정론 fallback으로 돌아간다.
+
+일반 `/ui/ceo/ask`·`/ui/ceo/ingress`의 기본 경로에서는 결정론 판단이 이미 root에
+고정되므로 CEO Hermes가 부서를 다시 판단하지 않는다. CEO는 primary 결과를
+종합하고 사용자 응답을 작성한다. `CEO_BFF_DETERMINISTIC_ROUTING_ENABLED=false`일
+때만 호환용 direct CEO planner가 활성화된다.
 
 | 요청 카테고리 | response-plane primary | 후속 처리 |
 |---|---|---|
@@ -344,12 +354,11 @@ dispatcher의 shared board 슬롯, CEO Head의 실제 모델 지연이 response-
 
 아래는 이 정본이 완료됐다고 주장하지 않는다.
 
-1. `STRATEGY_PROPOSAL`을 BFF에서 실제 `strategy-research` graph로 분기하는 작업
-2. 전략을 사용자의 포트폴리오에 편입하는 `USER` 승인 workflow
-3. 상시 대화의 `conversation_id` 기반 문맥 저장
-4. 공식 CEO Hermes Head native turn의 LangSmith callback 계측
-5. provider별 LangSmith root close readback/재시도 정책의 추가 보강
-6. CEO의 PM Pod/Book 비교·capital efficiency 원천 데이터와 계산 모듈
+1. 전략을 사용자의 포트폴리오에 편입하는 `USER` 승인 workflow
+2. 상시 대화의 `conversation_id` 기반 문맥 저장
+3. 공식 CEO Hermes Head native turn의 LangSmith callback 계측
+4. provider별 LangSmith root close readback/재시도 정책의 추가 보강
+5. CEO의 PM Pod/Book 비교·capital efficiency 원천 데이터와 계산 모듈
 
 미구현 항목은 빈 fake code로 채우지 않고 해당 workflow의 상태와 backlog로 남긴다.
 

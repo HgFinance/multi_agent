@@ -25,6 +25,82 @@ def test_exact_compound_market_buy_then_price_sell_is_structured() -> None:
     assert candidate["action"].sizing.value == Decimal("5")
 
 
+def test_buy_then_entry_relative_sell_is_structured() -> None:
+    """The shape rejected as MULTIPLE_COMMANDS on 2026-08-27.
+
+    "…매수하고 …매도해줘" joins the two legs without "그리고", and the trigger
+    is a percentage above the fill price rather than an absolute number.
+    """
+
+    plan = parse_compound_paper_order(
+        "가온전선 1주 시장가 매수하고 매수가 대비 1% 상승하면 시장가로 매도해줘"
+    )
+
+    assert plan is not None
+    assert plan.instrument_mention == "가온전선"
+    assert plan.immediate_instruction == "가온전선 1주 시장가 매수"
+    assert plan.immediate_quantity == 1
+    # An omitted sell quantity means "what the first leg just bought".
+    assert plan.conditional_quantity == 1
+    assert plan.trigger_price is None
+    assert plan.trigger_entry_percent == Decimal("1")
+    assert plan.trigger_operator == "GTE"
+    # The preview flags AMBIGUOUS_RETURN_BASELINE unless the generated
+    # instruction names the baseline it measures from.
+    assert "매수가" in plan.conditional_instruction
+
+    candidate = build_compound_conditional_candidate(plan)
+    threshold = candidate["condition"].right
+    assert threshold.type.value == "ARITHMETIC"
+    assert threshold.operator == "MUL"
+    assert threshold.left.field == "AVG_ENTRY_PRICE"
+    assert threshold.right.value == Decimal("1.01")
+    assert candidate["action"].side.value == "SELL"
+    assert candidate["action"].sizing.value == Decimal("1")
+
+
+def test_buy_then_entry_relative_stop_loss_compares_downward() -> None:
+    """A stop-loss is the same shape as a take-profit with the sign flipped."""
+
+    plan = parse_compound_paper_order(
+        "가온전선 1주 시장가 매수하고 매수가 대비 2% 하락하면 시장가로 매도해줘"
+    )
+
+    assert plan is not None
+    assert plan.trigger_operator == "LTE"
+    assert plan.trigger_entry_percent == Decimal("-2")
+    assert "하락" in plan.conditional_instruction
+
+    candidate = build_compound_conditional_candidate(plan)
+    threshold = candidate["condition"].right
+    assert threshold.left.field == "AVG_ENTRY_PRICE"
+    assert threshold.right.value == Decimal("0.98")
+    assert candidate["condition"].operator == "LTE"
+
+    # "떨어지면" must reach the same rule as "하락하면".
+    spoken = parse_compound_paper_order(
+        "가온전선 1주 시장가 매수하고 매수가 대비 2% 이상 떨어지면 매도해줘"
+    )
+    assert spoken is not None
+    assert spoken.trigger_operator == "LTE"
+    assert spoken.trigger_entry_percent == Decimal("-2")
+
+
+def test_entry_relative_compound_is_fail_closed() -> None:
+    # A different instrument in the second leg is not a compound order.
+    assert parse_compound_paper_order(
+        "가온전선 1주 시장가 매수하고 현대차 2주 시장가 매도해줘"
+    ) is None
+    # Selling more than was bought would go net short.
+    assert parse_compound_paper_order(
+        "가온전선 1주 시장가 매수하고 매수가 대비 1% 상승하면 5주 시장가로 매도해줘"
+    ) is None
+    # An implausible move is left for a human to confirm.
+    assert parse_compound_paper_order(
+        "가온전선 1주 시장가 매수하고 매수가 대비 80% 상승하면 매도해줘"
+    ) is None
+
+
 def test_compound_requires_same_quantity_to_avoid_partial_semantics() -> None:
     assert (
         parse_compound_paper_order(
