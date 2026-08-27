@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
-"""완료된 카드들을 훑어 부서장 span 트리를 Langfuse 로 보낸다. dispatcher 컨테이너 전용.
+"""완료된 카드들을 훑어 부서장 span 트리를 Langfuse 로 보낸다.
+
+## 왜 dispatcher 안이 아니라 별도 컨테이너인가
+
+읽는 파일만 보면 dispatcher 안이 맞다 - 거기에 `/home/ubuntu/.hermes` 가 통째로
+붙어 있어 `kanban.db` 와 8개 부서 `state.db` 가 전부 있고, `HERMES_KANBAN_DB` 값도
+이 파일의 기본값과 같다. 그런데도 밖으로 뺀 이유는 **수명주기**다.
+
+- dispatcher 의 command 자리는 `hermes kanban daemon` 이 쓰고 있다. 여기를 함께
+  쓰려면 수집기를 background 로 띄워야 하는데, `restart: unless-stopped` 는 PID 1
+  만 본다. 백그라운드 수집기가 죽으면 **dispatcher 는 멀쩡한 채 trace 만 끊긴다** -
+  이 파일이 `BoardUnreadable` 과 `langfuse=on|disabled` 로 없애려는 바로 그 실패
+  모드를 배포 층에서 다시 만드는 셈이다.
+- 수집기를 고칠 때마다 dispatcher 를 재생성하게 된다. 그건 SIGTERM→SIGKILL 취소
+  계약을 타서 **실행 중인 카드가 취소된다.** 관측 도구가 카드 실행을 중단시킬 수
+  있어야 할 이유가 없다.
+- 수집기의 행/누수가 카드 디스패치 경로에 얹힌다. 분리하면 mem 256m·cpu 0.25·
+  pids 64 로 가둘 수 있다.
+
+새 이미지는 아니다 - `hedgefund-operations-runtime:latest` 는 card-watchdog 이
+이미 쓰고 있어 호스트에 존재한다. 늘어나는 것은 컨테이너 하나뿐이다.
 
 ## 왜 wrapper 가 아니라 수집기인가
 
@@ -51,7 +71,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from orchestration.head_span_builder import build_card_spans
+from orchestration.head_span_builder import build_card_spans, card_span_id
 from orchestration.hermes_session_usage import read_turn
 from orchestration.langfuse_otlp import enabled as langfuse_enabled
 from orchestration.langfuse_otlp import publish
@@ -91,6 +111,34 @@ _MAX_SPANS_PER_REQUEST = 400
 # task_runs.metadata 에서 **이 두 개만** 읽는다. 나머지(final_answer, findings,
 # result, limitations...)는 전부 업무 원문이다.
 _METADATA_KEYS = ("worker_session_id", "workflow_root_task_id")
+
+# 이미 보낸 카드. `head span id -> (관측 신뢰도, ended_ms)`.
+#
+# 창(기본 900초)이 주기(기본 60초)보다 넓은 것은 의도다 - 프로세스가 죽어 있던 사이를
+# 다음 회차가 저절로 메운다. 문제는 그 대가로 같은 카드가 창 안에 **15번** 들어온다는
+# 것이고, 원래 설계는 "span id 가 결정론이니 재발행은 덮어쓰기"라고 봤다.
+#
+# ⚠ 그 가정이 틀렸다(2026-08-27 실측). Langfuse OTLP 는 같은 traceId+spanId 를 다시
+# 받으면 덮어쓰지 않고 **새 관측을 만든다** - UI 에서 카드 1장이 13~15행으로 보였다.
+# 도입 당시 실측한 것은 수신(HTTP 200)과 트리 렌더링이지 멱등성이 아니었다.
+#
+# 그래서 보낸 것을 기억한다. 파일이 아니라 메모리다 - 상태 파일이 깨져 관측이 조용히
+# 멈추는 실패 모드를 만들지 않으려던 원래 판단은 그대로 옳다. 재시작하면 창 하나만큼
+# 한 번 다시 보내고(그게 공백을 메우는 값이다) 그 뒤로는 조용해진다.
+_published: dict[str, tuple[str, int]] = {}
+
+# 다시 보낼 신뢰도. 세션 행은 카드 종료보다 늦게 쓰일 수 있어서 첫 회차가 토큰 없이
+# 나갈 수 있는데, 그건 다음 회차에 채워야 한다 - 창이 넓은 진짜 이유가 이것이다.
+# 나머지(exact/no_session_id/no_state_db)는 다시 보내도 같은 값이라 보내지 않는다.
+_RETRY_CONFIDENCE = frozenset({"session_not_ready"})
+
+
+def _prune_published(*, now_s: float, lookback_seconds: int) -> None:
+    """창 밖으로 나간 기억은 버린다 - 어차피 다시 조회되지 않는다."""
+
+    cutoff_ms = int((now_s - lookback_seconds) * 1000)
+    for key in [key for key, (_, ended) in _published.items() if ended < cutoff_ms]:
+        del _published[key]
 
 _TERMINAL_OUTCOMES = frozenset(
     {"completed", "failed", "blocked", "gave_up", "timed_out", "crashed"}
@@ -287,11 +335,15 @@ def current_rate(*, env: Mapping[str, str], now_s: float) -> UnitRate:
 
 def spans_for_run(
     run: CardRun, *, env: Mapping[str, str], rate: UnitRate = UNPRICED
-) -> list[dict[str, Any]]:
-    """카드 실행 1건 -> span 목록. 못 만들면 빈 목록."""
+) -> tuple[list[dict[str, Any]], str]:
+    """카드 실행 1건 -> (span 목록, 관측 신뢰도). 못 만들면 빈 목록.
+
+    신뢰도를 함께 돌려주는 이유는 재발행 판단에 쓰이기 때문이다 - `session_not_ready`
+    만 다음 회차에 다시 보내고 나머지는 더 나아질 게 없다(`collect_once` 참고).
+    """
 
     if not run.department or not run.task_id or not run.started_ms:
-        return []
+        return [], "unusable_run"
     usage = None
     confidence = "no_session_id"
     if run.session_id:
@@ -301,10 +353,9 @@ def spans_for_run(
         else:
             usage = read_turn(run.session_id, db_path=db_path)
             # 카드가 끝난 시각과 세션 행이 쓰이는 시각에 차이가 있어, 아주 최근
-            # 카드는 아직 못 읽을 수 있다. 다음 회차에 같은 창을 다시 훑으면서
-            # 같은 span id 로 덮어쓴다 - 그래서 여기서 실패해도 영구 손실이 아니다.
+            # 카드는 아직 못 읽을 수 있다. 그때만 다음 회차에 다시 보낸다.
             confidence = "exact" if usage is not None else "session_not_ready"
-    return build_card_spans(
+    spans = build_card_spans(
         root_id=run.root_id,
         task_id=run.task_id,
         department=run.department,
@@ -320,6 +371,7 @@ def spans_for_run(
         run_id=run.run_id,
         environment=str(env.get("LANGFUSE_ENVIRONMENT") or ""),
     )
+    return spans, confidence
 
 
 def collect_once(
@@ -331,7 +383,10 @@ def collect_once(
     """한 회차. 돌려주는 값은 로그·점검용 카운터다."""
 
     runtime = dict(env) if env is not None else dict(os.environ)
-    counters = {"runs": 0, "skipped": 0, "spans": 0, "requests": 0, "failed": 0, "unreadable": 0}
+    counters = {
+        "runs": 0, "resent": 0, "deduped": 0, "skipped": 0,
+        "spans": 0, "requests": 0, "failed": 0, "unreadable": 0,
+    }
     if not langfuse_enabled(runtime):
         return counters
 
@@ -352,29 +407,49 @@ def collect_once(
             flush=True,
         )
         return counters
-    rate = current_rate(env=runtime, now_s=time.time() if now_s is None else now_s)
+    tick_s = time.time() if now_s is None else now_s
+    rate = current_rate(env=runtime, now_s=tick_s)
     batch: list[dict[str, Any]] = []
+    # 배치가 나가기 전에는 기억하지 않는다. 먼저 적어 두면 전송이 실패했을 때 그
+    # 카드가 영영 안 나간다 - 실패는 다음 회차에 다시 시도되어야 한다.
+    pending: list[tuple[str, str, int]] = []
+
+    def flush() -> None:
+        nonlocal batch, pending
+        if not batch:
+            return
+        counters["requests"] += 1
+        counters["spans"] += len(batch)
+        if publish(batch, env=runtime, service_name="hgfinance-head"):
+            for key, confidence, ended_ms in pending:
+                _published[key] = (confidence, ended_ms)
+        else:
+            counters["failed"] += 1
+        batch = []
+        pending = []
+
     for run in runs:
         if run.outcome and run.outcome.casefold() not in _TERMINAL_OUTCOMES:
             counters["skipped"] += 1
             continue
-        spans = spans_for_run(run, env=runtime, rate=rate)
+        key = card_span_id(root_id=run.root_id, task_id=run.task_id)
+        prior = _published.get(key)
+        if prior is not None and prior[0] not in _RETRY_CONFIDENCE:
+            # 이 카드는 이미 나갔고 더 나아질 값이 없다. 다시 보내면 Langfuse 에
+            # 같은 카드가 한 행 더 생긴다.
+            counters["deduped"] += 1
+            continue
+        spans, confidence = spans_for_run(run, env=runtime, rate=rate)
         if not spans:
             counters["skipped"] += 1
             continue
-        counters["runs"] += 1
+        counters["resent" if prior is not None else "runs"] += 1
         batch.extend(spans)
+        pending.append((key, confidence, run.ended_ms))
         if len(batch) >= _MAX_SPANS_PER_REQUEST:
-            counters["requests"] += 1
-            counters["spans"] += len(batch)
-            if not publish(batch, env=runtime, service_name="hgfinance-head"):
-                counters["failed"] += 1
-            batch = []
-    if batch:
-        counters["requests"] += 1
-        counters["spans"] += len(batch)
-        if not publish(batch, env=runtime, service_name="hgfinance-head"):
-            counters["failed"] += 1
+            flush()
+    flush()
+    _prune_published(now_s=tick_s, lookback_seconds=lookback_seconds)
     return counters
 
 
@@ -479,7 +554,8 @@ def _self_check() -> None:
         state.close()
 
         env = {"HERMES_HOME": str(home)}
-        spans = spans_for_run(qa_run, env=env)
+        spans, qa_confidence = spans_for_run(qa_run, env=env)
+        assert qa_confidence == "exact", qa_confidence
         names = [s["name"] for s in spans]
         assert names[0] == "head.qa"
         assert "codex.session" in names
@@ -489,19 +565,27 @@ def _self_check() -> None:
             assert secret not in blob, secret
 
         # 5. 세션 스토어가 없는 부서는 head span 만 나가고 사유가 남는다.
-        ceo_spans = spans_for_run(ceo_run, env=env)
+        ceo_spans, ceo_confidence = spans_for_run(ceo_run, env=env)
         assert len(ceo_spans) == 1
+        assert ceo_confidence == "no_state_db", ceo_confidence
         assert "no_state_db" in json.dumps(ceo_spans[0], ensure_ascii=False)
 
-        # 6. 두 번 돌려도 같은 span id 다(재발행이 중복을 만들지 않는다).
+        # 6. 두 번 만들어도 같은 span id 다. 이것만으로는 중복이 안 막힌다는 것이
+        #    2026-08-27 실측의 요지다 - Langfuse 가 같은 id 를 덮어쓰지 않는다.
         assert [s["spanId"] for s in spans] == [
-            s["spanId"] for s in spans_for_run(qa_run, env=env)
+            s["spanId"] for s in spans_for_run(qa_run, env=env)[0]
         ]
 
-        # 7. 스위치가 꺼져 있으면 아무 일도 하지 않는다.
-        assert collect_once(env={"HERMES_KANBAN_DB": str(kanban_db)}, now_s=1787799900) == {
-            "runs": 0, "skipped": 0, "spans": 0, "requests": 0, "failed": 0, "unreadable": 0
+        idle = {
+            "runs": 0, "resent": 0, "deduped": 0, "skipped": 0,
+            "spans": 0, "requests": 0, "failed": 0, "unreadable": 0,
         }
+
+        # 7. 스위치가 꺼져 있으면 아무 일도 하지 않는다.
+        _published.clear()
+        assert collect_once(
+            env={"HERMES_KANBAN_DB": str(kanban_db)}, now_s=1787799900
+        ) == idle
 
         # 8. 전송 실패는 카운터로만 남고 예외가 아니다.
         live = {
@@ -513,6 +597,8 @@ def _self_check() -> None:
         assert counters["runs"] == 2 and counters["failed"] == 1, counters
         assert counters["spans"] == len(spans) + len(ceo_spans)
         assert counters["unreadable"] == 0, counters
+        # 8-1. 전송이 실패했으면 기억하지 않는다 - 다음 회차가 다시 시도해야 한다.
+        assert not _published, _published
 
         # 9. 보드를 못 읽는 것은 "카드 0장"이 아니다. AWS 에서 경로·권한이 어긋나는
         #    형태가 정확히 이것이고, 빈 목록으로 접으면 60초마다 runs=0 을 찍으며
@@ -532,9 +618,57 @@ def _self_check() -> None:
         assert blind["unreadable"] == 1, blind
         assert blind["runs"] == 0 and blind["spans"] == 0, blind
         # 꺼져 있을 때(테스트 7)와 카운터가 달라야 한다 - 그래야 로그로 구분된다.
-        assert blind != {
-            "runs": 0, "skipped": 0, "spans": 0, "requests": 0, "failed": 0, "unreadable": 0
-        }
+        assert blind != idle
+
+        # 10. **같은 카드를 두 번 보내지 않는다.**
+        #
+        #     창(900초)이 주기(60초)보다 넓어서 같은 카드가 15회 들어오고, Langfuse
+        #     OTLP 는 같은 traceId+spanId 를 덮어쓰지 않고 새 관측을 만든다(실측:
+        #     카드 1장이 UI 에 13~15행). 전송이 성공한 카드는 기억해서 걸러낸다.
+        sent: list[list[dict[str, Any]]] = []
+        ok_live = dict(live)
+
+        def _fake_publish(spans_out, **_kwargs):
+            sent.append(list(spans_out))
+            return True
+
+        real_publish = sys.modules[__name__].publish
+        sys.modules[__name__].publish = _fake_publish  # type: ignore[assignment]
+        try:
+            _published.clear()
+            first = collect_once(env=ok_live, now_s=1787799900)
+            second = collect_once(env=ok_live, now_s=1787799901)
+        finally:
+            sys.modules[__name__].publish = real_publish  # type: ignore[assignment]
+
+        assert first["runs"] == 2 and first["deduped"] == 0, first
+        # QA 는 exact 라 다시 안 보낸다. CEO 는 state.db 가 없어 no_state_db 이고,
+        # 그것도 다시 보낸다고 나아지지 않으므로 걸러진다.
+        assert second["runs"] == 0 and second["resent"] == 0, second
+        assert second["deduped"] == 2, second
+        assert len(sent) == 1, f"두 번째 회차가 또 보냈다: {len(sent)}건"
+
+        # 10-1. 세션이 아직 안 쓰인 카드만 다음 회차에 다시 나간다 - 창이 넓은
+        #       진짜 이유가 그것이고, 그것까지 막으면 토큰이 영영 안 붙는다.
+        _published.clear()
+        _published[card_span_id(root_id=qa_run.root_id, task_id=qa_run.task_id)] = (
+            "session_not_ready", qa_run.ended_ms,
+        )
+        sys.modules[__name__].publish = _fake_publish  # type: ignore[assignment]
+        try:
+            retry = collect_once(env=ok_live, now_s=1787799902)
+        finally:
+            sys.modules[__name__].publish = real_publish  # type: ignore[assignment]
+        assert retry["resent"] == 1, retry
+        assert retry["runs"] == 1, retry  # CEO 는 처음 보는 카드
+
+        # 10-2. 창 밖으로 나간 기억은 버린다(메모리가 무한히 자라지 않는다).
+        _published.clear()
+        _published["stale"] = ("exact", int((1787799900 - 10_000) * 1000))
+        _published["fresh"] = ("exact", int(1787799900 * 1000))
+        _prune_published(now_s=1787799900, lookback_seconds=900)
+        assert "stale" not in _published and "fresh" in _published, _published
+        _published.clear()
 
     print("ok - 부서장 카드 수집기 점검 통과")
 
