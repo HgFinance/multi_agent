@@ -2087,6 +2087,17 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      # ▶ 부서장 카드 span (2026-08-27). 여기가 **유일한** 계측 지점이다 -
+      #   사용자 질의는 CEO 루트 카드만 만들고(apps/api/ceo.py), 거기서 갈라지는
+      #   CEO·부서·QA·종합 턴을 전부 이 컨테이너가 띄운다.
+      #   SDK 는 필요 없다: scripts/head_card_trace.py 가 OTLP/JSON 을 직접 친다
+      #   (실측 2026-08-27, HTTP 200 + UI 트리 확인). LANGFUSE_TRACING=false 면
+      #   계측만 조용히 꺼지고 카드 실행은 그대로다.
+      LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-}
       # The live board has operated at a one-second tick without queue buildup;
       # keep that latency behavior on fresh deployments too. Hermes still
       # enforces the board-wide max_in_progress cap on every daemon tick.

@@ -263,18 +263,25 @@ def read_turn(
         f"select {', '.join(_MESSAGE_COLUMNS)} from messages where session_id = ? "
         "order by id asc"
     )
+    # ▶ `with sqlite3.connect(...)` 를 쓰지 않는다. 그 컨텍스트 매니저는 트랜잭션만
+    #   끝내고 **연결을 닫지 않는다** - 오래 도는 프로세스에서 파일 핸들이 쌓이고,
+    #   윈도우에서는 그 파일을 지울 수도 없다(자체 점검에서 실제로 막혔다).
+    connection: sqlite3.Connection | None = None
     try:
-        with _connect(db_path) as connection:
-            row = connection.execute(session_sql, (session_id,)).fetchone()
-            if row is None:
-                return None
-            session = dict(zip(_SESSION_COLUMNS, row))
-            messages = [
-                dict(zip(_MESSAGE_COLUMNS, values))
-                for values in connection.execute(message_sql, (session_id,))
-            ]
+        connection = _connect(db_path)
+        row = connection.execute(session_sql, (session_id,)).fetchone()
+        if row is None:
+            return None
+        session = dict(zip(_SESSION_COLUMNS, row))
+        messages = [
+            dict(zip(_MESSAGE_COLUMNS, values))
+            for values in connection.execute(message_sql, (session_id,))
+        ]
     except (OSError, sqlite3.Error):
         return None
+    finally:
+        if connection is not None:
+            connection.close()
 
     return TurnUsage(
         session_id=str(session["id"]),
