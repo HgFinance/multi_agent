@@ -77,7 +77,7 @@ def _sync_hypotheses(lab: ResearchLab) -> None:
             mechanism=str(payload.get("mechanism") or ""),
             expected_behavior=str(payload.get("expected_behavior") or ""),
             falsifiers=tuple(payload.get("falsifiers") or ()),
-            dimensions=dict(payload.get("dimensions") or {}),
+            dimensions=_mapping(payload.get("dimensions"), field_name="dimensions"),
             parent_id=payload.get("parent_id"),
             role=str(payload.get("role") or "explore"),
             created_at=str(payload.get("created_at") or ""),
@@ -101,11 +101,11 @@ def _sync_plans(lab: ResearchLab) -> None:
             hypothesis_id=str(payload.get("hypothesis_id") or ""),
             objective=str(payload.get("objective") or ""),
             method=str(payload.get("method") or ""),
-            data_requirements=tuple(payload.get("data_requirements") or ()),
-            splits=tuple(payload.get("splits") or ()),
-            cost_model=str(payload.get("cost_model") or ""),
+            data_requirements=_texts_or_json(payload.get("data_requirements"), field_name="data_requirements"),
+            splits=_texts_or_json(payload.get("splits"), field_name="splits"),
+            cost_model=_text_or_json(payload.get("cost_model")),
             seed=payload.get("seed"),
-            signature=dict(payload.get("signature") or {}),
+            signature=_mapping(payload.get("signature"), field_name="signature"),
             preregistration_hash=str(payload.get("preregistration_hash") or ""),
             status=str(payload.get("status") or "PLANNED"),
             created_at=str(payload.get("created_at") or ""),
@@ -122,6 +122,42 @@ def _read_object(path: Path) -> dict[str, Any]:
 
 def _read_objects(directory: Path) -> list[dict[str, Any]]:
     return [_read_object(path) for path in sorted(directory.glob("*.json"))]
+
+
+def _mapping(value: object, *, field_name: str) -> dict[str, str]:
+    """Accept the structured form and Hermes' compact string form.
+
+    The persisted plan contract allows a signature to be human-readable.  The
+    old Python director emitted a mapping, while a direct Hermes session may
+    reasonably emit a single string.  Normalize both without dropping the
+    artifact or letting a legacy shape crash the whole worker cycle.
+    """
+
+    if isinstance(value, dict):
+        return {str(key): str(item) for key, item in value.items()}
+    if isinstance(value, str) and value.strip():
+        return {field_name: value.strip()}
+    if isinstance(value, (list, tuple, set)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return {f"{field_name}_{index}": item for index, item in enumerate(items)}
+    return {}
+
+
+def _texts_or_json(value: object, *, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple, set)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    if isinstance(value, dict):
+        return (json.dumps(value, ensure_ascii=False, sort_keys=True),)
+    text = str(value).strip()
+    return (text,) if text else ()
+
+
+def _text_or_json(value: object) -> str:
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value or "").strip()
 
 
 __all__ = ["ingest_result", "sync_agent_artifacts"]

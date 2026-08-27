@@ -6,6 +6,10 @@ set -eu
 lab_root="${AUTONOMOUS_RESEARCH_LAB_ROOT:-/var/lib/autonomous-research}"
 runtime_home="${HERMES_HOME:-/opt/data}"
 mkdir -p "$lab_root/intake" "$lab_root/labs" "$lab_root/errors"
+# BFF runs as root while Strategy Hermes runs as uid 1000. Intake is a narrow
+# file-backed IPC directory: both sides must be able to consume a manifest.
+# Lab/state files are chowned below and remain private to Hermes.
+chmod 0777 "$lab_root/intake"
 target_uid="${HERMES_UID:-$(id -u hermes)}"
 target_gid="${HERMES_GID:-$(id -g hermes)}"
 chown -R "$target_uid:$target_gid" "$lab_root"

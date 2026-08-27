@@ -236,7 +236,7 @@ def _gate_blockers(cur) -> list[Bottleneck]:
             evidence=f"'{crit}' 가 서로 다른 계열 {len(fams)}개를 막았다",
             owner="research-department",
             hint=("이 조항을 겨냥한 설계로 바꾼다. 실행면에 손잡이가 없으면 "
-                  "그것부터 낸다(experiment-factory §4-b)"),
+                  "그것부터 낸다(퇴역 전략 공장 실행 계약 §4-b)"),
             ids=sorted(fams)[:8]))
     return out
 
@@ -557,7 +557,7 @@ def _soundness(cur) -> list[Bottleneck]:
 _HINT_UNHEARD = (
     "**네가 못 한다고 신고한 것이다.** 무엇이 없어서 못 하는지 한 줄로 적어라 - "
     "도구인지, 권한인지, 실행면에 자리가 없는지. 만들 수 있는 것이면 "
-    "만들어라(스킬은 `skill-authoring`, 실행면은 experiment-factory §4 가 "
+    "만들어라(스킬은 `skill-authoring`, 실행면은 퇴역 전략 공장 실행 계약 §4 가 "
     "허용한다). 만들 수 없는 것이면 그 사실이 남아야 다음 주기가 같은 카드를 "
     "또 안 건다")
 
@@ -567,7 +567,7 @@ _HINT_UNHEARD = (
 _HINT_HEARD = (
     "**답은 이미 나와 있다** - 위 인용이 그 답이다. 같은 질문을 다시 걸지 말고 "
     "그 답이 요구하는 것을 처리해라: 권한이면 사람에게 올리고(CEO/IAM), "
-    "도구면 만들어라(`skill-authoring`), 실행면 자리면 experiment-factory §4 가 "
+    "도구면 만들어라(`skill-authoring`), 실행면 자리면 퇴역 전략 공장 실행 계약 §4 가 "
     "허용한다. 이 줄이 다음 주기에도 그대로면 아무도 그 답을 처리하지 않은 "
     "것이지 에이전트가 말을 안 한 것이 아니다")
 

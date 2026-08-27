@@ -112,6 +112,26 @@ mcp_servers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
 
+# ── Hermes 내장 도구 경계 ──────────────────────────────────────────────────
+# Quant Hermes는 부서 오케스트레이션과 읽기 전용 MCP 결과의 종합만 담당한다.
+# 기본 도구셋을 그대로 상속하면 browser·terminal·file·code_execution 같은
+# 범용 실행 도구가 모델에 노출되어, 데이터 MCP를 사용할 수 있는데도 무관한
+# 탐색이나 실행 경로를 선택할 수 있다.  시장·문헌·리서치 조회는 위의 MCP
+# 서버가 소유하므로 여기서는 Hermes 내장 lifecycle 도구만 허용한다.
+#
+# `known_builtin_toolsets`는 Hermes가 새 내장 도구를 자동 활성화하지 않게
+# 하는 완전 목록이다. profile sync 뒤에도 허용 목록 밖 도구가 되살아나지
+# 않도록 Trading profile과 같은 런타임 계약을 명시한다.
+platform_toolsets:
+  cli: [clarify, cronjob, delegation, kanban, memory, session_search, skills, todo]
+known_builtin_toolsets:
+  cli: [bfl, browser, clarify, code_execution, computer_use, context_engine, cronjob,
+        delegation, discord, discord_admin, file, homeassistant, image_gen, memory,
+        session_search, skills, spotify, stt, terminal, todo, tts, video, video_gen,
+        vision, web, x_search, yuanbao]
+known_plugin_toolsets:
+  cli: [spotify]
+
 hiring_priority:
   quant-backtest-supervisor:
     role_codes:

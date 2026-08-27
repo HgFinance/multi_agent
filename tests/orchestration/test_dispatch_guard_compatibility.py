@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 PATCH = ROOT / "deploy" / "hermes-dispatch-guard" / "sitecustomize.py"
 PREFLIGHT = ROOT / "deploy" / "hermes-dispatch-guard" / "check_guard.py"
@@ -74,6 +73,22 @@ def test_dispatch_guard_keeps_legacy_lane_signature_compatible(monkeypatch):
 
     assert patched(connection, "t_plain", lane="blocked") == "legacy"
     assert observed == [("t_plain", "blocked")]
+
+
+def test_dispatch_guard_exposes_worker_observer_registry_path(monkeypatch):
+    def original(connection, task_id):
+        del connection, task_id
+        return "native"
+
+    _load_module(monkeypatch, original)
+
+    assert str(ROOT / "scripts") in sys.path
+
+
+def test_dispatch_worker_observer_does_not_reap_native_child(monkeypatch):
+    del monkeypatch
+
+    assert "os.waitpid" not in PATCH.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(("assignee", "expected"), [

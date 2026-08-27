@@ -97,7 +97,6 @@ for _p in (_BASE / "evidence", _BASE / "audit", _AGENTIC_RAG_DIR):
 
 from reporting import (
     evaluation_metrics,
-    json_cell,
     langsmith_handoff,
     md_cell,
 )
@@ -971,189 +970,119 @@ def _check_supervisor_guard():
     print("  Supervisor 스키마 가드      OK")
 
 
-# ── MD 리포트 렌더 (결정론 - LLM 미개입, run_qa_department 반환값을 그대로 옮기기만 한다) ──
+# ── 관리자용 리포트 렌더 (결정론 - LLM 미개입) ───────────────────────────────
 def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
-    checks = out.get("claim_checks", [])
-    findings = out.get("findings", [])
-
+    checks = out.get("claim_checks") or []
+    findings = out.get("findings") or []
+    status_labels = {
+        "PASS": "통과",
+        "WARN": "주의",
+        "FAIL": "실패·결정 차단",
+        "CONDITIONAL": "조건부 통과",
+        "DEFER": "판단 보류",
+        "UNSUPPORTED": "근거 부족",
+        "CONTRADICTED": "근거 불일치",
+        "CRITICAL": "매우 높음",
+        "BLOCKER": "차단",
+        "HIGH": "높음",
+        "MEDIUM": "중간",
+        "LOW": "낮음",
+    }
+    verdict = status_labels.get(str(out.get("verdict") or "").upper(), "확인 필요")
+    artifact_id = artifact.get("trace_id") or artifact.get("instrument_id") or "확인 필요"
     lines = [
-        "# AI QA/감사본부 — 감사 보고서 (결정론적 생성, LLM 자유 서술 아님)",
+        "# QA 감사 결과",
         "",
-        "| 항목 | 값 |",
-        "|---|---|",
-        f"| **qa_decision_id** | `{out['qa_decision_id']}` |",
-        f"| **판정 (verdict)** | **{out['verdict']}** |",
-        f"| **판정 엔진** | departments/06-ai-qa-audit/evidence/evidence_qa_engine.py (`{out['calculation_version']}`) |",
-        f"| **input_hash** | `{out['input_hash']}` (같은 Artifact·Context면 재현 가능) |",
-        f"| **decision_time (PIT)** | {md_cell(decision_time)} |",
-        f"| **escalate** | {md_cell(out['escalate'])} |",
-        f"| **생성** | {PIPELINE_VERSION}, {datetime.now(timezone.utc).isoformat()} |",
+        "## 검토 정보",
         "",
-        "---",
+        f"- 검토 대상: `{md_cell(artifact_id)}`",
+        f"- 종합 판정: **{verdict}**",
+        f"- 판정 기준 버전: `{md_cell(out.get('calculation_version'))}`",
+        f"- 기준 시각: {md_cell(decision_time)}",
+        f"- 추가 검토 필요: {'예' if out.get('escalate') else '아니오'}",
         "",
-        "## Claim별 검사 결과",
+        "## 주장별 확인 결과",
         "",
-        "| # | Claim | 검사 결과 | 사유 |",
+        "| 번호 | 확인 대상 | 결과 | 사유 |",
         "|---|---|---|---|",
     ]
-    lines += [
-        f"| {md_cell(c.get('claim_index'))} | {md_cell(c.get('claim'))} | "
-        f"{md_cell(c.get('result'))} | {md_cell(c.get('reason'))} |"
-        for c in checks
-    ]
+    lines.extend(
+        f"| {md_cell(item.get('claim_index'))} | {md_cell(item.get('claim'))} | "
+        f"{status_labels.get(str(item.get('result') or '').upper(), '확인 필요')} | "
+        f"{md_cell(item.get('reason'))} |"
+        for item in checks
+        if isinstance(item, dict)
+    )
     if not checks:
-        lines.append("| — | (claim_checks 없음) | — | — |")
+        lines.append("| — | 확인 항목 없음 | 확인 필요 | 제출된 점검 자료 없음 |")
 
-    lines += ["", "## Hallucination Critic (hallucination-critic, Agentic RAG)", ""]
-    reviews = out.get("hallucination_reviews") or []
-    if reviews:
-        for r in reviews:
-            answer = r.get("answer") or {}
-            lines += [
-                f"### Claim #{r['claim_index']}",
-                "",
-                "| 필드 | 값 |",
-                "|---|---|",
-                f"| verdict | {md_cell(answer.get('verdict'))} |",
-                f"| grounded | {md_cell(r.get('grounded'))} |",
-                f"| rationale | {md_cell(answer.get('rationale'))} |",
-                "",
-            ]
-    else:
-        lines.append("UNSUPPORTED/CONTRADICTED claim 없음 - 조건부 노드 미호출")
-
-    lines += [
-        "",
-        "## Reason Codes",
-        "",
-        ", ".join(f"`{r}`" for r in out["reason_codes"])
-        if out["reason_codes"]
-        else "없음",
-        "",
-        "## Findings",
-        "",
-    ]
+    lines += ["", "## 주요 문제와 영향", ""]
     if findings:
-        for f in findings:
-            lines += [
-                f"### `{md_cell(f.get('finding_id'))}`",
-                "",
-                "| 필드 | 값 |",
-                "|---|---|",
-                f"| 유형 | `{md_cell(f.get('finding_type'))}` |",
-                f"| 심각도 | {md_cell(f.get('severity'))} |",
-                f"| 설명 | {md_cell(f.get('description'))} |",
-                "",
-            ]
+        for item in findings:
+            if not isinstance(item, dict):
+                lines.append(f"- {md_cell(item)}")
+                continue
+            severity = status_labels.get(
+                str(item.get("severity") or "").upper(),
+                str(item.get("severity") or "확인 필요"),
+            )
+            description = item.get("description") or item.get("message") or "문제 설명 없음"
+            lines.append(f"- [{md_cell(severity)}] {md_cell(description)}")
     else:
-        lines.append("없음")
+        lines.append("- 기록된 주요 문제가 없습니다.")
 
     lines += [
         "",
-        "## Claim 서술 (evidence-qa-agent, 내부 Ollama - 판정 재해석 없이 결과만 풀어씀)",
+        "## 근거 요약",
         "",
-        md_cell(out["claim_narrative"]),
+        md_cell(out.get("claim_narrative") or "확인된 근거 요약이 없습니다."),
         "",
-        "## 종합 서술 (qa-audit-supervisor, Hermes)",
-        "",
-        md_cell(out["narrative"]),
+        md_cell(out.get("narrative") or "종합 설명이 없습니다."),
     ]
 
     evaluation = out.get("evaluation") or {}
     if evaluation:
+        metric_labels = {
+            "claim_count": "확인 주장 수",
+            "finding_count": "주요 문제 수",
+            "unsupported_or_contradicted_count": "근거 부족·불일치 수",
+            "fallback_count": "보완 처리 수",
+            "escalated": "추가 검토 요청",
+            "notion_upload_ok": "Notion 기록",
+            "langsmith_enabled": "LangSmith 기록 설정",
+        }
         lines += ["", "## 평가 지표", "", "| 지표 | 값 |", "|---|---|"]
-        lines += [
-            f"| {md_cell(key)} | {json_cell(value)} |"
-            for key, value in evaluation.items()
-        ]
+        lines.extend(
+            f"| {label} | {md_cell(evaluation[key])} |"
+            for key, label in metric_labels.items()
+            if key in evaluation
+        )
 
     observability = out.get("observability") or {}
     if observability:
+        langsmith = observability.get("langsmith") or {}
         lines += [
             "",
-            "## LangSmith / HR 관측성 전달",
+            "## 관측 기록",
             "",
-            "| 필드 | 값 |",
-            "|---|---|",
-            f"| trace_id | `{md_cell(observability.get('trace_id'))}` |",
-            f"| LangSmith | {json_cell(observability.get('langsmith'))} |",
+            f"- LangSmith 기록: {'연결됨' if langsmith.get('enabled') else '확인 필요'}",
+            f"- 추적 식별자: `{md_cell(observability.get('trace_id'))}`",
         ]
-
-    agent_execution = out.get("agent_execution") or {}
-    if agent_execution:
-        lines += ["", "## Agent 실행 매니페스트", "", "| 구분 | Agent |", "|---|---|"]
-        lines += [
-            f"| 실행 | {md_cell(agent)} |"
-            for agent in agent_execution.get("executed", [])
-        ]
-        lines += [
-            f"| 실패 | {md_cell(agent)} |"
-            for agent in agent_execution.get("failed", [])
-        ]
-        lines += [
-            f"| 미실행/조건부 | {md_cell(agent)} |"
-            for agent in agent_execution.get("not_executed", [])
-        ]
-        worker_execution = out.get("employee_workers") or {}
-        if worker_execution:
-            lines += [
-                "",
-                "### LangGraph Employee Workers",
-                "",
-                "| Worker | 상태 | 도구 |",
-                "|---|---|---|",
-            ]
-            lines += [
-                f"| `{md_cell(item.get('worker_id'))}` | {md_cell(item.get('status'))} | "
-                f"{md_cell(', '.join(item.get('tools') or []))} |"
-                for item in worker_execution.get("workers", [])
-            ]
-            lines += [
-                f"- executor: `{md_cell((worker_execution.get('runtime') or {}).get('executor'))}`",
-                f"- model: `{md_cell((worker_execution.get('runtime') or {}).get('model'))}`",
-            ]
-        runtime = out.get("hermes_runtime") or {}
-        if runtime:
-            lines += [
-                "",
-                "### Hermes Runtime",
-                "",
-                f"- profile: `{md_cell(runtime.get('profile'))}`",
-                f"- provider/model: `{md_cell(runtime.get('provider'))}` / `{md_cell(runtime.get('model'))}`",
-                f"- runtime config matches source: `{md_cell(runtime.get('runtime_config_matches_source'))}`",
-                f"- supervisor call: `{md_cell(out.get('supervisor_call_status'))}`",
-                f"- skills: `{md_cell(runtime.get('skill_file_count'))}`; memory files: `{md_cell(runtime.get('memory_file_count'))}`",
-            ]
 
     fallbacks = out.get("fallbacks") or []
     if fallbacks:
-        lines += [
-            "",
-            "## Fallback / Escalation",
-            "",
-            "| 단계 | 오류 | 조치 |",
-            "|---|---|---|",
-        ]
-        lines += [
-            f"| {md_cell(item.get('stage'))} | {md_cell(item.get('error'))} | "
-            f"{md_cell(item.get('action'))} |"
+        lines += ["", "## 보완 및 후속 조치", ""]
+        lines.extend(
+            f"- {md_cell(item.get('action') or '추가 확인 필요')}"
             for item in fallbacks
-        ]
-
-    notion = out.get("notion_upload")
-    if notion is not None:
-        lines += ["", "## Notion 업로드 (Reporter Node)", ""]
-        lines.append(
-            f"업로드 성공: {notion['url']}"
-            if notion.get("ok")
-            else f"업로드 생략/실패: {notion.get('reason') or notion.get('error')}"
+            if isinstance(item, dict)
         )
 
     lines += [
         "",
-        "---",
-        "> 이 문서는 evidence_qa_engine.py의 결정론적 판정과 스키마 검증된 LLM 서술을 Python이 그대로",
-        "> 옮긴 것이다 - LLM이 이 파일의 형식이나 내용을 자유롭게 창작하지 않았다.",
+        "## 안전 경계",
+        "",
+        "- PAPER·읽기 전용 검토이며 주문 제출과 원장 변경은 수행하지 않았습니다.",
     ]
     return "\n".join(lines)
 
@@ -1186,9 +1115,8 @@ def _check_notion_report_node():
     assert result["notion_upload"] == {"ok": True, "url": "https://notion.so/fake"}
     assert result["report_markdown"]
     assert captured["out"]["qa_decision_id"] == "d1"
-    assert (
-        "qa_decision_id" in captured["report_md"]
-    )  # _render_report_md 가 실제로 불렸는지
+    assert "검토 대상" in captured["report_md"]
+    assert "qa_decision_id" not in captured["report_md"]
     print("  Notion Reporter 노드        OK")
 
 

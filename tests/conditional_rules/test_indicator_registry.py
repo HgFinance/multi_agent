@@ -138,6 +138,36 @@ def test_registry_calculators_cover_new_local_indicators() -> None:
     assert isinstance(engine.compute(ExpressionNode.model_validate(_indicator("PSAR", output="TREND")), candles), bool)
 
 
+def test_envelope_bands_are_a_fixed_percentage_offset_from_the_average() -> None:
+    """Requested as "엔빌로프(20,2)" on 2026-08-27 and rejected as unsupported.
+
+    Envelope offsets the moving average by a fixed percentage, so unlike
+    Bollinger its width does not move with volatility.
+    """
+
+    assert get_indicator_definition("엔빌로프")["name"] == "ENVELOPE"
+    engine = IndicatorEngine()
+    candles = _candles()
+    node = ExpressionNode.model_validate(
+        _indicator("ENVELOPE", output="MIDDLE") | {"parameters": {"PERIOD": 20, "PERCENT": "2"}}
+    )
+    middle = engine.compute(node, candles)
+    upper = engine.compute(
+        ExpressionNode.model_validate(
+            _indicator("ENVELOPE", output="UPPER") | {"parameters": {"PERIOD": 20, "PERCENT": "2"}}
+        ),
+        candles,
+    )
+    lower = engine.compute(
+        ExpressionNode.model_validate(
+            _indicator("ENVELOPE", output="LOWER") | {"parameters": {"PERIOD": 20, "PERCENT": "2"}}
+        ),
+        candles,
+    )
+    assert upper == middle * Decimal("1.02")
+    assert lower == middle * Decimal("0.98")
+
+
 def test_explicit_source_and_provider_are_part_of_indicator_identity() -> None:
     node = _indicator("RSI") | {"source": "LOCAL"}
     node["provider"] = None

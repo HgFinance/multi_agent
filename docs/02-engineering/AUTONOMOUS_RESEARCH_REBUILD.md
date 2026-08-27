@@ -1,6 +1,8 @@
 # Autonomous Research Pipeline Rebuild
 
-Status: staged migration. Legacy runtime removal is deliberately gated by dependency and smoke checks.
+Status: runtime cutover completed for the isolated research surface. Legacy source,
+database migrations, and rollback evidence remain deliberately retained until their
+shared dependencies are migrated.
 
 ## Objective
 
@@ -14,7 +16,7 @@ The most dangerous coupling points are:
 
 - `departments/01-research/factory/` and `departments/01-research/contracts/factory_contracts.py`;
 - `departments/04-quant-backtest/pipeline/factory_bridge.py` and its legacy orchestrator/worker callers;
-- `Dockerfile.factory`, `scripts/factory_runtime_contract.py` and the factory compose services;
+- the removed `Dockerfile.factory`, `scripts/factory_runtime_contract.py` and former factory compose services;
 - the `factory-kanban-*`, `factory-autopilot`, `factory-experiment-worker` and factory-coupled watchdog services;
 - the local and AWS compose overlays that recreate those services;
 - tests and runbooks that assert the old board/image/service names.
@@ -22,6 +24,14 @@ The most dangerous coupling points are:
 Some quant backtest modules still import `strategy_templates.py`. That file is currently a shared execution dependency, not an isolated deletion target. It must not be deleted until its callers are replaced and the execution path has its own contract.
 
 ## New boundary
+
+**Ownership clarification (2026-08-27):** the actual strategy researcher is
+the independent `strategy-hermes` runtime. `departments/01-research/autonomous/`
+is its logically owned lab/intake/storage/validation infrastructure; the
+`01-research` path is retained only for repository placement and rollback
+compatibility. Research HQ supplies evidence and market-data contracts but
+does not invoke `runner.py`, create the lab, author strategy code, or run the
+strategy backtest. See [`departments/01-research/autonomous/OWNERSHIP.md`](../../departments/01-research/autonomous/OWNERSHIP.md).
 
 ```text
 natural-language objective
@@ -60,12 +70,16 @@ Each row is a separate change and verification point. Stop if a precondition or 
 1. **Add and test the new lab.** Run unit tests, initialize a temporary lab, create a plan, and verify that an invalid/missing-cost/leaky result cannot become a candidate.
 2. **Validate compose wiring without starting an agent.** Render compose configuration, build the new autonomous runtime image, and confirm it has no Docker socket, factory image, factory board or order-service mount.
 3. **Run a bounded non-live smoke.** Use a temporary lab and a synthetic or already-approved historical fixture. Verify result ingestion, lineage, failure memory and candidate reporting. Do not connect an OMS or broker.
-4. **Migrate unrelated consumers off `Dockerfile.factory`.** `strategy-runtime-control`, skill-evolution workers and any watchdog retained for general queue hygiene must use a runtime image that does not contain the retired factory code. Verify their health checks independently.
+4. **[completed] Migrate unrelated consumers off `Dockerfile.factory`.** `strategy-runtime-control`, skill-evolution workers and the retained general queue watchdog use `Dockerfile.operations-runtime`; the retired factory image is not a Compose dependency.
 5. **Stop old strategy-factory containers one at a time.** Inspect the exact container, mounts, labels, dependents and recent logs; stop/remove only the named factory worker/autopilot/dispatcher/init containers. Preserve the state and Kanban volumes until their retention decision is explicit.
-6. **Remove old compose service definitions and overlays.** First prove the running containers are gone and `rg` shows no active deployment caller. Keep an archival retirement record and do not remove historical database migrations.
+6. **[completed for the current deployment] Remove old compose service definitions and overlays.** The factory image/services and local factory overlay are absent from the current Compose graph. Keep this retirement record and do not remove historical database migrations.
 7. **Retire isolated factory code.** Delete only modules whose runtime callers are zero after the previous step. For every group, run import/compile tests and the relevant service smoke. Leave shared execution, market data, risk, order and paper-control paths intact.
 8. **Retire images and volumes separately.** Remove the old image only after no service references it. Remove named volumes only after confirming that audit/history is exported or intentionally discarded; this is a separate, potentially destructive decision.
 
 ## Current retention policy
 
-Until each cutover gate passes, retain legacy source, migrations and volumes as rollback evidence. Do not run a broad `docker compose down`, recursive deletion, `git reset`, or volume prune. The new pipeline is allowed to coexist only during this controlled migration window; after cutover, old factory runtime references must be zero even if historical migration files remain.
+Retain legacy source, migrations and volumes as rollback evidence until their shared
+dependencies are migrated. The current runtime has zero retired factory image/service
+references; source-level factory names may remain only in the explicitly retained
+legacy modules and historical migration/benchmark evidence. Do not run a broad
+`docker compose down`, recursive deletion, `git reset`, or volume prune.

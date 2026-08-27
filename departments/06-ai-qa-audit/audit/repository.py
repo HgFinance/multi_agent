@@ -38,9 +38,9 @@ import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
+from uuid import UUID
 
 from audit.db_session import configure_writer_connection, runtime_session_dsn
-from uuid import UUID
 
 try:
     # `audit.repository` is imported as a package by the supervisor.  Keep the

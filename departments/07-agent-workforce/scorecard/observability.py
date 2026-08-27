@@ -367,6 +367,7 @@ class LangfuseTraceReader:
 
         return self.count_events(event_name=event_name, since=since)
 
+
     def latest_event_timestamp(self, *, event_name: str, since: datetime) -> datetime | None:
         """event_name 을 가진 가장 최근 이벤트의 timestamp. 없으면 None."""
 
@@ -439,6 +440,22 @@ class LangfuseTraceReader:
         }
 
 
+def _bounded_langfuse_call(method: Any, **kwargs: Any) -> Any:
+    """Call an SDK endpoint with bounded retries, preserving old test doubles."""
+
+    try:
+        return method(
+            **kwargs,
+            request_options={"timeout_in_seconds": 5, "max_retries": 0},
+        )
+    except TypeError as exc:
+        # Older/local fakes implement the pre-request_options signature.  Keep
+        # those doubles usable without weakening the real SDK call above.
+        if "request_options" not in str(exc):
+            raise
+        return method(**kwargs)
+
+
 class LangfuseApiTraceReader(LangfuseTraceReader):
     """실제 Langfuse API 조회 구현. LANGFUSE_* 자격증명이 있을 때만 만든다."""
 
@@ -463,7 +480,8 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
 
     def _list_page(self, *, event_name: str, since: datetime, limit: int, page: int):
         try:
-            return self._client.api.trace.list(
+            return _bounded_langfuse_call(
+                self._client.api.trace.list,
                 name=event_name, from_timestamp=since, limit=limit, page=page,
             )
         except Exception as exc:  # noqa: BLE001 - 조회 실패는 항상 UNAVAILABLE 로 접힌다.
@@ -537,7 +555,8 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
               "value": list(event_names), "type": "stringOptions"}]
         )
         try:
-            return self._client.api.trace.list(
+            return _bounded_langfuse_call(
+                self._client.api.trace.list,
                 from_timestamp=since, limit=DEFAULT_ACTIVITY_PAGE_LIMIT,
                 page=page, filter=payload,
             )
@@ -615,9 +634,46 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
             "config": {"row_limit": max(100, len(names) * 2)},
         }
         try:
-            response = self._client.api.metrics.metrics(query=json.dumps(query))
+            response = _bounded_langfuse_call(
+                self._client.api.metrics.metrics,
+                query=json.dumps(query),
+            )
         except Exception as exc:  # noqa: BLE001
-            raise LangfuseQueryError(_query_failure_reason(exc)) from exc
+            # The Metrics endpoint is independently rate-limited in Langfuse.
+            # On 429, use the same bounded Trace batch already used for
+            # execution activity and count only event names/timestamps.  This
+            # keeps the HR read contract metadata-only while avoiding a
+            # second unbounded retry loop.  Test doubles without a Trace API
+            # retain the original error behavior.
+            if getattr(exc, "status_code", None) != 429:
+                raise LangfuseQueryError(_query_failure_reason(exc)) from exc
+            trace_api = getattr(getattr(self._client, "api", None), "trace", None)
+            if trace_api is None:
+                raise LangfuseQueryError(_query_failure_reason(exc)) from exc
+            counts = dict.fromkeys(names, 0)
+            page_number = 1
+            while True:
+                try:
+                    page = self._list_page_many(
+                        event_names=names, since=since, page=page_number,
+                    )
+                except LangfuseQueryError:
+                    raise
+                for item in page.data:
+                    name = getattr(item, "name", None)
+                    if name in counts:
+                        counts[name] += 1
+                if not page.data:
+                    break
+                total_pages = _meta_int(page, "total_pages")
+                if total_pages is not None and page_number >= total_pages:
+                    break
+                if total_pages is None and len(page.data) < DEFAULT_ACTIVITY_PAGE_LIMIT:
+                    break
+                if page_number >= MAX_ACTIVITY_PAGES:
+                    raise LangfuseQueryError("langfuse_trace_count_truncated")
+                page_number += 1
+            return counts
 
         # ▶ 건수 0 인 이름은 응답에 **행이 아예 없다.** 0 으로 채워 둬야
         #   "기회 0건"과 "조회 실패"가 안 섞인다.
@@ -818,9 +874,22 @@ class WindowedActivityReader(LangfuseTraceReader):
         #    에서 왕복이 오히려 늘어난다.
         if opportunity_names:
             try:
-                counts = self._inner.count_many_worker_activity(
-                    event_names=opportunity_names, since=since, until=until,
+                batch_counter = getattr(
+                    self._inner, "count_many_worker_activity", None
                 )
+                if callable(batch_counter):
+                    counts = batch_counter(
+                        event_names=opportunity_names, since=since, until=until,
+                    )
+                else:
+                    # Compatibility path for older test/local readers that
+                    # only implement the original single-name interface.
+                    counts = {
+                        name: self._inner.count_worker_activity(
+                            event_name=name, since=since,
+                        )
+                        for name in opportunity_names
+                    }
                 self.queries += 1
                 for name, count in counts.items():
                     self._counts.setdefault(self._key(name, since), count)

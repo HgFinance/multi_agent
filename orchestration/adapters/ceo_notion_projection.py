@@ -249,6 +249,42 @@ def _select(value: str) -> dict[str, Any]:
     return {"select": {"name": value}}
 
 
+_DEPARTMENT_LABELS = {
+    "research-department": "리서치 부서",
+    "trading-department": "트레이딩 부서",
+    "risk-management": "리스크 부서",
+    "quant-backtest-department": "퀀트 부서",
+    "accounting-portfolio-department": "회계·포트폴리오 부서",
+    "qa-department": "품질검증 부서",
+    "hr-department": "인사 부서",
+}
+
+_WORKFLOW_MODE_LABELS = {
+    "analysis": "분석 자문",
+    "binding": "승인 검토",
+    "fast_advisory": "신속 자문",
+}
+
+
+def _department_label(value: Any) -> str:
+    text = str(value or "").strip()
+    return _DEPARTMENT_LABELS.get(text, text or "지정되지 않음")
+
+
+def _workflow_mode_label(value: Any) -> str:
+    text = str(value or "").strip()
+    return _WORKFLOW_MODE_LABELS.get(text, text or "분석 자문")
+
+
+def _human_report_title(fields: Mapping[str, Any]) -> str:
+    completed_at = str(fields.get("completed_at") or fields.get("created_at") or "")
+    # Keep the title readable in the manager view while retaining a stable,
+    # human-visible publication timestamp for same-day reports.  The durable
+    # projection key remains the idempotency key and is not shown here.
+    stamp = completed_at.replace("T", " ").replace("+00:00", " UTC")
+    return f"CEO 종합 보고 · {stamp}" if stamp else "CEO 종합 보고"
+
+
 def _property_type(property_schema: Mapping[str, Any]) -> str:
     return str(property_schema.get("type") or "").casefold()
 
@@ -486,7 +522,8 @@ class CeoNotionProjection:
             in {"blocked", "failed", "error", "expired"}
         ]
         primary_summaries = "\n".join(
-            f"{item.get('assignee')}: {summary(item, merged_run_metadata(item))}"
+            f"{_department_label(item.get('assignee'))}: "
+            f"{summary(item, merged_run_metadata(item))}"
             for item in workflow_tasks
             if is_request_scoped_role(item, fields["root_task_id"], "primary")
         )
@@ -503,7 +540,7 @@ class CeoNotionProjection:
             properties, "구분", ("CEO", "CEO 종합", "SYNTHESIS", "보고서", "분석")
         )
         return {
-            "브리핑명": _title(f"CEO Synthesis · {fields['root_task_id']}"),
+            "브리핑명": _title(_human_report_title(fields)),
             "기준일": _date(fields["completed_at"] or fields["created_at"]),
             "상태": _select(state),
             "구분": _select(category),
@@ -515,10 +552,10 @@ class CeoNotionProjection:
             "대표 결정사항": _rich_text(final_answer),
             "핵심 성과": _rich_text(primary_summaries),
             "문제·위험": _rich_text(
-                qa_summaries or "QA evaluation may be asynchronous."
+                qa_summaries or "품질검증 부서의 사후 검토는 별도로 진행되지 않았습니다."
             ),
             "다음 우선순위": _rich_text(
-                "Review unresolved findings and follow-up actions."
+                "미확인 위험 요인을 확인하고 필요한 후속 검토를 요청합니다."
             ),
         }
 
@@ -613,12 +650,15 @@ class CeoNotionProjection:
                 retryable=True,
                 error="Kanban client is required for durable Notion projection idempotency",
             ).as_dict()
+        selected_departments = ", ".join(
+            _department_label(value) for value in fields["selected_departments"]
+        ) or "지정되지 않음"
         report = (
-            "# CEO Final Synthesis\n\n"
-            f"- Root task: `{fields['root_task_id']}`\n"
-            f"- Synthesis task: `{fields['synthesis_task_id']}`\n"
-            f"- Selected departments: {', '.join(fields['selected_departments']) or 'none'}\n"
-            f"- Workflow mode: `{fields['workflow_mode']}`\n\n"
+            "# CEO 종합 보고\n\n"
+            "## 업무 개요\n\n"
+            f"- 검토 부서: {selected_departments}\n"
+            f"- 업무 유형: {_workflow_mode_label(fields['workflow_mode'])}\n\n"
+            "## 최종 판단\n\n"
             f"{fields['final_answer']}"
         )
         if current_report_schema:
@@ -627,7 +667,7 @@ class CeoNotionProjection:
             )
         else:
             properties = {
-                "제목": _title(f"CEO Synthesis · {root_task_id}"),
+                "제목": _title(_human_report_title(fields)),
                 "projection_key": _rich_text(key),
                 "root_task_id": _rich_text(root_task_id),
                 "synthesis_task_id": _rich_text(task_id(task)),
@@ -653,13 +693,16 @@ class CeoNotionProjection:
                 elif current_report_schema and force_upsert:
                     query_title = getattr(transport, "query_title", None)
                     if callable(query_title):
-                        existing = query_title(
-                            database_id,
-                            "브리핑명",
+                        # New pages use a human-readable timestamp title. Keep
+                        # the former task-id title as a one-time migration
+                        # fallback so correction/replay remains idempotent.
+                        for title in (
+                            _human_report_title(fields),
                             f"CEO Synthesis · {root_task_id}",
-                        )
-                        if existing:
-                            return existing
+                        ):
+                            existing = query_title(database_id, "브리핑명", title)
+                            if existing:
+                                return existing
                 if force_upsert:
                     # An explicit correction treats the authoritative Notion
                     # query as truth.  A stale Kanban/idempotency marker must

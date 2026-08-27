@@ -17,6 +17,7 @@ _SPEC = importlib.util.spec_from_file_location(
 assert _SPEC and _SPEC.loader
 risk_scripts = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(risk_scripts)
+import notion_reporter
 from notion_reporter import _rich_text
 
 
@@ -188,6 +189,52 @@ def test_notion_report_keeps_full_markdown_as_chunks():
     chunks = payload["rich_text"]
     assert "".join(chunk["text"]["content"] for chunk in chunks) == markdown
     assert all(len(chunk["text"]["content"]) <= 1900 for chunk in chunks)
+
+
+def test_notion_schema_lookup_is_cached_for_repeated_cases(monkeypatch):
+    schema_reads = 0
+
+    def fake_get(path, token):
+        nonlocal schema_reads
+        assert path == "databases/db1"
+        assert token == "tok"
+        schema_reads += 1
+        return 200, {"properties": {"제목": {"type": "title"}}}
+
+    def fake_post(path, body, token):
+        assert token == "tok"
+        if path.endswith("/query"):
+            return 200, {"results": []}
+        return 200, {"id": "page-1", "url": "https://notion.so/page-1"}
+
+    monkeypatch.setattr(
+        notion_reporter,
+        "_SCHEMA_CACHE",
+        notion_reporter.BoundedNotionSchemaCache(ttl_seconds=60, max_entries=8),
+    )
+    monkeypatch.setattr(notion_reporter, "_get", fake_get)
+    monkeypatch.setattr(notion_reporter, "_post", fake_post)
+
+    base = {
+        "verdict": "approve",
+        "approved_quantity": None,
+        "reason_codes": [],
+        "check_results": [],
+        "calculation_version": "v1",
+        "input_hash": "h1",
+        "trading_state": "ENABLED",
+        "escalate": False,
+        "narrative": "n",
+        "counterparty": None,
+        "compliance": None,
+    }
+    first = dict(base, risk_request_id="r1")
+    second = dict(base, risk_request_id="r2")
+
+    env = {"NOTION_TOKEN": "tok", "NOTION_RISK_DB": "db1"}
+    assert notion_reporter.upload_case({}, {}, first, env=env)["ok"]
+    assert notion_reporter.upload_case({}, {}, second, env=env)["ok"]
+    assert schema_reads == 1
 
 
 def test_markdown_table_escapes_untrusted_values():

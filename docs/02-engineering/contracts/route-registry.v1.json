@@ -187,6 +187,10 @@
         },
         {
           "method": "GET",
+          "path": "/ready"
+        },
+        {
+          "method": "GET",
           "path": "/health/ready"
         },
         {
@@ -1002,11 +1006,23 @@
         },
         {
           "method": "GET",
+          "path": "/internal/accounting/broker-evidence"
+        },
+        {
+          "method": "GET",
           "path": "/health"
         },
         {
           "method": "GET",
           "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/strategy-research/ask"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/strategy-research/requests/{request_id}"
         },
         {
           "method": "POST",

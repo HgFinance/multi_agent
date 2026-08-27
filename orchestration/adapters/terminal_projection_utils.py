@@ -57,6 +57,22 @@ _FORBIDDEN_KEYS = {
     "scratchpad",
 }
 
+_INTERNAL_HANDOFF_RE = re.compile(r"(?im)^\s*\[terminal handoff\]\s*$")
+
+
+def strip_internal_handoff(value: Any) -> str:
+    """Keep internal terminal metadata out of user-facing projections.
+
+    Hermes workers sometimes append a compact handoff after the user-ready
+    answer. It is useful in the task record, but fields such as ``mode`` and
+    ``execution`` are implementation details and must not leak into Discord
+    or manager-facing Notion pages.
+    """
+
+    text = str(value or "").strip()
+    match = _INTERNAL_HANDOFF_RE.search(text)
+    return text[: match.start()].rstrip() if match else text
+
 
 def as_mapping(value: Any) -> dict[str, Any]:
     """Decode the JSON-shaped metadata returned by different Hermes versions."""

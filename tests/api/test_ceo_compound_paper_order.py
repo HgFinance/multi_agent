@@ -3,12 +3,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from apps.api import ceo
-from apps.api import conditional_rule_workflow
-from apps.api import conditional_rules
-from apps.api import paper_order_bundle
+from apps.api import (
+    ceo,
+    conditional_rule_workflow,
+    conditional_rules,
+    paper_order_bundle,
+)
 from apps.api.user_order_workflow import InMemoryUserOrderRequestRepository
-
 
 USER_ID = "11111111-1111-4111-8111-111111111111"
 FUND_ID = "22222222-2222-4222-8222-222222222222"
@@ -73,6 +74,13 @@ def test_compound_route_composes_existing_order_and_rule_authorities(monkeypatch
         immediate_route["query"] = req.query
         immediate_route["request_id"] = req.request_id
         immediate_route["pre_admitted_record"] = kwargs["pre_admitted_record"]
+        for key in (
+            "discord_channel_id",
+            "discord_message_id",
+            "discord_guild_id",
+            "discord_thread_id",
+        ):
+            immediate_route[key] = kwargs[key]
         return {
             "task_id": "t_buy1",
             "task": {},
@@ -87,13 +95,52 @@ def test_compound_route_composes_existing_order_and_rule_authorities(monkeypatch
             request_id="discord:compound-1",
             fund_id=FUND_ID,
             book_id=BOOK_ID,
+            source="web",
         ),
         owner_id=USER_ID,
+        discord_channel_id="channel-1",
+        discord_message_id="message-1",
+        discord_guild_id="guild-1",
+        discord_thread_id="thread-1",
     )
 
     assert immediate_route["query"] == "삼성전자 5주 시장가로 매수해줘"
     assert immediate_route["request_id"] == "discord:compound-1:buy"
     assert immediate_route["pre_admitted_record"].raw_instruction == immediate_route["query"]
+    assert immediate_route["discord_channel_id"] == "channel-1"
+    assert immediate_route["discord_message_id"] == "message-1"
+    assert immediate_route["discord_guild_id"] == "guild-1"
+    assert immediate_route["discord_thread_id"] == "thread-1"
     assert result["compound_paper_order"] is True
     assert result["order_state"] == "WAITING_FOR_IMMEDIATE_FILL"
     assert result["conditional_rule_id"] == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+def test_traced_paper_route_receives_mirror_coordinates(monkeypatch) -> None:
+    captured = {}
+
+    def route(req, **kwargs):
+        captured.update(kwargs)
+        return {"task_id": "t_order", "status": "accepted"}
+
+    monkeypatch.setattr(ceo, "_route_traced_user_paper_order", route)
+
+    ceo.ceo_query(
+        ceo.CeoAsk(
+            query="삼성전자 2주 시장가로 매수해줘",
+            request_id="web-order-1",
+            source="web",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+        discord_channel_id="channel-1",
+        discord_message_id="message-1",
+        discord_guild_id="guild-1",
+        discord_thread_id="thread-1",
+    )
+
+    assert captured["discord_channel_id"] == "channel-1"
+    assert captured["discord_message_id"] == "message-1"
+    assert captured["discord_guild_id"] == "guild-1"
+    assert captured["discord_thread_id"] == "thread-1"

@@ -10,8 +10,14 @@ from orchestration.adapters.ceo_notion_projection import (
     CeoNotionProjection,
     NotionProjectionError,
 )
-from orchestration.adapters.ceo_supervisor import CeoSupervisorService
+from orchestration.adapters.ceo_supervisor import (
+    CeoSupervisorService,
+    ChildTaskState,
+    _augment_risk_legal_answer,
+    _handoff_provenance,
+)
 from orchestration.adapters.qa_audit_projection import QaAuditProjection
+from orchestration.adapters.terminal_projection_utils import strip_internal_handoff
 from orchestration.ceo_workflow_scope import build_root_body
 
 ROOT = "t_root"
@@ -19,6 +25,91 @@ RESEARCH = "t_research"
 RISK = "t_risk"
 QA = "t_qa"
 SYNTHESIS = "t_synthesis"
+
+
+def test_strip_internal_handoff_keeps_only_user_ready_answer() -> None:
+    value = "결과를 확인했습니다.\n\n[Terminal handoff]\n- mode: fast_advisory"
+
+    assert strip_internal_handoff(value) == "결과를 확인했습니다."
+
+
+def test_risk_legal_answer_keeps_only_verified_coordinates() -> None:
+    payload = _task(
+        RISK,
+        "primary",
+        assignee="risk-management",
+        metadata={
+            "legal_routing_verification": {
+                "source_references": [
+                    {
+                        "clause": "제172조",
+                        "title": "내부자의 단기매매차익 반환",
+                        "official_url": "https://www.law.go.kr/DRF/lawService.do",
+                    }
+                ]
+            }
+        },
+    )
+
+    answer = _augment_risk_legal_answer(
+        "법률 검토 참고 대상으로 제172조 페이지가 제시되었습니다.",
+        [payload],
+    )
+
+    assert "https://www.law.go.kr/DRF/lawService.do" in answer
+    assert "확인된 인용 문서" not in answer
+
+
+def test_risk_legal_answer_removes_unverified_statute_claim() -> None:
+    payload = _task(
+        RISK,
+        "primary",
+        assignee="risk-management",
+        metadata={"legal_routing_verification": {"source_references": []}},
+    )
+
+    answer = _augment_risk_legal_answer(
+        "자본시장법 제172조 페이지가 제시되었습니다.",
+        [payload],
+    )
+
+    assert "자본시장법 제172조" not in answer
+    assert "공식 법률 근거 좌표를 확인하지 못했으므로" in answer
+
+
+def test_risk_legal_answer_accepts_flat_run_metadata() -> None:
+    payload = _task(
+        RISK,
+        "primary",
+        assignee="risk-management",
+        metadata={
+            "legal_wiki_calls": 1,
+            "legal_status": "OK_but_ambiguous_escalate",
+            "legal_verdict": "ambiguous",
+            "legal_pages_visited": ["https://www.law.go.kr/법령/자본시장법"],
+            "legal_source_references": [
+                {
+                    "clause_id": "제172조",
+                    "title": "내부자의 단기매매차익 반환",
+                    "authority": "금융위원회",
+                    "effective_from": "2026-02-03",
+                    "origin_url": "https://www.law.go.kr/DRF/lawService.do",
+                }
+            ],
+        },
+    )
+
+    answer = _augment_risk_legal_answer(
+        "법률 검토 참고 대상으로 제172조 페이지가 제시되었습니다.",
+        [payload],
+    )
+
+    assert "https://www.law.go.kr/DRF/lawService.do" in answer
+    provenance = _handoff_provenance(ChildTaskState.from_hermes(payload))
+    legal_evidence = provenance["legal_evidence"]
+    assert legal_evidence["status"] == "OK_but_ambiguous_escalate"
+    assert legal_evidence["invocation_count"] == 1
+    assert legal_evidence["source_references"][0]["clause"] == "제172조"
 
 
 def _task(
@@ -486,6 +577,14 @@ class TerminalProjectionTests(unittest.TestCase):
         self.assertEqual(properties["상태"]["select"]["name"], "완료")
         self.assertEqual(properties["구분"]["select"]["name"], "CEO")
         self.assertEqual(properties["전체 업무"]["number"], len(self.workflow))
+        title = properties["브리핑명"]["title"][0]["text"]["content"]
+        self.assertTrue(title.startswith("CEO 종합 보고 · "))
+        report = str(transport.pages[0]["children"])
+        self.assertIn("리서치 부서", report)
+        self.assertIn("리스크 부서", report)
+        self.assertNotIn("Root task", report)
+        self.assertNotIn("Selected departments", report)
+        self.assertNotIn("Workflow mode", report)
         self.assertIn(
             "projection_key=ceo-synthesis:t_root:t_synthesis", client.comments[0][1]
         )
@@ -767,6 +866,38 @@ class TerminalProjectionTests(unittest.TestCase):
         )
 
         self.assertEqual(delivery.calls, [RESEARCH, RISK])
+
+    def test_risk_discord_card_strips_internal_terminal_handoff(self) -> None:
+        class DeliverySpy:
+            def __init__(self) -> None:
+                self.contents: list[str] = []
+
+            def upsert_thread_card(self, **kwargs: Any) -> str:
+                self.contents.append(str(kwargs["content"]))
+                return "created"
+
+        root = dict(self.root)
+        root["body"] += "\nselected_primary_profiles=risk-management"
+        risk = dict(self.primary[1])
+        risk["result"] = (
+            "### 결론\nPAPER 손실은 -400,000원입니다.\n"
+            "[Terminal handoff]\n- mode: fast_advisory\n- execution: PROHIBITED"
+        )
+        client = FakeSupervisorClient(root, [risk])
+        delivery = DeliverySpy()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+
+        service._deliver_department_progress(
+            root_task_id=ROOT,
+            root_payload=root,
+            task_payload=risk,
+            event={"event_id": "risk-terminal", "task_id": RISK, "kind": "completed"},
+        )
+
+        assert delivery.contents
+        assert "PAPER 손실은 -400,000원입니다." in delivery.contents[0]
+        assert "Terminal handoff" not in delivery.contents[0]
+        assert "- mode: fast_advisory" not in delivery.contents[0]
 
     def test_handler_keeps_failed_current_card_retryable(self) -> None:
         class Client(FakeSupervisorClient):

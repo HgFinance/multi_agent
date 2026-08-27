@@ -4,7 +4,12 @@ import threading
 import time
 from uuid import uuid4
 
-from orchestration.adapters.notion_idempotency import NotionIdempotency
+import pytest
+
+from orchestration.adapters.notion_idempotency import (
+    NotionIdempotency,
+    NotionIdempotencyError,
+)
 
 
 class _FakeRedis:
@@ -86,3 +91,27 @@ def test_late_owner_cannot_overwrite_newer_redis_claim() -> None:
 
     assert redis.values[key] == "in-progress:new-owner"
     assert first_token != redis.values[key]
+
+
+def test_distributed_wait_checks_notion_once_at_deadline() -> None:
+    projection = NotionIdempotency(
+        {"NOTION_IDEMPOTENCY_WAIT_SECONDS": "0.2"},
+        namespace=f"test-{uuid4()}",
+    )
+    redis = _FakeRedis()
+    projection._redis = lambda: redis  # type: ignore[method-assign]
+    lookup_calls = 0
+
+    def lookup() -> list[dict[str, str]]:
+        nonlocal lookup_calls
+        lookup_calls += 1
+        return []
+
+    claim = projection.claim("db-1", "projection-1", lookup=lookup)
+    redis.values[claim.key] = "in-progress:other-worker"
+
+    with pytest.raises(NotionIdempotencyError, match="claim_in_progress"):
+        with claim:
+            pass
+
+    assert lookup_calls == 1

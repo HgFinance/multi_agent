@@ -441,8 +441,8 @@ def test_heads_are_excluded_from_the_default_report() -> None:
         reader=_None(), departments=("research",), now=now, include_heads=True
     )
     assert len(with_heads) == len(default) + 1
-    assert "research-supervisor" in {r.worker_id for r in with_heads}
-    assert "research-supervisor" not in {r.worker_id for r in default}
+    assert "research-methodology-head" in {r.worker_id for r in with_heads}
+    assert "research-methodology-head" not in {r.worker_id for r in default}
 
 
 # ---------------------------------------------------------------------------

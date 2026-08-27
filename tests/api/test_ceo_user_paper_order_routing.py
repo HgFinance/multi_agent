@@ -8,15 +8,14 @@ import pytest
 from fastapi import HTTPException
 
 from apps.api import ceo
-from orchestration import llm_observability
 from apps.api.user_order_workflow import InMemoryUserOrderRequestRepository
+from orchestration import llm_observability
 from orchestration.ceo_workflow_scope import (
     requested_by_from_body,
     user_paper_order_scope_from_body,
     workflow_role_from_body,
     workflow_root_from_body,
 )
-
 
 USER_ID = "11111111-1111-4111-8111-111111111111"
 FUND_ID = "22222222-2222-4222-8222-222222222222"
@@ -31,6 +30,17 @@ def test_hr_read_only_e2e_marker_bypasses_order_high_recall_router() -> None:
 
     assert ceo._is_read_only_hr_e2e_request(raw) is True
     assert ceo._is_read_only_hr_e2e_request("삼성전자 매수 10주 시장가") is False
+
+
+def test_risk_read_only_e2e_marker_bypasses_legal_example_order_router() -> None:
+    raw = (
+        "[RISK-E2E] Risk 부서만 수행하세요. PAPER 읽기 전용 분석입니다. "
+        "임직원이 취득 후 6개월 이내 매도한 가상 법률 사례를 검토하되, "
+        "실제 주문·매매·승인·원장 변경은 절대 수행하지 마세요."
+    )
+
+    assert ceo._is_read_only_risk_e2e_request(raw) is True
+    assert ceo._is_read_only_risk_e2e_request("삼성전자 매도 10주 시장가") is False
 
 
 class _OrderedRepository(InMemoryUserOrderRequestRepository):
@@ -101,9 +111,10 @@ def _install_successful_route(
     return create
 
 
-def test_exact_sample_is_durably_bound_before_either_card_is_released(
+def test_exact_sample_is_durably_bound_before_either_card_is_finalized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "true")
     events: list[str] = []
     repository = _OrderedRepository(events)
     create = _install_successful_route(
@@ -129,7 +140,7 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
         "create-trading-blocked",
         "bind-trading",
         "complete-t_root1",
-        "release-t_trade1",
+        "complete-t_trade1",
     ]
     assert create.call_count == 2
     root_call, trading_call = create.call_args_list
@@ -147,10 +158,10 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert "삼성전자 매수 10주 시장가" in root_body
     assert "삼성전자 매수 10주 시장가" in trading_body
     assert "selected_primary_profiles=trading-department" in root_body
-    assert "managed omission default: order_type=MARKET" in trading_body
-    assert "limit_price=null, and no ORDER_TYPE evidence" in trading_body
-    assert "conflicting market/limit language, must CLARIFY" in trading_body
-    assert "Every evidence item must include normalized" in trading_body
+    assert "interpreter=DETERMINISTIC_EXACT_EVIDENCE" in trading_body
+    assert "authority=server_verified_paper_only" in trading_body
+    assert "instrument resolution, idempotency, OMS state" in trading_body
+    assert "process_user_paper_order exactly once" not in trading_body
 
     stored = repository.get(response["order_request_id"])
     assert stored is not None

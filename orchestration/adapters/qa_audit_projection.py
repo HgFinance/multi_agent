@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from collections.abc import Mapping, Sequence
@@ -75,8 +76,39 @@ def _verdict(metadata: Mapping[str, Any], task: Mapping[str, Any]) -> str:
         or metadata.get("qa_status")
         or task.get("verdict")
         or task.get("overall")
+        or metadata.get("audit_result")
     )
-    return str(value or "UNKNOWN").strip().upper()
+    if value:
+        return str(value).strip().upper()
+
+    # The QA Hermes terminal contract historically persisted a human-readable
+    # verdict in the completion summary while leaving result/metadata empty.
+    # Preserve that compatibility path, but only accept an explicit verdict;
+    # never infer PASS from a missing field.
+    terminal_text = " ".join(
+        str(task.get(key) or "")
+        for key in ("result", "latest_summary", "summary")
+    )
+    match = re.search(
+        r"\bQA\s+overall\s*=\s*(PASS|WARN|FAIL|CONDITIONAL(?:\s+PASS)?)\b",
+        terminal_text,
+        flags=re.IGNORECASE,
+    )
+    return str(match.group(1) if match else "UNKNOWN").strip().upper()
+
+
+def _audit_input(task: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Decode the bounded JSON audit envelope appended to a QA task body."""
+
+    body = str(task.get("body") or "")
+    marker = body.find('{"root_task_id"')
+    if marker < 0:
+        return {}
+    try:
+        value = json.loads(body[marker:])
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, Mapping) else {}
 
 
 def _canonical_decision(original: str) -> str:
@@ -327,6 +359,8 @@ class QaAuditProjection:
         primary = scoped_primary
         original = _verdict(metadata, task)
         qa_task_id = task_id(task)
+        audit_envelope = _audit_input(task)
+        workflow_observations = audit_envelope.get("workflow_observations")
         evidence = safe_json(
             {
                 "root_task_id": root_task_id,
@@ -352,6 +386,11 @@ class QaAuditProjection:
                     metadata.get("numerical_posture")
                     or metadata.get("numeric_posture")
                     or metadata.get("decision")
+                ),
+                "workflow_observations": (
+                    workflow_observations
+                    if isinstance(workflow_observations, Mapping)
+                    else {}
                 ),
             }
         )
@@ -521,6 +560,9 @@ class QaAuditProjection:
                 ),
                 "observability_source": "kanban_terminal_projection",
                 "raw_payloads_sent": False,
+                "workflow_observations": record.evidence.get(
+                    "workflow_observations", {}
+                ),
             }
             if (
                 latency_ms is not None

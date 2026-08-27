@@ -226,6 +226,8 @@ class PostResponseQaWorkflowTest(unittest.TestCase):
         self.assertEqual(observed["ceo_response"], result)
         self.assertEqual(events[-1]["qa_gate"]["phase"], "POST_RESPONSE")
         self.assertFalse(events[-1]["qa_gate"]["binding"])
+        self.assertEqual(events[-1]["department_report"]["status"], "COMPLETED")
+        self.assertEqual(events[-1]["department_report"]["worker_ids"], ["qa-runner"])
 
 
 class PaperE2EAdapterTest(unittest.TestCase):

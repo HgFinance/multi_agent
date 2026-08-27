@@ -16,7 +16,9 @@ metadata:
 이 스킬은 자율 연구실의 탐색 렌즈다. **웹에서 방법을 찾아 근거와 경쟁 가설로 만든다.**
 산출물은 사람이 읽는 리포트에 그치지 않고, 연구실의 영속 `hypotheses/`와 등록 계획으로
 넘길 수 있는 source-grounded evidence다. 계획 생성·실험 실행·결과 판정은
-`autonomous-quant-research` 러너와 결정론 검증면이 소유한다.
+전략 실행은 Strategy Hermes와 결정론 검증면이 소유한다. Research HQ의
+스카우트는 방법론 근거만 제공하고 `autonomous-quant-research` 실행 루프를
+호출하지 않는다.
 
 종목 방향·확률 예측은 이 스킬의 범위가 아니다. 방향 판단은 실험을 통과해 승격된
 전략의 몫이고, 여기서 그것을 하면 프레임워크가 다시 투자판단을 하게 된다.

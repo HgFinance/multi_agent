@@ -68,7 +68,10 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
     assert result["external_writes"] is False
     assert result["suitability"]["recommendations"][0]["portfolio_id"] == "balanced-core"
     assert result["risk_gate"]["verdict"] == "approve"
-    assert result["qa_gate"]["decision"] == "WARN"
+    # QA audits the exact delivered CEO envelope after this response-plane
+    # graph returns. The durable runtime projection resolves this PENDING row
+    # from the post-response QA completion event.
+    assert result["qa_gate"]["decision"] == "PENDING"
 
     expected_counts = {
         # Research workers are conditional: without a holdings question or an
@@ -81,9 +84,6 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
         "trading": 0,
         # Quant workers require an experiment card or an authoring request.
         "quant": 0,
-        # 2026-08-06: QA는 LLM 2명(hallucination/incident)과 결정론
-        # qa-runner 1명으로 축소했다. 이 파이프라인 count는 LLM만 센다.
-        "qa": 2,
         # 2026-08-07: 회계는 LLM 1명(exception-investigation-worker)과 결정론
         # back-office-runner 1명으로 축소했다. 헌장상(마스터플랜 19.12) 에이전트 일이
         # "예외 조사와 설명" 하나뿐이라 도메인별 7명이 전부 결정론 전달 계층이었다.
@@ -91,7 +91,7 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
         "accounting": 1,
         "ceo": 1,
     }
-    assert set(result["department_reports"]) == set(expected_counts)
+    assert set(result["department_reports"]) == set(expected_counts) | {"qa"}
     for stage, count in expected_counts.items():
         report = result["department_reports"][stage]
         expected_status = "NOT_APPLICABLE" if stage == "trading" else "COMPLETED"
@@ -104,13 +104,26 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
             assert report["skip_reason"] == "NO_VALID_STRATEGY_BUNDLE"
             assert report["skipped_safe"] == 1
 
+    qa_report = result["department_reports"]["qa"]
+    assert qa_report["status"] == "PENDING"
+    assert qa_report["executed"] == 0
+    assert qa_report["skip_reason"] == "POST_RESPONSE_AUDIT_PENDING"
+    assert qa_report["fan_out"] is True
+    assert qa_report["fan_in"] is True
+
     assert all(worker["binding"] is False for worker in result["worker_reports"])
-    risk_qa_workers = [
-        worker for worker in result["worker_reports"] if worker["stage"] in {"risk", "qa"}
+    response_plane_risk_workers = [
+        worker for worker in result["worker_reports"] if worker["stage"] == "risk"
     ]
-    assert len(risk_qa_workers) == 3
-    assert all(worker["technology"]["write_capability"] == "NONE" for worker in risk_qa_workers)
-    assert all(worker["technology"]["stack"] for worker in risk_qa_workers)
+    assert len(response_plane_risk_workers) == 1
+    assert all(
+        worker["technology"]["write_capability"] == "NONE"
+        for worker in response_plane_risk_workers
+    )
+    assert all(worker["technology"]["stack"] for worker in response_plane_risk_workers)
+    # QA workers are intentionally absent from this response-plane envelope;
+    # their completion is projected by the post-response audit event.
+    assert not any(worker["stage"] == "qa" for worker in result["worker_reports"])
 
 
 def test_worker_registry_loading_is_atomic_under_parallel_fanout():
@@ -138,7 +151,7 @@ def test_full_pipeline_holds_when_no_suitable_candidate_exists():
     assert result["suitability"]["status"] == "NO_MATCH"
     assert result["suitability"]["recommendations"] == []
     assert result["risk_gate"]["verdict"] == "reject"
-    assert result["qa_gate"]["decision"] == "WARN"
+    assert result["qa_gate"]["decision"] == "PENDING"
 
 
 def test_live_stage_payload_does_not_invent_conditional_worker_signals():

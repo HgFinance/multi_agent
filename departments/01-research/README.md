@@ -11,21 +11,43 @@ Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 �
 
 ## Mission
 
-**자율 연구실이다.** 웹(논문·투자자 서한·실무자 글·커뮤니티·타 분야)과 내부 증거를 스스로
-탐색하고, 가설·계획·실험·반증·학습을 영속 아티팩트로 남긴다. 종목 방향·확률 예측과 주문은
-하지 않으며, 강건성 검증을 통과한 경우에도 별도 검증·Risk·사람 심사를 위한 후보만 낸다.
+**리서치 본부는 방법론·근거·시장 데이터 제공 본부다.** 웹(논문·투자자 서한·실무자 글·
+커뮤니티·타 분야)과 내부 증거를 수집·검증해 다른 실행면이 재현 가능하게 사용할 수 있는
+근거를 제공한다. 전략 목표의 가설·코드 작성·백테스트·계보를 실제로 수행하는 주체는 이
+본부가 아니라 별도 논리 소유자인 **Strategy Hermes**다.
 
-### 현행 전략 연구 경로
+## 소유권 경계: Strategy Hermes와 Research HQ
 
-`departments/01-research/autonomous/`의 Hermes 연구 러너가 정본입니다. 사용자의 자연어 목표는
-`POST /ui/strategy-research/ask`로 `intake/`에 멱등 매니페스트로 등록되고, 워커가 이를
+이 저장소의 물리 경로와 조직 소유권은 일치하지 않는 부분이 있다. `autonomous/`는
+`01-research` 아래에 남아 있지만, 그 디렉터리의 논리 소유자와 실제 연구 실행자는
+`strategy-hermes`다. 독립 프로필은 `strategy-hermes/`에 있고, 직접 실행되는 Hermes와
+연구실 접수·저장·검증 코드는 `autonomous/`에 있다. 상세 계약은
+[`autonomous/OWNERSHIP.md`](autonomous/OWNERSHIP.md)를 정본으로 한다.
+
+| 구분 | Research HQ | Strategy Hermes |
+|---|---|---|
+| 주 책임 | 방법론·근거·시장 데이터 제공 | 전략 목표를 달성할 때까지 연구 |
+| 전략 연구 실행 | 하지 않음 | 직접 실행되는 Hermes가 수행 |
+| 연구실 쓰기 | 접수 매니페스트 외에는 하지 않음 | 가설·계획·코드·결과·실패 기억·계보 |
+| 실행 경로 | `research-hermes`의 일반 리서치/증거 표면 | `strategy-hermes` 프로필 + `autonomous/` 런타임 |
+| 금지된 위임 | 전략 연구를 `autonomous/runner.py`로 실행하지 않음 | `research-hermes`·`quant-hermes`·factory·주문 경로로 위임하지 않음 |
+
+따라서 `01-research`라는 경로명은 Strategy Hermes의 조직 소유권을 의미하지 않는다.
+이 경계를 정리하기 전까지는 물리적 디렉터리 이동이나 보존 코드·볼륨 삭제를 하지 않는다.
+
+### 현행 Strategy Hermes 전략 연구 경로
+
+논리 정본은 `strategy-hermes`다. 사용자의 자연어 목표는
+`POST /ui/strategy-research/ask`로 `intake/`에 멱등 매니페스트로 등록되고, **직접 실행되는
+Strategy Hermes**가 이를
 `labs/<request_id>/`의 독립 연구실로 물질화합니다. 그 폴더 안에서 `objective.json`,
 `hypotheses/`, `plans/`, `results/`, `agent-runs/`, `events.jsonl`과 사람이 읽는 요약 파일을
 영속화하며, 재시작해도 같은 `request_id`로 이어집니다. PIT·비용·OOS·강건성·누수·실패 모드
 게이트를 통과하지 못한 결과는 후보로 승격되지 않습니다. 기존 DB/팩토리 계약은 안전한 의존성
 이관과 감사 증거를 위해 보존되어 있지만 이 경로에 연결되지 않습니다.
 
-수집·PIT·인용 검증 인프라는 그대로 쓴다. 바뀐 것은 **무엇을 만드느냐**다.
+Research HQ의 수집·PIT·인용 검증 인프라는 공급자 경계로만 사용한다. 바뀐 것은 **누가
+전략 연구를 소유하고 실행하느냐**다.
 
 > 2026-08-10 재편. 이전 Mission("종목별 Research Packet 생성")은 프레임워크 자체가
 > 투자판단을 내리는 구조를 전제했다. 종목 애널리스트 편제는 운영에서 내렸고, 코드는
@@ -116,8 +138,9 @@ PBO 성립 하한**이기도 하다(`pbo_cscv.MIN_VARIANTS = 4`) — 예산을 �
 
 | 경로 | 내용 | 상태 |
 |---|---|---|
-| `hermes/` | Git 기준 Hermes Profile 사본 (`config.yaml`, `SOUL.md`) | 사용 중 |
-| **`autonomous/`** | 영속 Objective → Hypothesis → Plan → Result 루프, anti-loop/pivot, 실패 기억과 계보 | 현행 전략 연구 경로 |
+| `hermes/` | Research HQ의 방법론·증거 Profile 사본 (`config.yaml`, `SOUL.md`) | Research HQ 제공면 |
+| **`strategy-hermes/`** | Strategy Hermes 전용 Profile (`config.yaml`, `SOUL.md`) | 현행 전략 연구 Profile |
+| **`autonomous/`** | Strategy Hermes가 소유하는 접수·독립 연구실·직접 Hermes 실행·검증 인프라 | 논리 소유자: Strategy Hermes |
 | **`contracts/factory_contracts.py`** | 기존 DB 계약의 감사·이관용 보존본. 새 Hermes 러너는 import하지 않는다 | 의존성 이관 전 삭제 금지 |
 | **`factory/`** | 기존 제안/리드 경로의 보존본. 컨테이너·MCP에는 복사하지 않으며 새 경로와 연결하지 않는다 | 안전한 단계적 삭제 대기 |
 | **`collectors/ls_unified_parser.py`** | LS 통합시세(US3/UH1) 파서. KRX+NXT 한 소켓, 수신 시각 3종 보존 | 이식 완료, **호출처 0건** |
@@ -198,7 +221,9 @@ LSE TugOfWar, Oxford ORA, arXiv 1312.0514 — 링크 전부 HTTP 200 확인).
 > **한때 MCP가 병목이라고 적혀 있었지만 사실이 아니었다.** 웹 도달 수단은 처음부터
 > 있었고, 없던 것은 **스카우트 산출을 원장에 옮기는 코드**였다. 그래서 DB의 리드가
 > 전부 손으로 넣은 데모였다(`model_version` 이 빈 문자열인 것이 그 증거였다).
-> 자율 연구실의 근거 카드와 `autonomous/runner.py`가 그 역할을 담당한다.
+> 방법론 근거 카드는 Research HQ의 증거면이 담당한다. 전략 목표의 연구실 생성과
+> 실행은 Strategy Hermes가 담당하며, Research HQ의 프로필은 `autonomous/runner.py`를
+> 전략 실행 명령으로 등록하거나 호출하지 않는다.
 
 에이전트는 제안하고 **코드가 판정한다**:
 

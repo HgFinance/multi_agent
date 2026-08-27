@@ -28,6 +28,7 @@ from orchestration.skill_contract import (
     CANONICAL_SKILLS,
     PENDING_SOURCE_SKILLS,
     SKILL_OWNER_BY_NAME,
+    STRATEGY_RUNTIME_PROFILES,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -67,7 +68,9 @@ class SkillContractConsistencyTest(unittest.TestCase):
     def test_every_owner_is_a_canonical_profile(self) -> None:
         for skill, owners in SKILL_OWNER_BY_NAME.items():
             self.assertEqual(
-                set(owners) - set(CANONICAL_PROFILES), set(), f"skill={skill}"
+                set(owners) - (set(CANONICAL_PROFILES) | set(STRATEGY_RUNTIME_PROFILES)),
+                set(),
+                f"skill={skill}",
             )
 
     def test_declared_skills_exist_unless_explicitly_pending(self) -> None:

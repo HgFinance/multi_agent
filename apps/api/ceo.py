@@ -12,10 +12,10 @@ import logging
 import os
 import re
 import time
-from hashlib import sha256
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from hashlib import sha256
 
 from orchestration.kanban_retention import (
     AuditStore,
@@ -28,9 +28,6 @@ from orchestration.kanban_retention import (
 
 try:
     from . import hermes_boundary
-    from .conditional_rule_language import looks_like_conditional_paper_rule
-    from .conditional_rule_orchestrator import process_user_conditional_paper_rule
-    from .conditional_rules import build_delayed_order_candidate
     from .ceo_kanban_read import (
         KanbanTaskNotFound,
         KanbanUnavailable,
@@ -56,30 +53,24 @@ try:
         TaskStatusResponse,
         TaskWorkflow,
     )
+    from .conditional_rule_language import looks_like_conditional_paper_rule
+    from .conditional_rule_orchestrator import process_user_conditional_paper_rule
+    from .conditional_rules import build_delayed_order_candidate
     from .current_user import (
         current_user,
         optional_current_user,
         require_trading_book_access,
     )
     from .governance_client import fetch_current_mandate_by_fund
+    from .user_order_orchestrator import process_deterministic_user_paper_order
     from .user_order_workflow import (
         UserOrderRequestConflict,
         UserOrderRequestRecord,
         UserOrderWorkflowUnavailable,
         user_order_repository,
     )
-    from .user_order_orchestrator import process_deterministic_user_paper_order
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     import hermes_boundary  # type: ignore[no-redef]
-    from conditional_rule_language import (  # type: ignore[no-redef]
-        looks_like_conditional_paper_rule,
-    )
-    from conditional_rule_orchestrator import (  # type: ignore[no-redef]
-        process_user_conditional_paper_rule,
-    )
-    from conditional_rules import (  # type: ignore[no-redef]
-        build_delayed_order_candidate,
-    )
     from ceo_kanban_read import (  # type: ignore[no-redef]
         KanbanTaskNotFound,
         KanbanUnavailable,
@@ -105,6 +96,15 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         TaskStatusResponse,
         TaskWorkflow,
     )
+    from conditional_rule_language import (  # type: ignore[no-redef]
+        looks_like_conditional_paper_rule,
+    )
+    from conditional_rule_orchestrator import (  # type: ignore[no-redef]
+        process_user_conditional_paper_rule,
+    )
+    from conditional_rules import (  # type: ignore[no-redef]
+        build_delayed_order_candidate,
+    )
     from current_user import (  # type: ignore[no-redef]
         current_user,
         optional_current_user,
@@ -113,14 +113,14 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from governance_client import (
         fetch_current_mandate_by_fund,  # type: ignore[no-redef]
     )
+    from user_order_orchestrator import (  # type: ignore[no-redef]
+        process_deterministic_user_paper_order,
+    )
     from user_order_workflow import (  # type: ignore[no-redef]
         UserOrderRequestConflict,
         UserOrderRequestRecord,
         UserOrderWorkflowUnavailable,
         user_order_repository,
-    )
-    from user_order_orchestrator import (  # type: ignore[no-redef]
-        process_deterministic_user_paper_order,
     )
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -140,23 +140,23 @@ from orchestration.ceo_workflow_scope import (
     requested_by_from_body,
     selected_primary_profiles_from_task,
 )
-from orchestration.user_order_language import (
-    deterministic_delayed_order_plan,
-    deterministic_order_candidate,
-    is_clearly_non_executable_order_language,
-    looks_like_user_order_request,
-)
 from orchestration.compound_paper_orders import (
     AnalysisThenConditionalPaperOrderPlan,
     build_compound_conditional_candidate,
     parse_analysis_then_conditional_paper_order,
     parse_compound_paper_order,
 )
+from orchestration.experience_bank import ExperienceBank
 from orchestration.qa_contract import (
     canonical_qa_contract,
     split_planner_selection,
 )
-from orchestration.experience_bank import ExperienceBank
+from orchestration.user_order_language import (
+    deterministic_delayed_order_plan,
+    deterministic_order_candidate,
+    is_clearly_non_executable_order_language,
+    looks_like_user_order_request,
+)
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 logger = logging.getLogger(__name__)
@@ -292,6 +292,42 @@ def _is_read_only_hr_e2e_request(raw_query: str) -> bool:
         )
     )
     return has_hr_scope and has_read_only_scope
+
+
+def _is_read_only_risk_e2e_request(raw_query: str) -> bool:
+    """Keep an explicit Risk E2E review out of the high-recall order router.
+
+    Legal examples often contain words such as ``매도`` or ``6개월 이내``.
+    Those are evidence for the Risk/Legal review, not an instruction to create
+    a PAPER order.  Require an explicit Risk scope plus both an E2E/read-only
+    marker and a no-execution marker before bypassing the order detectors.
+    """
+
+    text = str(raw_query or "").casefold()
+    has_risk_scope = "리스크" in text or "risk" in text
+    has_e2e_scope = any(
+        marker in text
+        for marker in (
+            "e2e",
+            "읽기 전용",
+            "read-only",
+            "비주문",
+            "검증",
+        )
+    )
+    has_no_execution = any(
+        marker in text
+        for marker in (
+            "주문 금지",
+            "주문·매매·승인",
+            "주문/매매/승인",
+            "실제 주문",
+            "실행하지",
+            "실행 금지",
+            "no order",
+        )
+    )
+    return has_risk_scope and has_e2e_scope and has_no_execution
 
 _PLANNING_SCHEMA_VERSION = "ceo.query-accepted.v2"
 _PRIMARY_PROFILE_ORDER = (
@@ -514,9 +550,13 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
             qa_required = True
         elif assignee == "ceo-agent" and role == "synthesis":
             synthesis_present = True
-        elif assignee in _PRIMARY_PROFILE_ORDER and role in {"", "primary"}:
-            if assignee not in selected and not declared_primary:
-                selected.append(assignee)
+        elif (
+            assignee in _PRIMARY_PROFILE_ORDER
+            and role in {"", "primary"}
+            and assignee not in selected
+            and not declared_primary
+        ):
+            selected.append(assignee)
 
     declared_departments = metadata.get("selected_departments")
     if isinstance(declared_departments, str):
@@ -573,9 +613,12 @@ def _materialized_planning_profiles(
             qa_present = True
         elif assignee == "ceo-agent" and role == "synthesis":
             synthesis_present = True
-        elif assignee in _PRIMARY_PROFILE_ORDER and role in {"", "primary"}:
-            if assignee not in selected:
-                selected.append(assignee)
+        elif (
+            assignee in _PRIMARY_PROFILE_ORDER
+            and role in {"", "primary"}
+            and assignee not in selected
+        ):
+            selected.append(assignee)
     return selected, qa_present, synthesis_present
 
 
@@ -1108,7 +1151,7 @@ def _mark_paper_order_failed(
             error_code=error_code,
             error_message=error_message[:1000],
         )
-    except Exception:  # noqa: BLE001 - failure recording cannot grant authority.
+    except Exception:
         logger.exception(
             "paper-order failure record unavailable request=%s code=%s",
             order_request_id,
@@ -1248,7 +1291,7 @@ def _route_analysis_then_conditional_paper_order(
             error_message=str(exc),
         )
         raise HTTPException(status_code=503, detail="paper_order_workflow_unavailable") from exc
-    except Exception as exc:  # noqa: BLE001 - preserve the API boundary contract.
+    except Exception as exc:
         _mark_paper_order_failed(
             repository,
             record.order_request_id,
@@ -1296,6 +1339,10 @@ def _route_compound_user_paper_order(
     *,
     owner_id: str | None,
     mandate: Mapping[str, object] | None,
+    discord_channel_id: str | None = None,
+    discord_message_id: str | None = None,
+    discord_guild_id: str | None = None,
+    discord_thread_id: str | None = None,
 ) -> dict[str, object]:
     """Compose existing PAPER order and conditional-rule authorities.
 
@@ -1318,18 +1365,19 @@ def _route_compound_user_paper_order(
 
     # These imports stay local so the normal CEO analysis path does not acquire
     # conditional-rule dependencies when it is not an order request.
-    from .conditional_rules import (  # noqa: PLC0415
-        ConditionalRuleCandidate,
-        ConditionalRulePreviewRequest,
-        _build_preview,
-    )
-    from .conditional_rule_workflow import (  # noqa: PLC0415
+    from orchestration.conditional_rules import RuleState
+
+    from .conditional_rule_workflow import (
         ConditionalRuleConflict,
         ConditionalRuleUnavailable,
         conditional_rule_repository,
     )
-    from orchestration.conditional_rules import RuleState  # noqa: PLC0415
-    from .paper_order_bundle import (  # noqa: PLC0415
+    from .conditional_rules import (
+        ConditionalRuleCandidate,
+        ConditionalRulePreviewRequest,
+        _build_preview,
+    )
+    from .paper_order_bundle import (
         PaperOrderBundleError,
         paper_order_bundle_repository,
     )
@@ -1421,7 +1469,7 @@ def _route_compound_user_paper_order(
                     code="COMPOUND_ADMISSION_FAILED",
                     message=type(exc).__name__,
                 )
-            except Exception:  # noqa: BLE001 - preserve the admission error.
+            except Exception:
                 logger.exception("compound PAPER admission cleanup failed")
         if rule is not None:
             try:
@@ -1430,7 +1478,7 @@ def _route_compound_user_paper_order(
                     user_id=access["user_id"],
                     target=RuleState.CANCELLED,
                 )
-            except Exception:  # noqa: BLE001 - preserve the admission error.
+            except Exception:
                 logger.exception("compound PAPER rule cleanup failed")
         if "immediate_record" in locals():
             try:
@@ -1440,7 +1488,7 @@ def _route_compound_user_paper_order(
                     error_code="COMPOUND_ADMISSION_FAILED",
                     error_message="compound PAPER bundle was not fully admitted",
                 )
-            except Exception:  # noqa: BLE001 - preserve the admission error.
+            except Exception:
                 logger.exception("compound PAPER order cleanup failed")
         raise HTTPException(
             status_code=409 if isinstance(exc, UserOrderRequestConflict) else 503,
@@ -1459,8 +1507,12 @@ def _route_compound_user_paper_order(
             owner_id=owner_id,
             mandate=mandate,
             pre_admitted_record=immediate_record,
+            discord_channel_id=discord_channel_id,
+            discord_message_id=discord_message_id,
+            discord_guild_id=discord_guild_id,
+            discord_thread_id=discord_thread_id,
         )
-    except Exception as exc:  # noqa: BLE001 - close the pending composition.
+    except Exception as exc:
         try:
             bundles.mark_failed(
                 bundle.bundle_id,
@@ -1472,7 +1524,7 @@ def _route_compound_user_paper_order(
                 user_id=access["user_id"],
                 target=RuleState.CANCELLED,
             )
-        except Exception:  # noqa: BLE001 - original failure remains authoritative.
+        except Exception:
             logger.exception("compound PAPER cleanup failed bundle=%s", bundle.bundle_id)
         raise
 
@@ -1519,6 +1571,10 @@ def _route_user_paper_order(
     pre_admitted_record: UserOrderRequestRecord | None = None,
     langsmith_trace_context: str | None = None,
     langsmith_trace_run_id: str | None = None,
+    discord_channel_id: str | None = None,
+    discord_message_id: str | None = None,
+    discord_guild_id: str | None = None,
+    discord_thread_id: str | None = None,
 ) -> dict[str, object]:
     """Durably route one direct user workflow to Trading Hermes, always PAPER."""
 
@@ -1601,6 +1657,10 @@ def _route_user_paper_order(
             mandate=mandate,
             requested_by=access["user_id"],
             user_paper_order_scope=scope,
+            discord_channel_id=discord_channel_id,
+            discord_message_id=discord_message_id,
+            discord_guild_id=discord_guild_id,
+            discord_thread_id=discord_thread_id,
             langsmith_trace_context=langsmith_trace_context,
             langsmith_trace_run_id=langsmith_trace_run_id,
             previous_question_context=getattr(req, "previous_question_context", None),
@@ -1886,6 +1946,10 @@ def _route_traced_user_paper_order(
     owner_id: str | None,
     mandate: Mapping[str, object] | None,
     conditional_rule: bool,
+    discord_channel_id: str | None = None,
+    discord_message_id: str | None = None,
+    discord_guild_id: str | None = None,
+    discord_thread_id: str | None = None,
 ) -> dict[str, object]:
     """Route the direct PAPER lane with the same redacted root trace as analysis."""
 
@@ -1914,6 +1978,10 @@ def _route_traced_user_paper_order(
                 if root_trace is not None
                 else None
             ),
+            discord_channel_id=discord_channel_id,
+            discord_message_id=discord_message_id,
+            discord_guild_id=discord_guild_id,
+            discord_thread_id=discord_thread_id,
         )
     except Exception as exc:
         if root_trace is not None:
@@ -1930,7 +1998,7 @@ def _route_traced_user_paper_order(
                     run_id=getattr(root_trace, "run_id", None),
                     terminal_metadata=_trace_error_metadata(exc),
                 )
-            except Exception:  # noqa: BLE001 - tracing cannot mask route failure.
+            except Exception:  # noqa: BLE001, S110 - tracing cannot mask route failure.
                 pass
         raise
 
@@ -1996,9 +2064,10 @@ def ceo_query(
     mandate = fetch_current_mandate_by_fund(fund_id) if fund_id else None
 
     read_only_hr_e2e = _is_read_only_hr_e2e_request(req.query)
+    read_only_risk_e2e = _is_read_only_risk_e2e_request(req.query)
     analysis_then_conditional_plan = (
         None
-        if read_only_hr_e2e
+        if read_only_hr_e2e or read_only_risk_e2e
         else parse_analysis_then_conditional_paper_order(req.query)
     )
     if analysis_then_conditional_plan is not None:
@@ -2013,23 +2082,40 @@ def ceo_query(
             discord_thread_id=discord_thread_id,
         )
 
-    if not read_only_hr_e2e and parse_compound_paper_order(req.query) is not None:
+    if (
+        not read_only_hr_e2e
+        and not read_only_risk_e2e
+        and parse_compound_paper_order(req.query) is not None
+    ):
         return _route_compound_user_paper_order(
             req,
             owner_id=owner_id if isinstance(owner_id, str) else None,
             mandate=mandate,
+            discord_channel_id=discord_channel_id,
+            discord_message_id=discord_message_id,
+            discord_guild_id=discord_guild_id,
+            discord_thread_id=discord_thread_id,
         )
 
-    if not read_only_hr_e2e and looks_like_conditional_paper_rule(req.query):
+    if (
+        not read_only_hr_e2e
+        and not read_only_risk_e2e
+        and looks_like_conditional_paper_rule(req.query)
+    ):
         return _route_traced_user_paper_order(
             req,
             owner_id=owner_id if isinstance(owner_id, str) else None,
             mandate=mandate,
             conditional_rule=True,
+            discord_channel_id=discord_channel_id,
+            discord_message_id=discord_message_id,
+            discord_guild_id=discord_guild_id,
+            discord_thread_id=discord_thread_id,
         )
 
     if (
         not read_only_hr_e2e
+        and not read_only_risk_e2e
         and looks_like_user_order_request(req.query)
         and not is_clearly_non_executable_order_language(req.query)
     ):
@@ -2038,6 +2124,10 @@ def ceo_query(
             owner_id=owner_id if isinstance(owner_id, str) else None,
             mandate=mandate,
             conditional_rule=False,
+            discord_channel_id=discord_channel_id,
+            discord_message_id=discord_message_id,
+            discord_guild_id=discord_guild_id,
+            discord_thread_id=discord_thread_id,
         )
 
     workflow_mode = infer_workflow_mode(req.query)
@@ -2121,7 +2211,9 @@ def ceo_query(
                 ),
                 experience_hint=d5_hint,
                 approved_feedback_hint=approved_feedback,
-                include_accounting_advisory=not read_only_hr_e2e,
+                include_accounting_advisory=(
+                    not read_only_hr_e2e and not read_only_risk_e2e
+                ),
             ),
             idempotency_key=req.request_id,
         )

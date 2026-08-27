@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Entry point for Hermes Autonomous Strategy Research.
+"""Compatibility CLI for the pre-supervisor autonomous research runner.
+
+The production strategy path is owned and executed by the direct Strategy
+Hermes worker launched by ``strategy_hermes_supervisor.py``. This CLI remains
+for tested local replay and rollback evidence only; Research HQ must not
+register or invoke it as its strategy execution surface.
 
 Examples:
   python runner.py init --goal "Find a robust short-horizon alpha" --universe krx

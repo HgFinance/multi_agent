@@ -45,6 +45,19 @@ _RELATIVE_TIME_TRIGGER = re.compile(
     r"(?<![\w,])(?:[1-9]\d*|[일이삼사오육칠팔구십한두세네열스물서른마흔쉰예순일흔여든아흔\s]+)"
     r"\s*(?:초|분|시간)\s*뒤(?:에)?(?!\w)"
 )
+# A wall-clock instant is as much a trigger as a price or an indicator, but
+# only the relative form ("4분 뒤") used to be recognized.  "15:15 되면 매수"
+# therefore fell through to the immediate-order lane, which refuses it for
+# lacking the conditional-rule marker, and the user saw a flat rejection with
+# no rule created (2026-08-27).  ``시간`` is excluded so the relative grammar
+# above keeps owning "3시간 뒤".
+_ABSOLUTE_TIME_TRIGGER = re.compile(
+    r"(?<![\d:])(?:오전|오후|아침|저녁|낮)?\s*"
+    r"(?:"
+    r"(?:[01]?\d|2[0-3])\s*:\s*[0-5]\d(?![\d:])"
+    r"|(?:[01]?\d|2[0-3])\s*시(?!\s*간)(?:\s*[0-5]?\d\s*분)?"
+    r")"
+)
 _NON_BINDING_CONDITIONAL = re.compile(
     r"(?:\?|해도\s*될|해야\s*할|할까|어때|알려\s*줘|설명|추천|"
     r"예시|가정|백테스트|분석\s*해)",
@@ -68,6 +81,7 @@ def looks_like_conditional_paper_rule(raw_instruction: str) -> bool:
         and (
             _CONDITIONAL_TRIGGER.search(normalized)
             or _RELATIVE_TIME_TRIGGER.search(normalized)
+            or _ABSOLUTE_TIME_TRIGGER.search(normalized)
         )
         and not _NON_BINDING_CONDITIONAL.search(normalized)
     )

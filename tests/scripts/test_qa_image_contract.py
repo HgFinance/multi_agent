@@ -51,12 +51,17 @@ def test_compose_selects_scoped_database_runtime_roles() -> None:
         assert services[worker]["environment"]["DATABASE_URL"] == (
             "${RISK_QA_DATABASE_URL:-${DATABASE_URL:-}}"
         )
+    # Only quant-api may reach the quant database. quant-hermes is an
+    # unprivileged agent boundary and must not receive a DB role/credential.
     assert compose.count(
         "DATABASE_RUNTIME_ROLE: ${QUANT_DATABASE_RUNTIME_ROLE:-svc_quant}"
-    ) == 2
+    ) == 1
+    assert "DATABASE_RUNTIME_ROLE" not in services["quant-hermes"]["environment"]
+    assert "DATABASE_URL" not in services["quant-hermes"]["environment"]
     assert compose.count(
         "DATABASE_SESSION_URL: ${RISK_QA_DATABASE_SESSION_URL:-}"
     ) == 3
     assert compose.count(
         "DATABASE_SESSION_URL: ${QUANT_DATABASE_SESSION_URL:-}"
-    ) == 2
+    ) == 1
+    assert "DATABASE_SESSION_URL" not in services["quant-hermes"]["environment"]

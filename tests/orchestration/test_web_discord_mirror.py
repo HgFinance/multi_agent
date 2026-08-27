@@ -16,8 +16,9 @@ import os
 import unittest
 from unittest.mock import patch
 
-from apps.api.discord_actor_map import ACTOR_MAP_ENV, resolve as resolve_actor
 from apps.api import discord_mirror
+from apps.api.discord_actor_map import ACTOR_MAP_ENV
+from apps.api.discord_actor_map import resolve as resolve_actor
 from apps.api.discord_mirror import MIRROR_TAG, build_content
 from orchestration.ceo_workflow_scope import (
     build_root_body,

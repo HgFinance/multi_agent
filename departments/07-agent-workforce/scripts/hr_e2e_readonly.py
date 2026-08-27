@@ -42,6 +42,152 @@ def _parse_json(raw: bytes) -> Any:
         return raw.decode("utf-8", errors="replace")
 
 
+def _bounded_response(path: str, response: Any) -> Any:
+    """Keep only replay-relevant facts beside the raw response hash.
+
+    The evidence file is attached through the Hermes task transport. Large
+    nested Workforce payloads add no proof beyond their response hash and can
+    make that transport fragile. Preserve the fields needed to reproduce the
+    HR summary while keeping worker-level raw records out of the artifact.
+    """
+
+    if isinstance(response, str) and "/scorecard-brief" in path:
+        # The scorecard endpoint intentionally returns a human-readable
+        # Markdown table rather than JSON.  Keep only the table cells needed
+        # to verify the rendered answer; never copy the full response into
+        # the task handoff.
+        section_names = {
+            "capacity": "처리량·지연 (capacity)",
+            "cost": "비용 (cost)",
+            "quality": "품질 (quality)",
+        }
+        table_rows: dict[str, list[dict[str, str]]] = {
+            section: [] for section in section_names
+        }
+        current_section: str | None = None
+        headers: list[str] = []
+        for line in response.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                current_section = next(
+                    (
+                        section
+                        for section, title in section_names.items()
+                        if title in stripped
+                    ),
+                    None,
+                )
+                headers = []
+                continue
+            if current_section is None or not stripped.startswith("|"):
+                continue
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if not cells or all(set(cell) <= {"-", " "} for cell in cells):
+                continue
+            if not headers:
+                headers = cells
+                continue
+            if len(cells) != len(headers):
+                continue
+            table_rows[current_section].append(
+                {
+                    header: value
+                    for header, value in zip(headers, cells)
+                    if header and header != "---"
+                }
+            )
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+        departments = [
+            item
+            for item in query.get("department_code", [])
+            if item in SCORECARD_DEPARTMENTS
+        ]
+        snapshot_statuses = {
+            row.get("부서", ""): row.get("관측", "")
+            for row in table_rows["cost"]
+            if row.get("부서") and row.get("관측")
+        }
+        eval_references = {
+            row.get("부서", ""): int(row["eval_run 참조"])
+            for row in table_rows["quality"]
+            if row.get("부서")
+            and row.get("eval_run 참조", "").isdigit()
+        }
+        bounded_text = {
+            "content_sha256": hashlib.sha256(response.encode("utf-8")).hexdigest(),
+            "content_type": "text/markdown",
+            "departments": departments,
+            "table_rows": table_rows,
+            "snapshot_status_by_department": snapshot_statuses,
+            "quality_eval_run_references": eval_references,
+        }
+        bounded_text["summary_sha256"] = hashlib.sha256(
+            json.dumps(bounded_text, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return bounded_text
+    if not isinstance(response, dict):
+        return None
+    bounded: dict[str, Any] | None = None
+    if path.endswith("/improvements"):
+        candidates = response.get("candidates")
+        bounded = {
+            "candidate_count": len(candidates) if isinstance(candidates, list) else None,
+        }
+    elif "/observability" in path:
+        idle_agents = response.get("idle_agents")
+        states: dict[str, int] = {}
+        field_presence: dict[str, dict[str, int]] = {}
+        if isinstance(idle_agents, list):
+            for agent in idle_agents:
+                if not isinstance(agent, dict):
+                    continue
+                state = str(agent.get("status") or "").strip()
+                if state:
+                    states[state] = states.get(state, 0) + 1
+            agent_count = len([item for item in idle_agents if isinstance(item, dict)])
+            for field_name in ("worker_id", "last_seen_at", "idle_hours", "status"):
+                value_count = sum(
+                    1
+                    for agent in idle_agents
+                    if isinstance(agent, dict)
+                    and agent.get(field_name) not in (None, "")
+                )
+                key_count = sum(
+                    1
+                    for agent in idle_agents
+                    if isinstance(agent, dict) and field_name in agent
+                )
+                field_presence[field_name] = {
+                    "key_present": key_count,
+                    "value_present": value_count,
+                    "missing_or_null": max(agent_count - value_count, 0),
+                }
+        bounded = {
+            "window_start": response.get("window_start"),
+            "window_end": response.get("window_end"),
+            "states": states,
+            "agent_count": (
+                len([item for item in idle_agents if isinstance(item, dict)])
+                if isinstance(idle_agents, list)
+                else 0
+            ),
+            "field_presence": field_presence,
+        }
+    elif "/scorecard-brief" in path:
+        bounded = {
+            "content_sha256": hashlib.sha256(
+                json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest(),
+            "content_type": type(response).__name__,
+        }
+    if bounded is None:
+        return None
+    bounded["summary_sha256"] = hashlib.sha256(
+        json.dumps(bounded, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return bounded
+
+
 def _get(base_url: str, path: str) -> dict[str, Any]:
     started = _utc_now()
     request = urllib.request.Request(
@@ -75,7 +221,7 @@ def _get(base_url: str, path: str) -> dict[str, Any]:
         "http_status": status,
         "response_sha256": hashlib.sha256(raw).hexdigest() if raw else None,
         "response_bytes": len(raw),
-        "response": _parse_json(raw) if raw else None,
+        "response": _bounded_response(path, _parse_json(raw)) if raw else None,
         "error": error,
     }
 
@@ -109,7 +255,20 @@ def _summary(receipts: list[dict[str, Any]]) -> dict[str, Any]:
             state = str(agent.get("status") or "").strip()
             if state:
                 states[state] = states.get(state, 0) + 1
+    if not states and isinstance(body, dict):
+        bounded_states = body.get("states")
+        if isinstance(bounded_states, dict):
+            states = {
+                str(key): int(value)
+                for key, value in bounded_states.items()
+                if isinstance(value, int) and not isinstance(value, bool)
+            }
     candidates = improvements.get("response")
+    candidate_count = (
+        candidates.get("candidate_count")
+        if isinstance(candidates, dict)
+        else None
+    )
     candidates = candidates.get("candidates") if isinstance(candidates, dict) else []
     duration_by_path = {
         "improvements": improvements.get("duration_ms"),
@@ -128,7 +287,11 @@ def _summary(receipts: list[dict[str, Any]]) -> dict[str, Any]:
     )
     return {
         "helper_runs": 1,
-        "improvement_candidate_count": len(candidates) if isinstance(candidates, list) else None,
+        "improvement_candidate_count": (
+            len(candidates)
+            if isinstance(candidates, list)
+            else candidate_count
+        ),
         "idle_state_counts": states,
         "observability_window_start": body.get("window_start") if isinstance(body, dict) else None,
         "observability_window_end": body.get("window_end") if isinstance(body, dict) else None,
@@ -183,7 +346,11 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.name}.tmp")
     temporary.write_text(
-        json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
+        # Keep the attachment transport ASCII-safe.  The decoded JSON remains
+        # Korean for QA/Notion projections, while avoiding charset corruption
+        # in Hermes attachment storage before the supervisor recomputes the
+        # artifact digest.
+        json.dumps(evidence, ensure_ascii=True, indent=2) + "\n",
         encoding="utf-8",
     )
     temporary.replace(output)

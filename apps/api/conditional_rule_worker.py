@@ -60,6 +60,7 @@ from orchestration.conditional_rules.market_data import (
     LSTimescaleMarketPriceResolver,
     MarketPriceResolver,
     MarketPriceResolverError,
+    MarketPriceSnapshot,
 )
 from orchestration.conditional_rules.semantic import normalized_indicator_parameters
 
@@ -379,6 +380,7 @@ class HttpRuntimeClient:
         price_resolver: MarketPriceResolver | None = None,
         fallback_price_resolver: MarketPriceResolver | None = None,
         fallback_price_cache_seconds: float = 5.0,
+        shared_price_max_age_seconds: float = 30.0,
         bar_resolver: BarResolver | None = None,
     ) -> None:
         if not trading_api_url.strip() or not market_api_url.strip():
@@ -396,6 +398,9 @@ class HttpRuntimeClient:
             0.0, min(float(fallback_price_cache_seconds), 30.0)
         )
         self._fallback_prices: dict[str, tuple[float, MarketPriceSnapshot]] = {}
+        self._shared_price_max_age_seconds = max(
+            0.0, min(float(shared_price_max_age_seconds), 300.0)
+        )
         self._bar_resolver = bar_resolver
         self._cycle_prices: dict[str, tuple[Decimal, datetime, dict[str, Any]]] = {}
         self._cycle_prices_lock = threading.Lock()
@@ -501,6 +506,57 @@ class HttpRuntimeClient:
             raise RuntimeDataError("TRADING_CONTEXT_INVALID", "Trading context is invalid")
         return value
 
+    def _shared_snapshot_is_stale(self, snapshot: MarketPriceSnapshot) -> bool:
+        """Treat an aged shared tick the same as a missing one.
+
+        ``observed_at`` is the collector's write instant, so this measures how
+        far behind the shared realtime stream is, not broker clock skew.
+        """
+
+        if self._shared_price_max_age_seconds <= 0:
+            return False
+        age = (datetime.now(timezone.utc) - snapshot.observed_at).total_seconds()
+        return age > self._shared_price_max_age_seconds
+
+    def _rest_fallback_snapshot(
+        self, cache_key: str, normalized: str
+    ) -> MarketPriceSnapshot:
+        """Read the PAPER read-only quote adapter, cached per TTL.
+
+        The TTL keeps a 1-second worker from hammering LS REST, and the broker
+        receipt timestamp is preserved so freshness is never faked.
+        """
+
+        with self._fallback_price_lock:
+            cached_fallback = self._fallback_prices.get(cache_key)
+            if (
+                cached_fallback is not None
+                and time.monotonic() - cached_fallback[0]
+                <= self._fallback_price_cache_seconds
+            ):
+                return cached_fallback[1]
+            fallback = self._fallback_price_resolver
+            if fallback is None:
+                try:
+                    fallback = LSPaperMarketPriceResolver.from_env()
+                except MarketPriceResolverError as fallback_exc:
+                    raise RuntimeDataError(
+                        fallback_exc.code,
+                        str(fallback_exc),
+                        retryable=fallback_exc.retryable,
+                    ) from fallback_exc
+                self._fallback_price_resolver = fallback
+            try:
+                snapshot = fallback.snapshot(normalized)
+            except MarketPriceResolverError as fallback_exc:
+                raise RuntimeDataError(
+                    fallback_exc.code,
+                    str(fallback_exc),
+                    retryable=fallback_exc.retryable,
+                ) from fallback_exc
+            self._fallback_prices[cache_key] = (time.monotonic(), snapshot)
+            return snapshot
+
     def _snapshot(
         self, symbol: str, instrument_id: UUID | None = None
     ) -> tuple[Decimal, datetime, dict[str, Any]]:
@@ -536,44 +592,21 @@ class HttpRuntimeClient:
                 snapshot = shared_snapshot(normalized, instrument_id)
             else:
                 snapshot = resolver.snapshot(normalized)
+            # 공유 tick 이 **있지만 낡은** 경우도 폴백 대상이다. 예전에는 행이
+            # 하나라도 있으면 그대로 썼는데, 수집기가 밀리면 그 가격이 몇 분씩
+            # 낡은 채로 통과해 guard 가 MARKET_QUOTE_STALE 로 주문을 거절했다
+            # (2026-08-27 실측: 049080 이 자동 구독에 합류한 직후 observed_at
+            # 8분 지연). 정작 LS REST 는 같은 순간 신선한 값을 준다.
+            if self._shared_snapshot_is_stale(snapshot):
+                snapshot = self._rest_fallback_snapshot(cache_key, normalized)
         except MarketPriceResolverError as exc:
             if exc.code != "MARKET_PRICE_SHARED_DATA_GAP":
                 raise RuntimeDataError(
                     exc.code, str(exc), retryable=exc.retryable
                 ) from exc
             # ACTIVE 종목이 자동 구독에 합류했어도 첫 체결 전에는 공유 tick이
-            # 없을 수 있다. 그 한 경우에만 기존 PAPER 읽기 전용 quote adapter를
-            # 사용한다. 5초 TTL로 1초 worker가 LS REST를 과호출하지 않으며,
-            # 원래 broker receipt timestamp를 그대로 보존해 freshness를 속이지 않는다.
-            with self._fallback_price_lock:
-                cached_fallback = self._fallback_prices.get(cache_key)
-                if (
-                    cached_fallback is not None
-                    and time.monotonic() - cached_fallback[0]
-                    <= self._fallback_price_cache_seconds
-                ):
-                    snapshot = cached_fallback[1]
-                else:
-                    fallback = self._fallback_price_resolver
-                    if fallback is None:
-                        try:
-                            fallback = LSPaperMarketPriceResolver.from_env()
-                        except MarketPriceResolverError as fallback_exc:
-                            raise RuntimeDataError(
-                                fallback_exc.code,
-                                str(fallback_exc),
-                                retryable=fallback_exc.retryable,
-                            ) from fallback_exc
-                        self._fallback_price_resolver = fallback
-                    try:
-                        snapshot = fallback.snapshot(normalized)
-                    except MarketPriceResolverError as fallback_exc:
-                        raise RuntimeDataError(
-                            fallback_exc.code,
-                            str(fallback_exc),
-                            retryable=fallback_exc.retryable,
-                        ) from fallback_exc
-                    self._fallback_prices[cache_key] = (time.monotonic(), snapshot)
+            # 없을 수 있다.
+            snapshot = self._rest_fallback_snapshot(cache_key, normalized)
         value = {
             "last_trade": {
                 "price": str(snapshot.price),
@@ -1121,6 +1154,9 @@ def _settings() -> tuple[PostgresRuleWorkerStore, HttpRuntimeClient, float, int,
         timeout_seconds=float(os.getenv("CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS", "8")),
         fallback_price_cache_seconds=float(
             os.getenv("CONDITIONAL_RULE_FALLBACK_PRICE_CACHE_SECONDS", "5")
+        ),
+        shared_price_max_age_seconds=float(
+            os.getenv("CONDITIONAL_RULE_SHARED_PRICE_MAX_AGE_SECONDS", "30")
         ),
     )
     poll = max(float(os.getenv("CONDITIONAL_RULE_WORKER_POLL_SECONDS", "30")), 0.1)

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
-
 import time
-import pytest
+from datetime import datetime, timedelta, timezone
 
+import pytest
 from eval_runner import (
     AppendOnlyViolation,
     EvalCase,

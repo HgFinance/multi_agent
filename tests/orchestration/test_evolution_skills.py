@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from orchestration.evolution_skills import (
     Occurrence,
     active_registry_bindings,
     build_resolution_report,
+    cleanup_discord_review_cards,
     detect_candidates,
     inventory_skills,
     promote_proposal,
@@ -43,6 +45,27 @@ def _metadata(model: str = PRODUCTION_GENERATION_MODEL) -> dict[str, object]:
     }
 
 
+class _DiscordResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    @staticmethod
+    def read() -> bytes:
+        return b""
+
+
+class _DiscordOpener:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def __call__(self, request, timeout):
+        self.requests.append((request, timeout))
+        return _DiscordResponse()
+
+
 def _candidate(*, first_run: int = 1, active_version: int | None = None):
     rows = [
         Occurrence(
@@ -64,6 +87,76 @@ def _candidate(*, first_run: int = 1, active_version: int | None = None):
         if active_version
         else None,
     )[0]
+
+
+def test_resolved_skill_review_card_retention_keeps_proposal_history(tmp_path: Path) -> None:
+    store = EvolutionSkillStore(tmp_path / "state")
+    state = store.create_proposal(
+        _candidate(),
+        lambda _prompt: _body("repeated-quote-timeout"),
+        model_metadata=_metadata(),
+    )
+    proposal_id = state["proposal_id"]
+    assert store.update_review_delivery(
+        proposal_id, expected="PENDING", status="CLAIMED"
+    )
+    assert store.update_review_delivery(
+        proposal_id,
+        expected="CLAIMED",
+        status="DELIVERED",
+        message_id="123456791",
+    )
+    store.approve(proposal_id, approved_by="qa-owner", qa_verdict="PASS")
+    state_path = store.proposal_dir(proposal_id) / "state.json"
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    raw["updated_at"] = "2026-08-01T00:00:00+00:00"
+    state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    opener = _DiscordOpener()
+    summary = cleanup_discord_review_cards(
+        store,
+        retention_days=7,
+        token="qa-token",
+        channel_id="987654321",
+        now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        opener=opener,
+    )
+
+    assert summary.deleted == 1
+    assert len(opener.requests) == 1
+    final = json.loads(state_path.read_text(encoding="utf-8"))
+    assert final["status"] == "APPROVED"
+    assert final["review_deleted_at"]
+
+
+def test_pending_skill_review_card_is_not_retained_as_deleted(tmp_path: Path) -> None:
+    store = EvolutionSkillStore(tmp_path / "state")
+    state = store.create_proposal(
+        _candidate(),
+        lambda _prompt: _body("repeated-quote-timeout"),
+        model_metadata=_metadata(),
+    )
+    proposal_id = state["proposal_id"]
+    assert store.update_review_delivery(
+        proposal_id,
+        expected="PENDING",
+        status="DELIVERED",
+        message_id="123456792",
+    )
+
+    opener = _DiscordOpener()
+    summary = cleanup_discord_review_cards(
+        store,
+        retention_days=7,
+        token="qa-token",
+        channel_id="987654321",
+        now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        opener=opener,
+    )
+
+    assert summary.attempted == 0
+    assert summary.deleted == 0
+    assert opener.requests == []
 
 
 def _approved_proposal(store: EvolutionSkillStore, *, candidate=None) -> dict:

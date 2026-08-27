@@ -27,6 +27,7 @@ from lab import ResearchLab, ResearchLabError
 
 DEFAULT_LAB_ROOT = Path(os.getenv("AUTONOMOUS_RESEARCH_LAB_ROOT", "/var/lib/autonomous-research"))
 DEFAULT_REPO_ROOT = Path(os.getenv("AUTONOMOUS_RESEARCH_REPO_ROOT", str(HERE.parents[3])))
+MANAGED_MARKER = ".strategy-hermes-managed"
 
 
 def run_once(args: argparse.Namespace) -> dict[str, Any]:
@@ -35,14 +36,47 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
         path.mkdir(parents=True, exist_ok=True)
 
     reports: list[dict[str, Any]] = []
-    for request_id in intake.pending_ids():
+    request_filter = str(getattr(args, "request_id", "") or "").strip()
+    retry_blocked = bool(getattr(args, "retry_blocked", False))
+    pending_ids = intake.pending_ids()
+    if request_filter:
+        pending_ids = tuple(request_id for request_id in pending_ids if request_id == request_filter)
+    for request_id in pending_ids:
         try:
             intake.materialize(request_id, repo_root=args.repo_root)
         except (ResearchLabError, ValueError, OSError, json.JSONDecodeError) as exc:
             intake.record_error(request_id, phase="MATERIALIZE", error=f"{type(exc).__name__}: {exc}")
             reports.append({"request_id": request_id, "status": "BLOCKED", "error": str(exc)})
 
-    for lab_path in sorted(path for path in intake.labs_dir.iterdir() if path.is_dir()):
+    lab_paths = sorted(path for path in intake.labs_dir.iterdir() if path.is_dir())
+    if request_filter:
+        lab_paths = [path for path in lab_paths if path.name == request_filter]
+    for lab_path in lab_paths:
+        if not _is_strategy_hermes_lab(lab_path):
+            # Existing labs from the retired Python/factory-era worker remain
+            # readable for rollback and audit, but are never re-executed by the
+            # new direct Strategy Hermes worker.
+            reports.append({"lab_id": lab_path.name, "status": "PRESERVED_LEGACY_LAB"})
+            continue
+        error_path = intake.errors_dir / f"{lab_path.name}.json"
+        if error_path.exists() and not retry_blocked:
+            # A durable worker/validation error is a human-visible stop, not a
+            # polling trigger. Re-running the same invalid result every cycle
+            # burns model budget and can make an old request look active. An
+            # operator must explicitly opt into a retry after changing the
+            # input, data or runtime contract.
+            try:
+                error = intake._read_json(error_path)
+            except (OSError, json.JSONDecodeError, ValueError):
+                error = {"error": "unreadable persisted worker error"}
+            reports.append(
+                {
+                    "lab_id": lab_path.name,
+                    "status": "BLOCKED",
+                    "error": str(error.get("error") or "persisted worker error"),
+                }
+            )
+            continue
         try:
             reports.append(_run_lab(args, lab_path))
             intake.clear_error(lab_path.name)
@@ -57,6 +91,20 @@ def _run_lab(args: argparse.Namespace, lab_path: Path) -> dict[str, Any]:
     state = lab.state()
     if (lab_path / "candidate.json").exists():
         return {"lab_id": lab_path.name, "status": "CANDIDATE", "cycle": state.get("cycle", 0)}
+    existing_results = lab.results()
+    if existing_results and existing_results[-1].status == "BLOCKED":
+        # A result can have been authored by Hermes before a supervisor
+        # restart.  Finish the mechanical ingest before waiting for new data;
+        # do not spend another expensive model turn on the same blocked plan.
+        decisions = sync_agent_artifacts(lab)
+        lab.update_state(last_action="AWAITING_NEW_DATA")
+        return {
+            "lab_id": lab_path.name,
+            "status": "AWAITING_NEW_DATA",
+            "cycle": state.get("cycle", 0),
+            "last_result": existing_results[-1].plan_id,
+            "decisions": decisions,
+        }
 
     cycle = int(state.get("cycle", 0) or 0) + 1
     lab.update_state(cycle=cycle, last_action="HERMES_RUNNING")
@@ -86,12 +134,51 @@ def _run_lab(args: argparse.Namespace, lab_path: Path) -> dict[str, Any]:
     }
 
 
+def _is_strategy_hermes_lab(lab_path: Path) -> bool:
+    """Select only new-worker labs without deleting or mutating legacy labs."""
+
+    marker = lab_path / MANAGED_MARKER
+    if marker.exists():
+        return True
+
+    events_path = lab_path / "events.jsonl"
+    if not events_path.exists() or events_path.stat().st_size == 0:
+        marker.touch()
+        return True
+
+    try:
+        event_types = {
+            json.loads(line).get("event_type")
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    # The current worker writes AGENT_RUN before verification.  This permits
+    # the already-started Discord run to finish after a supervisor upgrade,
+    # while historical labs with hypotheses/plans are kept untouched.
+    if event_types and event_types <= {"AGENT_RUN"}:
+        marker.touch()
+        return True
+    return False
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Direct Strategy Hermes lifecycle supervisor")
     parser.add_argument("--lab-root", type=Path, default=DEFAULT_LAB_ROOT)
     parser.add_argument("--repo-root", type=Path, default=DEFAULT_REPO_ROOT)
-    parser.add_argument("--interval-min", type=float, default=float(os.getenv("AUTONOMOUS_RESEARCH_INTERVAL_MIN", "30")))
+    parser.add_argument("--interval-min", type=float, default=float(os.getenv("AUTONOMOUS_RESEARCH_INTERVAL_MIN", "0.5")))
     parser.add_argument("--timeout-seconds", type=int, default=int(os.getenv("AUTONOMOUS_RESEARCH_TIMEOUT_SECONDS", "1800")))
+    parser.add_argument(
+        "--request-id",
+        help="Process only this request/lab (manual tracing; the service loop remains unfiltered)",
+    )
+    parser.add_argument(
+        "--retry-blocked",
+        action="store_true",
+        help="Explicitly retry labs with a persisted worker/validation error",
+    )
     parser.add_argument("--loop", action="store_true")
     return parser
 

@@ -1,4 +1,9 @@
-"""Natural-language ingress for the isolated autonomous research lab."""
+"""BFF ingress adapter for the Strategy Hermes-owned research lab.
+
+This module admits and reads request manifests; it is not the Strategy Hermes
+researcher and it is not a Research HQ execution surface. The direct Hermes
+worker owns hypothesis, code, backtest, result and lineage writes after intake.
+"""
 
 from __future__ import annotations
 
@@ -97,6 +102,11 @@ def accept_strategy_research_query(
     universe: str = "unspecified",
     horizon: str = "unspecified",
     constraints: list[str] | None = None,
+    source_message_id: str | None = None,
+    discord_channel_id: str | None = None,
+    discord_message_id: str | None = None,
+    discord_guild_id: str | None = None,
+    discord_thread_id: str | None = None,
 ) -> StrategyResearchAccepted:
     """Admit one strategy objective without touching CEO/Kanban state.
 
@@ -117,6 +127,11 @@ def accept_strategy_research_query(
             {
                 **_request_payload(request, actor_id),
                 "source": source,
+                "source_message_id": source_message_id,
+                "discord_channel_id": discord_channel_id,
+                "discord_message_id": discord_message_id,
+                "discord_guild_id": discord_guild_id,
+                "discord_thread_id": discord_thread_id,
             }
         )
     except ResearchRequestConflict as exc:

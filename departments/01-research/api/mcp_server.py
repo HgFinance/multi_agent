@@ -912,17 +912,19 @@ def gather_holdings_evidence(symbol: str, *, get=None, search_news=None,
     sources: dict[str, dict] = {}
     out: dict = {"symbol": symbol, "sources": sources}
 
-    # 회사명. 답변에 "005930(005930)" 이라고 나가지 않게 한다. DART 기업색인은
-    # 어차피 공시 조회에서 로드되므로 추가 비용이 없다(실패는 무시 - 이름이
-    # 없다고 근거 수집이 멈출 이유는 없다).
-    try:
-        from external_sources import _resolve as _resolve_corp
+    # 회사명은 기본 DART 경로에서만 보강한다. 테스트/호출자가 공시 조회기를
+    # 주입한 경우에는 이미 독립적인 소스 계약을 받은 것이므로, 부가적인
+    # corpCode.xml 요청으로 그 계약을 지연시키거나 외부 네트워크를 다시
+    # 호출하지 않는다.
+    if search_disclosures is None:
+        try:
+            from external_sources import _resolve as _resolve_corp
 
-        hits = _resolve_corp(symbol)
-        if hits:
-            out["company"] = hits[0].get("corp_name") or symbol
-    except Exception:  # noqa: BLE001, S110 - 이름은 부가정보다
-        pass
+            hits = _resolve_corp(symbol)
+            if hits:
+                out["company"] = hits[0].get("corp_name") or symbol
+        except Exception:  # noqa: BLE001, S110 - 이름은 부가정보다
+            pass
 
     try:
         if search_news is None:

@@ -1,4 +1,4 @@
-"""Redacted LangSmith observation for dispatcher-owned Accounting workers.
+"""Redacted LangSmith observation for dispatcher-owned Hermes workers.
 
 The central Kanban dispatcher, rather than the department container, starts
 the real Hermes worker.  This small boundary therefore owns the only reliable
@@ -27,6 +27,9 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 ACCOUNTING_PROFILE = "accounting-portfolio-department"
 QA_PROFILE = "qa-department"
+# Keep one dispatcher-owned registry for every active non-CEO profile.  The
+# CEO root has its own lifecycle trace, while all department workers use the
+# same redacted worker/model/tool publisher below.
 _PROFILE_SPECS = {
     ACCOUNTING_PROFILE: {
         "department": "accounting-portfolio",
@@ -37,6 +40,41 @@ _PROFILE_SPECS = {
         "department": "qa",
         "schema_version": "llm.qa-worker.v1",
         "name_prefix": "hgfinance.qa",
+    },
+    "research-department": {
+        "department": "research",
+        "schema_version": "llm.research-worker.v1",
+        "name_prefix": "hgfinance.research",
+    },
+    "research-liaison": {
+        "department": "research",
+        "schema_version": "llm.research-liaison-worker.v1",
+        "name_prefix": "hgfinance.research-liaison",
+    },
+    "quant-backtest-department": {
+        "department": "quant-backtest",
+        "schema_version": "llm.quant-backtest-worker.v1",
+        "name_prefix": "hgfinance.quant-backtest",
+    },
+    "quant-liaison": {
+        "department": "quant-backtest",
+        "schema_version": "llm.quant-liaison-worker.v1",
+        "name_prefix": "hgfinance.quant-liaison",
+    },
+    "trading-department": {
+        "department": "trading",
+        "schema_version": "llm.trading-worker.v1",
+        "name_prefix": "hgfinance.trading",
+    },
+    "risk-management": {
+        "department": "risk",
+        "schema_version": "llm.risk-worker.v1",
+        "name_prefix": "hgfinance.risk",
+    },
+    "hr-department": {
+        "department": "hr",
+        "schema_version": "llm.hr-worker.v1",
+        "name_prefix": "hgfinance.hr",
     },
 }
 _PROFILE_RE = re.compile(r"(?:^|\s)-p\s+(?P<profile>[A-Za-z0-9._-]+)")
@@ -342,6 +380,12 @@ def _run_payload(
     }
     if parent_run_id is not None:
         payload["parent_run_id"] = str(parent_run_id)
+    error_code = metadata.get("error_code")
+    if error_code:
+        # LangSmith derives the run status from this field. Keep the value to
+        # a bounded internal code; raw worker output and task payloads never
+        # enter the failure trace.
+        payload["error"] = _safe_id(error_code, limit=80)
     return payload
 
 
@@ -490,6 +534,29 @@ def publish_department_worker_trace(
         "telemetry_completeness": worker_metadata["telemetry_completeness"],
         "raw_payloads_sent": False,
     }
+    worker_latency_ms = max(int(ended_ms) - int(started_ms), 0)
+    model_latency_ms = (
+        max(0, worker_latency_ms - tool_duration_total_ms)
+        if tool_latency_available
+        else None
+    )
+    model_metadata = {
+        **worker_metadata,
+        "observation_unit": "model",
+        "model_call_count_observed": llm_turn_count,
+        "model_latency_ms": model_latency_ms,
+        "latency_ms": model_latency_ms,
+        "latency_scope": (
+            "model_estimate" if model_latency_ms is not None else "unavailable"
+        ),
+        "latency_available": model_latency_ms is not None,
+    }
+    model_outputs = {
+        **safe_outputs,
+        "latency_ms": model_latency_ms,
+        "latency_scope": model_metadata["latency_scope"],
+        "latency_available": model_metadata["latency_available"],
+    }
     runs = [
         _run_payload(
             run_uuid=worker_uuid,
@@ -512,20 +579,11 @@ def publish_department_worker_trace(
             run_type="llm",
             started_ms=started_ms,
             ended_ms=ended_ms,
-            metadata={
-                **worker_metadata,
-                "observation_unit": "model",
-                "model_call_count_observed": llm_turn_count,
-                "model_latency_ms": max(
-                    0,
-                    max(int(ended_ms) - int(started_ms), 0)
-                    - tool_duration_total_ms,
-                ),
-            },
+            metadata=model_metadata,
             project_name=project_name,
             parent_run_id=worker_uuid,
             inputs=safe_inputs,
-            outputs=safe_outputs,
+            outputs=model_outputs,
         ),
     ]
     tool_cursor_ms = int(started_ms)
@@ -553,6 +611,11 @@ def publish_department_worker_trace(
                     "tool_name": tool_name,
                     "tool_call_index": index,
                     "tool_call_count": tool_count_for_name,
+                    "latency_ms": tool_duration_ms if tool_duration_ms > 0 else None,
+                    "latency_scope": (
+                        "tool_observation" if tool_duration_ms > 0 else "unavailable"
+                    ),
+                    "latency_available": tool_duration_ms > 0,
                     "tool_latency_ms": tool_duration_ms,
                     "tool_latency_available": tool_duration_ms > 0,
                     "tool_timing_source": (
@@ -562,7 +625,16 @@ def publish_department_worker_trace(
                 project_name=project_name,
                 parent_run_id=worker_uuid,
                 inputs=safe_inputs,
-                outputs=safe_outputs,
+                outputs={
+                    **safe_outputs,
+                    "latency_ms": (
+                        tool_duration_ms if tool_duration_ms > 0 else None
+                    ),
+                    "latency_scope": (
+                        "tool_observation" if tool_duration_ms > 0 else "unavailable"
+                    ),
+                    "latency_available": tool_duration_ms > 0,
+                },
             )
         )
     return _post_batch(env=runtime_env, runs=runs)

@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -170,9 +171,16 @@ class LsPaperFallbackMarketDataProvider:
         "TRADING_MARKET_QUOTE_UNAVAILABLE",
     }
 
-    def __init__(self, primary: MarketDataProvider, broker: Any) -> None:
+    def __init__(
+        self,
+        primary: MarketDataProvider,
+        broker: Any,
+        *,
+        monotonic: Any = None,
+    ) -> None:
         self.primary = primary
         self.broker = broker
+        self._monotonic = monotonic or time.monotonic
 
     def quote(
         self,
@@ -188,6 +196,7 @@ class LsPaperFallbackMarketDataProvider:
         except MarketDataError as exc:
             if exc.code not in self._FALLBACK_CODES:
                 raise
+        fetch_started = self._monotonic()
         try:
             level = self.broker.get_quote(instrument.symbol)
             value = TrustedQuote(
@@ -205,8 +214,16 @@ class LsPaperFallbackMarketDataProvider:
                 "TRADING_MARKET_QUOTE_UNAVAILABLE",
                 "LS PAPER REST quote fallback failed",
             ) from exc
+        # The REST read happens *after* the caller stamped `now`, and t1101 is
+        # throttled to roughly one call per second.  Validating a just-fetched
+        # quote against the older stamp makes its age negative, so the freshest
+        # quote this deployment can obtain is rejected as STALE whenever the
+        # round trip exceeds the future-skew bound.  Advance the stamp by the
+        # measured round trip instead of reading the wall clock, so an injected
+        # clock stays authoritative and the staleness bound stays strict.
+        validation_now = now + timedelta(seconds=self._monotonic() - fetch_started)
         return validate_quote(
-            value, instrument, now=now, max_age_seconds=max_age_seconds
+            value, instrument, now=validation_now, max_age_seconds=max_age_seconds
         )
 
 

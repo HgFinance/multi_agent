@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Mapping
+from collections.abc import Mapping
 from urllib.parse import SplitResult, urlsplit, urlunsplit
-
 
 _ROLE_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 

@@ -140,7 +140,10 @@ case "$MODE" in
       sync_one "$dept" "$SRC_ROOT/$folder/hermes-liaison" "$(dest_for "$dept")"
     done
     sync_local_skill "ceo-agent" "ceo/hermes-multi-agent-pipelines" "orchestration/hermes-multi-agent-pipelines"
-    sync_local_skill "research-department" "autonomous-quant-research" "research/autonomous-quant-research"
+    sync_local_skill "ceo-agent" "ceo/hermes-memory" "orchestration/hermes-memory"
+    # autonomous-quant-research belongs to the direct strategy-hermes runtime,
+    # not the Research HQ profile. Strategy Hermes receives it from the shared
+    # /opt/shared-skills mount; do not copy it into research-department.
     sync_local_skill "research-department" "methodology-scout" "research/methodology-scout"
     # Shared /opt/shared-skills is the canonical copy for this byte-identical
     # research skill; retire only an identical profile duplicate so qualified

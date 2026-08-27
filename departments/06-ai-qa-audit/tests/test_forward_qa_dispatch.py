@@ -15,13 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audit"))
 
 import qa_events.worker as qa_worker  # noqa: E402
+from qa_events.redis_event_bus import QaEventPoisonError  # noqa: E402
 from qa_events.worker import (  # noqa: E402
     _connect_dispatch_database,
     dispatch_forward_qa_handoffs,
     forward_qa_event_id,
     forward_qa_message_id,
 )
-from qa_events.redis_event_bus import QaEventPoisonError  # noqa: E402
 from repository import (  # noqa: E402
     ForwardQaRequestConflict,
     PostgresAuditRepository,

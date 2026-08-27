@@ -1,4 +1,9 @@
-"""Repository-owned contract for skills force-loaded by Kanban tasks."""
+"""Repository-owned contract for Kanban and direct Hermes runtime skills.
+
+Kanban profile identities and the direct Strategy Hermes runtime identity are
+kept separate: Strategy Hermes can own its research skill without becoming a
+Kanban assignee or a substitute for a department profile.
+"""
 
 from __future__ import annotations
 
@@ -20,9 +25,14 @@ CANONICAL_SHARED_SKILL_ROOT = Path(__file__).resolve().parents[1] / "skills"
 # 추가돼 두 계약이 갈렸다 - 창구에 스킬을 배정하면 "unknown Hermes profile" 로
 # 거부되는데, 정작 에이전트는 이 경계를 안 지나므로 아무도 모른 채 굴러갔다.
 # 정본은 canonical_profiles.py 하나다.
-from orchestration.canonical_profiles import (  # noqa: E402
+from orchestration.canonical_profiles import (
     CANONICAL_PROFILES,
 )
+
+# Direct runtimes are intentionally not added to canonical_profiles.py: that
+# set is the assignee contract for Kanban. They still need an explicit skill
+# owner so Research HQ cannot accidentally reclaim the Strategy Hermes skill.
+STRATEGY_RUNTIME_PROFILES = frozenset({"strategy-hermes"})
 
 # Repository-owned skill names.
 #
@@ -45,6 +55,8 @@ STATIC_CANONICAL_SKILLS = frozenset(
         "financial-research-memos",
         "financial-risk-research",
         "hermes-multi-agent-pipelines",
+        "hermes-memory",
+        "ls-accounting-evidence",
         "methodology-scout",
         "skill-authoring",
         # 2026-08-13: 카탈로그 우선 탐색 - "없다" 선언 전 정보원 4층 검색 규율.
@@ -82,13 +94,17 @@ _STATIC_SKILL_OWNER_BY_NAME = {
         "dataset-engineering": frozenset(
             {"quant-backtest-department", "research-department"}
         ),
-        "autonomous-quant-research": frozenset({"research-department"}),
+        # Strategy Hermes invokes this directly; Research HQ only supplies
+        # evidence/data contracts and must not claim the execution skill.
+        "autonomous-quant-research": frozenset({"strategy-hermes"}),
         "equity-quant-assessment": frozenset({"quant-backtest-department"}),
         "financial-equity-research": frozenset({"research-department"}),
         "financial-portfolio-assessment": SHARED_PORTFOLIO_SKILL_PROFILES,
         "financial-research-memos": frozenset({"research-department"}),
         "financial-risk-research": frozenset({"risk-management"}),
         "hermes-multi-agent-pipelines": frozenset({"ceo-agent"}),
+        "hermes-memory": frozenset({"ceo-agent"}),
+        "ls-accounting-evidence": frozenset({"accounting-portfolio-department"}),
         "methodology-scout": frozenset({"research-department"}),
         "skill-authoring": frozenset(
             {"quant-backtest-department", "research-department"}
@@ -207,7 +223,7 @@ def validate_skill_for_profile(
 ) -> str:
     """Validate source availability and semantic owner before task creation."""
 
-    if profile not in CANONICAL_PROFILES:
+    if profile not in CANONICAL_PROFILES | STRATEGY_RUNTIME_PROFILES:
         raise CanonicalSkillError(f"unknown Hermes profile: {profile!r}")
     name = str(skill_name or "").strip()
     owners = skill_owners(name)
@@ -250,7 +266,7 @@ def validate_skills_for_profiles(
     """Validate a flat planner skill list against selected profile owners."""
 
     selected = {str(profile).strip() for profile in profiles}
-    unknown_profiles = selected - CANONICAL_PROFILES
+    unknown_profiles = selected - (CANONICAL_PROFILES | STRATEGY_RUNTIME_PROFILES)
     if unknown_profiles:
         raise CanonicalSkillError(f"unknown Hermes profiles: {sorted(unknown_profiles)}")
     if skills is None:
@@ -298,16 +314,17 @@ def validate_required_skills(
 __all__ = [
     "ACTIVE_EVOLUTION_SKILLS",
     "AMBIGUOUS_CUSTOM_SKILLS",
-    "EVOLUTION_SKILL_REGISTRY",
-    "REGISTERED_EVOLUTION_SKILLS",
-    "STATIC_CANONICAL_SKILLS",
-    "CANONICAL_SHARED_SKILL_ROOT",
     "CANONICAL_PROFILES",
+    "CANONICAL_SHARED_SKILL_ROOT",
     "CANONICAL_SKILLS",
+    "EVOLUTION_SKILL_REGISTRY",
     "PENDING_SOURCE_SKILLS",
-    "CanonicalSkillError",
+    "REGISTERED_EVOLUTION_SKILLS",
     "SHARED_PORTFOLIO_SKILL_PROFILES",
     "SKILL_OWNER_BY_NAME",
+    "STRATEGY_RUNTIME_PROFILES",
+    "STATIC_CANONICAL_SKILLS",
+    "CanonicalSkillError",
     "resolve_canonical_skill",
     "skill_owners",
     "validate_required_skills",

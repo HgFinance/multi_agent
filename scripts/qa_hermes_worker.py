@@ -7,7 +7,8 @@ configured provider has no credential).  That leaves a running claim behind
 and the dispatcher correctly reports a protocol violation.  This wrapper is
 used as the dispatcher's worker executable and turns that narrow, observable
 condition into the existing typed ``kanban_block`` handoff for the QA profile.
-Non-QA profiles are delegated to the unchanged Hermes executable.
+Dispatcher-owned profiles are delegated to the Hermes executable through this
+single wrapper so the same redacted worker observer covers every department.
 
 Normal Hermes execution, provider selection, retry policy, and terminal tools
 are otherwise untouched. Dispatcher-owned user-query planning, response
@@ -23,7 +24,6 @@ import re
 import sqlite3
 import subprocess
 import sys
-import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -32,13 +32,17 @@ REAL_HERMES = (
 ).strip()
 QA_PROFILE = "qa-department"
 RISK_PROFILE = "risk-management"
+QUANT_PROFILE = "quant-backtest-department"
+QUANT_LIAISON_PROFILE = "quant-liaison"
 RISK_USER_PRIMARY_TOOLSETS = "kanban,risk-legal"
+QUANT_FAST_ADVISORY_TOOLSETS = "kanban,ls-securities"
+QUANT_LIAISON_FAST_ADVISORY_TOOLSETS = "kanban,research"
 _TASK_ID_RE = re.compile(r"\bt_[A-Za-z0-9_-]+\b")
 FAST_ADVISORY_MODE = "analysis_mode=fast_advisory"
 DEFAULT_FAST_ADVISORY_MAX_TURNS = 12
 MIN_FAST_ADVISORY_MAX_TURNS = 8
 MAX_FAST_ADVISORY_MAX_TURNS = 64
-DEFAULT_QA_PRIMARY_MAX_TURNS = 8
+DEFAULT_QA_PRIMARY_MAX_TURNS = 6
 MIN_QA_PRIMARY_MAX_TURNS = 6
 MAX_QA_PRIMARY_MAX_TURNS = 16
 DEFAULT_QA_PRIMARY_REASONING = "high"
@@ -51,7 +55,7 @@ MIN_QA_AUDIT_MAX_TURNS = 8
 MAX_QA_AUDIT_MAX_TURNS = 32
 DEFAULT_QA_AUDIT_REASONING = "high"
 QA_AUDIT_TOOLSETS = "kanban"
-QA_PRIMARY_TOOLSETS = "kanban,terminal"
+QA_PRIMARY_TOOLSETS = "kanban"
 _REASONING_LEVELS = frozenset(
     {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
@@ -84,31 +88,6 @@ def _task_id_from_argv(argv: Sequence[str]) -> str | None:
         if match:
             return match.group(0)
     return None
-
-
-def _latest_run_id(
-    db_path: str | os.PathLike[str] | None,
-    task_id: str | None,
-) -> int | None:
-    """Read the last attempt ID without relying on worker environment state."""
-
-    if not db_path or not task_id:
-        return None
-    db_uri = f"file:{Path(db_path).resolve()}?mode=ro"
-    try:
-        conn = sqlite3.connect(db_uri, uri=True, timeout=1.0)
-    except (OSError, sqlite3.Error):
-        return None
-    try:
-        row = conn.execute(
-            "SELECT id FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        return int(row[0]) if row and row[0] is not None else None
-    except (TypeError, ValueError, sqlite3.Error):
-        return None
-    finally:
-        conn.close()
 
 
 def _read_live_run_state(
@@ -270,6 +249,13 @@ def _qa_audit_reasoning() -> str:
 def _response_task_kind(body: str, *, profile: str = "") -> str | None:
     """Classify only bounded tasks on the user-facing response plane."""
 
+    # Every dispatcher-owned Risk worker is a bounded advisory boundary.  A
+    # manually-created card may omit the CEO workflow markers, but it must not
+    # regain shell/code/web tools merely because its body is legacy-shaped.
+    # Legal evidence remains available through the dedicated risk-legal edge.
+    if profile == RISK_PROFILE:
+        return "risk_user_primary"
+
     if profile == QA_PROFILE and (
         "workflow_role=primary" in body
         and "origin=user-query" in body
@@ -295,12 +281,6 @@ def _response_task_kind(body: str, *, profile: str = "") -> str | None:
         return "user_query_planning"
     if "workflow_role=synthesis" in body and "workflow_plane=response" in body:
         return "response_synthesis"
-    if (
-        profile == RISK_PROFILE
-        and "origin=user-query" in body
-        and "workflow_role=primary" in body
-    ):
-        return "risk_user_primary"
     return None
 
 
@@ -374,7 +354,30 @@ def _bounded_worker_argv(
                 else _user_response_reasoning(),
             ]
         )
-    if task_kind in {"qa_audit", "qa_primary"}:
+    if task_kind == "fast_advisory" and profile in {
+        QUANT_PROFILE,
+        QUANT_LIAISON_PROFILE,
+    }:
+        # A current Quant snapshot needs the task lifecycle boundary and its
+        # read-only data surface only.  The dispatcher otherwise supplies every
+        # registered builtin/MCP surface, which previously let a price request
+        # start unrelated workers and exhaust its bounded response budget before
+        # returning a result.  The liaison uses the read-only research library;
+        # the laboratory profile uses the LS securities projection.
+        allowed_toolsets = (
+            QUANT_FAST_ADVISORY_TOOLSETS
+            if profile == QUANT_PROFILE
+            else QUANT_LIAISON_FAST_ADVISORY_TOOLSETS
+        )
+        if toolsets_index is None:
+            additions.extend(["--toolsets", allowed_toolsets])
+        else:
+            option = args[toolsets_index]
+            if option in {"-t", "--toolsets"} and toolsets_index + 1 < len(args):
+                args[toolsets_index + 1] = allowed_toolsets
+            elif option.startswith("--toolsets="):
+                args[toolsets_index] = f"--toolsets={allowed_toolsets}"
+    elif task_kind in {"qa_audit", "qa_primary"}:
         # Post-response QA receives the exact bounded audit input in the
         # Kanban task body. Delegated specialists, shell/file exploration and
         # full-history reads only duplicate that evidence and can serialize
@@ -457,25 +460,24 @@ def _qa_primary_worker_argv(
 ) -> list[str]:
     """Give a primary QA E2E task one bounded diagnostic pass.
 
-    Primary QA tasks need terminal access to inspect existing redacted logs, but
-    they do not need the general skill catalog, delegation, or repeated board
-    expansion. Keeping the task payload inline also avoids spending turns
-    rediscovering the same root/task identifiers.
+    Primary QA tasks receive the authoritative evidence boundary from the
+    dispatcher. Detailed log/connector inspection belongs to the asynchronous
+    post-response audit, so the primary handoff must not reopen terminal or
+    board exploration and serialize the CEO response path.
     """
 
     body = str(task_body or "").strip()
     prompt = (
-        "Perform one bounded PAPER/read-only QA E2E diagnostic using only the "
-        "authoritative task payload below. Inspect existing local redacted logs "
-        "and state as needed, then report concrete evidence and unknowns. Do "
-        "not create or modify tasks, call skill_view/skill_manage, delegate, "
-        "write files, submit orders, change ledgers, or change configuration. "
-        "Do not repeat a failed command; if sqlite3, heredoc, or shell -c is "
-        "unavailable, continue with an available read-only command and record "
-        "the limitation. Use kanban_complete exactly once with structured "
-        "summary/result/error/block_reason and a user-ready final_answer. QA is "
-        "post-analysis governance and must not delay or rewrite any CEO/user "
-        "response.\n\nTASK PAYLOAD:\n"
+        "Perform one bounded PAPER/read-only QA primary handoff using only the "
+        "authoritative task payload below. Do not inspect the filesystem, logs, "
+        "connectors, or other Kanban tasks; the detailed evidence audit runs "
+        "asynchronously after the response. Preserve any evidence gaps as "
+        "unknowns instead of guessing. Do not create or modify tasks, call "
+        "skill_view/skill_manage, delegate, use terminal, write files, submit "
+        "orders, change ledgers, or change configuration. Call kanban_complete "
+        "exactly once with structured summary/result/error/block_reason and a "
+        "user-ready final_answer. QA is post-analysis governance and must not "
+        "delay or rewrite any CEO/user response.\n\nTASK PAYLOAD:\n"
         + body
     )
     args = list(argv)
@@ -614,9 +616,8 @@ def _run_real_worker(argv: Sequence[str]) -> int:
         task_id=env.get("HERMES_KANBAN_TASK"),
         profile=worker_profile,
     )
-    task_id, run_id = _task_context()
+    task_id, _run_id = _task_context()
     task_id = task_id or _task_id_from_argv(worker_argv)
-    run_id = run_id or _latest_run_id(env.get("HERMES_KANBAN_DB"), task_id)
     if worker_profile == QA_PROFILE and task_id:
         task_body = _task_body(env.get("HERMES_KANBAN_DB"), task_id)
         task_kind = _response_task_kind(task_body, profile=worker_profile)
@@ -630,104 +631,15 @@ def _run_real_worker(argv: Sequence[str]) -> int:
                 worker_argv,
                 task_body=task_body,
             )
-    started_ms = int(time.time() * 1000)
     completed = subprocess.run(
         [REAL_HERMES, *worker_argv],
         check=False,
         env=env,
     )
-    ended_ms = int(time.time() * 1000)
 
-    # The central dispatcher, not the department container, owns this worker
-    # process. Attach the task/root IDs for every profile supported by the
-    # one shared observer. This is a fail-open observer and never changes
-    # Hermes' return code or the CEO response dependency.
-    if task_id and run_id is not None:
-        try:
-            task_status, _current_run_id, outcome = _read_live_run_state(
-                env.get("HERMES_KANBAN_DB", ""), task_id, run_id
-            )
-            from hermes_worker_observability import publish_department_worker_trace
-
-            published = publish_department_worker_trace(
-                task_id=task_id,
-                task_body=_task_body(env.get("HERMES_KANBAN_DB"), task_id),
-                task_status=task_status or outcome or "",
-                run_id=str(run_id),
-                return_code=int(completed.returncode),
-                started_ms=started_ms,
-                ended_ms=ended_ms,
-                argv=worker_argv,
-                env=env,
-            )
-            if not published:
-                print(
-                    f"worker-observability task={task_id} status=not_published",
-                    file=sys.stderr,
-                )
-        except Exception as exc:  # noqa: BLE001 - observer is strictly fail-open.
-            # LangSmith is optional and must not turn a valid terminal handoff
-            # into a worker failure.
-            print(
-                "worker-observability "
-                f"task={task_id or 'unknown'} status=failed "
-                f"error={type(exc).__name__}",
-                file=sys.stderr,
-            )
-
-    # ▶ 부서장 카드 1장의 Langfuse span 트리 (2026-08-27 신규)
-    #
-    #   위 LangSmith 관측과 **별도 블록**이다. 하나가 실패했다고 다른 하나를
-    #   건너뛰면, 관측이 반쯤 있는 상태가 조용히 만들어진다.
-    #
-    #   위 블록과 달리 프로필 화이트리스트가 없다. 기존 관측은 accounting/qa 두
-    #   프로필만 보고 있어서 **나머지 6개 부서장은 어디에도 안 찍혔다** - 사용자
-    #   질의가 CEO 루트 카드로만 들어오는 구조라(apps/api/ceo.py), 그 카드에서
-    #   갈라지는 CEO·부서·QA·종합 턴이 전부 이 지점을 지나간다.
-    #
-    #   run_id 가 없어도 발행한다. 그건 카드가 없다는 뜻이 아니라 attempt 행을
-    #   아직 못 읽었다는 뜻이고, 그때도 지연·토큰은 재진다.
-    if task_id:
-        try:
-            from head_card_trace import publish_card_trace
-
-            task_body = _task_body(env.get("HERMES_KANBAN_DB"), task_id)
-            task_status, _current, outcome = _read_live_run_state(
-                env.get("HERMES_KANBAN_DB", ""), task_id, run_id or 0
-            )
-            from hermes_worker_observability import _request_id, _root_id, _status
-
-            root_id = _root_id(task_id=task_id, task_body=task_body)
-            status, _error_code = _status(
-                task_status=task_status or outcome or "",
-                return_code=int(completed.returncode),
-            )
-            outcome_line = publish_card_trace(
-                profile=worker_profile,
-                task_id=task_id,
-                root_id=root_id,
-                request_id=_request_id(root_id=root_id, task_body=task_body),
-                run_id=str(run_id or ""),
-                status=status.upper(),
-                started_ms=started_ms,
-                ended_ms=ended_ms,
-                attempts=_task_attempt_count(env.get("HERMES_KANBAN_DB"), task_id),
-                env=env,
-            )
-            if not outcome_line.startswith("published"):
-                # 계측 코드가 자기 실패를 관측하지 못하면 관측이 없는 것과 같다
-                # (2026-08-23 에 langfuse 미설치로 몇 시간을 태운 뒤 얻은 규칙).
-                print(
-                    f"head-card-trace task={task_id} profile={worker_profile} "
-                    f"reason={outcome_line}",
-                    file=sys.stderr,
-                )
-        except Exception as exc:  # noqa: BLE001 - observer is strictly fail-open.
-            print(
-                f"head-card-trace task={task_id} status=failed "
-                f"error={type(exc).__name__}",
-                file=sys.stderr,
-            )
+    # The dispatcher sitecustomize hook owns the single worker trace publish
+    # after it reaps this process. Keeping publication there prevents this
+    # wrapper and the spawn-boundary observer from emitting duplicate traces.
     return int(completed.returncode)
 
 
@@ -768,12 +680,11 @@ def _drop_dispatcher_terminal_cwd() -> None:
         os.environ.pop("TERMINAL_CWD", None)
 
 
-def _is_qa_kanban_worker() -> bool:
+def _is_dispatcher_kanban_worker() -> bool:
     task_id, run_id = _task_context()
     return (
         task_id is not None
         and run_id is not None
-        and os.environ.get("HERMES_PROFILE", "").strip() == QA_PROFILE
     )
 
 
@@ -782,9 +693,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     _drop_dispatcher_terminal_cwd()
 
-    # Ordinary QA CLI/gateway commands are byte-for-byte delegated to Hermes;
-    # only dispatcher-owned QA workers get the terminal-contract guard.
-    if not _is_qa_kanban_worker():
+    # Ordinary CLI/gateway commands are byte-for-byte delegated to Hermes.
+    # Dispatcher-owned workers stay in this wrapper so the existing single
+    # redacted publisher can observe every active department profile.
+    if not _is_dispatcher_kanban_worker():
         env = _real_worker_environment()
         env["HERMES_BIN"] = REAL_HERMES
         worker_argv = _bounded_worker_argv(
@@ -801,11 +713,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     task_id, run_id = _task_context()
     assert task_id is not None and run_id is not None
 
+    worker_profile = _profile_from_argv(args) or os.environ.get(
+        "HERMES_PROFILE", ""
+    ).strip()
+
     # The observed QA failure is deterministic and can be identified before
     # starting Hermes: this profile selects openai-codex and its stored
     # credential pool is empty. Do not alter provider auth or retry policy;
     # just use the existing terminal handoff once.
-    if _codex_credential_is_deterministically_missing(args):
+    if (
+        worker_profile == QA_PROFILE
+        and _codex_credential_is_deterministically_missing(args)
+    ):
         if _block_owned_task(task_id, reason=AUTH_BLOCK_REASON):
             return 0
         return 78
@@ -817,7 +736,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     # successor/recovery cannot be touched by the old worker process.
     db_path = os.environ.get("HERMES_KANBAN_DB", "").strip()
     if (
-        child_rc == 0
+        worker_profile == QA_PROFILE
+        and child_rc == 0
         and db_path
         and _still_owned_and_unfinished(db_path, task_id, run_id)
         and not _block_owned_task(task_id)

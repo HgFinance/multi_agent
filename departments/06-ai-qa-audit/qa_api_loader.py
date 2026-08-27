@@ -13,7 +13,6 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-
 _MODULE_NAME = "hgfinance_qa_audit.api_app"
 _APP_PATH = Path(__file__).resolve().parent / "api" / "app.py"
 

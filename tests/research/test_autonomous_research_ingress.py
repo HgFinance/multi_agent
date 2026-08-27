@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -10,7 +11,11 @@ AUTONOMOUS_DIR = Path(__file__).resolve().parents[2] / "departments/01-research/
 if str(AUTONOMOUS_DIR) not in sys.path:
     sys.path.insert(0, str(AUTONOMOUS_DIR))
 
-from autonomous_research_ingress import ResearchIntake, ResearchRequestConflict  # noqa: E402
+from autonomous_research_ingress import (  # noqa: E402
+    ResearchIntake,
+    ResearchRequestConflict,
+    looks_like_strategy_research,
+)
 
 
 def _payload(request_id: str = "research-01") -> dict[str, object]:
@@ -34,6 +39,7 @@ def test_intake_is_idempotent_and_rejects_rebinding(tmp_path: Path) -> None:
     assert created is True
     assert replay_created is False
     assert replay == first
+    assert stat.S_IMODE((intake.intake_dir / "research-01.json").stat().st_mode) == 0o644
     with pytest.raises(ResearchRequestConflict):
         intake.submit(_payload() | {"goal": "A different research objective"})
 
@@ -68,6 +74,25 @@ def test_materialize_is_safe_to_retry_after_marker_survives(tmp_path: Path) -> N
     assert intake.status("research-01")["goal"] == _payload()["goal"]
 
 
+def test_discord_correlation_is_persisted_with_the_request_but_not_invented() -> None:
+    payload = _payload() | {
+        "source": "discord",
+        "source_message_id": "discord-message-1",
+        "discord_channel_id": "channel-1",
+        "discord_message_id": "message-1",
+        "discord_guild_id": "guild-1",
+        "discord_thread_id": "thread-1",
+    }
+
+    from autonomous_research_ingress import normalize_request
+
+    normalized = normalize_request(payload)
+    assert normalized["discord_channel_id"] == "channel-1"
+    assert normalized["discord_message_id"] == "message-1"
+    assert normalized["discord_thread_id"] == "thread-1"
+    assert normalize_request(_payload())["discord_channel_id"] is None
+
+
 def test_worker_error_is_visible_until_the_next_successful_materialization(tmp_path: Path) -> None:
     intake = ResearchIntake(tmp_path / "research")
     intake.submit(_payload())
@@ -79,3 +104,27 @@ def test_worker_error_is_visible_until_the_next_successful_materialization(tmp_p
     intake.materialize("research-01", repo_root=tmp_path)
     assert intake.status("research-01")["status"] == "RESEARCHING"
     assert intake.status("research-01")["error"] is None
+
+
+def test_blocked_result_is_visible_as_blocked_without_worker_error(tmp_path: Path) -> None:
+    intake = ResearchIntake(tmp_path / "research")
+    intake.submit(_payload("research-04"))
+    lab_path = intake.materialize("research-04", repo_root=tmp_path)
+    (lab_path / "results").mkdir(exist_ok=True)
+    (lab_path / "results" / "plan-1.json").write_text(
+        '{"status":"BLOCKED","failure_reason":"insufficient daily history"}',
+        encoding="utf-8",
+    )
+
+    status = intake.status("research-04")
+
+    assert status is not None
+    assert status["status"] == "BLOCKED"
+    assert status["error"] == "insufficient daily history"
+
+
+def test_strategy_backtest_only_query_routes_to_strategy_research() -> None:
+    assert looks_like_strategy_research(
+        "미래에셋증권 ５일선이 ２０일선 골든 크로스시 매수 데드 크로스시 매도하는 전략 백테스트 해줘"
+    ) is True
+    assert looks_like_strategy_research("미래에셋증권 주가 알려줘") is False

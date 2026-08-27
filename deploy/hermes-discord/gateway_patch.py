@@ -367,7 +367,34 @@ def _wrap_init(cls: type[Any]) -> None:
     @functools.wraps(original)
     def wrapped(self: Any, *args: Any, **kwargs: Any) -> None:
         original(self, *args, **kwargs)
-        _store(self)
+        store = _store(self)
+        # Recover only historical leases. This is a local state transition;
+        # it never replays a Discord message or invokes Hermes. New rows are
+        # closed by the normal success/failure hooks below.
+        try:
+            reconciliation = store.reconcile_stale_inbound(
+                profile=_profile_name(),
+            )
+            if reconciliation["completed"] or reconciliation["expired"]:
+                logger.warning(
+                    "discord-idempotency-reconcile profile=%s scanned=%d "
+                    "completed=%d expired=%d skipped=%d",
+                    _profile_name(),
+                    reconciliation["scanned"],
+                    reconciliation["completed"],
+                    reconciliation["expired"],
+                    reconciliation["skipped"],
+                )
+        except Exception as exc:  # noqa: BLE001 - gateway remains fail-closed.
+            # A reconciliation failure must not make adapter construction
+            # appear successful with an unknown ledger state. Normal claim
+            # operations still fail closed through IdempotencyStoreUnavailable.
+            logger.error(
+                "discord-idempotency-reconcile status=unavailable "
+                "profile=%s error_type=%s",
+                _profile_name(),
+                type(exc).__name__,
+            )
 
     cls.__init__ = wrapped
 
@@ -546,8 +573,11 @@ async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool 
         session_token = _QA_FEEDBACK_SESSION_ANCHOR.set(session_anchor)
         try:
             result = await adapter._handle_message(message)
-            if not result:
-                _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+            _store(adapter).mark_inbound(
+                dedup_key,
+                "COMPLETED" if result else "FAILED",
+                _profile_name(),
+            )
             return bool(result)
         except Exception:
             _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())

@@ -434,6 +434,8 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(admit.call_count, 2)
         self.assertEqual(ceo_query.call_count, 0)
         self.assertTrue(admit.call_args_list[0].kwargs["request_id"].startswith("strategy-"))
+        self.assertEqual(admit.call_args_list[1].kwargs["discord_channel_id"], "channel-1")
+        self.assertEqual(admit.call_args_list[1].kwargs["discord_message_id"], "555555555555555555")
 
     def test_non_binding_ceo_query_forwards_source_to_ceo_boundary(self) -> None:
         response = {

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from contextlib import closing
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from orchestration.discord_idempotency import (
     DiscordIdempotencyStore,
@@ -350,6 +351,79 @@ class DiscordIdempotencyTests(unittest.TestCase):
                 handler="live",
             ).admitted
         )
+
+    def test_stale_reconciliation_repairs_only_proven_delivery(self) -> None:
+        now = datetime.now(timezone.utc)
+        completed_key = canonical_discord_dedup_key(
+            "guild", "channel", "m-reconcile-completed"
+        )
+        expired_key = canonical_discord_dedup_key(
+            "guild", "channel", "m-reconcile-expired"
+        )
+        for key, message_id in (
+            (completed_key, "m-reconcile-completed"),
+            (expired_key, "m-reconcile-expired"),
+        ):
+            self.store.claim_inbound(
+                dedup_key=key,
+                message_id=message_id,
+                guild_id="guild",
+                channel_id="channel",
+                thread_id=None,
+                profile="qa-department",
+                handler="qa_feedback_agent",
+            )
+            self.store.mark_inbound(key, "PROCESSING", "qa-department")
+
+        response_key = f"{completed_key}:final"
+        self.store.claim_outbound(
+            response_key=response_key,
+            dedup_key=completed_key,
+            profile="qa-department",
+        )
+        self.store.mark_outbound(
+            response_key,
+            "COMPLETED",
+            "qa-department",
+            "reply-reconcile",
+        )
+
+        stale_at = (now - timedelta(hours=2)).isoformat()
+        with closing(sqlite3.connect(self.store.path)) as conn:
+            conn.execute(
+                "UPDATE discord_idempotency_inbound SET updated_at=? "
+                "WHERE profile=? AND state='PROCESSING'",
+                (stale_at, "qa-department"),
+            )
+            conn.commit()
+
+        result = self.store.reconcile_stale_inbound(
+            profile="qa-department",
+            now=now,
+        )
+
+        self.assertEqual(result["scanned"], 2)
+        self.assertEqual(result["completed"], 1)
+        self.assertEqual(result["expired"], 1)
+        self.assertEqual(
+            self.store.inbound_state(completed_key, "qa-department"),
+            "COMPLETED",
+        )
+        self.assertEqual(
+            self.store.inbound_state(expired_key, "qa-department"),
+            "EXPIRED",
+        )
+        replay = self.store.claim_inbound(
+            dedup_key=expired_key,
+            message_id="m-reconcile-expired",
+            guild_id="guild",
+            channel_id="channel",
+            thread_id=None,
+            profile="qa-department",
+            handler="qa_feedback_agent",
+        )
+        self.assertFalse(replay.admitted)
+        self.assertEqual(replay.state, "EXPIRED")
         self.store.mark_inbound(key, "FAILED", "research-department")
         self.assertTrue(
             self.store.claim_inbound(

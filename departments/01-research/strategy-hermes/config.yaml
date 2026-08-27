@@ -1,6 +1,7 @@
 # Dedicated Strategy Hermes profile. It shares only the user's Codex
 # credential seed with the other department heads; runtime state, sessions,
 # skills and workspace are separate.
+_config_version: 37
 model:
   provider: openai-codex
   default: gpt-5.6-luna

@@ -21,6 +21,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 _QA_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_QA_DIR))
 
+from audit.db_session import (  # noqa: E402
+    configure_writer_connection,
+    runtime_role,
+    runtime_session_dsn,
+)
 from qa_api_loader import load_qa_api  # noqa: E402
 
 from qa_events.redis_event_bus import (  # noqa: E402
@@ -29,12 +34,6 @@ from qa_events.redis_event_bus import (  # noqa: E402
     is_deterministic_event_error,
     json_safe,
 )
-from audit.db_session import (  # noqa: E402
-    configure_writer_connection,
-    runtime_role,
-    runtime_session_dsn,
-)
-
 
 FORWARD_QA_DISPATCHER = "qa-worker/forward-dispatch-v2"
 FORWARD_QA_SOURCE_DEPARTMENT = "quant-backtest-department"

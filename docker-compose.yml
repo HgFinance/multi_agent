@@ -165,7 +165,7 @@ services:
       APP_ENV: local
       PORTFOLIO_AUTH_MODE: fixture
       PORTFOLIO_LIVE_MODE: broker
-      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: "${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}"
       # Closed-network local PAPER runtime. This uses the fixed demo identity
       # and the isolated order logins above; it does not add user login/Auth.
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
@@ -235,9 +235,9 @@ services:
       # boundary above; it does not gain a Docker-exec transport.
       ACCOUNTING_API_URL: ${ACCOUNTING_API_URL:-http://accounting-api:8000}
       ACCOUNTING_ADVISORY_BOOK_ID: ${ACCOUNTING_ADVISORY_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
-      ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-5.0}
+      ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-2.0}
       PORTFOLIO_BFF_INTERNAL_URL: ${PORTFOLIO_BFF_INTERNAL_URL:-http://portfolio-bff:8000}
-      RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-5.0}
+      RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-2.0}
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
       RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
       # Host-side tools use RISK_API_URL=127.0.0.1:8041.  A container must not
@@ -432,7 +432,7 @@ services:
       APP_ENV: ${AI_OFFICE_APP_ENV:-local}
       PORTFOLIO_DATA_MODE: "production"
       PORTFOLIO_AUTH_MODE: fixture
-      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: "${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}"
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
       ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
       ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
@@ -507,6 +507,10 @@ services:
       TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
       CONDITIONAL_RULE_WORKER_POLL_SECONDS: ${CONDITIONAL_RULE_WORKER_POLL_SECONDS:-1.0}
       CONDITIONAL_RULE_FALLBACK_PRICE_CACHE_SECONDS: ${CONDITIONAL_RULE_FALLBACK_PRICE_CACHE_SECONDS:-5.0}
+      # A shared tick this old is treated as a gap, so the read-only LS quote
+      # adapter is used instead.  Without it a backlogged collector serves a
+      # minutes-old price and the guard rejects the order as MARKET_QUOTE_STALE.
+      CONDITIONAL_RULE_SHARED_PRICE_MAX_AGE_SECONDS: ${CONDITIONAL_RULE_SHARED_PRICE_MAX_AGE_SECONDS:-30}
       CONDITIONAL_RULE_WORKER_BATCH_SIZE: ${CONDITIONAL_RULE_WORKER_BATCH_SIZE:-100}
       CONDITIONAL_RULE_WORKER_MAX_WORKERS: ${CONDITIONAL_RULE_WORKER_MAX_WORKERS:-8}
       CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS: ${CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS:-8}
@@ -711,6 +715,12 @@ services:
       LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
       LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-shadow}
       LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
+      # The feedback worker owns this SQLite volume. It also deletes only
+      # resolved QA/review cards after seven days; pending cards remain.
+      LANGSMITH_FEEDBACK_DISCORD_RETENTION_ENABLED: ${LANGSMITH_FEEDBACK_DISCORD_RETENTION_ENABLED:-true}
+      LANGSMITH_FEEDBACK_DISCORD_RETENTION_DAYS: ${LANGSMITH_FEEDBACK_DISCORD_RETENTION_DAYS:-7}
+      LANGSMITH_FEEDBACK_DISCORD_RETENTION_MAX_MESSAGES: ${LANGSMITH_FEEDBACK_DISCORD_RETENTION_MAX_MESSAGES:-100}
+      LANGSMITH_FEEDBACK_DISCORD_RETENTION_INTERVAL_SECONDS: ${LANGSMITH_FEEDBACK_DISCORD_RETENTION_INTERVAL_SECONDS:-86400}
       LANGSMITH_FEEDBACK_POLL_SECONDS: ${LANGSMITH_FEEDBACK_POLL_SECONDS:-30}
       LANGSMITH_FEEDBACK_LOOKBACK_SECONDS: ${LANGSMITH_FEEDBACK_LOOKBACK_SECONDS:-900}
       LANGSMITH_FEEDBACK_BATCH_SIZE: ${LANGSMITH_FEEDBACK_BATCH_SIZE:-25}
@@ -1424,9 +1434,12 @@ services:
     stop_grace_period: 20s
 
   # ── Independent Strategy Hermes ───────────────────────────────────────────
-  # Opt-in. The intake/supervisor is only a lifecycle boundary; the actual
-  # researcher is the direct Hermes process it launches. Existing
-  # research-hermes and quant-hermes are not called from this service.
+  # Opt-in. This service is the Strategy Hermes owner and actual researcher.
+  # The autonomous/ source path is physically under 01-research for repository
+  # compatibility only; it is not owned or executed by Research HQ. The
+  # intake/supervisor is only a lifecycle boundary; the actual researcher is
+  # the direct Hermes process it launches. Existing research-hermes and
+  # quant-hermes are not called from this service.
   strategy-hermes:
     profiles: ["strategy-hermes"]
     build:
@@ -1448,7 +1461,12 @@ services:
       - ./departments/01-research/strategy-hermes/config.yaml:/opt/data/config.yaml:ro
       - ./departments/01-research/strategy-hermes/SOUL.md:/opt/data/SOUL.md:ro
       - ./skills:/opt/shared-skills:ro
-      - ./quant-data:/app/quant-data:ro
+    # Raw data and the old repository cache are hidden from this worker. The
+    # host copy remains untouched for rollback/audit, but Strategy Hermes has
+    # no persistent raw-data input surface.
+    tmpfs:
+      - /tmp/strategy-market-data
+      - /app/repo/quant-data
     environment:
       HERMES_HOME: /opt/data
       HERMES_PROFILE: strategy-hermes
@@ -1459,9 +1477,26 @@ services:
       AUTONOMOUS_RESEARCH_REPO_ROOT: /app/repo
       AUTONOMOUS_RESEARCH_HERMES_PROVIDER: openai-codex
       AUTONOMOUS_RESEARCH_HERMES_MODEL: gpt-5.6-luna
-      AUTONOMOUS_RESEARCH_INTERVAL_MIN: ${AUTONOMOUS_RESEARCH_INTERVAL_MIN:-30}
+      # LS is a read-only, on-demand source for this worker. Credentials are
+      # injected from the host .env and never written to the research lab.
+      LS_ENV: ${LS_ENV:-LIVE}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_DATA_ACCESS_MODE: readonly
+      LS_ALLOWED_TR_CODES: t1665,t8410,t8411,t8412,t8451,t8452,t8453
+      STRATEGY_MARKET_DATA_PARENT: /tmp/strategy-market-data
+      STRATEGY_MARKET_DATA_DIR: /tmp/strategy-market-data
+      LS_TOKEN_CACHE_DIR: /tmp/strategy-market-data/token-cache
+      # Poll frequently enough that a Discord/Web request is admitted without
+      # a manual wake-up. The supervisor still enforces a 30-second floor.
+      AUTONOMOUS_RESEARCH_INTERVAL_MIN: ${AUTONOMOUS_RESEARCH_INTERVAL_MIN:-0.5}
       AUTONOMOUS_RESEARCH_TIMEOUT_SECONDS: ${AUTONOMOUS_RESEARCH_TIMEOUT_SECONDS:-1800}
       AUTONOMOUS_RESEARCH_MAX_AGENT_ATTEMPTS: ${AUTONOMOUS_RESEARCH_MAX_AGENT_ATTEMPTS:-3}
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -1477,6 +1512,49 @@ services:
     cpus: 2.0
     pids_limit: 256
     stop_grace_period: 30s
+
+  # ── Strategy Hermes Discord result notifier ──────────────────────────────
+  # Delivery only: it reads completed, mechanically recorded lab results and
+  # posts one bounded report to the original Discord message/thread. It has no
+  # write access to the lab and no CEO/Kanban/order/broker capability.
+  strategy-research-discord-notifier:
+    profiles: ["strategy-hermes"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: hedgefund-strategy-discord-notifier:latest
+    container_name: hedgefund-strategy-discord-notifier
+    restart: unless-stopped
+    command:
+      ["python", "-m", "apps.api.strategy_research_discord_notifier",
+       "--lab-root", "/var/lib/autonomous-research",
+       "--state-root", "/var/lib/strategy-discord-notifier", "--loop"]
+    volumes:
+      - autonomous_research_lab:/var/lib/autonomous-research:ro
+      - strategy_discord_notifier_state:/var/lib/strategy-discord-notifier
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      AUTONOMOUS_RESEARCH_LAB_ROOT: /var/lib/autonomous-research
+      STRATEGY_DISCORD_REPORT_STATE_ROOT: /var/lib/strategy-discord-notifier
+      STRATEGY_DISCORD_REPORT_INTERVAL_SECONDS: ${STRATEGY_DISCORD_REPORT_INTERVAL_SECONDS:-10}
+      # Reuse the existing explicit Discord opt-in by default; this report lane
+      # can be disabled independently with STRATEGY_DISCORD_REPORT_ENABLED=false.
+      STRATEGY_DISCORD_REPORT_ENABLED: ${STRATEGY_DISCORD_REPORT_ENABLED:-${DISCORD_MIRROR_ENABLED:-false}}
+      STRATEGY_DISCORD_RESOLVE_LEGACY: ${STRATEGY_DISCORD_RESOLVE_LEGACY:-true}
+      DISCORD_BOT_TOKEN_CEO: ${DISCORD_BOT_TOKEN_CEO:-}
+      DISCORD_CEO_CHANNEL_ID: ${DISCORD_CEO_CHANNEL_ID:-}
+    healthcheck:
+      test: ["CMD", "python", "-m", "apps.api.strategy_research_discord_notifier",
+             "--lab-root", "/var/lib/autonomous-research", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: 256m
+    mem_reservation: 64m
+    cpus: 0.25
+    pids_limit: 64
+    stop_grace_period: 10s
 
   quant-hermes:
     image: nousresearch/hermes-agent:latest
@@ -1849,10 +1927,10 @@ services:
       # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
       - ./skills:/opt/shared-skills:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
-      # QA-only worker boundary: preserve Hermes behavior while converting a
-      # clean exit without a Kanban terminal marker into the existing block
-      # handoff. The shared dispatcher selects this wrapper for worker
-      # subprocesses and its profile gate keeps other profiles unchanged.
+      # Shared dispatcher worker boundary: preserve Hermes behavior while
+      # publishing one redacted worker/model/tool trace for every department.
+      # The QA profile additionally converts a clean exit without a Kanban
+      # terminal marker into the existing block handoff.
       - ./scripts:/opt/hgfinance/scripts:ro
       # The QA reviewer reads the exact proposed SKILL/provenance/hash. It has
       # no write path; only the isolated control worker can activate a skill.
@@ -1875,9 +1953,9 @@ services:
       # dispatcher lease; retain high reasoning but cap runaway tool loops.
       HGFINANCE_QA_AUDIT_MAX_TURNS: ${HGFINANCE_QA_AUDIT_MAX_TURNS:-16}
       HGFINANCE_QA_AUDIT_REASONING: ${HGFINANCE_QA_AUDIT_REASONING:-high}
-      # Primary QA E2E diagnostics use a separate short budget and retain only
-      # the existing Kanban/terminal tools; post-response QA remains Kanban-only.
-      HGFINANCE_QA_PRIMARY_MAX_TURNS: ${HGFINANCE_QA_PRIMARY_MAX_TURNS:-8}
+      # Primary QA handoffs use a separate short budget and Kanban completion
+      # only; detailed evidence remains in the asynchronous post-response QA.
+      HGFINANCE_QA_PRIMARY_MAX_TURNS: ${HGFINANCE_QA_PRIMARY_MAX_TURNS:-6}
       HGFINANCE_QA_PRIMARY_REASONING: ${HGFINANCE_QA_PRIMARY_REASONING:-high}
       QA_DISCORD_CHANNEL_ID: ${QA_DISCORD_CHANNEL_ID:-1541636723006775477}
       # This is the dedicated QA room. It lets the exact self-authored
@@ -2079,9 +2157,9 @@ services:
       # container replacement also changes the execution namespace.
       HERMES_KANBAN_CLAIM_TTL_SECONDS: ${HERMES_KANBAN_CLAIM_TTL_SECONDS:-180}
       HERMES_BIN: /app/repo/scripts/qa_hermes_worker.py
-      # Accounting workers are spawned here, not by accounting-hermes. Keep
-      # the redacted LangSmith observer configuration on the actual process
-      # boundary that launches them.
+      # Department workers are spawned here, not by their profile containers.
+      # Keep the redacted LangSmith observer configuration on the actual
+      # process boundary that launches them.
       <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
@@ -2174,7 +2252,7 @@ services:
       # Risk advisory tasks receive one exact-symbol canonical quote alongside
       # the Accounting Book snapshot. This is read-only and never submits an order.
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
-      RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-5.0}
+      RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-2.0}
       PYTHONPATH: /opt/hgfinance
       # Langfuse(2026-08-20). Discord/웹 사용자 질의는 BFF 가 부서장을 직접 부르지
       # 않고 카드로 넘긴다 - 그 카드가 끝나는 것을 보는 유일한 프로세스가 여기다.
@@ -2231,7 +2309,7 @@ services:
       # and dashboard already use.
       ACCOUNTING_ADVISORY_FUND_ID: ${ACCOUNTING_ADVISORY_FUND_ID:-3838f7d6-0c7c-4e54-85f3-316a451e7eeb}
       ACCOUNTING_ADVISORY_BOOK_ID: ${ACCOUNTING_ADVISORY_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
-      ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-5.0}
+      ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-2.0}
       PORTFOLIO_BFF_INTERNAL_URL: ${PORTFOLIO_BFF_INTERNAL_URL:-http://portfolio-bff:8000}
       CEO_SUPERVISOR_OBSERVER_WORKERS: ${CEO_SUPERVISOR_OBSERVER_WORKERS:-2}
       CEO_SUPERVISOR_OBSERVER_MAX_PENDING: ${CEO_SUPERVISOR_OBSERVER_MAX_PENDING:-128}
@@ -2471,3 +2549,4 @@ volumes:
   portfolio_runtime_data:
   autonomous_research_lab:
   strategy_hermes_home:
+  strategy_discord_notifier_state:

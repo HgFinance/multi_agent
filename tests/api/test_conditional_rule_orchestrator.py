@@ -77,6 +77,7 @@ def _install_workflow(
     orders = InMemoryUserOrderRequestRepository()
     rules = InMemoryConditionalRuleRepository()
     tasks: dict[str, dict[str, Any]] = {}
+    monkeypatch.setenv("USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "false")
 
     monkeypatch.setattr(ceo, "fetch_current_mandate_by_fund", lambda _fund: None)
     monkeypatch.setattr(ceo, "user_order_repository", lambda: orders)
@@ -115,6 +116,11 @@ def _install_workflow(
     monkeypatch.setattr(ceo.hermes_boundary, "complete_kanban_task", complete_root)
     monkeypatch.setattr(
         ceo.hermes_boundary, "unblock_kanban_task", lambda **_kwargs: True
+    )
+    monkeypatch.setattr(
+        ceo.hermes_boundary,
+        "show_kanban_task",
+        lambda task_id, **_kwargs: tasks.get(task_id),
     )
 
     response = ceo.ceo_query(

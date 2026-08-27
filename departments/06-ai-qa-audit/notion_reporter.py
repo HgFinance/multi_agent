@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """QA본부 감사 결과를 Notion QA DB(NOTION_QA_DB)에 올리는 Reporter Node의 업로드 로직.
 
-담당: 동규. docs/06-integrations/notion/NOTION_DEPARTMENT_DB_DESIGN.md 4.2 스펙 그대로 옮긴다 -
-속성명·Select 값은 코드 출력(run_qa_department 반환 형태)을 그대로 쓴다, 새로 만들지 않는다.
+담당: 동규. 결정론적 QA 결과를 관리자용 한국어 요약으로 Notion QA DB에 기록한다.
+페이지 제목·본문·관리자용 속성에는 내부 변수명을 노출하지 않는다. 기술 식별값은
+LangSmith와 Kanban의 운영 추적 영역에서만 연결한다.
 
 자격증명은 root .env가 아니라 ai-office/.dev.vars 에서 읽는다(03-risk/notion_reporter.py와 동일
 근거 - .env.example 18-24행). Notion은 Projection일 뿐이다 - 이 모듈이 실패해도 QAState의
@@ -14,11 +15,8 @@
 # ruff: noqa: E402
 from __future__ import annotations
 
-import json
 import os
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,7 +26,11 @@ if str(_REPO_ROOT) not in sys.path:
 from reporting import notion_rich_text_chunks
 
 from departments.notion_markdown import markdown_to_notion_blocks
+from orchestration.adapters.department_notion_projection import (
+    build_qa_notion_properties,
+)
 from orchestration.adapters.notion_idempotency import NotionIdempotency
+from orchestration.adapters.notion_http import NotionHttpError, request_json
 
 _DEV_VARS = Path(__file__).resolve().parent.parent.parent / "ai-office" / ".dev.vars"
 _NOTION_VERSION = "2022-06-28"
@@ -51,33 +53,27 @@ def _load_dev_vars() -> dict:
 
 
 def _post(path: str, body: dict, token: str) -> tuple[int, dict]:
-    req = urllib.request.Request(
-        f"https://api.notion.com/v1/{path}",
-        data=json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Notion-Version": _NOTION_VERSION,
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status, json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
+        return 200, dict(
+            request_json(
+                "POST", path, token, body=body, version=_NOTION_VERSION
+            )
+        )
+    except NotionHttpError as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc)}
+        return exc.status or 599, detail
 
 
 def _rich_text(s) -> dict:
     return {"rich_text": notion_rich_text_chunks(s)}
 
 
-def _report_path(qa_decision_id: object) -> Path:
-    return (
-        Path(__file__).resolve().parent
-        / "reports"
-        / f"qa_audit_report_{qa_decision_id}.md"
-    )
+def _notion_title(artifact: dict, out: dict) -> str:
+    """Return a readable, stable title without exposing a field name."""
+
+    identifier = artifact.get("trace_id") or artifact.get("instrument_id")
+    identifier = str(identifier or out.get("qa_decision_id") or "검토").strip()
+    return f"QA 감사 결과 · 검토 번호 {identifier}"
 
 
 def upload_case(
@@ -94,35 +90,26 @@ def upload_case(
     if not token or not db_id:
         return {"ok": False, "reason": "NOTION_TOKEN/NOTION_QA_DB 미설정 - 업로드 생략"}
 
-    props = {
-        "제목": {
-            "title": [{"text": {"content": f"qa_decision_id: {out['qa_decision_id']}"}}]
-        },
-        "trade_case_id": _rich_text(artifact.get("trace_id")),
-        "판정": {"select": {"name": out["verdict"]}},
-        "reason_codes": {
-            "multi_select": [{"name": c} for c in out.get("reason_codes", [])]
-        },
-        "escalate": {"checkbox": bool(out.get("escalate", False))},
-        "input_hash": _rich_text(out.get("input_hash")),
-        "calculation_version": _rich_text(out.get("calculation_version")),
-        "claim_checks": _rich_text(
-            json.dumps(out.get("claim_checks", []), ensure_ascii=False)
-        ),
-        "findings": _rich_text(json.dumps(out.get("findings", []), ensure_ascii=False)),
-        "claim_narrative": _rich_text(out.get("claim_narrative")),
-        "생성 시각": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
-    }
+    title = _notion_title(artifact, out)
+    props = build_qa_notion_properties(
+        {},
+        title=title,
+        verdict=out.get("verdict"),
+        findings=out.get("findings") or (),
+        checks=out.get("claim_checks") or (),
+        claim_narrative=out.get("claim_narrative") or report_md,
+        input_hash=out.get("input_hash"),
+        calculation_version=out.get("calculation_version"),
+        reason_codes=out.get("reason_codes") or (),
+        escalate=out.get("escalate"),
+        created_at=decision_time or datetime.now(timezone.utc).isoformat(),
+        original_report=report_md or "QA 검토 결과",
+    )
 
     try:
         payload = {"parent": {"database_id": db_id}, "properties": props}
         if report_md:
-            report_path = _report_path(out["qa_decision_id"])
-            report_intro = (
-                f"**결정론적 MD 리포트 저장:** `{report_path}`\n\n{report_md}"
-            )
-            payload["children"] = markdown_to_notion_blocks(report_intro)
-        title = f"qa_decision_id: {out['qa_decision_id']}"
+            payload["children"] = markdown_to_notion_blocks(report_md)
         idempotency = NotionIdempotency(env, namespace="qa-reporter")
 
         def lookup():
@@ -211,6 +198,17 @@ def _check_payload_shape():
         assert result == {"ok": True, "url": "https://notion.so/fake"}
         assert captured["body"]["parent"]["database_id"] == "db1"
         assert captured["body"]["properties"]["판정"]["select"]["name"] == "PASS"
+        title = captured["body"]["properties"]["제목"]["title"][0]["text"]["content"]
+        assert title.startswith("QA 감사 결과 · 검토 번호 ")
+        assert "qa_decision_id" not in title
+        properties = captured["body"]["properties"]
+        assert "findings" in properties
+        assert "claim_checks" in properties
+        assert "claim_narrative" in properties
+        assert properties["input_hash"]["rich_text"][0]["text"]["content"] == "h1"
+        assert properties["calculation_version"]["rich_text"][0]["text"]["content"] == "v1"
+        assert properties["escalate"]["checkbox"] is False
+        assert "trade_case_id" not in properties
     finally:
         globals()["_post"] = orig
     print("  업로드 Payload 구성        OK")

@@ -219,7 +219,8 @@ def test_pipeline_accepts_control_db_snapshot_and_keeps_gates_non_binding() -> N
     assert result["data_context"]["research"]["status"] == "REQUEST_TIME_MCP"
     assert result["pipeline_status"] == "COMPLETED"
     assert result["risk_gate"]["verdict"] == "approve"
-    assert result["qa_gate"]["decision"] == "PASS"
+    assert result["qa_gate"]["decision"] == "PENDING"
+    assert result["department_reports"]["qa"]["status"] == "PENDING"
     assert result["risk_gate"]["binding"] is False
     assert result["qa_gate"]["binding"] is False
     assert result["external_writes"] is False
@@ -298,6 +299,11 @@ def test_pipeline_blocks_when_control_db_is_unavailable(monkeypatch) -> None:
     registered = registered_worker_ids()
     for stage in ("research", "risk", "qa", "ceo"):
         report = result["department_reports"][stage]
+        if stage == "qa":
+            assert report["status"] == "PENDING"
+            assert report["skip_reason"] == "POST_RESPONSE_AUDIT_PENDING"
+            assert report["executed"] == 0
+            continue
         expected_skipped = len(registered.get(stage, ()))
         assert expected_skipped > 0, f"{stage} 에 등록된 LLM 워커가 없다 - 검사가 무의미"
         assert report["executed"] == 0

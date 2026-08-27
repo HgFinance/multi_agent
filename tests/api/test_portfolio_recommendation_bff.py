@@ -356,6 +356,78 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
                     os.environ.pop("PORTFOLIO_RUNTIME_STORE_PATH", None)
                 else:
                     os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = previous
+
+    def test_post_response_qa_completion_updates_gate_and_department_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            previous = os.environ.get("PORTFOLIO_RUNTIME_STORE_PATH")
+            os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(directory, "runtime.sqlite3")
+            try:
+                runtime = PortfolioRuntime()
+                job = runtime._base_job("qa-projection-run", {"user_id": "qa-owner"})
+                job["result"] = {
+                    "pipeline_status": "COMPLETED",
+                    "qa_gate": {
+                        "status": "PENDING",
+                        "decision": "PENDING",
+                        "binding": False,
+                    },
+                    "department_reports": {
+                        "qa": {"status": "PENDING", "executed": 0}
+                    },
+                }
+                runtime._store.save(job)
+                runtime._record_event(
+                    "qa-projection-run",
+                    {
+                        "kind": "qa_audit_completed",
+                        "stage": "qa",
+                        "qa_gate": {
+                            "status": "COMPLETED",
+                            "decision": "PASS",
+                            "phase": "POST_RESPONSE",
+                            "binding": False,
+                            "response_task_id": "qa-projection-run",
+                            "worker_count": 1,
+                        },
+                        "department_report": {
+                            "status": "COMPLETED",
+                            "worker_ids": ["qa-runner"],
+                            "executed": 1,
+                            "completed": 1,
+                            "failed": [],
+                            "binding": False,
+                            "fan_out": True,
+                            "fan_in": True,
+                        },
+                        "summary": "QA completed",
+                    },
+                )
+                projected = runtime.get("qa-projection-run")
+                self.assertEqual(projected["result"]["qa_gate"]["decision"], "PASS")
+                self.assertEqual(
+                    projected["result"]["department_reports"]["qa"]["worker_ids"],
+                    ["qa-runner"],
+                )
+                runtime._record_event(
+                    "qa-projection-run",
+                    {
+                        "kind": "qa_audit_started",
+                        "stage": "qa",
+                        "department_report": {"status": "RUNNING"},
+                    },
+                )
+                projected = runtime.get("qa-projection-run")
+                self.assertEqual(projected["result"]["qa_gate"]["decision"], "PASS")
+                self.assertEqual(
+                    projected["departments"]["qa-department"]["status"],
+                    "COMPLETED",
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("PORTFOLIO_RUNTIME_STORE_PATH", None)
+                else:
+                    os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = previous
+
     def test_runtime_requeues_persisted_profile_after_worker_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             previous = os.environ.get("PORTFOLIO_RUNTIME_STORE_PATH")

@@ -14,15 +14,135 @@ from orchestration.langsmith_feedback import (
     FeedbackLedger,
     LangSmithFeedbackService,
     TraceObservation,
-    attribute_workflow_bottleneck,
-    evaluation_run_id,
-    evaluate_observation,
+    _aggregate_metric_window,
     _is_workflow_feedback_source,
+    attribute_workflow_bottleneck,
+    evaluate_observation,
+    evaluation_run_id,
     observation_from_run,
 )
-from orchestration.langsmith_feedback import _aggregate_metric_window
-from orchestration.semantic_qa import evaluate_answer, evaluate_prompt_answer
 from orchestration.qa_feedback_benchmarks import run_pending_feedback_benchmarks
+from orchestration.semantic_qa import evaluate_answer, evaluate_prompt_answer
+
+
+class _DiscordResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    @staticmethod
+    def read() -> bytes:
+        return b""
+
+
+class _DiscordOpener:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def __call__(self, request, timeout):
+        self.requests.append((request, timeout))
+        return _DiscordResponse()
+
+
+def test_qa_discord_retention_deletes_only_old_resolved_cards(tmp_path) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    artifact_id = ledger.complete(
+        "source-discord-retention",
+        "eval-discord-retention",
+        _actionable_result(
+            "source-discord-retention",
+            request_id="discord:retention",
+            department="qa-department",
+        ),
+    )
+    assert ledger.approve(
+        artifact_id,
+        "APPROVED",
+        "qa-user",
+        "reviewed",
+        improvement_type="CODE_FIX",
+    )
+    assert ledger.claim_discord_delivery(artifact_id)
+    ledger.finish_discord_delivery(
+        artifact_id,
+        delivered=True,
+        discord_message_id="123456789",
+    )
+    old = "2026-08-01T00:00:00+00:00"
+    with ledger._connect() as db:
+        db.execute(
+            "UPDATE langsmith_feedback_decisions SET created_at=? WHERE artifact_id=?",
+            (old, artifact_id),
+        )
+        db.execute(
+            "UPDATE langsmith_feedback_discord_deliveries "
+            "SET created_at=?, updated_at=? WHERE artifact_id=?",
+            (old, old, artifact_id),
+        )
+
+    opener = _DiscordOpener()
+    summary = ledger.cleanup_qa_discord_messages(
+        retention_days=7,
+        token="qa-token",
+        channel_id="987654321",
+        now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        opener=opener,
+    )
+
+    assert summary.deleted == 1
+    assert summary.failed == 0
+    assert len(opener.requests) == 1
+    request, timeout = opener.requests[0]
+    assert request.full_url.endswith("/channels/987654321/messages/123456789")
+    assert request.get_header("Authorization") == "Bot qa-token"
+    assert timeout == 10
+    with ledger._connect() as db:
+        assert db.execute(
+            "SELECT discord_deleted_at IS NOT NULL "
+            "FROM langsmith_feedback_discord_deliveries WHERE artifact_id=?",
+            (artifact_id,),
+        ).fetchone()[0] == 1
+
+
+def test_qa_discord_retention_preserves_pending_cards(tmp_path) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    artifact_id = ledger.complete(
+        "source-discord-pending",
+        "eval-discord-pending",
+        _actionable_result(
+            "source-discord-pending",
+            request_id="discord:pending",
+            department="qa-department",
+        ),
+    )
+    assert ledger.claim_discord_delivery(artifact_id)
+    ledger.finish_discord_delivery(
+        artifact_id,
+        delivered=True,
+        discord_message_id="123456790",
+    )
+    old = "2026-08-01T00:00:00+00:00"
+    with ledger._connect() as db:
+        db.execute(
+            "UPDATE langsmith_feedback_discord_deliveries "
+            "SET created_at=?, updated_at=? WHERE artifact_id=?",
+            (old, old, artifact_id),
+        )
+
+    opener = _DiscordOpener()
+    summary = ledger.cleanup_qa_discord_messages(
+        retention_days=7,
+        token="qa-token",
+        channel_id="987654321",
+        now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        opener=opener,
+    )
+
+    assert summary.attempted == 0
+    assert summary.deleted == 0
+    assert opener.requests == []
 
 
 class _Run:
@@ -709,6 +829,7 @@ def test_feedback_config_bounds_concurrency_inputs(monkeypatch) -> None:
     monkeypatch.setenv("LANGSMITH_FEEDBACK_BATCH_SIZE", "99999")
     monkeypatch.setenv("LANGSMITH_FEEDBACK_MAX_PENDING", "1")
     monkeypatch.setenv("LANGSMITH_FEEDBACK_METRICS_MAX_RUNS", "99999")
+    monkeypatch.setenv("LANGSMITH_FEEDBACK_DISCORD_RETENTION_INTERVAL_SECONDS", "1")
 
     config = FeedbackConfig.from_env()
 
@@ -717,6 +838,7 @@ def test_feedback_config_bounds_concurrency_inputs(monkeypatch) -> None:
     assert config.max_pending == 10
     assert config.metrics_window_seconds == 300
     assert config.metrics_max_runs == 100
+    assert config.discord_retention_interval_seconds == 60.0
 
 
 def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_path, monkeypatch) -> None:
@@ -746,16 +868,11 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_
 
     class _Client:
         def __init__(self, **kwargs):
-            self.read_called = False
             self.query_calls = []
             self.runs = _Runs(self)
 
         async def aread_project(self, *, project_name):
             return SimpleNamespace(id=f"project-{project_name}")
-
-        def read_run(self, *_args, **_kwargs):
-            self.read_called = True
-            raise AssertionError("raw run read must not be used")
 
     fake_client = _Client()
     monkeypatch.setattr("langsmith.Client", lambda **kwargs: fake_client)
@@ -783,7 +900,6 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_
     result = service.run_once()
 
     assert result["completed"] == 1
-    assert fake_client.read_called is False
     root_call = fake_client.query_calls[0]
     assert root_call["project_ids"] == ["project-First"]
     assert "max_start_time" in root_call

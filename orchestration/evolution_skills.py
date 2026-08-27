@@ -17,7 +17,7 @@ import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +90,18 @@ _PLACEHOLDERS = ("TODO", "TBD", "<스킬", "<도구>", "[SKILL_PRUNED]")
 
 class EvolutionSkillError(ValueError):
     """A lifecycle transition or artifact violated the governed contract."""
+
+
+@dataclass(frozen=True)
+class EvolutionDiscordRetentionSummary:
+    """Bounded cleanup result for resolved skill-review cards."""
+
+    enabled: bool
+    available: bool
+    attempted: int = 0
+    deleted: int = 0
+    failed: int = 0
+    error_code: str | None = None
 
 
 def _utcnow() -> str:
@@ -967,6 +979,144 @@ class EvolutionSkillStore:
         return path
 
 
+def cleanup_discord_review_cards(
+    store: EvolutionSkillStore,
+    *,
+    retention_days: int | None = None,
+    max_messages: int | None = None,
+    token: str | None = None,
+    channel_id: str | None = None,
+    dry_run: bool = False,
+    now: datetime | None = None,
+    opener: Any | None = None,
+) -> EvolutionDiscordRetentionSummary:
+    """Delete old resolved skill-review cards without deleting skill history."""
+
+    enabled = os.getenv(
+        "LANGSMITH_FEEDBACK_DISCORD_RETENTION_ENABLED", "true"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    if not enabled:
+        return EvolutionDiscordRetentionSummary(enabled=False, available=False)
+
+    configured_days = retention_days
+    if configured_days is None:
+        try:
+            configured_days = int(
+                os.getenv("LANGSMITH_FEEDBACK_DISCORD_RETENTION_DAYS", "7")
+            )
+        except (TypeError, ValueError):
+            configured_days = 7
+    configured_days = max(1, min(int(configured_days), 3650))
+
+    configured_max = max_messages
+    if configured_max is None:
+        try:
+            configured_max = int(
+                os.getenv(
+                    "LANGSMITH_FEEDBACK_DISCORD_RETENTION_MAX_MESSAGES", "100"
+                )
+            )
+        except (TypeError, ValueError):
+            configured_max = 100
+    configured_max = max(1, min(int(configured_max), 1000))
+
+    effective_token = (
+        token if token is not None else os.getenv("DISCORD_BOT_TOKEN_QA", "")
+    ).strip()
+    if channel_id is None:
+        from orchestration.qa_discord_feedback import QA_FEEDBACK_CHANNEL_DEFAULT
+
+        effective_channel = (
+            os.getenv("QA_DISCORD_CHANNEL_ID", "").strip()
+            or QA_FEEDBACK_CHANNEL_DEFAULT
+        )
+    else:
+        effective_channel = channel_id.strip()
+    if not effective_token or not effective_channel:
+        return EvolutionDiscordRetentionSummary(enabled=False, available=False)
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(days=configured_days)
+    if not store.proposals_dir.is_dir():
+        return EvolutionDiscordRetentionSummary(enabled=True, available=True)
+
+    def _parse(value: Any) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    candidates: list[tuple[Path, dict[str, Any], datetime]] = []
+    for state_path in sorted(store.proposals_dir.glob("*/state.json")):
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (
+            state.get("status") not in {"APPROVED", "REJECTED"}
+            or state.get("review_delivery_status") != "DELIVERED"
+            or state.get("review_deleted_at")
+            or not str(state.get("review_message_id") or "").strip()
+        ):
+            continue
+        terminal_at = _parse(state.get("updated_at"))
+        if terminal_at is not None and terminal_at < cutoff:
+            candidates.append((state_path.parent, state, terminal_at))
+
+    candidates.sort(key=lambda item: item[2])
+    candidates = candidates[:configured_max]
+    if dry_run:
+        return EvolutionDiscordRetentionSummary(
+            enabled=True,
+            available=True,
+            attempted=len(candidates),
+            deleted=len(candidates),
+        )
+
+    from orchestration.discord_retention import DiscordRetentionWorker
+
+    discord = DiscordRetentionWorker(
+        token=effective_token,
+        channel_ids=[effective_channel],
+        opener=opener,
+    )
+    attempted = deleted = failed = 0
+    for proposal_dir, state, _terminal_at in candidates:
+        attempted += 1
+        try:
+            discord.delete_message(
+                effective_channel, str(state["review_message_id"])
+            )
+            with _proposal_state_lock(proposal_dir):
+                state_path = proposal_dir / "state.json"
+                latest = json.loads(state_path.read_text(encoding="utf-8"))
+                if (
+                    latest.get("status") in {"APPROVED", "REJECTED"}
+                    and latest.get("review_message_id") == state.get("review_message_id")
+                    and not latest.get("review_deleted_at")
+                ):
+                    latest["review_deleted_at"] = _utcnow()
+                    _write_json_atomic(state_path, latest)
+            deleted += 1
+        except Exception:  # noqa: BLE001 - one card cannot block the pass
+            failed += 1
+            # Keep the original proposal state intact so a later pass can retry.
+
+    return EvolutionDiscordRetentionSummary(
+        enabled=True,
+        available=True,
+        attempted=attempted,
+        deleted=deleted,
+        failed=failed,
+        error_code="DISCORD_QA_DELETE_FAILED" if failed else None,
+    )
+
+
 def record_trace_occurrences(
     store: EvolutionSkillStore,
     *,
@@ -1618,6 +1768,7 @@ __all__ = [
     "PRODUCTION_GENERATION_MODEL",
     "REGISTRY_VERSION",
     "SCHEMA_VERSION",
+    "EvolutionDiscordRetentionSummary",
     "EvolutionSkillError",
     "EvolutionSkillStore",
     "Occurrence",
@@ -1626,6 +1777,7 @@ __all__ = [
     "append_occurrences_to_path",
     "build_resolution_report",
     "check_boundary",
+    "cleanup_discord_review_cards",
     "detect_candidates",
     "draft_body",
     "inventory_skills",

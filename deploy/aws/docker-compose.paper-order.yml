@@ -123,7 +123,7 @@ services:
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
       PORTFOLIO_AUTH_MODE: fixture
-      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:?An explicit PAPER trading-book fixture grant is required}
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: "${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:?An explicit PAPER trading-book fixture grant is required}"
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
       USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "true"
       WORKER_MODEL_EXECUTION_CONTEXT: container
@@ -163,7 +163,7 @@ services:
       ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
       CONDITIONAL_RULE_DATABASE_URL: *conditional-orchestrator-database-url
       CONDITIONAL_RULE_DATABASE_ROLE: svc_conditional_rule_orchestrator
-      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:?An explicit PAPER trading-book fixture grant is required}
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: "${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:?An explicit PAPER trading-book fixture grant is required}"
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
       PORTFOLIO_AUTH_MODE: fixture
@@ -373,6 +373,12 @@ services:
       <<: *control-environment
       GOVERNANCE_WORKFORCE_DATABASE_URL: *control-database-url
 
+  workforce-snapshot-writer:
+    depends_on: *control-dependency
+    environment:
+      DATABASE_URL: *control-database-url
+      GOVERNANCE_WORKFORCE_DATABASE_URL: *control-database-url
+
   control-event-worker:
     depends_on: *control-dependency
     environment:
@@ -388,6 +394,11 @@ services:
       APP_ENV: production
       TRADING_EXECUTION_MODE: PAPER
       TRADING_BROKER_ADAPTER: ${TRADING_BROKER_ADAPTER:-ls-paper}
+      # The TSDB quote projection only covers the bounded realtime
+      # subscription basket, so admission for any other symbol can never meet
+      # the freshness window.  This reads one read-only t1101 quote as a
+      # fallback; order routing stays on TRADING_BROKER_ADAPTER.
+      TRADING_MARKET_QUOTE_LS_FALLBACK: ${TRADING_MARKET_QUOTE_LS_FALLBACK:-true}
       TRADING_DIRECTIVE_REPOSITORY: postgres
       TRADING_DATABASE_ROLE: svc_trading_api
       TRADING_AUTH_MODE: service

@@ -19,10 +19,13 @@ from orchestration.adapters.ceo_supervisor import (
     SupervisorState,
     SupervisorValidationError,
     _analysis_synthesis_decision,
+    _augment_hr_final_answer,
     _compact_hr_qa_handoff,
     _department_progress_text,
+    _analysis_execution_mode_from_root_body,
     _initial_primary_materialization_decisions,
     _handoff_provenance,
+    _materialization_plan_body,
     _single_primary_passthrough_child,
     _terminal_payload_mapping,
     decide_supervisor,
@@ -192,6 +195,66 @@ def test_hr_qa_handoff_compacts_raw_responses_but_keeps_receipt_coordinates() ->
     assert "response" not in evidence["requests"][0]
 
 
+def test_hr_status_normalization_preserves_fractional_iso_timestamp() -> None:
+    content = (
+        "Worker 상태는 ACTIVE 0·IDLE 2·UNOBSERVED 6·UNAVAILABLE 0으로 확인했습니다. "
+        "IDLE은 competing-explanation-worker(2026-08-26T13:40:32.408Z, 11.7시간)입니다."
+    )
+    primary = {
+        "id": "hr",
+        "assignee": "hr-department",
+        "status": "done",
+        "body": "workflow_root_task_id=root\nworkflow_role=primary",
+        "final_answer": content,
+        "metadata": {
+            "result": {
+                "candidate_snapshot": {"http_status": 200, "candidate_count": 0},
+                "observability": {
+                    "http_status": 200,
+                    "statuses": {"IDLE": 2, "UNOBSERVED": 6},
+                    "window_start": "2026-08-26T00:00:00Z",
+                    "window_end": "2026-08-27T00:00:00Z",
+                },
+                "scorecard": {"http_status": 200},
+            }
+        },
+    }
+
+    enriched = _augment_hr_final_answer(
+        content,
+        root_task_id="root",
+        task_payloads=(primary,),
+    )
+
+    assert "2026-08-26T13:40:32.408Z" in enriched
+    assert ").408Z" not in enriched
+    assert "ACTIVE 0" not in enriched
+    assert "UNAVAILABLE 0" not in enriched
+
+
+def test_active_unscoped_child_does_not_poison_root_cache() -> None:
+    class Client:
+        environment = {}
+
+        def show(self, task_id: str):
+            return {
+                "id": task_id,
+                "assignee": "qa-department",
+                "status": "running",
+                "body": "workflow_role=qa",
+            }
+
+    service = CeoSupervisorService(Client())
+
+    root_id, _, _ = service._active_progress_payloads(
+        task_id="qa-task",
+        event={},
+    )
+
+    assert root_id is None
+    assert service._cached_workflow_root("qa-task") is None
+
+
 def test_startup_recovery_skips_roots_with_existing_synthesis() -> None:
     root_body = (
         build_root_body("query", "request")
@@ -242,6 +305,23 @@ class NoAnalysisChildrenOriginGuardTest(unittest.TestCase):
         )
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, SupervisorAction.REQUEST_USER_INPUT)
+
+    def test_completed_synthesis_does_not_create_clarification(self) -> None:
+        synthesis = child(
+            "synthesis",
+            "ceo-agent",
+            "done",
+            body=(
+                "workflow_role=synthesis\n"
+                "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
+            ),
+        )
+
+        decision = decide_supervisor(
+            SupervisorState("root", (synthesis,), root_is_user_query=True)
+        )
+
+        self.assertIsNone(decision)
 
 
 class UserPaperCanonicalSynthesisTest(unittest.TestCase):
@@ -1704,9 +1784,123 @@ class PostResponseQaAuditTest(unittest.TestCase):
         self.assertIn("qa_phase=post_response", qa["body"])
         self.assertIn("qa_timing=after_ceo_response", qa["body"])
         self.assertIn("ceo_input_is_identical=true", qa["body"])
+        self.assertIn('"workflow_observations": {', qa["body"])
+        self.assertIn('"trace_closed": false', qa["body"])
+        self.assertIn('"raw_payloads_sent": false', qa["body"])
+        self.assertIn('"metadata_only": true', qa["body"])
         self.assertIn("CEO가 받은 연구 결과", qa["body"])
         self.assertIn(synthesis_body.replace("\n", "\\n"), qa["body"])
         self.assertIn("CEO 최종 응답", qa["body"])
+
+    def test_web_synthesis_without_discord_context_does_not_fail_root(self) -> None:
+        timeline: list[str] = []
+
+        class DeliverySpy:
+            def deliver(self, **_kwargs):
+                timeline.append("deliver")
+                return "missing_context"
+
+            def deliver_to_existing_thread(self, **_kwargs):
+                timeline.append("deliver")
+                return "missing_context"
+
+        class OrderingClient(FakeClient):
+            def create_task(self, **kwargs):
+                timeline.append(f"create:{kwargs['assignee']}")
+                return super().create_task(**kwargs)
+
+        root_id = "root-web"
+        root = {
+            "id": root_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "body": (
+                build_root_body("웹 요청", "req-web")
+                + "\nsource=web"
+            ),
+        }
+        synthesis = {
+            "id": "web-response",
+            "assignee": "ceo-agent",
+            "status": "done",
+            "result": "웹 최종 응답",
+            "final_answer": "웹 최종 응답",
+            "body": (
+                f"workflow_root_task_id={root_id}\n"
+                "workflow_role=synthesis\n"
+                "workflow_mode=analysis\n"
+                "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
+            ),
+        }
+        client = OrderingClient()
+        service = CeoSupervisorService(
+            client,
+            discord_delivery=DeliverySpy(),
+        )
+
+        service._project_terminal_task(
+            root_task_id=root_id,
+            task_id="web-response",
+            task_payloads=(root, synthesis),
+            event={
+                "event_id": "web-response-1",
+                "task_id": "web-response",
+                "kind": "completed",
+            },
+        )
+
+        self.assertEqual(timeline, ["create:qa-department"])
+        self.assertEqual(len(client.created), 1)
+        self.assertIn('"delivery_status": "not_applicable"', client.created[0]["body"])
+        self.assertIn('"not_applicable": true', client.created[0]["body"])
+
+    def test_discord_delivery_failure_still_schedules_qa_audit(self) -> None:
+        class DeliverySpy:
+            def deliver(self, **_kwargs):
+                return "missing_context"
+
+            def deliver_to_existing_thread(self, **_kwargs):
+                return "missing_thread"
+
+        root_id = "root-discord-failure"
+        root = {
+            "id": root_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "body": build_root_body("Discord 전달 실패를 점검해줘", "req-discord-failure"),
+        }
+        synthesis = {
+            "id": "discord-failure-response",
+            "assignee": "ceo-agent",
+            "status": "done",
+            "result": "CEO 최종 응답",
+            "final_answer": "CEO 최종 응답",
+            "body": (
+                f"workflow_root_task_id={root_id}\n"
+                "workflow_role=synthesis\n"
+                "workflow_mode=analysis\n"
+                "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
+            ),
+        }
+        client = FakeClient()
+        service = CeoSupervisorService(client, discord_delivery=DeliverySpy())
+
+        service._project_terminal_task(
+            root_task_id=root_id,
+            task_id="discord-failure-response",
+            task_payloads=(root, synthesis),
+            event={
+                "event_id": "discord-failure-1",
+                "task_id": "discord-failure-response",
+                "kind": "completed",
+            },
+        )
+
+        self.assertEqual(len(client.created), 1)
+        qa = client.created[0]
+        self.assertEqual(qa["parent_task_ids"], ("discord-failure-response",))
+        self.assertIn('"delivery_status": "missing_context"', qa["body"])
+        self.assertIn('"response_delivered": false', qa["body"])
 
     def test_completed_empty_synthesis_is_edited_instead_of_completed_again(self) -> None:
         class EditingClient(FakeClient):
@@ -2043,6 +2237,14 @@ class UnmaterializedPrimaryFinalDeliveryTest(unittest.TestCase):
             client.created[0]["body"],
         )
         self.assertEqual(len(client.completed), 1)
+        self.assertIn(
+            "분석 primary가 생성되지 않아 부서 결과를 받지 못했습니다.",
+            client.completed[0]["result"],
+        )
+        self.assertIn(
+            "empty_primary_not_materialized",
+            client.completed[0]["metadata"]["final_answer"],
+        )
 
     def test_materialized_valid_primary_does_not_use_invalid_primary_fallback(self) -> None:
         root = self.root_payload(final_answer="CEO planner metadata")
@@ -4182,6 +4384,48 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
             _initial_primary_materialization_decisions(state, body),
             (),
         )
+
+    def test_split_ceo_plan_and_mode_correction_are_recovered_once(self) -> None:
+        root_body = (
+            "origin=user-query\n"
+            "workflow_role=root\n"
+            "workflow_mode=analysis\n"
+        )
+        payload = {
+            "body": root_body,
+            "comments": [
+                {
+                    "author": "ceo-agent",
+                    "body": (
+                        "selected_primary_profiles=research-department\n"
+                        "delegation_instruction.research-department="
+                        "analysis_mode=standard_analysis; inspect the read-only evidence.\n"
+                    ),
+                },
+                {
+                    "author": "ceo-agent",
+                    "body": "analysis_mode=fast_advisory\n",
+                },
+            ],
+        }
+
+        materialization_body = _materialization_plan_body(payload)
+        self.assertEqual(
+            _analysis_execution_mode_from_root_body(materialization_body),
+            "fast_advisory",
+        )
+        decisions = _initial_primary_materialization_decisions(
+            SupervisorState(
+                parent_task_id="root",
+                children=(),
+                workflow_mode="analysis",
+                selected_primary_profiles=("research-department",),
+                root_is_user_query=True,
+            ),
+            materialization_body,
+        )
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].assignee, "research-department")
 
     def test_binding_workflow_never_uses_fast_materializer(self) -> None:
         state = SupervisorState(

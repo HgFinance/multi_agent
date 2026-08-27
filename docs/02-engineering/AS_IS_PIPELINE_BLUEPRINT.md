@@ -75,8 +75,8 @@ flowchart TB
     end
 
     subgraph FACTORY["공장 플레인"]
-        AUTO["factory-autopilot<br/>15분 주기"]
-        EXPW["factory-experiment-worker<br/>백테스트 실행"]
+        AUTO["퇴역 factory-autopilot<br/>당시 15분 주기"]
+        EXPW["퇴역 factory-experiment-worker<br/>당시 백테스트 실행"]
         MCP["research-mcp :8037<br/>ls-mcp :8038<br/>liaison-mcp"]
     end
 
@@ -124,7 +124,7 @@ flowchart TB
 | 결합 | 프로토콜 | 근거 |
 |---|---|---|
 | UI → BFF | HTTP `/ui/*`, 인증은 무서명 `X-User-Id` 헤더뿐 | `ai-office/app/lib/currentAccount.ts:155-157`, `apps/api/current_user.py` |
-| BFF/공장/supervisor → 칸반 | **`hermes` CLI subprocess** (`kanban create/show/list/comment/complete`) — SQLite를 직접 안 연다 | `apps/api/hermes_boundary.py:141-154`, `Dockerfile.factory:13-17` (외부에서 열면 `-shm` 매핑이 보드 쓰기를 죽임) |
+| BFF/supervisor/watchdog → 칸반 | **`hermes` CLI subprocess** (`kanban create/show/list/comment/complete`) — SQLite를 직접 안 연다 | `apps/api/hermes_boundary.py:141-154`, 현재 watchdog 런타임은 `Dockerfile.operations-runtime` (외부에서 열면 `-shm` 매핑이 보드 쓰기를 죽임) |
 | dispatcher → 에이전트 | 컨테이너 내부 subprocess `hermes -p <부서> chat -q work kanban task <id>` | `docker-compose.override.yml:156-160` |
 | 리서치 에이전트 → DB | MCP 도구(`factory_submit_*`)만 통과, 직접 INSERT 없음 | `departments/01-research/api/mcp_server.py:800-921` |
 | 리서치 ↔ 퀀트 | **DB 테이블 3개** (HTTP 핸드오프 없음) | §6.3 |
@@ -167,14 +167,15 @@ flowchart TB
 | `qa-worker` | 동일 | `qa_events/worker.py` | — | 리스크 결정 이벤트 소비 |
 | `kanban-dispatcher` | hermes 이미지 (로컬은 `Dockerfile.agent-runtime`) | `kanban daemon --force --interval 60` | **없음(설계)** | ★ 에이전트 스포너. 최고 권한 컨테이너 |
 | `ceo-kanban-supervisor` | hermes 이미지 | `run_ceo_supervisor.py --interval 1` | — | 종료 이벤트 상태기계 |
-| `factory-autopilot` | `Dockerfile.factory` → `hedgefund-factory:latest` | `factory_autopilot.py --loop --interval-min 15` | — | 공장 사이클 드라이버 |
-| `factory-experiment-worker` | `hedgefund-factory:latest` (빌드 스탠자 없음†) | `experiment_worker.py --serve` | — | 백테스트 실행 워커 (단일 프로세스) |
-| `card-watchdog` | `hedgefund-factory:latest` | `card_watchdog.py --loop --interval-min 3` | — | 죽은 부모 카드 release |
+| `factory-autopilot` | **레거시 보존 소스** (전용 이미지·Compose 서비스 제거) | `factory_autopilot.py --loop --interval-min 15` (역사 기록) | — | 과거 공장 사이클 드라이버 |
+| `factory-experiment-worker` | **레거시 보존 소스** (전용 이미지·Compose 서비스 제거) | `experiment_worker.py --serve` (역사 기록) | — | 과거 백테스트 실행 워커 |
+| `card-watchdog` | `Dockerfile.operations-runtime` | `apps/api/card_watchdog.py --loop --interval-min 3` | — | 현재 고아 카드 release |
 | `hermes-dashboard` | hermes 이미지 | `dashboard :9119` | `127.0.0.1:9119` | **profiles 게이트 — 기본 미기동** |
 | `paper-search-mcp` `youtube-transcript-mcp` | uv 이미지 | uvx | — | **profiles 게이트 — 기본 미기동** |
 | `ui-bff` | factory 이미지 | uvicorn (레거시) | — | **profiles 게이트 — 레거시, 그대로 켜면 고장** (§12) |
 
-† `factory-experiment-worker`/`card-watchdog`은 `build:` 없이 `hedgefund-factory:latest`를 참조 — `factory-autopilot`이 같은 호스트에서 먼저 빌드해야만 뜬다 (`docker-compose.yml:1205, 1235`).
+> 위의 factory 두 행은 이 문서가 기록한 과거 토폴로지다. 현재 Compose에는
+> `strategy-hermes`(opt-in)와 `card-watchdog`(operations-runtime)만 남아 있다.
 
 **부서 fragment (13개):**
 
@@ -413,9 +414,11 @@ Windows 안전장치: WAL SQLite를 컨테이너 밖에서 열면 보드 쓰기�
 
 ---
 
-## 6. 흐름 2 — 전략 공장 무인 루프
+## 6. 흐름 2 — [역사 기록] 전략 공장 무인 루프
 
-**저장소에서 유일하게 처음부터 끝까지 닫힌 E2E 루프.** 2026-08-13 02:59 첫 완주 실측(발굴→환류 사람 0명, 56분).
+**2026-08-13 당시의 보존 기록이며 현재 기동 경로가 아니다.** 당시 첫 완주
+실측은 발굴→환류 사람 0명, 56분이었다. 현행 전략 연구는
+`strategy-hermes`와 `AUTONOMOUS_RESEARCH_REBUILD.md`의 파일 기반 계약을 따른다.
 
 ```mermaid
 flowchart LR
@@ -424,7 +427,7 @@ flowchart LR
         LEADS["factory_submit_leads (MCP)<br/>→ research.methodology_leads"]
         PROP["factory_submit_proposal (MCP)<br/>→ proposal_intake + publish_gate<br/>→ research.experiment_proposals(PUBLISHED)"]
     end
-    subgraph A["factory-autopilot (15분 주기)"]
+    subgraph A["퇴역 factory-autopilot (당시 15분 주기)"]
         HARVEST["harvest: 카드 납품 집계"]
         PROMOTE["_promote → Gate 0"]
         DISPATCH["_dispatch_experiments → job 큐"]

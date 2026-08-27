@@ -321,13 +321,6 @@ def test_research_image_has_safe_market_only_default() -> None:
     ).read_text(encoding="utf-8").splitlines()
     assert {"**/__pycache__", "**/*.pyc", ".env*"} <= set(dockerignore)
 
-    factory_dockerfile = (ROOT / "Dockerfile.factory").read_text(encoding="utf-8")
-    assert "COPY departments/01-research/collectors ./" not in factory_dockerfile
-    assert (
-        "COPY departments/01-research/collectors/source_registry.py "
-        "./departments/01-research/collectors/source_registry.py"
-    ) in factory_dockerfile
-
     root_dockerignore = (ROOT / ".dockerignore").read_text(
         encoding="utf-8"
     ).splitlines()

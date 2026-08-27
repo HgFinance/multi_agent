@@ -6,13 +6,13 @@ integration in this module.
 """
 from __future__ import annotations
 
+import signal
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
-import signal
-import threading
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 

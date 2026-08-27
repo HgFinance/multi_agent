@@ -40,11 +40,16 @@ class CeoTaskPlannerError(RuntimeError):
 
 # allow-list 는 **상한**만 정한다("이 부서 밖은 못 부른다"). 하한이 없으면 LLM 이
 # requested_departments 를 ["ceo"] 하나로 줄여도 통과하고, 그러면 CEO 응답의
-# 감사 의도가 사라진다. QA는 이 하한으로 계획에 남기되 응답-plane primary로
-# materialize하지 않는다. 호출부가 CEO 응답을 저장·전달한 뒤 동일 입력과 응답을
-# 담은 post-response audit 카드로 QA를 생성한다. 프롬프트로 부탁하지 않고
+# 감사 의도가 사라진다. QA는 응답-plane primary가 아니라 post-response audit
+# 소비자지만, 이 모듈의 시스템 하한에는 포함된다. 호출부가 CEO 응답을 저장·전달한
+# 뒤 동일 입력과 응답을 담은 audit를 materialize한다. 프롬프트로 부탁하지 않고
 # 파싱 단계에서 감사 의도를 보존한다.
 REQUIRED_DEPARTMENTS: frozenset[str] = frozenset({"qa", "ceo"})
+# QA is a required audit consumer even when the response-plane caller's
+# allow-list intentionally contains only primary departments. It is not added
+# to the graph's primary fan-out by this constant; the post-response scheduler
+# owns its materialization.
+POST_RESPONSE_REQUIRED_DEPARTMENTS: frozenset[str] = frozenset({"qa"})
 
 
 class LlmCeoTaskPlanner:
@@ -222,16 +227,30 @@ def _parse_plan(stdout: str, valid_departments: Sequence[str]) -> dict[str, Any]
         raise ValueError("CEO planner returned no requested_departments")
     allow_list = set(valid_departments)
     requested_set = {str(item) for item in requested}
-    if not requested_set.issubset(allow_list):
+    planner_allow_list = allow_list | POST_RESPONSE_REQUIRED_DEPARTMENTS
+    if not requested_set.issubset(planner_allow_list):
         raise ValueError("CEO planner requested a department outside the allow-list")
-    # 하한 강제: 호출부가 실제로 가진 부서에 한해 CEO와 QA 감사 의도를 되살린다.
-    # QA는 응답-plane 자식으로 실행되지 않고, CEO 응답 전달 후 별도 audit task로
-    # materialize된다. LLM이 QA를 빠뜨려도 감사 의도를 잃지 않되 CEO 응답을
-    # QA 선행 결과에 묶지 않는 것이 이 경계의 핵심이다.
-    requested_set |= REQUIRED_DEPARTMENTS & allow_list
+    # 하한 강제: CEO는 response-plane allow-list 안에서, QA는 별도
+    # post-response audit lane에서 항상 되살린다. QA를 allow-list에 넣지 않는
+    # 호출부도 있으므로 REQUIRED_DEPARTMENTS를 allow-list와 교집합하면 안 된다.
+    requested_set |= REQUIRED_DEPARTMENTS
     # Preserve the caller's canonical department order (same rule as the
     # deterministic planner's `ordered = [stage for stage in DEPARTMENTS ...]`).
     ordered = [stage for stage in valid_departments if stage in requested_set]
+    # The response-plane caller intentionally omits QA from valid_departments.
+    # Keep the planner contract complete without making QA a blocking graph
+    # node: place the audit consumer immediately before CEO in the returned
+    # plan, matching the existing canonical test/order convention.
+    for required in REQUIRED_DEPARTMENTS:
+        if required in ordered:
+            continue
+        if required not in POST_RESPONSE_REQUIRED_DEPARTMENTS:
+            raise ValueError(f"required department is outside the allow-list: {required}")
+        insert_at = next(
+            (index for index, department in enumerate(ordered) if department == "ceo"),
+            len(ordered),
+        )
+        ordered.insert(insert_at, required)
 
     rewritten_query = str(payload.get("rewritten_query", "")).strip()
     rationale = str(payload.get("rationale", "")).strip()

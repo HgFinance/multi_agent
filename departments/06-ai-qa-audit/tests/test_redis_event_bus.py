@@ -12,9 +12,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from qa_api_loader import load_qa_api
-
 import qa_events.redis_event_bus as event_bus_module
+from qa_api_loader import load_qa_api
 from qa_events.redis_event_bus import (
     FORWARD_QA_DLQ_STREAM,
     FORWARD_QA_GROUP,

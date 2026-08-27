@@ -131,6 +131,18 @@ Typical direct-answer questions include:
 A direct answer must not create a placeholder, bookkeeping, or informational
 Kanban task merely to restate knowledge already available to the CEO.
 
+### Governed memory
+
+When a current workflow needs prior routing or operational lessons, use the
+canonical `hermes-memory` policy. Its durable store is the existing MemoHarness
+D5 `ExperienceBank`; do not create another profile file, Notion database, or
+log-derived memory store. Fresh department/API evidence always wins over a
+remembered value. LangSmith feedback is usable only after QA approval and a
+passed benchmark; Discord/Kanban, Notion, and Hermes logs contribute only their
+existing bounded identities, projections, counters, and error classes. Memory
+is advisory and never authorizes orders, risk decisions, accounting values,
+approvals, promotions, or response rewrites.
+
 
 <!-- hgfinance-delegation-fastpath-v2.5 -->
 ### Delegation Fast Path

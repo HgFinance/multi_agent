@@ -156,6 +156,47 @@ def test_stale_tsdb_quote_falls_back_to_fresh_ls_paper_rest_quote():
     assert quote.source == "ls-paper-rest:t1101"
 
 
+def test_slow_ls_paper_rest_fallback_is_not_rejected_as_stale():
+    """A quote observed after `now` must not read as a future quote.
+
+    t1101 is throttled to about one call per second, so the fallback read
+    routinely lands seconds after the caller stamped `now`.  Validating against
+    the original stamp made the age negative and tripped the future-skew guard,
+    which is how two live conditional rules were rejected on 2026-08-27 while
+    holding the freshest quote this deployment can obtain.
+    """
+
+    instrument = InstrumentRef(uuid4(), "049080", Decimal(1), None, "KRW")
+    fetch_seconds = 3.0
+
+    class UnavailableProvider:
+        def quote(self, *_args, **_kwargs):
+            raise MarketDataError(
+                "TRADING_MARKET_QUOTE_UNAVAILABLE", "no projection row", 503
+            )
+
+    class SlowBroker:
+        def get_quote(self, symbol):
+            return {
+                "symbol": symbol,
+                # Observed only after the throttled round trip completes.
+                "observed_at": NOW + timedelta(seconds=fetch_seconds),
+                "bid": Decimal("8820"),
+                "ask": Decimal("8830"),
+                "bid_size": Decimal("1706"),
+                "ask_size": Decimal("209"),
+            }
+
+    provider_clock = iter((0.0, fetch_seconds))
+    provider = LsPaperFallbackMarketDataProvider(
+        UnavailableProvider(), SlowBroker(), monotonic=lambda: next(provider_clock)
+    )
+    quote = provider.quote(instrument, now=NOW, max_age_seconds=30.0)
+
+    assert quote.source == "ls-paper-rest:t1101"
+    assert quote.bid == Decimal("8820")
+
+
 class Harness:
     def __init__(self) -> None:
         self.user = uuid4()

@@ -322,7 +322,12 @@ def _adapt_mandate_report(
 ) -> dict[str, Any]:
     """Adapt and validate one report before QA-head fan-in."""
     from qa_runtime import build_qa_task_context
-    from runtime_contracts import ArtifactRef, WorkerContext, sha256_hash, to_worker_context
+    from runtime_contracts import (
+        ArtifactRef,
+        WorkerContext,
+        sha256_hash,
+        to_worker_context,
+    )
 
     normalized = dict(report) if isinstance(report, Mapping) else {}
     worker_id = str(normalized.get("worker_id") or "unknown-qa-worker")

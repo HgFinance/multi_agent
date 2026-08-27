@@ -1,11 +1,11 @@
-import os
 import inspect
+import os
 import sqlite3
 import sys
 import threading
 import time
 from functools import wraps
-
+from pathlib import Path
 
 _SENSITIVE_WORKER_ENV = (
     "MCP_RESEARCH_API_KEY",
@@ -13,6 +13,16 @@ _SENSITIVE_WORKER_ENV = (
     "MCP_TRADING_ORDER_API_KEY",
     "TIMESCALE_DATABASE_URL",
 )
+_TERMINAL_RUN_STATES = frozenset({
+    "done",
+    "completed",
+    "archived",
+    "blocked",
+    "gave_up",
+    "timed_out",
+    "crashed",
+    "failed",
+})
 
 
 def _fail_closed_secret_scope(reason):
@@ -36,7 +46,7 @@ def _suppress_dispatcher_cwd_warning():
         return
     try:
         import hermes_cli.config as hermes_config
-    except Exception:
+    except ImportError:
         return
 
     original = getattr(hermes_config, "warn_deprecated_cwd_env_vars", None)
@@ -65,27 +75,40 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
         # second analysis primary. This wraps the existing Kanban primitive;
         # it does not create another task path or alter non-CEO workers.
         _repo_root = "/app/repo"
-        if _repo_root not in sys.path:
-            sys.path.insert(0, _repo_root)
+        _runtime_repo_root = str(Path(__file__).resolve().parents[2])
+        for _path in (_repo_root, _runtime_repo_root):
+            if _path not in sys.path:
+                sys.path.insert(0, _path)
+        # The worker observer imports its redacted LangSmith registry before
+        # the detached observer thread can add this directory itself.  The
+        # dispatcher image exposes the repository root but not ``scripts/``
+        # on ``PYTHONPATH``, so register it at guard installation time.
+        for _scripts_root in {
+            f"{_repo_root}/scripts",
+            str(Path(_runtime_repo_root, "scripts")),
+        }:
+            if _scripts_root not in sys.path:
+                sys.path.insert(0, _scripts_root)
         from orchestration.primary_task_idempotency import (
             validate_primary_create,
         )
 
-        _original_create_task = kb.create_task
+        _original_create_task = getattr(kb, "create_task", None)
+        if callable(_original_create_task):
 
-        @wraps(_original_create_task)
-        def _hgfinance_guarded_create_task(*args, **kwargs):
-            if os.environ.get("HERMES_PROFILE", "").strip() == "ceo-agent":
-                rejection = validate_primary_create(
-                    kwargs.get("body"),
-                    kwargs.get("assignee"),
-                    kwargs.get("idempotency_key"),
-                )
-                if rejection:
-                    raise ValueError(rejection)
-            return _original_create_task(*args, **kwargs)
+            @wraps(_original_create_task)
+            def _hgfinance_guarded_create_task(*args, **kwargs):
+                if os.environ.get("HERMES_PROFILE", "").strip() == "ceo-agent":
+                    rejection = validate_primary_create(
+                        kwargs.get("body"),
+                        kwargs.get("assignee"),
+                        kwargs.get("idempotency_key"),
+                    )
+                    if rejection:
+                        raise ValueError(rejection)
+                return _original_create_task(*args, **kwargs)
 
-        kb.create_task = _hgfinance_guarded_create_task
+            kb.create_task = _hgfinance_guarded_create_task
 
         _original_check_respawn_guard = kb.check_respawn_guard
         _original_guard_accepts_lane = (
@@ -113,7 +136,7 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                     ):
                         return "hgfinance_control_plane_root"
 
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - dispatcher guard fails open
                 # Fail open to Hermes' native behavior if our guard
                 # cannot inspect the task. Never break the dispatcher.
                 pass
@@ -204,10 +227,11 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                 """
 
                 assignee = str(getattr(task, "assignee", "") or "").strip()
-                if assignee not in {
-                    "accounting-portfolio-department",
-                    "qa-department",
-                }:
+                try:
+                    from hermes_worker_observability import _PROFILE_SPECS
+                except Exception:  # noqa: BLE001 - observer is fail-open
+                    return
+                if assignee not in _PROFILE_SPECS:
                     return
                 task_id = str(getattr(task, "id", "") or "").strip()
                 run_id = getattr(task, "current_run_id", None)
@@ -222,28 +246,6 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                         timeout = 630.0
                     deadline = time.monotonic() + timeout
                     return_code = 0
-                    process_reaped = False
-                    while time.monotonic() < deadline:
-                        try:
-                            waited_pid, wait_status = os.waitpid(int(pid), os.WNOHANG)
-                        except (ChildProcessError, OSError):
-                            # The native dispatcher may reap the child before
-                            # this fail-open observer wins the waitpid race.
-                            # The task-run row remains the authoritative
-                            # terminal signal in that case; do not lose the
-                            # LangSmith join key merely because the PID was
-                            # reaped by another dispatcher loop.
-                            break
-                        if waited_pid == int(pid):
-                            try:
-                                return_code = os.waitstatus_to_exitcode(wait_status)
-                            except (AttributeError, ValueError):
-                                return_code = 0
-                            process_reaped = True
-                            break
-                        time.sleep(0.5)
-                    if not process_reaped and time.monotonic() >= deadline:
-                        return
 
                     try:
                         import sys
@@ -276,7 +278,8 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                                     if run_id is None:
                                         row = connection.execute(
                                             "SELECT t.status, t.started_at, t.completed_at, "
-                                            "r.id, r.status, r.ended_at, r.outcome "
+                                            "r.id, r.status, r.started_at, r.ended_at, "
+                                            "r.outcome "
                                             "FROM tasks t LEFT JOIN task_runs r "
                                             "ON r.id = (SELECT id FROM task_runs "
                                             "WHERE task_id = t.id ORDER BY id DESC LIMIT 1) "
@@ -286,7 +289,8 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                                     else:
                                         row = connection.execute(
                                             "SELECT t.status, t.started_at, t.completed_at, "
-                                            "r.id, r.status, r.ended_at, r.outcome "
+                                            "r.id, r.status, r.started_at, r.ended_at, "
+                                            "r.outcome "
                                             "FROM tasks t LEFT JOIN task_runs r ON r.id = ? "
                                             "WHERE t.id = ?",
                                             (run_id, task_id),
@@ -297,61 +301,62 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                             except (OSError, TypeError, ValueError, sqlite3.Error):
                                 return None
 
-                        if not process_reaped:
-                            # A task run can be terminal even when the native
-                            # loop already collected the PID. Poll only the
-                            # single task/run row and keep the observer off the
-                            # CEO response path.
+                        def _apply_terminal_state(state):
+                            nonlocal ended_at, latest_run_id, return_code, task_status
+                            nonlocal started_at
+                            if not state:
+                                return False
+                            (
+                                board_status,
+                                board_started_at,
+                                board_ended_at,
+                                state_run_id,
+                                run_status,
+                                run_started_at,
+                                run_ended_at,
+                                outcome,
+                            ) = state
+                            run_state = str(run_status or outcome or "").casefold()
+                            board_state = str(board_status or "").casefold()
+                            # A retry can make the task row ``running`` while
+                            # this exact older run is already ``crashed``.
+                            # Prefer the run-owned state; otherwise a crashed
+                            # attempt can be published as a successful retry.
+                            terminal_status = (
+                                run_state
+                                if run_state in _TERMINAL_RUN_STATES
+                                else board_state
+                            )
+                            if terminal_status not in _TERMINAL_RUN_STATES:
+                                if run_state in {"", "running"}:
+                                    return False
+                                terminal_status = run_state
+                            if run_state in _TERMINAL_RUN_STATES:
+                                task_status = str(run_status or outcome)
+                            else:
+                                task_status = str(board_status or run_status or outcome)
+                            latest_run_id = state_run_id or run_id
+                            started_at = run_started_at or board_started_at or started_at
+                            ended_at = run_ended_at or board_ended_at or ended_at
+                            return_code = 0 if task_status.casefold() in {
+                                "done",
+                                "completed",
+                                "archived",
+                            } else 1
+                            return True
+
+                        # The native dispatcher exclusively owns child
+                        # reaping. Poll only the exact task-run row so this
+                        # observer cannot steal the PID and cause a false
+                        # ``pid not alive`` crash/retry. This remains off the
+                        # CEO response path and never creates a second run.
+                        if not _apply_terminal_state(_read_task_run_state()):
                             while time.monotonic() < deadline:
-                                state = _read_task_run_state()
-                                if state:
-                                    (
-                                        board_status,
-                                        board_started_at,
-                                        board_ended_at,
-                                        state_run_id,
-                                        run_status,
-                                        run_ended_at,
-                                        outcome,
-                                    ) = state
-                                    terminal_status = str(
-                                        board_status or run_status or outcome or ""
-                                    ).casefold()
-                                    if terminal_status in {
-                                        "done",
-                                        "completed",
-                                        "archived",
-                                        "blocked",
-                                        "gave_up",
-                                        "timed_out",
-                                        "crashed",
-                                        "failed",
-                                    } or str(run_status or "").casefold() not in {
-                                        "",
-                                        "running",
-                                    }:
-                                        task_status = str(
-                                            board_status or run_status or outcome or ""
-                                        )
-                                        latest_run_id = state_run_id or run_id
-                                        started_at = board_started_at or started_at
-                                        ended_at = board_ended_at or run_ended_at or ended_at
-                                        return_code = 0 if task_status.casefold() in {
-                                            "done",
-                                            "completed",
-                                            "archived",
-                                        } else 1
-                                        break
+                                if _apply_terminal_state(_read_task_run_state()):
+                                    break
                                 time.sleep(0.5)
                             else:
                                 return
-                        else:
-                            state = _read_task_run_state()
-                            if state:
-                                task_status = str(state[0] or state[4] or state[6] or "")
-                                latest_run_id = state[3] or run_id
-                                started_at = state[1] or started_at
-                                ended_at = state[2] or state[5] or ended_at
 
                         publish_department_worker_trace(
                             task_id=task_id,
@@ -364,7 +369,7 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                             argv=["-p", assignee],
                             env=os.environ,
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - observability is fail open
                         # Observability must never change dispatcher behavior.
                         return
 
@@ -388,7 +393,7 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
         else:
             _fail_closed_secret_scope("NO_DEFAULT_SPAWN_HOOK")
 
-    except Exception:
+    except Exception:  # noqa: BLE001 - capability scope fails closed below
         # A dispatcher without a known spawn hook must lose capabilities, not
         # silently hand every credential to every profile.  The startup
         # preflight also rejects this state so work queues stop visibly.
@@ -401,7 +406,7 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
         from provider_failfast import install as _install_provider_failfast
 
         _install_provider_failfast()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - provider policy is optional
         # Provider policy is an optimization, never a reason to prevent the
         # dispatcher from starting. Native Hermes retry remains the fallback.
         pass

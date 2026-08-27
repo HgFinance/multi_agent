@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
+import warnings
 from collections.abc import Callable
 from datetime import date, datetime, timezone
 from functools import lru_cache
@@ -77,7 +78,22 @@ def _default_answer_fn() -> LegalWikiAnswerFn:
     if str(_LLM_WIKI_DIR) not in sys.path:
         sys.path.insert(0, str(_LLM_WIKI_DIR))
     # lazy import: avoids OpenAI/BM25 load cost for callers that never use LEGAL_QUERY
-    from arms import llm_wiki_grep_bm25_answer
+    # LangGraph emits this dependency-level notice while importing its cache
+    # package; the Legal Wiki contract does not instantiate that cache. Keep
+    # the narrowly-scoped warning filter here so a genuine routing/model
+    # warning remains visible to the caller.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"The default value of `allowed_objects` will change.*",
+            category=Warning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"langsmith\.wrappers\._openai_agents is deprecated.*",
+            category=Warning,
+        )
+        from arms import llm_wiki_grep_bm25_answer
 
     return llm_wiki_grep_bm25_answer
 

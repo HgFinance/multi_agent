@@ -27,9 +27,9 @@ from uuid import UUID
 
 def _timeout_seconds() -> float:
     try:
-        return max(0.1, min(10.0, float(os.getenv("ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS", "5"))))
+        return max(0.1, min(10.0, float(os.getenv("ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS", "2"))))
     except ValueError:
-        return 5.0
+        return 2.0
 
 
 def _book_id() -> str | None:

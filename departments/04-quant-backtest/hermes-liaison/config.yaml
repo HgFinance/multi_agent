@@ -27,6 +27,21 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
+
+# ── Hermes 내장 도구 경계 ──────────────────────────────────────────────────
+# 사용자 질의 창구는 읽기 전용 research MCP 결과를 설명하는 역할만 맡는다.
+# 범용 브라우저·파일·터미널 도구를 상속하지 않아도 Kanban 종결과 MCP 조회는
+# 가능하므로, 허용 목록 밖 도구가 새로 활성화되지 않게 명시한다.
+platform_toolsets:
+  cli: [clarify, cronjob, delegation, kanban, memory, session_search, skills, todo]
+known_builtin_toolsets:
+  cli: [bfl, browser, clarify, code_execution, computer_use, context_engine, cronjob,
+        delegation, discord, discord_admin, file, homeassistant, image_gen, memory,
+        session_search, skills, spotify, stt, terminal, todo, tts, video, video_gen,
+        vision, web, x_search, yuanbao]
+known_plugin_toolsets:
+  cli: [spotify]
+
 skills:
   external_dirs:
     - /opt/shared-skills

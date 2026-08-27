@@ -244,6 +244,17 @@ their approval decisions after `LANGSMITH_FEEDBACK_RETENTION_DAYS`. LangSmith
 project retention is controlled separately by the workspace retention policy;
 the application does not delete external traces automatically.
 
+QA Discord cards are a separate action-inbox retention policy. The existing
+`portfolio-worker` runs one bounded pass per day and deletes only cards whose
+recorded QA feedback decision is `APPROVED`/`REJECTED` or whose benchmark is
+terminal (`PASSED`/`FAILED`) and whose latest terminal transition is older than
+seven days. Skill-review cards follow the same seven-day rule after final
+`APPROVED`/`REJECTED`. Pending cards are preserved; the local SQLite ledger,
+proposal state, provenance, and audit history are not deleted. The pass is
+disabled when `LANGSMITH_FEEDBACK_DISCORD_RETENTION_ENABLED=false` and is
+bounded by `LANGSMITH_FEEDBACK_DISCORD_RETENTION_MAX_MESSAGES` (default 100).
+Discord/API failures are isolated and retried on the next daily pass.
+
 No response is not a rejection. An artifact remains `PENDING` until an allowed
 human explicitly enters `승인`, `거부`, or `반려`; an unanswered artifact is
 eventually removed by the local retention cleanup without creating a rejection

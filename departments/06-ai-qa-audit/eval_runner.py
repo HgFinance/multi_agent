@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import copy
 import inspect
+import signal
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
-import signal
-import threading
+
 
 def _call_with_timeout(call: Callable[[], Any], timeout_ms: int) -> Any:
     """Bound an injected call on both the main thread and service threads.
@@ -127,7 +128,7 @@ class EvalCase(EvalModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "EvalCase":
+    def from_mapping(cls, value: Mapping[str, Any]) -> EvalCase:
         data = dict(value)
         if "input" in data and "input_payload" not in data:
             data["input_payload"] = data.pop("input")
@@ -144,7 +145,7 @@ class CandidateCase(EvalModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
-    def from_eval_case(cls, case: EvalCase) -> "CandidateCase":
+    def from_eval_case(cls, case: EvalCase) -> CandidateCase:
         safe_metadata = {
             key: copy.deepcopy(value)
             for key, value in case.metadata.items()
@@ -165,7 +166,7 @@ class EvalSet(EvalModel):
     cases: list[EvalCase] = Field(min_length=1)
 
     @classmethod
-    def compute_content_hash(cls, value: "EvalSet | Mapping[str, Any]") -> str:
+    def compute_content_hash(cls, value: EvalSet | Mapping[str, Any]) -> str:
         if isinstance(value, cls):
             normalized = value.model_dump(mode="json", exclude={"content_hash"})
         else:
@@ -191,7 +192,7 @@ class EvalSet(EvalModel):
         """Hash the normalized set, excluding the caller-supplied hash assertion."""
         return self.compute_content_hash(self)
     @model_validator(mode="after")
-    def canonical_hash_matches(self) -> "EvalSet":
+    def canonical_hash_matches(self) -> EvalSet:
         if self.content_hash != self.canonical_content_hash:
             raise ValueError("content_hash does not match canonical eval-set content")
         return self
@@ -253,7 +254,7 @@ class EvalResult(EvalModel):
             return score >= 0
         return 0 <= score <= 1
     @model_validator(mode="after")
-    def bounded_score(self) -> "EvalResult":
+    def bounded_score(self) -> EvalResult:
         if self.score is not None and not self.score_is_valid(self.metric, self.score):
             raise ValueError(f"score out of range for {self.metric.value}")
         return self
@@ -294,7 +295,7 @@ class EvaluationReport(EvalModel):
 
 @runtime_checkable
 class CandidateRunner(Protocol):
-    def run(self, case: CandidateCase, *, tools: "MockToolRegistry", memory: "ShadowMemory") -> Any: ...
+    def run(self, case: CandidateCase, *, tools: MockToolRegistry, memory: ShadowMemory) -> Any: ...
 
 
 @runtime_checkable
@@ -309,9 +310,9 @@ class EvalAuditRepository(Protocol):
     ) -> EvalRun: ...
     def run_for_id(self, run_id: str) -> EvalRun | None: ...
     def get_run(self, run_id: str) -> EvalRun | None: ...
-    def append_comparison(self, comparison: "ChampionComparison") -> None: ...
+    def append_comparison(self, comparison: ChampionComparison) -> None: ...
 
-    def comparison_for_run(self, run_id: str) -> "ChampionComparison | None": ...
+    def comparison_for_run(self, run_id: str) -> ChampionComparison | None: ...
 
 
 class ShadowMemory:
@@ -326,13 +327,13 @@ class ShadowMemory:
 
     def put(self, key: str, value: Any) -> None:
         self._values[key] = copy.deepcopy(value)
-    def fork(self) -> "ShadowMemory":
+    def fork(self) -> ShadowMemory:
         """Return an isolated snapshot for one case invocation."""
         child = ShadowMemory(self.namespace)
         child._values = copy.deepcopy(self._values)
         return child
 
-    def merge_from(self, child: "ShadowMemory") -> None:
+    def merge_from(self, child: ShadowMemory) -> None:
         """Commit a completed case snapshot without sharing mutable state."""
         self._values = copy.deepcopy(child._values)
 

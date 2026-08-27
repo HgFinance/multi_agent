@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-
 QA_ROOT = Path(__file__).resolve().parents[1]
 if str(QA_ROOT) not in sys.path:
     sys.path.insert(0, str(QA_ROOT))

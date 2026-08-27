@@ -184,6 +184,46 @@ QA_CHECK_LABELS = {
     "record_consistency": "기록 일관성",
     "failure_gate_and_delivery": "응답 비차단·전달",
     "fail_checks": "결정 차단 여부",
+    "evidence_and_scope": "근거·검토 범위",
+    "ceo_input_identity": "CEO 입력 동일성",
+    "evidence_consistency": "근거 내부 일관성",
+    "citations_and_provenance": "인용·자료 출처",
+    "scope_and_claims": "검토 범위·주장",
+    "e2e_delivery_and_qa_log_verification": "전달·QA 로그 검증",
+    "workflow_lifecycle": "업무 흐름 생명주기",
+    "safety_paper_read_only": "PAPER 읽기 전용 준수",
+    "mandate_handling": "투자지침 처리",
+    "scope_and_reproducibility": "검토 범위·재현성",
+    "response_claims": "응답 주장",
+    "delivery_and_observability": "전달·관측성",
+    "qa_log_coverage": "QA 로그 범위",
+    "contradictions_and_unknowns": "불일치·미확인 사항",
+    "async_nonblocking": "사후 QA 비차단",
+    "workforce_api_read_only_calls": "워크포스 읽기 전용 호출",
+    "http_statuses": "HTTP 상태코드",
+    "observability_state_counts": "관측 상태 집계",
+    "scorecard_content_verification": "성과표 내용 검증",
+    "improvement_candidate_count_claim": "개선 후보 수 검증",
+    "citations_and_reproducibility": "인용·재현성",
+    "delivery_path_lifecycle_connectivity": "전달 경로 연결성",
+    "delivery_content_verification": "전달 내용 검증",
+    "response_gating_behavior": "응답 차단 정책",
+    "orders": "주문 변경",
+    "investment_changes": "투자 변경",
+    "ledger_changes": "원장 변경",
+    "permission_changes": "권한 변경",
+    "workflow_scope_and_identity": "업무 범위·식별성",
+    "post_response_nonblocking": "사후 QA 비차단",
+    "response_delivery_connectivity": "응답 전달 연결성",
+    "claim_grounding": "주장 근거성",
+    "evidence_and_citation_completeness": "근거·인용 완전성",
+    "backtest_reproducibility": "백테스트 재현성",
+    "internal_consistency": "내부 일관성",
+    "scope_and_fulfillment": "범위·요청 이행",
+    "workflow_compliance": "업무 흐름 준수",
+    "hallucination_control": "추측·날조 방지",
+    "risk_fail_closed": "리스크 차단 준수",
+    "read_only_safety": "읽기 전용 안전성",
     # Accounting/portfolio QA receipts use a few source-shaped keys that
     # should remain readable in both operational surfaces.
     "position_value_sum": "포지션 평가액 합계",
@@ -220,7 +260,13 @@ _SEVERITY_LABELS = {
 
 def qa_check_label(value: Any) -> str:
     normalized = str(value or "").strip().casefold()
-    return QA_CHECK_LABELS.get(normalized, "추가 점검 항목")
+    label = QA_CHECK_LABELS.get(normalized)
+    if label:
+        return label
+    rendered = str(value or "").strip()
+    if rendered and not re.fullmatch(r"[a-z0-9_.:/ -]+", rendered.casefold()):
+        return rendered[:120]
+    return "추가 점검 항목"
 
 
 def qa_owner_label(value: Any) -> str:

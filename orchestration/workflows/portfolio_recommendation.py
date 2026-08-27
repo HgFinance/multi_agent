@@ -1848,14 +1848,24 @@ def build_portfolio_recommendation_graph(
         risk_gate = state.get("risk_gate", {})
         # QA is intentionally pending here. It audits this exact CEO input and
         # response after the result is delivered; it is not an execution gate
-        # and cannot change the response-plane safe action.
+        # and cannot change the response-plane safe action. Keep a concrete QA
+        # department row in the same response so callers never infer that the
+        # department was forgotten merely because it runs out of band.
+        response_task_id = str(state.get("case_id") or "") or None
         qa_gate = {
             "status": "PENDING",
             "decision": "PENDING",
             "phase": "POST_RESPONSE",
             "reason": "awaiting_post_response_audit",
             "binding": False,
+            "response_task_id": response_task_id,
+            "failed_workers": [],
+            "worker_count": 0,
         }
+        reports = dict(reports)
+        reports["qa"] = _qa_department_report(
+            "PENDING", skip_reason="POST_RESPONSE_AUDIT_PENDING"
+        )
         risk_safe = risk_gate.get("safe_action") == "NO_ACTION"
         gate_degraded = risk_gate.get("reason") == "UPSTREAM_WORKER_CONTRACT_FAILED"
         pipeline_status = (
@@ -2008,6 +2018,66 @@ def _qa_gate_from_result(
     }
 
 
+def _qa_department_report(
+    status: str,
+    *,
+    worker_ids: Sequence[str] = (),
+    completed: int = 0,
+    skipped_safe: int = 0,
+    not_requested: int = 0,
+    failed: Sequence[str] = (),
+    skip_reason: str | None = None,
+) -> dict[str, Any]:
+    """Return the one stable department-report shape for the post-response QA lane."""
+
+    failed_ids = [str(item) for item in failed]
+    report: dict[str, Any] = {
+        "status": str(status),
+        "legacy_status": str(status),
+        "worker_ids": [str(item) for item in worker_ids],
+        "executed": len(worker_ids),
+        "completed": max(0, int(completed)),
+        "skipped_safe": max(0, int(skipped_safe)),
+        "not_requested": max(0, int(not_requested)),
+        "failed_count": len(failed_ids),
+        "skip_reasons": {},
+        "skip_reason": skip_reason,
+        "failed": failed_ids,
+        "binding": False,
+        "fan_out": True,
+        "fan_in": True,
+    }
+    if skip_reason:
+        report["skip_reasons"] = {skip_reason: max(1, not_requested or 1)}
+    return report
+
+
+def _qa_department_report_from_result(
+    qa_result: Mapping[str, Any],
+    gate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project completed QA without treating untriggered conditional workers as failures."""
+
+    workers = qa_result.get("workers", ())
+    worker_rows = [item for item in workers if isinstance(item, Mapping)]
+    not_executed = qa_result.get("not_executed", ())
+    not_requested = (
+        len(not_executed)
+        if isinstance(not_executed, Sequence)
+        and not isinstance(not_executed, (str, bytes, bytearray))
+        else 0
+    )
+    failed = gate.get("failed_workers") or qa_result.get("failed") or ()
+    return _qa_department_report(
+        str(gate.get("status") or "DEGRADED"),
+        worker_ids=[str(item.get("worker_id")) for item in worker_rows if item.get("worker_id")],
+        completed=sum(1 for item in worker_rows if str(item.get("status", "")).upper() == "COMPLETED"),
+        not_requested=not_requested,
+        failed=[str(item) for item in failed],
+        skip_reason="CONDITIONAL_NOT_TRIGGERED" if not_requested else None,
+    )
+
+
 def schedule_post_response_qa_audit(
     result: Mapping[str, Any],
     *,
@@ -2038,6 +2108,9 @@ def schedule_post_response_qa_audit(
             "kind": "qa_audit_scheduled",
             "stage": QA_AUDIT_STAGE,
             "response_task_id": response_id,
+            "department_report": _qa_department_report(
+                "QUEUED", skip_reason="POST_RESPONSE_AUDIT_PENDING"
+            ),
             "summary": "CEO 응답이 저장된 뒤 동일 입력을 QA 비동기 감사 큐에 등록했습니다.",
         }
     )
@@ -2048,6 +2121,9 @@ def schedule_post_response_qa_audit(
                 "kind": "qa_audit_started",
                 "stage": QA_AUDIT_STAGE,
                 "response_task_id": response_id,
+                "department_report": _qa_department_report(
+                    "RUNNING", skip_reason="POST_RESPONSE_AUDIT_RUNNING"
+                ),
             }
         )
         try:
@@ -2060,6 +2136,7 @@ def schedule_post_response_qa_audit(
                     "stage": QA_AUDIT_STAGE,
                     "status": gate["status"],
                     "qa_gate": gate,
+                    "department_report": _qa_department_report_from_result(qa_result, gate),
                     "response_task_id": response_id,
                     "summary": "CEO 응답 대상 QA 비동기 감사가 완료되었습니다.",
                 }
@@ -2079,6 +2156,9 @@ def schedule_post_response_qa_audit(
                         "response_task_id": response_id,
                         "reason": f"{type(exc).__name__}",
                     },
+                    "department_report": _qa_department_report(
+                        "DEGRADED", failed=[f"qa_audit:{type(exc).__name__}"]
+                    ),
                     "summary": "CEO 응답은 유지하고 QA 감사 실패를 에스컬레이션했습니다.",
                 }
             )

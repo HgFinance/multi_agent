@@ -243,7 +243,48 @@ Notion의 위치는 의도적으로 supervisor다. CEO Hermes에 Notion credenti
 Head가 임의로 페이지를 만들도록 하지 않는다. Notion sync가 필요해도 canonical
 Kanban/audit 상태를 먼저 바꾸지 않는다.
 
-### 5.3 Discord/Web
+### 5.3 Governed memory
+
+CEO의 운영 메모리는 새 DB나 Hermes `MEMORY.md` 복제본을 추가하지 않고, 기존
+`ExperienceBank`의 `experience.workflow_experiences`를 단일 정본으로 사용한다.
+이 저장소는 원문 대화나 모델 답변이 아니라 종료된 workflow의 제한된 결과·실패
+코드·라우팅 lesson만 보존한다.
+
+- BFF는 root를 만들기 전에 기존 경험을 조회하고, `active`일 때만 길이 제한된
+  advisory hint를 CEO planner에 전달한다.
+- CEO supervisor는 최종 응답이 확정된 뒤 root당 한 번만 Discord/Kanban terminal
+  결과를 기록한다. Portfolio recommendation도 자체 terminal close에서 같은
+  `ExperienceBank` writer를 사용한다.
+- `experience_identity`의 unique 계약으로 재시도·중복 관측을 멱등 처리한다.
+  저장 실패는 응답을 실패시키지 않지만, hint로 사용하지 않는다.
+- 성공·실패·운영 장애의 보존 기간과 recent/latest 예외는 기존
+  `experience_retention_policy`가 소유한다. 별도의 memory collector, memory DB,
+  Notion archive를 만들지 않는다.
+
+입력원별 역할도 분리한다.
+
+| 입력원 | 자동화된 역할 | 메모리 원문 저장 |
+|---|---|---|
+| Discord/Kanban | terminal workflow 결과를 D5에 aggregate | 금지 |
+| LangSmith | trace metadata와 QA 승인·benchmark 통과 feedback hint | 금지 |
+| Notion | CEO projection·audit·retention 대상 | 금지 |
+| Hermes logs | bounded timing/error-class 관측 | 금지 |
+| Hermes `MEMORY.md`/`USER.md` | 프로필 로컬 대화 보조 기억 | CEO 운영 메모리의 정본 아님 |
+
+따라서 “스스로 학습”은 모델 가중치 재학습이나 시장 사실의 영구 복사가 아니다.
+신선한 원천 데이터가 항상 우선이고, 반복되는 workflow의 구조적 패턴만 자동
+축적한다. 코드·Profile·Skill 변경은 memory가 직접 수행하지 않으며, LangSmith의
+QA 승인 및 benchmark 통과 feedback과 기존 evolution governance를 거쳐야 한다.
+메모리 hint는 주문 제출, Risk 승인, 원장 수정, QA 종결, 승격 권한을 갖지 않는다.
+
+검증 명령:
+
+```bash
+python -m pytest -q tests/orchestration/test_experience_bank.py \
+  tests/api/test_ceo_d5_wiring.py tests/orchestration/test_skill_contract.py
+```
+
+### 5.4 Discord/Web
 
 Discord gateway는 BFF ingress만 호출하고, CEO 최종 답변과 부서 진행 projection은
 기존 thread/message correlation을 사용한다. mirror event의 QA는 `evaluation`

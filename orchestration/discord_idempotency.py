@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _DB_FILENAME = "discord_message_recovery.db"
 _RETENTION = timedelta(days=30)
 _ACTIVE_LEASE = timedelta(minutes=30)
+_INBOUND_TERMINAL_STATES = frozenset({"COMPLETED", "EXPIRED"})
 
 
 def canonical_discord_dedup_key(
@@ -245,7 +246,7 @@ class DiscordIdempotencyStore:
 
     @staticmethod
     def _is_active(state: str, updated_at: str | None) -> bool:
-        if state == "COMPLETED":
+        if state in _INBOUND_TERMINAL_STATES:
             return True
         if state not in {"RECEIVED", "PROCESSING"}:
             return False
@@ -286,9 +287,9 @@ class DiscordIdempotencyStore:
                         dedup_hit=True,
                         state=state,
                     )
-                # FAILED is retryable, but not unbounded.  The Discord
-                # gateway's own recovery policy remains responsible for when
-                # a failed event is presented again.
+                # FAILED is retryable, but not unbounded. EXPIRED is handled
+                # by _is_active above and is never replayed: it is reserved
+                # for an audited stale lease with no delivery evidence.
                 attempts = int(row[1] or 0)
                 if attempts >= 3:
                     return ClaimResult(admitted=False, dedup_hit=True, state=state)
@@ -337,7 +338,7 @@ class DiscordIdempotencyStore:
         return result
 
     def mark_inbound(self, dedup_key: str, state: str, profile: str) -> None:
-        if state not in {"RECEIVED", "PROCESSING", "COMPLETED", "FAILED"}:
+        if state not in {"RECEIVED", "PROCESSING", "COMPLETED", "FAILED", "EXPIRED"}:
             raise ValueError(f"invalid inbound state: {state}")
         now = self._now()
 
@@ -349,6 +350,79 @@ class DiscordIdempotencyStore:
             )
 
         self._run(operation)
+
+    def reconcile_stale_inbound(
+        self,
+        *,
+        profile: str | None = None,
+        older_than: timedelta = _ACTIVE_LEASE,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Close only stale inbound leases with exact local evidence.
+
+        This is the one reconciliation boundary for historical gateway rows.
+        A matching completed outbound row is the only evidence that permits a
+        ``COMPLETED`` repair. Every other stale ``PROCESSING`` row becomes
+        ``EXPIRED`` and is permanently excluded from replay. Active rows,
+        malformed timestamps, and rows outside the requested profile are left
+        untouched. The whole decision runs under the same SQLite write lock as
+        normal claims, so a live delivery cannot be converted underneath it.
+        """
+
+        if older_than.total_seconds() <= 0:
+            raise ValueError("older_than must be positive")
+        observed_at = now or datetime.now(timezone.utc)
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+
+        def operation(conn: sqlite3.Connection) -> dict[str, int]:
+            query = (
+                "SELECT dedup_key, profile, updated_at "
+                "FROM discord_idempotency_inbound "
+                "WHERE state='PROCESSING'"
+            )
+            parameters: list[str] = []
+            if profile:
+                query += " AND profile=?"
+                parameters.append(profile)
+            rows = conn.execute(query, parameters).fetchall()
+            result = {"scanned": 0, "completed": 0, "expired": 0, "skipped": 0}
+            for row in rows:
+                try:
+                    updated_at = datetime.fromisoformat(str(row[2]))
+                except (TypeError, ValueError):
+                    result["skipped"] += 1
+                    continue
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+                if observed_at - updated_at <= older_than:
+                    result["skipped"] += 1
+                    continue
+
+                result["scanned"] += 1
+                has_completed_delivery = conn.execute(
+                    "SELECT 1 FROM discord_idempotency_outbound "
+                    "WHERE profile=? AND dedup_key=? AND state='COMPLETED' LIMIT 1",
+                    (str(row[1]), str(row[0])),
+                ).fetchone()
+                next_state = "COMPLETED" if has_completed_delivery else "EXPIRED"
+                updated = conn.execute(
+                    "UPDATE discord_idempotency_inbound SET state=?, updated_at=? "
+                    "WHERE profile=? AND dedup_key=? AND state='PROCESSING'",
+                    (
+                        next_state,
+                        observed_at.isoformat(),
+                        str(row[1]),
+                        str(row[0]),
+                    ),
+                ).rowcount
+                if updated != 1:
+                    result["skipped"] += 1
+                else:
+                    result["completed" if next_state == "COMPLETED" else "expired"] += 1
+            return result
+
+        return self._run(operation)
 
     def inbound_key_for_message(self, message_id: str, profile: str) -> str | None:
         def operation(conn: sqlite3.Connection) -> str | None:

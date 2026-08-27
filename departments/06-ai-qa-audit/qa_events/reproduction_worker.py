@@ -16,10 +16,10 @@ import os
 import socket
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
-
+from typing import Any
 
 _QA_DIR = Path(__file__).resolve().parents[1]
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -41,7 +41,6 @@ from intraday_experiment_runner import (  # noqa: E402
     reproduce_forward_confirmation,
 )
 from intraday_trial_ledger import stable_fingerprint  # noqa: E402
-
 
 WORKER_VERSION = "qa-forward-reproduction-worker-v1"
 DEFAULT_LEASE_SECONDS = 7_200

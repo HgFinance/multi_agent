@@ -10,13 +10,12 @@ import yaml
 from orchestration.skill_contract import (
     AMBIGUOUS_CUSTOM_SKILLS,
     PENDING_SOURCE_SKILLS,
-    CanonicalSkillError,
     SKILL_OWNER_BY_NAME,
+    CanonicalSkillError,
     resolve_canonical_skill,
     validate_required_skills,
     validate_skill_for_profile,
 )
-
 
 ROOT = Path(__file__).resolve().parents[2]
 REQUIRED_PROFILES = (
@@ -57,6 +56,7 @@ class SharedSkillContractTest(unittest.TestCase):
             "autonomous-quant-research",
             "financial-portfolio-assessment",
             "hermes-multi-agent-pipelines",
+            "hermes-memory",
             "methodology-scout",
         ):
             with self.subTest(skill=skill):
@@ -67,8 +67,9 @@ class SharedSkillContractTest(unittest.TestCase):
 
     def test_owner_contract_rejects_wrong_profile_skill_pairs(self) -> None:
         valid = (
+            ("hermes-memory", "ceo-agent"),
             ("methodology-scout", "research-department"),
-            ("autonomous-quant-research", "research-department"),
+            ("autonomous-quant-research", "strategy-hermes"),
             ("agentic-rag", "risk-management"),
             ("financial-portfolio-assessment", "qa-department"),
         )
@@ -80,15 +81,17 @@ class SharedSkillContractTest(unittest.TestCase):
                 )
 
         invalid = (
+            ("hermes-memory", "research-department"),
             ("methodology-scout", "quant-backtest-department"),
-            ("autonomous-quant-research", "quant-backtest-department"),
+            ("autonomous-quant-research", "research-department"),
             ("agentic-rag", "ceo-agent"),
             ("financial-portfolio-assessment", "trading-department"),
         )
         for skill, profile in invalid:
-            with self.subTest(skill=skill, profile=profile):
-                with self.assertRaises(CanonicalSkillError):
-                    validate_skill_for_profile(skill, profile, root=ROOT / "skills")
+            with self.subTest(skill=skill, profile=profile), self.assertRaises(
+                CanonicalSkillError
+            ):
+                validate_skill_for_profile(skill, profile, root=ROOT / "skills")
 
     def test_ceo_does_not_own_specialist_financial_skills(self) -> None:
         for skill in (
@@ -105,9 +108,8 @@ class SharedSkillContractTest(unittest.TestCase):
             {"financial-research-memos", "financial-risk-research"},
         )
         for skill in PENDING_SOURCE_SKILLS:
-            with self.subTest(skill=skill):
-                with self.assertRaises(CanonicalSkillError):
-                    resolve_canonical_skill(skill, root=ROOT / "skills")
+            with self.subTest(skill=skill), self.assertRaises(CanonicalSkillError):
+                resolve_canonical_skill(skill, root=ROOT / "skills")
 
         for skill in ("financial-equity-research", "equity-quant-assessment"):
             with self.subTest(skill=skill):

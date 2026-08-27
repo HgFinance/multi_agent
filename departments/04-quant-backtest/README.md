@@ -83,7 +83,8 @@ walk-forward·DSR·PBO·국면·릴리스 관문)은 **이미 `pipeline/`의 결
 | `pipeline/experiment_orchestrator.py` | 데이터·전략 가능성 Gate와 상태 전이 | 자체 점검 3개 통과, 실제 Experiment 4개 |
 | `hermes/` | 검증 실험실 Profile과 독립 조회 프로필 | 사용 중 |
 
-> 새 전략 생성은 `departments/01-research/autonomous/`가 소유합니다. 이 README의
+> 새 전략 생성은 **Strategy Hermes**가 소유합니다. 구현 위치인
+> `departments/01-research/autonomous/`는 저장소 호환성을 위한 물리 경로일 뿐입니다. 이 README의
 > `ExperimentProposalV1`·factory 관련 표와 기록은 기존 DB 실행 경로의 보존 설명이며, 새
 > 파이프라인의 생성/제안 표면이 아닙니다.
 

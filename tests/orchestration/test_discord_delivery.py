@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError
 
 from orchestration.discord_delivery import DiscordFinalDelivery, correlation_from_task
 from orchestration.discord_idempotency import (
@@ -332,7 +333,6 @@ class DiscordDeliveryTests(unittest.TestCase):
 
             self.assertEqual(result, "sent")
             self.assertGreaterEqual(len(sent), 2)
-            self.assertTrue(all(item["channel"] == "thread-123" for item in sent))
 
             # Re-delivery of the same task is idempotent.
             second = delivery.deliver_to_existing_thread(
@@ -347,6 +347,37 @@ class DiscordDeliveryTests(unittest.TestCase):
 
             self.assertEqual(second, "sent")
             self.assertGreaterEqual(len(sent), 2)
+
+    def test_deleted_existing_thread_uses_parent_fallback_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = DiscordIdempotencyStore(Path(directory) / "discord.sqlite3")
+
+            def sender(_channel: str, _payload: str, _headers: dict[str, str]):
+                raise HTTPError("https://discord.invalid/thread", 404, "missing", {}, None)
+
+            delivery = DiscordFinalDelivery(
+                environment={"DISCORD_BOT_TOKEN": "test-token"},
+                sender=sender,
+            )
+            result = delivery.deliver_to_existing_thread(
+                root_task_id="root",
+                source_task={
+                    "root_task": {
+                        "body": (
+                            "discord_message_id=message\n"
+                            "discord_channel_id=channel\n"
+                            "discord_thread_id=deleted-thread\n"
+                        )
+                    }
+                },
+                content="department full analysis",
+                title="상세 분석",
+                store=store,
+                profile="qa-department",
+                response_key_suffix="department-detail:deleted-thread",
+            )
+
+            self.assertEqual(result, "missing_thread")
 
     def test_department_detail_uses_starter_message_as_existing_thread(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

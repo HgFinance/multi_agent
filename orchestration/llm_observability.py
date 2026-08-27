@@ -81,6 +81,13 @@ def _root_run_id_from_trace_context(trace_context: str | None) -> str:
     return match.group("run_id") if match else ""
 
 
+def _root_dotted_order_from_trace_context(trace_context: str | None) -> str:
+    """Return the original LangSmith dotted order when the context is valid."""
+
+    value = str(trace_context or "").strip()
+    return value if _LANGSMITH_ROOT_CONTEXT_RE.fullmatch(value) else ""
+
+
 def begin_worker_metric(
     *, worker_id: str, role: str, stage: str, model_name: str
 ) -> contextvars.Token:
@@ -655,7 +662,7 @@ def start_root_trace(
 
 
 def close_root_trace(
-    trace_context: str | None,
+    trace_context: str | None = None,
     *,
     run_id: str | None = None,
     request_id: str | None = None,
@@ -669,9 +676,9 @@ def close_root_trace(
     terminal_metadata: Mapping[str, Any] | None = None,
     semantic_qa: Mapping[str, Any] | None = None,
 ) -> bool:
-    """Close a previously posted root run through its distributed context."""
+    """Close a root run through the single v2 update boundary."""
 
-    if not trace_context or not langsmith_enabled():
+    if (not trace_context and not run_id) or not langsmith_enabled():
         return False
     try:
         from langsmith import RunTree
@@ -769,21 +776,23 @@ def close_root_trace(
             )
             if metadata.get(key) not in (None, "")
         }
-        client.update_run(
-            run_id=resolved_run_id,
-            end_time=datetime.now(timezone.utc),
-            error=str(error_class) if error_class else None,
-            outputs=terminal_outputs,
-            extra={"metadata": metadata},
-        )
+        dotted_order = _root_dotted_order_from_trace_context(trace_context)
+        update_kwargs: dict[str, Any] = {
+            "run_id": resolved_run_id,
+            "trace_id": resolved_run_id,
+            "end_time": datetime.now(timezone.utc),
+            "error": str(error_class) if error_class else None,
+            "outputs": terminal_outputs,
+            "extra": {"metadata": metadata},
+        }
+        if dotted_order:
+            update_kwargs["dotted_order"] = dotted_order
+        client.update_run(**update_kwargs)
         return True
     except Exception as exc:  # noqa: BLE001 - root finalization is fail-open.
-        # LangSmith rejects a second PATCH for the same run with a 409 after
-        # the first PATCH has already been accepted.  Supervisor reconciliation
-        # can legitimately reach the same terminal root through both the live
-        # event and its durable recovery pass, so this provider response is an
-        # idempotent success rather than an unconfirmed trace.
-        # LangSmith must not delay or fail a durable finalization.
+        # The live path and restart reconciliation can both reach the same
+        # terminal root. LangSmith rejects the repeated patch, but the durable
+        # terminal evidence already makes this an idempotent success.
         return "duplicate run update requests" in str(exc).casefold()
 
 

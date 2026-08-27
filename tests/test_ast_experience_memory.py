@@ -105,10 +105,12 @@ def test_persist_can_return_actual_routed_ids_without_breaking_old_callers():
     assert lead_ids == [lead_intake.revision_lead_id(source_id, revised)]
     assert api_conn.commits == 1
 
-    mcp_source = (ROOT / "departments" / "01-research" / "api" /
-                  "mcp_server.py").read_text(encoding="utf-8")
-    assert '"lead_ids": lead_ids' in mcp_source
-    assert "return_ids=True" in mcp_source
+    # The retired factory MCP surface must not be the handoff boundary anymore.
+    # Outcome-conditioned evolution owns the validated revision IDs now.
+    evolution_source = (ROOT / "departments" / "01-research" / "factory" /
+                        "evolution_candidate_intake.py").read_text(encoding="utf-8")
+    assert '"lead_ids": lead_ids' in evolution_source
+    assert "return_ids=True" in evolution_source
 
 
 def test_persist_rejects_a_truncated_revision_digest_collision(monkeypatch):

@@ -6,4 +6,4 @@ keep this shim so those script-style entry points and package imports share
 one implementation.
 """
 
-from audit.repository import *
+from audit.repository import *  # noqa: F403 - compatibility facade for legacy imports

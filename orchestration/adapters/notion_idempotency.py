@@ -108,6 +108,7 @@ class _Claim(AbstractContextManager["_Claim"]):
     def _acquire_distributed(self) -> None:
         assert self.redis is not None
         deadline = time.monotonic() + self.owner.wait_seconds
+        poll_attempt = 0
         while True:
             current = self.redis.get(self.key)
             if current:
@@ -120,20 +121,6 @@ class _Claim(AbstractContextManager["_Claim"]):
                     self.page_id = str(state.get("page_id") or "") or None
                     return
 
-                # The owner may have created the page but lost the response
-                # before writing the done marker.  Re-query before waiting.
-                found = self.lookup()
-                found_id = _page_id(found)
-                if _has_existing(found):
-                    self._mark_done(found_id)
-                    self.duplicate = True
-                    self.page_id = found_id
-                    return
-                if time.monotonic() >= deadline:
-                    raise NotionIdempotencyError("notion_projection_claim_in_progress")
-                time.sleep(0.1)
-                continue
-
             if self.redis.set(
                 self.key,
                 self.token,
@@ -143,8 +130,26 @@ class _Claim(AbstractContextManager["_Claim"]):
                 self._redis_owned = True
                 return
             if time.monotonic() >= deadline:
-                raise NotionIdempotencyError("notion_projection_claim_unavailable")
-            time.sleep(0.05)
+                # A creator can finish the page and lose its completion marker
+                # (or Redis can briefly be unavailable).  One final lookup
+                # preserves duplicate protection without polling Notion on
+                # every Redis tick.
+                found = self.lookup()
+                found_id = _page_id(found)
+                if _has_existing(found):
+                    self._mark_done(found_id)
+                    self.duplicate = True
+                    self.page_id = found_id
+                    return
+                raise NotionIdempotencyError(
+                    "notion_projection_claim_in_progress"
+                    if current
+                    else "notion_projection_claim_unavailable"
+                )
+
+            delay = min(0.5, 0.05 * (2**min(poll_attempt, 4)))
+            time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+            poll_attempt += 1
 
     def _mark_done(self, page_id: str | None) -> None:
         if self.redis is None:

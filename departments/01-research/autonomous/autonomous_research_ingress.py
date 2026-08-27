@@ -46,6 +46,14 @@ def _text(value: object, name: str, *, maximum: int) -> str:
     return result
 
 
+def _optional_text(value: object, name: str, *, maximum: int) -> str | None:
+    """Validate optional correlation metadata without inventing a value."""
+
+    if value is None or not str(value).strip():
+        return None
+    return _text(value, name, maximum=maximum)
+
+
 def _constraints(value: object) -> list[str]:
     if value is None:
         return []
@@ -73,6 +81,24 @@ def normalize_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         "actor_id": _text(payload.get("actor_id") or "anonymous", "actor_id", maximum=256),
         "source": _text(payload.get("source") or "web", "source", maximum=64),
         "created_at": _text(payload.get("created_at") or utc_now(), "created_at", maximum=64),
+        # Discord delivery coordinates are carried into the lab as immutable
+        # ingress metadata. They are not research inputs and are never exposed
+        # to Hermes as an authority surface.
+        "source_message_id": _optional_text(
+            payload.get("source_message_id"), "source_message_id", maximum=512
+        ),
+        "discord_channel_id": _optional_text(
+            payload.get("discord_channel_id"), "discord_channel_id", maximum=128
+        ),
+        "discord_message_id": _optional_text(
+            payload.get("discord_message_id"), "discord_message_id", maximum=128
+        ),
+        "discord_guild_id": _optional_text(
+            payload.get("discord_guild_id"), "discord_guild_id", maximum=128
+        ),
+        "discord_thread_id": _optional_text(
+            payload.get("discord_thread_id"), "discord_thread_id", maximum=128
+        ),
     }
 
 
@@ -81,7 +107,11 @@ def request_fingerprint(payload: Mapping[str, Any]) -> tuple[Any, ...]:
         payload.get(key)
         if key != "constraints"
         else tuple(payload.get(key) or ())
-        for key in ("request_id", "goal", "universe", "horizon", "constraints", "actor_id", "source")
+        for key in (
+            "request_id", "goal", "universe", "horizon", "constraints", "actor_id", "source",
+            "source_message_id", "discord_channel_id", "discord_message_id",
+            "discord_guild_id", "discord_thread_id",
+        )
     )
 
 
@@ -136,6 +166,15 @@ class ResearchIntake:
         intake_path = self.intake_dir / f"{request_id}.json"
         lab_path = self.lab_path(request_id)
         with self._locked():
+            # BFF and Strategy Hermes intentionally run as different users
+            # while sharing this small file-backed IPC directory. Make the
+            # directory consumable by either side and manifests readable by
+            # the Hermes uid; the lab's private state remains mode 0600.
+            self.intake_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self.intake_dir.chmod(0o777)
+            except OSError:
+                pass
             existing_path = (
                 lab_path / "request.json"
                 if (lab_path / "request.json").exists()
@@ -151,6 +190,10 @@ class ResearchIntake:
                     )
                 return existing, False
             self._write_json(intake_path, normalized)
+            try:
+                intake_path.chmod(0o644)
+            except OSError:
+                pass
         return normalized, True
 
     def pending_ids(self) -> tuple[str, ...]:
@@ -219,9 +262,18 @@ class ResearchIntake:
         error = self._read_json(error_path) if error_path.exists() else None
         plan_count = len(tuple((lab_path / "plans").glob("*.json"))) if lab_path.exists() else 0
         result_count = len(tuple((lab_path / "results").glob("*.json"))) if lab_path.exists() else 0
+        latest_result: dict[str, Any] | None = None
+        result_paths = sorted((lab_path / "results").glob("*.json")) if lab_path.exists() else []
+        if result_paths:
+            try:
+                latest_result = self._read_json(result_paths[-1])
+            except (OSError, json.JSONDecodeError, ValueError):
+                latest_result = None
         if candidate.exists():
             status = "CANDIDATE"
         elif error is not None:
+            status = "BLOCKED"
+        elif str((latest_result or {}).get("status") or "").upper() in {"BLOCKED", "FAILED"}:
             status = "BLOCKED"
         elif not (lab_path / "objective.json").exists():
             status = "QUEUED"
@@ -243,7 +295,8 @@ class ResearchIntake:
             "candidate_available": candidate.exists(),
             "updated_at": state.get("updated_at") or request["created_at"],
             "actor_id": request["actor_id"],
-            "error": error.get("error") if error else None,
+            "error": (error.get("error") if error else None)
+            or ((latest_result or {}).get("failure_reason") if latest_result else None),
         }
 
 
@@ -251,9 +304,14 @@ def looks_like_strategy_research(text: str) -> bool:
     """Conservative UI classifier for routing strategy-research chat turns."""
 
     value = str(text or "").casefold()
-    nouns = r"(?:전략|알파|시그널|백테스트|트레이딩\s*전략|quant|backtest)"
-    verbs = r"(?:생성|만들|개발|연구|검증|발굴|찾아|설계|generate|create|build|develop|research|validate|discover|find|design)"
-    return bool(re.search(rf"{nouns}.*{verbs}|{verbs}.*{nouns}", value, re.IGNORECASE))
+    # ``백테스트해줘`` is itself a research action in Korean. The old
+    # classifier treated 백테스트 as a noun and required a second verb such
+    # as 생성/연구, so an explicit "전략 ... 백테스트" could fall through to
+    # the CEO/order lane. Keep the boundary conservative: a strategy/alpha/
+    # signal noun must still be paired with a research action.
+    nouns = r"(?:전략|알파|시그널|트레이딩\s*전략|strategy|alpha|signal|quant)"
+    actions = r"(?:생성|만들|개발|연구|검증|발굴|찾아|설계|백테스트|테스트|시뮬레이션|평가|generate|create|build|develop|research|validate|discover|find|design|backtest)"
+    return bool(re.search(rf"{nouns}.*{actions}|{actions}.*{nouns}", value, re.IGNORECASE))
 
 
 __all__ = [

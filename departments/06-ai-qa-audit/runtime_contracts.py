@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
 
 _ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
 _HASH_RE = r"^sha256:[0-9a-f]{64}$"
@@ -117,7 +117,7 @@ class AgentTaskContext(ContractModel):
         return value
 
     @model_validator(mode="after")
-    def timestamps_are_aware(self) -> "AgentTaskContext":
+    def timestamps_are_aware(self) -> AgentTaskContext:
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("created_at and updated_at must be timezone-aware")
         if self.updated_at < self.created_at:
@@ -198,7 +198,7 @@ class WorkerContext(ContractModel):
         return value
 
     @model_validator(mode="after")
-    def timestamps_are_aware(self) -> "WorkerContext":
+    def timestamps_are_aware(self) -> WorkerContext:
         if self.created_at.tzinfo is None:
             raise ValueError("created_at must be timezone-aware")
         if self.completed_at is not None and self.completed_at < self.created_at:

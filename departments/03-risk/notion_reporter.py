@@ -18,8 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,9 +30,18 @@ from reporting import notion_rich_text_chunks
 from departments.notion_markdown import markdown_to_notion_blocks
 from departments.risk_notion_schema import RISK_PROPERTY_NAMES, risk_property_name
 from orchestration.adapters.notion_idempotency import NotionIdempotency
+from orchestration.adapters.notion_http import NotionHttpError, request_json
+from orchestration.adapters.notion_schema_cache import BoundedNotionSchemaCache
 
 _DEV_VARS = Path(__file__).resolve().parent.parent.parent / "ai-office" / ".dev.vars"
 _NOTION_VERSION = "2022-06-28"
+_SCHEMA_CACHE = BoundedNotionSchemaCache(ttl_seconds=60.0, max_entries=8)
+
+
+class _SchemaReadError(RuntimeError):
+    def __init__(self, status: int) -> None:
+        super().__init__(f"Notion 스키마 조회 실패: HTTP {status}")
+        self.status = status
 
 
 def _load_dev_vars() -> dict:
@@ -53,37 +61,23 @@ def _load_dev_vars() -> dict:
 
 
 def _post(path: str, body: dict, token: str) -> tuple[int, dict]:
-    req = urllib.request.Request(
-        f"https://api.notion.com/v1/{path}",
-        data=json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Notion-Version": _NOTION_VERSION,
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status, json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
+        return 200, dict(
+            request_json(
+                "POST", path, token, body=body, version=_NOTION_VERSION
+            )
+        )
+    except NotionHttpError as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc)}
+        return exc.status or 599, detail
 
 
 def _get(path: str, token: str) -> tuple[int, dict]:
-    req = urllib.request.Request(
-        f"https://api.notion.com/v1/{path}",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Notion-Version": _NOTION_VERSION,
-        },
-        method="GET",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status, json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
+        return 200, dict(request_json("GET", path, token, version=_NOTION_VERSION))
+    except NotionHttpError as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc)}
+        return exc.status or 599, detail
 
 
 def _rich_text(s) -> dict:
@@ -115,16 +109,23 @@ def upload_case(
             "reason": "NOTION_TOKEN/NOTION_RISK_DB 미설정 - 업로드 생략",
         }
 
-    try:
+    schema_key = f"{db_id}:{sha256(str(token).encode()).hexdigest()[:16]}"
+
+    def load_schema():
         schema_status, schema_body = _get(f"databases/{db_id}", token)
-    except Exception as exc:  # noqa: BLE001 - Notion remains a non-binding projection.
-        return {"ok": False, "reason": f"Notion 스키마 조회 예외: {exc}"}
-    if schema_status != 200:
+        if schema_status != 200:
+            raise _SchemaReadError(schema_status)
+        return schema_body.get("properties") or {}
+
+    try:
+        properties_schema, _ = _SCHEMA_CACHE.get(schema_key, load_schema)
+    except _SchemaReadError as exc:
         return {
             "ok": False,
-            "reason": f"Notion 스키마 조회 실패: HTTP {schema_status}",
+            "reason": f"Notion 스키마 조회 실패: HTTP {exc.status}",
         }
-    properties_schema = schema_body.get("properties") or {}
+    except Exception as exc:  # noqa: BLE001 - Notion remains a non-binding projection.
+        return {"ok": False, "reason": f"Notion 스키마 조회 예외: {exc}"}
 
     def prop(field: str) -> str:
         return risk_property_name(field, properties_schema)

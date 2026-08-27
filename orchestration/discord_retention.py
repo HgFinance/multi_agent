@@ -23,9 +23,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from typing import Any
 
 LOG = logging.getLogger(__name__)
 DISCORD_API = "https://discord.com/api/v10"
@@ -143,7 +144,7 @@ class DiscordRetentionWorker:
         return ""
 
     @classmethod
-    def from_env(cls) -> "DiscordRetentionWorker":
+    def from_env(cls) -> DiscordRetentionWorker:
         return cls()
 
     def _redis(self) -> Any:
@@ -209,6 +210,19 @@ class DiscordRetentionWorker:
                     raw = response.read()
                 return json.loads(raw) if raw else {}
             raise
+
+    def delete_message(self, channel_id: str, message_id: str) -> None:
+        """Delete one bot-owned message through the shared Discord client."""
+
+        if not channel_id.strip() or not message_id.strip():
+            raise ValueError("discord_message_identity_missing")
+        self._discord_request(
+            "DELETE",
+            "channels/{}/messages/{}".format(
+                urllib.parse.quote(channel_id.strip(), safe=""),
+                urllib.parse.quote(message_id.strip(), safe=""),
+            ),
+        )
 
     def _load_profile_tokens(self) -> None:
         if self._profile_tokens_loaded:

@@ -17,6 +17,8 @@ from lab import ResearchLab
 from models import ExperimentResult, Objective
 from result import decision_for, parse_result
 import runner
+import artifact_validator
+import hermes_agent
 
 
 def _result(plan_id: str, **overrides: object) -> ExperimentResult:
@@ -107,6 +109,86 @@ def test_hermes_missing_binary_is_recordable_failure(tmp_path: Path, monkeypatch
 
     assert run.status == "FAILED"
     assert Path(run.output_path).read_text(encoding="utf-8").startswith("Hermes binary not found")
+
+
+def test_strategy_hermes_runs_directly_with_codex_high_and_no_plan_delegate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        temporary_root = Path(kwargs["env"]["STRATEGY_MARKET_DATA_DIR"])
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        (temporary_root / "raw.json").write_text("temporary", encoding="utf-8")
+        return type("Completed", (), {"stdout": "ok", "stderr": "", "returncode": 0})()
+
+    monkeypatch.setattr(hermes_agent.subprocess, "run", fake_run)
+    agent = hermes_agent.StrategyHermesAgent(repo_root=tmp_path, lab_root=tmp_path / "lab")
+
+    run = agent.run({"plan_id": "ignored-compatibility-input"})
+    command = captured["command"]
+    assert run.status == "COMPLETED"
+    assert isinstance(command, list)
+    assert "--provider" in command and command[command.index("--provider") + 1] == "openai-codex"
+    assert "--model" in command and command[command.index("--model") + 1] == "gpt-5.6-luna"
+    assert "--reasoning" in command and command[command.index("--reasoning") + 1] == "high"
+    assert "--in" in command and command[command.index("--in") + 1] == str((tmp_path / "lab").resolve())
+    assert "quant-hermes" in command[-1]
+    assert "research-hermes" in command[-1]
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert environment["QUANT_WORKSPACE"] == str((tmp_path / "lab" / "experiments").resolve())
+    temporary_root = Path(environment["STRATEGY_MARKET_DATA_DIR"])
+    assert str(temporary_root).startswith("/tmp/")
+    assert not temporary_root.exists()
+    assert environment["LS_DATA_ACCESS_MODE"] == "readonly"
+    assert environment["LS_ALLOWED_TR_CODES"].split(",") == [
+        "t1665", "t8410", "t8411", "t8412", "t8451", "t8452", "t8453",
+    ]
+
+
+def test_artifact_validator_accepts_hermes_compact_plan_shapes(tmp_path: Path) -> None:
+    lab = ResearchLab(tmp_path / "lab")
+    lab.initialize(Objective(goal="Test direct Hermes artifacts", universe="stocks"))
+    (lab.hypotheses_dir / "h1.json").write_text(json.dumps({
+        "hypothesis_id": "h1",
+        "statement": "A testable effect exists.",
+        "mechanism": "A measurable mechanism.",
+        "expected_behavior": "It survives costs.",
+        "falsifiers": ["No effect"],
+        "dimensions": ["costs", "regimes"],
+    }), encoding="utf-8")
+    (lab.plans_dir / "p1.json").write_text(json.dumps({
+        "plan_id": "p1",
+        "hypothesis_id": "h1",
+        "objective": "Measure the effect.",
+        "method": {"primary": "backtest"},
+        "data_requirements": {"source": "local"},
+        "splits": {"development": "historical"},
+        "cost_model": {"fees_bps": 5},
+        "seed": 7,
+        "signature": "compact-signature-v1",
+        "preregistration_hash": "hash-p1",
+        "status": "PREREGISTERED",
+    }), encoding="utf-8")
+    (lab.results_dir / "p1.json").write_text(json.dumps({
+        "plan_id": "p1",
+        "preregistration_hash": "hash-p1",
+        "status": "BLOCKED",
+        "cost_included": True,
+        "oos_evaluated": False,
+        "leakage_detected": False,
+        "robustness": {"data_integrity": True},
+        "metrics": {},
+        "failure_reason": "No suitable data.",
+    }), encoding="utf-8")
+
+    decisions = artifact_validator.sync_agent_artifacts(lab)
+
+    assert decisions[0]["decision"] == "PAUSE"
+    assert lab.plans()[0]["signature"] == {"signature": "compact-signature-v1"}
 
 
 def test_runner_requires_registered_plan_and_publishes_candidate(tmp_path: Path) -> None:

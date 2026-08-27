@@ -3,6 +3,10 @@ name: autonomous-quant-research
 description: "Run or review persistent, evidence-gated quantitative strategy research from a natural-language objective, including resource discovery, competing hypotheses, adversarial validation, failure memory and lineage. Use for autonomous strategy research; do not use for ordinary trade advice or live order execution."
 ---
 
+Owner: **Strategy Hermes**. The Research HQ profile may provide evidence and
+market-data contracts, but it does not invoke this skill or execute the
+strategy-research loop.
+
 # Autonomous Quant Research
 
 Use this skill when a research objective must become a reproducible strategy candidate. The objective is generalisation under realistic costs, not a high backtest score.
@@ -44,6 +48,24 @@ only an intake manifest; the dedicated `strategy-hermes` service creates
 `/ui/strategy-research/requests/<request_id>` for `QUEUED`, `RESEARCHING`, `BLOCKED` or
 `CANDIDATE`. A `request_id` is the research-session identity: replaying it is idempotent, while
 a new strategy objective must receive a new identifier.
+
+## On-demand LS market data
+
+Strategy Hermes receives a read-only LS REST credential boundary for one research turn. For
+market data use only `departments/01-research/autonomous/ls_market_data.py` and its allow-list:
+`t1665`, `t8410`, `t8411`, `t8412`, `t8451`, `t8452`, `t8453` on `/stock/chart`. Select the
+integrated `t8451/t8452/t8453` family when KRX+NXT coverage is required; use the non-integrated
+family only when that distinction is part of the hypothesis. Query the smallest explicit symbol
+set and date range that can answer the preregistered question, and respect the one-request-per-
+second and 500-row limits through the adapter.
+
+Keep returned rows in memory. If a dataframe needs a file, use `write_temp_json` and write only
+below `$STRATEGY_MARKET_DATA_DIR`; that directory is unique to the Hermes turn and is deleted
+when the process exits. Persist only the code, result, lineage, and non-sensitive `DataReceipt`
+(TR, range, row count and hash). Never read or write `quant-data`, the legacy discovery cache,
+collector backfill tables, market/research databases, or a persistent lab path for raw rows. Do
+not print raw rows or credentials. A failed or incomplete LS response is `BLOCKED`, not an
+empty dataset or a proxy substitution.
 
 Do not import or recreate the retired strategy-factory contracts, Kanban board, factory bridge, factory runtime contract, or factory database as a shortcut. The file-backed lab is the source of research-session state; external systems may provide data or compute but may not silently rewrite evidence.
 

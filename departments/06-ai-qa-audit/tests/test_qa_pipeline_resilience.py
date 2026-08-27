@@ -176,4 +176,6 @@ def test_markdown_report_contains_metrics_and_observability():
     assert "a\\|b" in report
     assert "line one<br>line two" in report
     assert "## 평가 지표" in report
-    assert "## LangSmith / HR 관측성 전달" in report
+    assert "## 관측 기록" in report
+    assert "qa_decision_id" not in report
+    assert "evidence_qa_engine.py" not in report

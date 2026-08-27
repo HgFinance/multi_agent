@@ -31,12 +31,16 @@
                 └─────────────┘                      ┏━━━━━━━━━━━━━┓   ┌──────────┐
                                                      ┃엔진1: kanban- ┃◀──│ BFF :8001│
    ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓        ┃  dispatcher  ┃   │(main: portfolio-bff│
-   ┃엔진2: factory-autopilot (15분 주기)        ┃───────▶┃(카드 실행 엔진)┃   │ 로컬: ui-bff)└────┘
+   ┃엔진2: strategy-hermes (opt-in)            ┃        ┃(카드 실행 엔진)┃   │ 로컬: ui-bff)└────┘
    ┃ 브리핑→기획→Gate0→가설→발주→실험→판정→환류 ┃        ┗━━━━━━━━━━━━━┛
    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ```
 
-움직이는 것은 둘뿐이다. **kanban-dispatcher** 가 카드를 집어 에이전트를 띄우고(사용자 질의 경로), **factory-autopilot** 이 15분마다 전략 실험 한 주기를 돌린다(전략 연구 경로). 나머지 컨테이너는 전부 이 둘에게 데이터·조회면·판정을 대주는 조연이다.
+현행 일반 부서 카드 질의의 실행 엔진은 **kanban-dispatcher**다. 전략 생성·백테스트
+질의의 실행 엔진은 예외적으로 **직접 실행되는 `strategy-hermes`**이며,
+`strategy-hermes`가 opt-in 프로파일로 파일 기반 연구실을 만든다. 과거
+`factory-autopilot` 주기와 전용 실험 워커는 현재 기동 경로가 아니다. 나머지
+컨테이너는 이 두 경로에 데이터·조회면·판정을 제공한다.
 
 ---
 
@@ -106,13 +110,19 @@
 | `kanban-dispatcher` | **카드를 실제로 돌리는 유일한 엔진.** 60초 tick 으로 ready 카드를 집어 자기 컨테이너 안에서 `profiles/<assignee>` 를 HERMES_HOME 삼아 에이전트 subprocess 를 띄운다. 8개 프로필 전체를 보는 유일한 고권한 컨테이너 — 포트 절대 미게시. **이게 죽으면 카드는 ready 로 영원히 앉는다** |
 | `ceo-kanban-supervisor` | CEO 종결 감시자. `kanban watch` 로 종결 이벤트를 구독해, primary 자식이 다 끝나면 CEO 응답 카드를 먼저 만든다. CEO 응답 전달이 확인된 뒤 동일 입력·응답을 담은 QA post-response audit 카드를 별도 생성한다. 이벤트당 최대 1개 bounded action, wakeup 은 root comment 로 durable 기록 |
 
-### 🏭 전략 공장 (3)
+### 🏭 레거시 전략 공장 (보존 코드, 현재 미기동)
 
 | 서비스 | 하는 일 |
 |---|---|
-| `factory-autopilot` | 공장 주기 엔진(**실효 15분** — 코드 기본 240분을 compose 가 15로 덮음). 수확→Gate0 승격→배분자 수 등록→발주→브리핑 카드→병목 개선 카드 |
-| `factory-experiment-worker` | 실험 큐(`quant.experiment_jobs`) 상주 소비자. 가설 하나를 백테스트+walk-forward 로 태우고, RUNNING 30분 스톨을 PROPOSED 로 회수 |
-| `card-watchdog` | 3분 주기. 죽은 부모(BLOCKED/FAILED/NO_ASSIGNEE) 밑에 갇힌 자식 카드를 "산출 없음"을 명시하고 풀어준다. 질의 카드 15분·공장 카드 1시간 기한 |
+| `factory-autopilot` | 과거 15분 주기 전략 공장. 전용 Compose 서비스는 제거됐으며, 보존 소스는 이관·감사 대상 |
+| `factory-experiment-worker` | 과거 `quant.experiment_jobs` 소비자. 전용 Compose 서비스는 제거됐으며, 새 연구 경로와 연결하지 않음 |
+| `strategy-hermes` | 현행 opt-in 전략 연구 경로. 직접 Hermes가 파일 기반 연구실과 `autonomous-quant-research` 계약을 사용. 논리 소유자는 Strategy Hermes이며 `01-research/autonomous`는 물리적 호환 위치 |
+
+### 🛡️ 운영 워치독 (1)
+
+| 서비스 | 하는 일 |
+|---|---|
+| `card-watchdog` | 현재 `Dockerfile.operations-runtime`에서 3분 주기로 고아 Kanban 카드를 안전하게 release/complete |
 
 ### ⚙️ 이벤트 소비 데몬 (6)
 

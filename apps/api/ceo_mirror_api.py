@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from hashlib import sha256
 import os
 import time
+from hashlib import sha256
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -163,6 +163,11 @@ def _strategy_query(request: CanonicalIngress) -> StrategyResearchAccepted:
         request_id=_strategy_request_id(request),
         actor_id=request.actor_id,
         source=request.source,
+        source_message_id=request.source_message_id,
+        discord_channel_id=request.discord_channel_id,
+        discord_message_id=request.discord_message_id,
+        discord_guild_id=request.discord_guild_id,
+        discord_thread_id=request.discord_thread_id,
     )
 
 

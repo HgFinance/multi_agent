@@ -22,6 +22,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -107,6 +108,10 @@ _SAFE_METADATA_KEYS = frozenset(
         "worker_id",
         "role",
         "status",
+        "terminal_status",
+        "terminal_reason",
+        "terminal_task_id",
+        "terminal_department",
         "error_code",
         "error_class",
         "http_status",
@@ -181,6 +186,10 @@ _TEXT_METADATA_KEYS = frozenset(
         "worker_id",
         "role",
         "status",
+        "terminal_status",
+        "terminal_reason",
+        "terminal_task_id",
+        "terminal_department",
         "error_code",
         "error_class",
         "provider",
@@ -367,6 +376,7 @@ class FeedbackConfig:
     metrics_window_seconds: int
     metrics_max_runs: int
     kanban_db_path: str | None = None
+    discord_retention_interval_seconds: float = 86_400.0
 
     @classmethod
     def from_env(cls) -> FeedbackConfig:
@@ -408,6 +418,12 @@ class FeedbackConfig:
             metrics_max_runs=_int("LANGSMITH_FEEDBACK_METRICS_MAX_RUNS", 100, 1, 100),
             kanban_db_path=os.getenv("LANGSMITH_FEEDBACK_KANBAN_DB_PATH", "").strip()
             or None,
+            discord_retention_interval_seconds=_float(
+                "LANGSMITH_FEEDBACK_DISCORD_RETENTION_INTERVAL_SECONDS",
+                86_400.0,
+                60.0,
+                604_800.0,
+            ),
         )
 
 
@@ -440,6 +456,20 @@ class EvaluationResult:
     finding_codes: tuple[str, ...]
     summaries: tuple[str, ...]
     metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class FeedbackDiscordRetentionSummary:
+    """Bounded cleanup result for QA feedback cards only."""
+
+    enabled: bool
+    available: bool
+    attempted: int = 0
+    deleted: int = 0
+    skipped_pending: int = 0
+    skipped_malformed: int = 0
+    failed: int = 0
+    error_code: str | None = None
 
 
 def observation_from_run(run: Any) -> TraceObservation:
@@ -479,13 +509,11 @@ def observation_from_run(run: Any) -> TraceObservation:
     start_time = getattr(run, "start_time", None)
     end_time = getattr(run, "end_time", None)
     if "latency_ms" not in metadata and start_time is not None and end_time is not None:
-        try:
+        with suppress(AttributeError, TypeError, ValueError):
             metadata["latency_ms"] = _bounded_int(
                 max(0.0, (end_time - start_time).total_seconds()) * 1_000,
                 maximum=3_600_000,
             )
-        except (AttributeError, TypeError, ValueError):
-            pass
     metadata.setdefault("raw_payloads_sent", False)
     return TraceObservation(
         source_run_id=_bounded_text(getattr(run, "id", ""), 128),
@@ -816,7 +844,8 @@ class FeedbackLedger:
                     discord_message_id TEXT,
                     error_code TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    discord_deleted_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS langsmith_feedback_semantic_keys (
                     semantic_key TEXT PRIMARY KEY,
@@ -856,6 +885,21 @@ class FeedbackLedger:
                     "ALTER TABLE langsmith_feedback_decisions ADD COLUMN "
                     "target_skill_slug TEXT"
                 )
+            delivery_columns = {
+                str(row["name"])
+                for row in db.execute(
+                    "PRAGMA table_info(langsmith_feedback_discord_deliveries)"
+                ).fetchall()
+            }
+            if "discord_deleted_at" not in delivery_columns:
+                db.execute(
+                    "ALTER TABLE langsmith_feedback_discord_deliveries "
+                    "ADD COLUMN discord_deleted_at TEXT"
+                )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_feedback_discord_retention "
+                "ON langsmith_feedback_discord_deliveries(discord_deleted_at, created_at)"
+            )
             for row in db.execute(
                 "SELECT artifact_id, department FROM langsmith_feedback_artifacts WHERE department_key=''"
             ).fetchall():
@@ -1202,6 +1246,191 @@ class FeedbackLedger:
                 )
         except sqlite3.Error:
             LOGGER.exception("langsmith_feedback_discord_finish_failed")
+
+    def cleanup_qa_discord_messages(
+        self,
+        *,
+        retention_days: int | None = None,
+        max_messages: int | None = None,
+        token: str | None = None,
+        channel_id: str | None = None,
+        dry_run: bool = False,
+        now: datetime | None = None,
+        opener: Any | None = None,
+    ) -> FeedbackDiscordRetentionSummary:
+        """Delete old, resolved QA feedback cards from the QA channel only.
+
+        The SQLite ledger remains the audit index. Pending cards are never
+        selected, and deletion is fenced by message IDs recorded when the QA
+        bot posted the card. Proposal-review cards have a separate lifecycle
+        and are intentionally not selected here.
+        """
+
+        enabled = os.getenv(
+            "LANGSMITH_FEEDBACK_DISCORD_RETENTION_ENABLED", "true"
+        ).strip().lower() not in {"0", "false", "no", "off"}
+        if not enabled:
+            return FeedbackDiscordRetentionSummary(enabled=False, available=False)
+
+        configured_days = retention_days
+        if configured_days is None:
+            try:
+                configured_days = int(
+                    os.getenv("LANGSMITH_FEEDBACK_DISCORD_RETENTION_DAYS", "7")
+                )
+            except (TypeError, ValueError):
+                configured_days = 7
+        configured_days = max(1, min(int(configured_days), 3650))
+
+        configured_max = max_messages
+        if configured_max is None:
+            try:
+                configured_max = int(
+                    os.getenv(
+                        "LANGSMITH_FEEDBACK_DISCORD_RETENTION_MAX_MESSAGES", "100"
+                    )
+                )
+            except (TypeError, ValueError):
+                configured_max = 100
+        configured_max = max(1, min(int(configured_max), 1000))
+
+        effective_token = (
+            token if token is not None else os.getenv("DISCORD_BOT_TOKEN_QA", "")
+        ).strip()
+        if channel_id is None:
+            from orchestration.qa_discord_feedback import QA_FEEDBACK_CHANNEL_DEFAULT
+
+            effective_channel = (
+                os.getenv("QA_DISCORD_CHANNEL_ID", "").strip()
+                or QA_FEEDBACK_CHANNEL_DEFAULT
+            )
+        else:
+            effective_channel = channel_id.strip()
+        if not effective_token or not effective_channel:
+            return FeedbackDiscordRetentionSummary(enabled=False, available=False)
+
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        cutoff = current - timedelta(days=configured_days)
+
+        try:
+            with self._connect() as db:
+                rows = db.execute(
+                    """SELECT d.artifact_id, d.discord_message_id,
+                              dec.created_at AS decision_at,
+                              b.status AS benchmark_status,
+                              b.updated_at AS benchmark_at
+                         FROM langsmith_feedback_discord_deliveries d
+                         JOIN langsmith_feedback_artifacts a
+                           ON a.artifact_id=d.artifact_id
+                    LEFT JOIN langsmith_feedback_decisions dec
+                           ON dec.artifact_id=d.artifact_id
+                    LEFT JOIN langsmith_feedback_benchmarks b
+                           ON b.artifact_id=d.artifact_id
+                        WHERE d.status='DELIVERED'
+                          AND d.discord_message_id IS NOT NULL
+                          AND d.discord_deleted_at IS NULL
+                          AND (
+                                dec.artifact_id IS NOT NULL
+                                OR b.status IN ('PASSED', 'FAILED')
+                              )
+                     ORDER BY d.created_at ASC
+                        LIMIT ?""",
+                    (configured_max,),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            LOGGER.warning(
+                "langsmith-feedback-discord-retention-query-failed error=%s",
+                type(exc).__name__,
+            )
+            return FeedbackDiscordRetentionSummary(
+                enabled=True,
+                available=False,
+                error_code=type(exc).__name__,
+            )
+
+        def _parse(value: Any) -> datetime | None:
+            if not value:
+                return None
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+        eligible: list[sqlite3.Row] = []
+        skipped_malformed = 0
+        for row in rows:
+            decision_at = _parse(row["decision_at"])
+            benchmark_at = (
+                _parse(row["benchmark_at"])
+                if row["benchmark_status"] in {"PASSED", "FAILED"}
+                else None
+            )
+            terminal_times = [
+                value for value in (decision_at, benchmark_at) if value is not None
+            ]
+            terminal_at = max(terminal_times, default=None)
+            if terminal_at is None:
+                skipped_malformed += 1
+                continue
+            # If a benchmark completed after approval, retain the card for
+            # seven days after the latest terminal transition.
+            if terminal_at >= cutoff:
+                continue
+            if not str(row["discord_message_id"] or "").strip():
+                skipped_malformed += 1
+                continue
+            eligible.append(row)
+
+        if dry_run:
+            return FeedbackDiscordRetentionSummary(
+                enabled=True,
+                available=True,
+                attempted=len(eligible),
+                deleted=len(eligible),
+                skipped_malformed=skipped_malformed,
+            )
+
+        from orchestration.discord_retention import DiscordRetentionWorker
+
+        discord = DiscordRetentionWorker(
+            token=effective_token,
+            channel_ids=[effective_channel],
+            opener=opener,
+        )
+        attempted = deleted = failed = 0
+        for row in eligible:
+            attempted += 1
+            message_id = str(row["discord_message_id"])
+            try:
+                discord.delete_message(effective_channel, message_id)
+                deleted_at = _now()
+                with self._connect() as db:
+                    db.execute(
+                        """UPDATE langsmith_feedback_discord_deliveries
+                              SET discord_deleted_at=?, updated_at=?
+                            WHERE artifact_id=? AND discord_deleted_at IS NULL""",
+                        (deleted_at, deleted_at, row["artifact_id"]),
+                    )
+                deleted += 1
+            except Exception as exc:  # noqa: BLE001 - one card cannot block the pass
+                failed += 1
+                LOGGER.warning(
+                    "langsmith-feedback-discord-delete-failed error=%s",
+                    type(exc).__name__,
+                )
+
+        return FeedbackDiscordRetentionSummary(
+            enabled=True,
+            available=True,
+            attempted=attempted,
+            deleted=deleted,
+            skipped_malformed=skipped_malformed,
+            failed=failed,
+            error_code="DISCORD_QA_DELETE_FAILED" if failed else None,
+        )
 
     def approved_hints(self, department: str | None, limit: int, max_chars: int) -> dict[str, Any] | None:
         limit = max(1, min(int(limit), 10))
@@ -1680,6 +1909,7 @@ class LangSmithFeedbackService:
             self.ledger = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._last_discord_retention_attempt = 0.0
 
     def start(self) -> None:
         if self.config.mode == "off" or self._thread is not None:
@@ -1835,6 +2065,40 @@ class LangSmithFeedbackService:
             LOGGER.warning("langsmith_feedback_poll_failed error=%s", type(exc).__name__)
         return {"discovered": discovered, "completed": completed, "failed": failed, "dropped": dropped}
 
+    def run_discord_retention_once(self) -> dict[str, int]:
+        """Delete only resolved QA/review cards while retaining local history."""
+
+        if self.ledger is None:
+            return {"feedback_deleted": 0, "proposal_deleted": 0, "failed": 0}
+
+        feedback_result = self.ledger.cleanup_qa_discord_messages()
+        from orchestration.evolution_skills import (
+            EvolutionSkillStore,
+            cleanup_discord_review_cards,
+        )
+
+        evolution_root = Path(
+            os.getenv("EVOLUTION_SKILLS_HOME", "/var/lib/evolution-skills").strip()
+            or "/var/lib/evolution-skills"
+        )
+        proposal_result = cleanup_discord_review_cards(
+            EvolutionSkillStore(evolution_root)
+        )
+        failed = feedback_result.failed + proposal_result.failed
+        LOGGER.info(
+            "qa-discord-retention feedback_deleted=%d proposal_deleted=%d "
+            "feedback_failed=%d proposal_failed=%d",
+            feedback_result.deleted,
+            proposal_result.deleted,
+            feedback_result.failed,
+            proposal_result.failed,
+        )
+        return {
+            "feedback_deleted": feedback_result.deleted,
+            "proposal_deleted": proposal_result.deleted,
+            "failed": failed,
+        }
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             started = time.monotonic()
@@ -1844,6 +2108,19 @@ class LangSmithFeedbackService:
                     self.ledger.cleanup(self.config.retention_days)
             except Exception:  # noqa: BLE001
                 LOGGER.exception("langsmith_feedback_loop_failed")
+            now = time.monotonic()
+            if (
+                now - self._last_discord_retention_attempt
+                >= self.config.discord_retention_interval_seconds
+            ):
+                # A Discord/API failure is isolated from feedback polling, and
+                # the attempt gate prevents a bad credential from causing a
+                # tight retry loop. The next daily pass retries it.
+                self._last_discord_retention_attempt = now
+                try:
+                    self.run_discord_retention_once()
+                except Exception:  # noqa: BLE001 - retention is fail-open
+                    LOGGER.exception("langsmith_feedback_discord_retention_failed")
             self._stop.wait(max(0.1, self.config.poll_seconds - (time.monotonic() - started)))
 
 
@@ -1882,6 +2159,7 @@ __all__ = [
     "FEEDBACK_SCHEMA",
     "EvaluationResult",
     "FeedbackConfig",
+    "FeedbackDiscordRetentionSummary",
     "FeedbackLedger",
     "LangSmithFeedbackService",
     "TraceObservation",

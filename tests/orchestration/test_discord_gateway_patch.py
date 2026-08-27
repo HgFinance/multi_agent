@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
+import asyncio
+import importlib.util
 import tempfile
 import threading
 import time
 import unittest
-import asyncio
-import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
 
 _MODULE_PATH = Path(__file__).parents[2] / "deploy" / "hermes-discord" / "install_patch.py"
 _SPEC = importlib.util.spec_from_file_location("hgfinance_install_patch", _MODULE_PATH)
@@ -25,6 +24,56 @@ _PATCH_SPEC.loader.exec_module(gateway_patch)
 
 
 class DiscordGatewayPatchTests(unittest.TestCase):
+    def test_qa_feedback_agent_completes_inbound_lease_after_success(self) -> None:
+        class Adapter:
+            def __init__(self, bot_user):
+                self._client = SimpleNamespace(user=bot_user)
+                self.calls = 0
+
+            async def _handle_message(self, message):
+                self.calls += 1
+                return True
+
+        bot_user = SimpleNamespace(id="qa-bot", bot=True)
+        message = SimpleNamespace(
+            id="qa-card-1",
+            content=f"{gateway_patch.QA_FEEDBACK_MARKER}\n검토 요청",
+            author=bot_user,
+            channel=SimpleNamespace(id="1541636723006775477", parent_id=None),
+            guild=SimpleNamespace(id="guild-qa"),
+        )
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "HERMES_HOME": directory,
+                "HERMES_PROFILE": "qa-department",
+                "QA_DISCORD_CHANNEL_ID": "1541636723006775477",
+            },
+            clear=False,
+        ):
+            adapter = Adapter(bot_user)
+            self.assertTrue(
+                asyncio.run(
+                    gateway_patch._maybe_handle_qa_feedback_message(adapter, message)
+                )
+            )
+            dedup_key = gateway_patch.canonical_discord_dedup_key(
+                "guild-qa", "1541636723006775477", "qa-card-1"
+            )
+            store = gateway_patch._store(adapter)
+            self.assertEqual(
+                store.inbound_state(dedup_key, "qa-department"),
+                "COMPLETED",
+            )
+
+            # A replay is admitted by neither the handler nor the output path.
+            self.assertTrue(
+                asyncio.run(
+                    gateway_patch._maybe_handle_qa_feedback_message(adapter, message)
+                )
+            )
+            self.assertEqual(adapter.calls, 1)
+
     def test_qa_feedback_cards_use_existing_bounded_session_coordinate(self) -> None:
         class Adapter:
             def build_source(self, **kwargs):

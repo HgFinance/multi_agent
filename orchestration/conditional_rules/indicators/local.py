@@ -141,6 +141,29 @@ def _bollinger(
     return {"UPPER": middle + width, "MIDDLE": middle, "LOWER": middle - width}
 
 
+def _envelope(
+    closes: list[Decimal], *, period: int, percent: Decimal
+) -> dict[str, Decimal]:
+    """Envelope bands: a moving average offset by a fixed percentage.
+
+    Unlike Bollinger the band width does not react to volatility, so the two
+    are not interchangeable even at the same period.
+    """
+
+    if len(closes) < period:
+        raise _fail(
+            "INSUFFICIENT_HISTORY",
+            f"Envelope({period}) requires at least {period} completed bars",
+        )
+    middle = _mean(closes[-period:])
+    ratio = percent / Decimal(100)
+    return {
+        "UPPER": middle * (Decimal(1) + ratio),
+        "MIDDLE": middle,
+        "LOWER": middle * (Decimal(1) - ratio),
+    }
+
+
 def _true_ranges(candles: list[CandleLike]) -> list[Decimal]:
     return [
         max(
@@ -377,6 +400,12 @@ def calculate_local_indicator(
             closes,
             period=_period(parameters),
             standard_deviations=Decimal(str(parameters["STDDEV"])),
+        )[output]
+    elif name == "ENVELOPE":
+        result = _envelope(
+            closes,
+            period=_period(parameters),
+            percent=Decimal(str(parameters["PERCENT"])),
         )[output]
     elif name in {"VOLUME_AVERAGE", "AVERAGE_VOLUME"}:
         period = _period(parameters)

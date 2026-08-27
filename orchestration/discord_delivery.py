@@ -669,7 +669,30 @@ class DiscordFinalDelivery:
                         "User-Agent": "HgFinance-DiscordDelivery/2.5",
                     },
                 )
-            except (HTTPError, URLError, OSError, TimeoutError, ValueError):
+            except HTTPError as exc:
+                store.mark_outbound(response_key, "FAILED", profile)
+                if exc.code == 404 and index == 1:
+                    # A request thread can be deleted between ingress and
+                    # terminal delivery. Let the supervisor use its existing
+                    # parent-channel fallback; never retry a partial
+                    # multi-message delivery into a different destination.
+                    logger.warning(
+                        "discord-detail-thread root=%s profile=%s "
+                        "status=missing_thread error=stale_thread",
+                        root_task_id,
+                        profile,
+                    )
+                    return "missing_thread"
+                logger.exception(
+                    "discord-detail-thread root=%s profile=%s "
+                    "chunk=%d/%d status=failed",
+                    root_task_id,
+                    profile,
+                    index,
+                    total,
+                )
+                return "failed"
+            except (URLError, OSError, TimeoutError, ValueError):
                 store.mark_outbound(response_key, "FAILED", profile)
                 logger.exception(
                     "discord-detail-thread root=%s profile=%s "

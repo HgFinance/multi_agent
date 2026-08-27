@@ -77,9 +77,14 @@ governance components but must not be collapsed into one claimed E2E pipeline:
 |---|---|
 | General CEO request | mirror/dedup → one `/ui/ceo/ask` implementation → root Kanban card → selected primary departments → CEO response → QA post-response audit (async) |
 | Portfolio advisory | profile validation → Research → Quant → Trading → Risk → Accounting → CEO response → QA post-response audit (async); all order/risk outputs remain non-binding and default to HOLD/manual review |
-| Research–Quant strategy factory | lead → proposal → Gate 0 → PIT experiment → release decision → lesson feedback; SUPPORTED is not automatic promotion or execution |
+| Autonomous Research–Quant lab | natural-language intake → opt-in `strategy-hermes` → file-backed lab → PIT/robustness validation → evidence-gated candidate; no automatic promotion or execution |
 | Automated strategy execution | StrategySignal → OrderIntent → deterministic Risk → OMS is implemented in parts; a continuously operated end-to-end lifecycle is not established |
 | Explicit user PAPER directive | exact local-fixture user instruction → deterministic verification → Trading directive service → LS PAPER adapter → durable status/reconciliation; no LIVE route and no login |
+
+The former database-backed strategy-factory modules and migrations remain only as
+explicitly retained audit/rollback dependencies. They are not a current Compose
+service, skill, or request route; the current strategy-research boundary is the
+file-backed lab above.
 
 The market data plane is shared infrastructure: price/market-state collectors
 write the market stores, while news, disclosure, financial, macro and web

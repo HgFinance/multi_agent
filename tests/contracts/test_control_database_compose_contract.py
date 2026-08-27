@@ -42,6 +42,7 @@ EXPECTED_DEFAULT_CONTROL_DB_CONSUMERS = {
     "trading-directive-worker",
     "trading-outbox-relay",
     "workforce-api",
+    "workforce-snapshot-writer",
 }
 
 EXPECTED_EB_CONTROL_DB_CONSUMERS = {

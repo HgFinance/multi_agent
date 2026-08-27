@@ -1,6 +1,6 @@
 """Small SmithDB v2 query adapter shared by LangSmith read paths.
 
-LangSmith's ``Client.list_runs`` uses the retired v1 query endpoint.  The
+The legacy LangSmith SDK listing helper uses a retired v1 query endpoint. The
 runtime still owns synchronous pollers and FastAPI threadpool handlers, while
 the SmithDB v2 SDK exposes an awaitable paginator.  This module keeps that
 boundary in one place: resolve a project name to its UUID once per process,
@@ -219,7 +219,7 @@ async def _query_runs_async(
     except Exception:
         # Some deployed langsmith/httpx2 combinations fail before an HTTP
         # request is made. The fallback is still exactly /api/v2/runs/query;
-        # it is never a list_runs/read_run compatibility path.
+        # it never falls back to a retired SDK compatibility path.
         return await asyncio.to_thread(
             _direct_v2_query,
             client,

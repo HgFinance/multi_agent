@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import os
 import sys
+import warnings
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -21,18 +22,33 @@ for _path in (str(_REPO_ROOT), str(_RISK_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from risk_mandate_workers import classify_compliance_query_mode
-from tools.legal_wiki_tool import (
+# LangGraph currently emits a dependency-level pending-deprecation notice while
+# importing the classifier's cache package. The MCP boundary does not create
+# that cache; keep this exact third-party notice from polluting health/E2E logs,
+# while leaving all routing and model warnings visible.
+warnings.filterwarnings(
+    "ignore",
+    message=r"The default value of `allowed_objects` will change.*",
+    category=Warning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"langsmith\.wrappers\._openai_agents is deprecated.*",
+    category=Warning,
+)
+
+from risk_mandate_workers import classify_compliance_query_mode  # noqa: E402, RUF100
+from tools.legal_wiki_tool import (  # noqa: E402, RUF100
     LegalWikiAnswerFn,
     LegalWikiQueryInput,
     query_legal_wiki,
 )
 
-from apps.security.mcp_bearer_auth import (
+from apps.security.mcp_bearer_auth import (  # noqa: E402, RUF100
     BearerAuthMiddleware,
     validate_api_key,
 )
-from orchestration.risk_observability import (
+from orchestration.risk_observability import (  # noqa: E402, RUF100
     risk_span,
     set_risk_span_outputs,
 )
@@ -137,20 +153,29 @@ def execute_legal_query(
 def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
     """Build the single-capability Risk legal MCP server."""
 
-    from mcp.server.fastmcp import FastMCP
+    # FastMCP imports pydantic-settings lazily and emits a dependency warning
+    # for its unresolved lifespan annotation.  Keep the exact filter local to
+    # this third-party import so unrelated application warnings remain visible.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Field 'lifespan' has an incomplete definition:.*",
+            category=Warning,
+        )
+        from mcp.server.fastmcp import FastMCP
 
-    server = FastMCP(
-        name="hgfinance-risk-legal",
-        instructions=(
-            "Read-only Korean financial-law evidence tool for Risk Hermes. "
-            "Use it only for statutes, regulations, cases, legal duties or "
-            "possible legal breaches. Numeric market-risk and ordinary policy "
-            "questions are not legal queries and must not invoke LLM-Wiki."
-        ),
-        host=host,
-        port=port,
-        streamable_http_path=MCP_PATH,
-    )
+        server = FastMCP(
+            name="hgfinance-risk-legal",
+            instructions=(
+                "Read-only Korean financial-law evidence tool for Risk Hermes. "
+                "Use it only for statutes, regulations, cases, legal duties or "
+                "possible legal breaches. Numeric market-risk and ordinary policy "
+                "questions are not legal queries and must not invoke LLM-Wiki."
+            ),
+            host=host,
+            port=port,
+            streamable_http_path=MCP_PATH,
+        )
 
     @server.tool(
         name="query_risk_legal_wiki",
@@ -190,7 +215,9 @@ def check_readiness() -> None:
         os.environ.get("MCP_RISK_API_KEY"),
         credential_name="MCP_RISK_API_KEY",
     )
-    import numpy  # noqa: F401 - this import was the original runtime failure.
+    import numpy
+    if not numpy.__version__:
+        raise RuntimeError("numpy import did not expose a version")
 
     wiki_dir = _RISK_DIR / "experiments" / "llm_wiki" / "data" / "wiki"
     if not wiki_dir.is_dir() or not any(wiki_dir.glob("*.md")):

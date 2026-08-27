@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import tempfile
 import subprocess
 import time
 from typing import Mapping
@@ -56,43 +57,55 @@ class StrategyHermesAgent:
         environment["AUTONOMOUS_RESEARCH_REPO_ROOT"] = str(self.repo_root)
         environment["QUANT_WORKSPACE"] = str(self.lab_root / "experiments")
         environment["HERMES_WRITE_SAFE_ROOT"] = str(self.lab_root)
+        # Raw LS rows are scoped to the child process.  The persistent lab may
+        # retain code, receipts and results, but never a downloaded data file.
+        # TemporaryDirectory is deliberately outside the lab and is removed
+        # even when Hermes times out or exits with an error.
         started = time.monotonic()
-        try:
-            completed = subprocess.run(
-                [
-                    self.binary,
-                    "--in",
-                    str(self.lab_root),
-                    "--skills",
-                    "autonomous-quant-research",
-                    "--provider",
-                    self.provider,
-                    "--model",
-                    self.model,
-                    "--reasoning",
-                    "high",
-                    "--usage-file",
-                    str(usage_path),
-                    "-z",
-                    prompt,
-                ],
-                cwd=self.lab_root,
-                env=environment,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.timeout_seconds,
-                check=False,
-            )
-        except FileNotFoundError:
-            error = f"Hermes binary not found: {self.binary}"
-            output_path.write_text(error + "\n", encoding="utf-8")
-            return AgentRun(run_id, None, "FAILED", None, str(output_path), error, time.monotonic() - started, str(usage_path))
-        except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or "") + (exc.stderr or "")
-            output_path.write_text(output + "\nagent timeout\n", encoding="utf-8")
-            return AgentRun(run_id, None, "TIMED_OUT", None, str(output_path), "Hermes timed out", time.monotonic() - started, str(usage_path))
+        temporary_parent = Path(os.getenv("STRATEGY_MARKET_DATA_PARENT", "/tmp"))
+        temporary_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="strategy-market-", dir=temporary_parent) as data_dir:
+            environment["STRATEGY_MARKET_DATA_DIR"] = data_dir
+            environment["LS_TOKEN_CACHE_DIR"] = str(Path(data_dir) / "token-cache")
+            environment["LS_DATA_ACCESS_MODE"] = "readonly"
+            environment["LS_ALLOWED_TR_CODES"] = "t1665,t8410,t8411,t8412,t8451,t8452,t8453"
+            Path(environment["LS_TOKEN_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
+            try:
+                completed = subprocess.run(
+                    [
+                        self.binary,
+                        "--in",
+                        str(self.lab_root),
+                        "--skills",
+                        "autonomous-quant-research",
+                        "--provider",
+                        self.provider,
+                        "--model",
+                        self.model,
+                        "--reasoning",
+                        "high",
+                        "--usage-file",
+                        str(usage_path),
+                        "-z",
+                        prompt,
+                    ],
+                    cwd=self.lab_root,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=self.timeout_seconds,
+                    check=False,
+                )
+            except FileNotFoundError:
+                error = f"Hermes binary not found: {self.binary}"
+                output_path.write_text(error + "\n", encoding="utf-8")
+                return AgentRun(run_id, None, "FAILED", None, str(output_path), error, time.monotonic() - started, str(usage_path))
+            except subprocess.TimeoutExpired as exc:
+                output = (exc.stdout or "") + (exc.stderr or "")
+                output_path.write_text(output + "\nagent timeout\n", encoding="utf-8")
+                return AgentRun(run_id, None, "TIMED_OUT", None, str(output_path), "Hermes timed out", time.monotonic() - started, str(usage_path))
 
         output = (completed.stdout or "") + (completed.stderr or "")
         output_path.write_text(output, encoding="utf-8")
@@ -116,6 +129,19 @@ You are a dedicated strategy-generation agent. Do not delegate the work to the e
 Research lab: {self.lab_root}
 Repository for inspection only: {self.repo_root}
 Writable experiment workspace: {self.lab_root / 'experiments'}
+Ephemeral raw-market-data root (deleted after this Hermes turn): $STRATEGY_MARKET_DATA_DIR
+
+For market data, use only the repository module
+{self.repo_root}/departments/01-research/autonomous/ls_market_data.py. It is a
+read-only allow-list for LS /stock/chart TRs t1665, t8410, t8411, t8412, t8451,
+t8452 and t8453. Query only the symbols and date range needed for the current
+experiment. Prefer the returned rows in memory; if a dataframe library needs a
+file, use its temporary-data helper and write only below $STRATEGY_MARKET_DATA_DIR.
+Never read or write quant-data, the legacy discovery cache, market/research
+databases, collector backfill tables, or any other persistent raw-data path.
+Do not print raw rows or credentials. Persist only code, experiment artifacts,
+the non-sensitive DataReceipt (TR, range, row count, hash), and result/lineage
+metadata in the lab. The temporary root is destroyed when this turn exits.
 
 Read these files first:
 {self.lab_root}/OBJECTIVE.md

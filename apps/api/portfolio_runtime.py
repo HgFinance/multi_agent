@@ -190,6 +190,33 @@ def _runtime_department(code: str) -> dict[str, Any]:
     }
 
 
+def _project_qa_result_event(job: dict[str, Any], event: Mapping[str, Any]) -> None:
+    """Apply the single post-response QA projection to the stored result."""
+
+    result = job.get("result")
+    if not isinstance(result, dict):
+        return
+    department_report = event.get("department_report")
+    if isinstance(department_report, Mapping):
+        reports = result.setdefault("department_reports", {})
+        current = reports.get("qa") if isinstance(reports, dict) else None
+        current_status = str(current.get("status", "")).upper() if isinstance(current, Mapping) else ""
+        incoming_status = str(department_report.get("status", "")).upper()
+        # A delayed duplicate lifecycle event must not regress a terminal QA
+        # verdict back to QUEUED/RUNNING. The event stream is at-least-once.
+        if current_status in {"COMPLETED", "DEGRADED"} and incoming_status in {
+            "PENDING",
+            "QUEUED",
+            "RUNNING",
+        }:
+            return
+        if isinstance(reports, dict):
+            reports["qa"] = dict(department_report)
+    qa_gate = event.get("qa_gate")
+    if isinstance(qa_gate, Mapping):
+        result["qa_gate"] = dict(qa_gate)
+
+
 class PortfolioRuntime:
     """Durable advisory projection; it is not a source of financial truth."""
 
@@ -481,6 +508,27 @@ class PortfolioRuntime:
             kind = str(event.get("kind", ""))
             stage = str(event.get("stage", ""))
             department = STAGE_DEPARTMENT.get(stage)
+            if kind in {"qa_audit_scheduled", "qa_audit_started"}:
+                result = job.get("result")
+                report = result.get("department_reports", {}).get("qa") if isinstance(result, dict) else None
+                gate = result.get("qa_gate") if isinstance(result, dict) else None
+                if (
+                    isinstance(report, Mapping)
+                    and str(report.get("status", "")).upper() in {"COMPLETED", "DEGRADED"}
+                ) or (
+                    isinstance(gate, Mapping)
+                    and str(gate.get("status", "")).upper() in {"COMPLETED", "DEGRADED"}
+                ):
+                    # Recovery and delivery are at-least-once. A late queue
+                    # marker must not reopen a terminal audit projection.
+                    return
+            if kind in {
+                "qa_audit_scheduled",
+                "qa_audit_started",
+                "qa_audit_completed",
+                "qa_audit_failed",
+            }:
+                _project_qa_result_event(job, event)
             job["status"] = "RUNNING"
             job["started_at"] = job["started_at"] or _now()
             job["updated_at"] = _now()
@@ -513,17 +561,25 @@ class PortfolioRuntime:
                     department=department,
                 )
             elif kind in {"qa_audit_completed", "qa_audit_failed"}:
-                qa_gate = event.get("qa_gate")
-                if isinstance(job.get("result"), dict) and isinstance(qa_gate, Mapping):
-                    job["result"]["qa_gate"] = dict(qa_gate)
+                department_report = event.get("department_report")
+                qa_status = str(
+                    department_report.get("status")
+                    if isinstance(department_report, Mapping)
+                    else event.get("status", "DEGRADED")
+                ).upper()
+                terminal_status = "COMPLETED" if qa_status == "COMPLETED" else "DEGRADED"
                 job["status"] = str(
                     (job.get("result") or {}).get("pipeline_status")
                     or "COMPLETED"
                 )
-                job["phase"] = "CEO 응답 완료 — QA 비동기 감사 완료"
+                job["phase"] = (
+                    "CEO 응답 완료 — QA 비동기 감사 완료"
+                    if terminal_status == "COMPLETED"
+                    else "CEO 응답 완료 — QA 비동기 감사 에스컬레이션"
+                )
                 job["departments"]["qa-department"].update(
                     {
-                        "status": "COMPLETED" if kind == "qa_audit_completed" else "DEGRADED",
+                        "status": terminal_status,
                         "current_stage": None,
                         "active_worker_ids": [],
                         "last_message": _one_line(event.get("summary")),
@@ -714,112 +770,6 @@ class PortfolioRuntime:
     def _event(self, job_id: str, event: Mapping[str, Any]) -> None:
         # Kept as the stable callback name for existing callers.
         return self._record_event(job_id, event)
-        with self._lock:
-            job = self._job_for(job_id)
-        if job is None:
-            return
-            pipeline_event = event.get("pipeline_event")
-            if isinstance(pipeline_event, Mapping):
-                job.setdefault("pipeline_events", []).append(dict(pipeline_event))
-                job["pipeline_events"] = job["pipeline_events"][-200:]
-            kind = str(event.get("kind", ""))
-            stage = str(event.get("stage", ""))
-            department = STAGE_DEPARTMENT.get(stage)
-            job["status"] = "RUNNING"
-            job["started_at"] = job["started_at"] or _now()
-            job["updated_at"] = _now()
-            if kind == "department_started" and department:
-                worker_ids = [str(item) for item in event.get("worker_ids", [])]
-                row = job["departments"][department]
-                row.update({"status": "RUNNING", "current_stage": stage, "active_worker_ids": worker_ids, "updated_at": _now()})
-                job["phase"] = f"{department} worker 실행 중"
-                self._message(job, f"{_department_label(department)}의 독립 Worker {len(worker_ids)}개 그래프 실행을 시작합니다.", kind="department_started", department=department)
-            elif kind == "worker_started" and department:
-                worker = {
-                    "worker_id": str(event.get("worker_id", "")),
-                    "department_code": department,
-                    "stage": stage,
-                    "role": str(event.get("role", "")),
-                    "status": "RUNNING",
-                    "started_at": _now(),
-                    "summary": None,
-                }
-                job["active_workers"] = [item for item in job["active_workers"] if item["worker_id"] != worker["worker_id"]]
-                job["active_workers"].append(worker)
-                KANBAN_STATUS_BRIDGE.publish_task_event(
-                    {
-                        "event_id": f"{job_id}:worker_started:{worker['worker_id']}",
-                        "department_code": department,
-                        "agent_id": worker["worker_id"],
-                        "worker_id": worker["worker_id"],
-                        "role": worker["role"],
-                        "status": "running",
-                        "reason": "LangGraph Worker graph 실행 시작",
-                    }
-                )
-                self._message(
-                    job,
-                    _event_message(
-                        kind="worker_started",
-                        department=department,
-                        worker_id=worker["worker_id"],
-                        role=worker["role"],
-                    ),
-                    kind="worker_started",
-                    department=department,
-                    worker_id=worker["worker_id"],
-                )
-                job["departments"][department]["active_worker_ids"] = [item["worker_id"] for item in job["active_workers"] if item["department_code"] == department]
-            elif kind == "worker_completed" and department:
-                worker_id = str(event.get("worker_id", ""))
-                summary = _one_line(event.get("summary"))
-                KANBAN_STATUS_BRIDGE.publish_task_event(
-                    {
-                        "event_id": f"{job_id}:worker_completed:{worker_id}",
-                        "department_code": department,
-                        "agent_id": worker_id,
-                        "worker_id": worker_id,
-                        "role": str(event.get("role", "")),
-                        "status": "completed",
-                        "reason": summary or "LangGraph Worker graph 실행 완료",
-                    }
-                )
-                job["active_workers"] = [item for item in job["active_workers"] if item["worker_id"] != worker_id]
-                job["departments"][department]["active_worker_ids"] = [item["worker_id"] for item in job["active_workers"] if item["department_code"] == department]
-                self._message(
-                    job,
-                    _event_message(
-                        kind="worker_completed",
-                        department=department,
-                        worker_id=worker_id,
-                        role=str(event.get("role", "")),
-                        summary=summary,
-                    ),
-                    kind="worker_summary",
-                    department=department,
-                    worker_id=worker_id,
-                )
-            elif kind == "department_skipped" and department:
-                row = job["departments"][department]
-                row.update({
-                    "status": "SKIPPED",
-                    "current_stage": None,
-                    "active_worker_ids": [],
-                    "last_message": _one_line(event.get("message")),
-                    "updated_at": _now(),
-                })
-                self._message(job, f"{_department_label(department)}는 CEO task plan에 따라 이번 요청에서 호출하지 않습니다.", kind="department_skipped", department=department)
-            elif kind == "department_completed" and department:
-                status = str(event.get("status", "DEGRADED"))
-                row = job["departments"][department]
-                row.update({"status": "COMPLETED" if status == "COMPLETED" else "SKIPPED" if status in {"SKIPPED", "NOT_REQUESTED", "NOT_APPLICABLE"} else "DEGRADED", "current_stage": None, "active_worker_ids": [], "last_message": _one_line(event.get("message")), "updated_at": _now()})
-                current_index = STAGE_ORDER.index(stage) if stage in STAGE_ORDER else -1
-                if status != "SKIPPED" and current_index >= 0 and current_index + 1 < len(STAGE_ORDER):
-                    next_stage = STAGE_ORDER[current_index + 1]
-                    self._handoff(job, stage, next_stage, str(event.get("message", "")))
-            elif kind == "department_blocked" and department:
-                job["departments"][department].update({"status": "BLOCKED", "current_stage": None, "active_worker_ids": [], "updated_at": _now()})
-                self._message(job, str(event.get("message", "실행 입력이 준비되지 않아 안전하게 중단했습니다.")), kind="department_blocked", department=department)
 
     async def _run(self, job_id: str, profile: dict[str, Any]) -> None:
         try:

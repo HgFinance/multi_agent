@@ -555,7 +555,50 @@ def test_close_root_trace_prefers_explicit_start_run_id(
     client.flush.assert_called_once_with()
 
 
-def test_close_root_trace_treats_langsmith_duplicate_patch_as_idempotent(
+def test_close_root_trace_can_reconcile_without_persisted_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_structured_langsmith_client", lambda: client)
+
+    assert close_root_trace(
+        run_id="historical-pending-run",
+        request_id="request-1",
+        root_id="t_root",
+        task_id="t_synthesis",
+        status="completed",
+    )
+    assert client.update_run.call_args.kwargs["run_id"] == "historical-pending-run"
+    assert client.update_run.call_args.kwargs["outputs"]["task_id"] == "t_synthesis"
+
+
+def test_historical_close_updates_by_run_id_without_provider_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_structured_langsmith_client", lambda: client)
+
+    assert close_root_trace(
+        run_id="run-id",
+        request_id="request-1",
+        root_id="t_root",
+        status="completed",
+    )
+    kwargs = client.update_run.call_args.kwargs
+    assert kwargs["run_id"] == "run-id"
+
+
+def test_duplicate_root_close_is_idempotent_without_provider_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LANGSMITH_TRACING", "true")

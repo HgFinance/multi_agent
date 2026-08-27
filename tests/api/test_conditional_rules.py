@@ -96,6 +96,36 @@ def test_explicit_korean_condition_endings_route_to_conditional_lane(raw: str) -
     assert looks_like_conditional_paper_rule(raw) is True
 
 
+@pytest.mark.parametrize(
+    "raw",
+    (
+        # The shape that was rejected on 2026-08-27: a wall-clock trigger with
+        # two instruments never reached the conditional lane, so Trading
+        # refused it for missing the conditional-rule marker.
+        "두산로보틱스, 레인보우로보틱스 각각 10주 1주 15:15 되면 시장가 매수 해줘",
+        "두산로보틱스 15:15 되면 10주 시장가 매수",
+        "두산로보틱스 15시 15분에 10주 시장가 매수",
+        "오후 3시에 삼성전자 1주 매수",
+    ),
+)
+def test_absolute_clock_time_triggers_route_to_conditional_lane(raw: str) -> None:
+    assert looks_like_conditional_paper_rule(raw) is True
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        # "3시간" must stay with the relative grammar, and neither an immediate
+        # order nor a question may be pulled into the conditional lane.
+        "삼성전자 3시간 뒤에 사도 될까?",
+        "삼성전자 지금 1주 매수해줘",
+        "하이닉스 1,674,000원에 2주 매수하는거 추천해?",
+    ),
+)
+def test_non_conditional_requests_stay_off_the_conditional_lane(raw: str) -> None:
+    assert looks_like_conditional_paper_rule(raw) is False
+
+
 def test_three_minute_request_uses_supported_five_minute_feed_and_discloses_fallback(monkeypatch) -> None:
     install_scope(monkeypatch)
     candidate = {

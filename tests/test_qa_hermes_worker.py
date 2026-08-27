@@ -152,30 +152,21 @@ def test_known_empty_codex_pool_blocks_before_starting_hermes(tmp_path, monkeypa
     assert calls == ["t_qa"]
 
 
-def test_non_qa_dispatcher_worker_delegates_to_real_hermes(monkeypatch):
+def test_non_qa_dispatcher_worker_uses_shared_observer(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_research")
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "11")
     monkeypatch.setenv("HERMES_PROFILE", "research-department")
     calls = []
+    monkeypatch.setattr(
+        qa_worker,
+        "_run_real_worker",
+        lambda argv: calls.append(list(argv)) or 0,
+    )
+    monkeypatch.setattr(qa_worker, "_still_owned_and_unfinished", lambda *args: False)
 
-    def fake_execvpe(executable, argv, env):
-        calls.append((executable, list(argv), dict(env)))
-        raise RuntimeError("exec intercepted")
-
-    monkeypatch.setattr(qa_worker.os, "execvpe", fake_execvpe)
-
-    try:
-        qa_worker.main(["--cli", "chat", "-q", "work kanban task t_research"])
-    except RuntimeError as exc:
-        assert str(exc) == "exec intercepted"
-    else:
-        raise AssertionError("non-QA worker did not delegate")
-
-    assert len(calls) == 1
-    executable, argv, env = calls[0]
-    assert executable == qa_worker.REAL_HERMES
-    assert argv[0] == qa_worker.REAL_HERMES
-    assert env["HERMES_BIN"] == qa_worker.REAL_HERMES
+    argv = ["--cli", "chat", "-q", "work kanban task t_research"]
+    assert qa_worker.main(argv) == 0
+    assert calls == [argv]
 
 
 def test_fast_advisory_gets_task_scoped_turn_budget(tmp_path, monkeypatch):
@@ -207,6 +198,54 @@ def test_fast_advisory_gets_task_scoped_turn_budget(tmp_path, monkeypatch):
         "-q",
         "work",
     ]
+
+
+def test_quant_fast_advisory_replaces_dispatcher_broad_toolsets(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("analysis_mode=fast_advisory\nquestion",),
+    )
+    conn.commit()
+    conn.close()
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["--profile", "quant-backtest-department", "chat", "--toolsets", "all", "-q", "work"],
+        db_path=db,
+        task_id="t_qa",
+        profile="quant-backtest-department",
+    )
+
+    assert bounded.count("--toolsets") == 1
+    assert bounded[bounded.index("--toolsets") + 1] == (
+        qa_worker.QUANT_FAST_ADVISORY_TOOLSETS
+    )
+
+
+def test_quant_liaison_fast_advisory_keeps_only_read_only_library(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("analysis_mode=fast_advisory\nquestion",),
+    )
+    conn.commit()
+    conn.close()
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["--profile", "quant-liaison", "chat", "--toolsets", "all", "-q", "work"],
+        db_path=db,
+        task_id="t_qa",
+        profile="quant-liaison",
+    )
+
+    assert bounded.count("--toolsets") == 1
+    assert bounded[bounded.index("--toolsets") + 1] == (
+        qa_worker.QUANT_LIAISON_FAST_ADVISORY_TOOLSETS
+    )
 
 
 def test_response_budget_does_not_change_standard_or_explicit_budget(tmp_path):
@@ -300,10 +339,12 @@ def test_direct_qa_primary_gets_the_same_bounded_review_budget(tmp_path, monkeyp
     conn.execute(
         "UPDATE tasks SET body = ? WHERE id = 't_qa'",
         (
-            "origin=user-query\n"
-            "workflow_role=primary\n"
-            "selected_primary_profiles=qa-department\n"
-            "delegation_instruction.qa-department=review",
+            (
+                "origin=user-query\n"
+                "workflow_role=primary\n"
+                "selected_primary_profiles=qa-department\n"
+                "delegation_instruction.qa-department=review"
+            ),
         ),
     )
     conn.commit()
@@ -324,7 +365,7 @@ def test_direct_qa_primary_gets_the_same_bounded_review_budget(tmp_path, monkeyp
         "--reasoning",
         "high",
         "--toolsets",
-        "kanban,terminal",
+        "kanban",
         "-q",
         "review",
     ]
@@ -368,10 +409,12 @@ def test_direct_qa_fast_advisory_uses_qa_primary_budget(tmp_path, monkeypatch):
     conn.execute(
         "UPDATE tasks SET body = ? WHERE id = 't_qa'",
         (
-            "analysis_mode=fast_advisory\n"
-            "origin=user-query\n"
-            "workflow_role=primary\n"
-            "selected_primary_profiles=qa-department",
+            (
+                "analysis_mode=fast_advisory\n"
+                "origin=user-query\n"
+                "workflow_role=primary\n"
+                "selected_primary_profiles=qa-department"
+            ),
         ),
     )
     conn.commit()
@@ -399,7 +442,7 @@ def test_direct_qa_fast_advisory_uses_qa_primary_budget(tmp_path, monkeypatch):
         "--reasoning",
         "high",
         "--toolsets",
-        "kanban,terminal",
+        "kanban",
         "-q",
         "work",
     ]
@@ -415,6 +458,7 @@ def test_qa_primary_query_is_bounded_and_does_not_reopen_general_tools():
     assert "TASK PAYLOAD:" in bounded[2]
     assert "skill_view/skill_manage" in bounded[2]
     assert "kanban_complete exactly once" in bounded[2]
+    assert "use terminal" in bounded[2]
 
 
 def test_direct_qa_does_not_use_post_response_payload_prompt():
@@ -502,6 +546,22 @@ def test_risk_user_primary_restricts_dispatcher_toolsets(tmp_path):
     assert (
         bounded[bounded.index("--toolsets") + 1]
         == qa_worker.RISK_USER_PRIMARY_TOOLSETS
+    )
+
+
+def test_unmarked_risk_worker_still_uses_bounded_toolsets(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["chat", "-q", "work"],
+        db_path=db,
+        task_id="t_qa",
+        profile="risk-management",
+    )
+
+    assert bounded[bounded.index("--toolsets") + 1] == (
+        qa_worker.RISK_USER_PRIMARY_TOOLSETS
     )
 
 

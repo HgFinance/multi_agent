@@ -27,20 +27,21 @@ tool_permission_check.py/incident_timeline.py/agentic-rag를 감싸는 FastAPI �
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
+import json
+
 # Current contract status: qa-check is approved as Evidence QA Gate v1. The
 # production flag and fail-closed corpus/worker-profile checks below are the
 # authoritative runtime boundary; older proposal wording in this module docstring
 # is retained only as historical context.
 import os
-import hashlib
-import importlib.util
-import json
-from functools import wraps
-from threading import Lock
 import sys
 from datetime import datetime
 from decimal import Decimal
+from functools import wraps
 from pathlib import Path
+from threading import Lock
 from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException
@@ -101,6 +102,14 @@ def _load_qa_repository():
 
 _qa_repository = _load_qa_repository()
 from corpus_registry import inspect_policy_corpus
+from eval_runner import (
+    CandidateSpec,
+    ChampionComparison,
+    EvalCase,
+    EvalRunner,
+    EvalSet,
+    InMemoryEvalAuditRepository,
+)
 from evidence_qa_engine import (
     Artifact,
     EvidenceQaEngine,
@@ -134,20 +143,6 @@ from qa_events.redis_event_bus import (
     RedisEventBus,
 )
 from qa_mandate_workers import QaVerificationRequest, assess_qa_verification
-from eval_runner import (
-    CandidateSpec,
-    ChampionComparison,
-    EvalCase,
-    EvalRunner,
-    EvalSet,
-    InMemoryEvalAuditRepository,
-)
-from orchestration.evolution_skills import (
-    EvolutionSkillError,
-    EvolutionSkillStore,
-    build_resolution_report,
-)
-from orchestration.langsmith_feedback import FeedbackConfig, FeedbackLedger
 from tool_permission_check import (
     AgentToolPolicy,
     check_tool_permission,
@@ -155,6 +150,13 @@ from tool_permission_check import (
     record_and_check_tool_call,
 )
 from trace_recorder import TraceRecorder, TraceRecorderError
+
+from orchestration.evolution_skills import (
+    EvolutionSkillError,
+    EvolutionSkillStore,
+    build_resolution_report,
+)
+from orchestration.langsmith_feedback import FeedbackConfig, FeedbackLedger
 
 # DATABASE_URL이 있을 때만 audit 및 QA Eval write-through을 활성화한다.
 # Shadow import에서 DATABASE_URL이 없으면 어떤 PostgreSQL pool도 만들지 않는다.

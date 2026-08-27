@@ -76,6 +76,15 @@ def test_accounting_worker_trace_correlates_task_model_and_tools(tmp_path: Path)
     assert metadata[0]["tool_latency_available"] is True
     assert metadata[0]["tool_timing_source"] == "hermes-log-duration"
     assert metadata[0]["telemetry_completeness"] == "runtime-and-boundary"
+    assert metadata[1]["observation_unit"] == "model"
+    assert metadata[1]["latency_ms"] == 2_200
+    assert metadata[1]["latency_scope"] == "model_estimate"
+    assert metadata[2]["latency_ms"] is None
+    assert metadata[2]["latency_scope"] == "unavailable"
+    assert metadata[3]["latency_ms"] == 700
+    assert metadata[3]["latency_scope"] == "tool_observation"
+    assert metadata[4]["latency_ms"] == 100
+    assert metadata[4]["latency_scope"] == "tool_observation"
     assert all(item["raw_payloads_sent"] is False for item in metadata)
     assert all(run["inputs"]["task_id"] == "t_primary" for run in runs)
     assert all(run["inputs"]["workflow_root_task_id"] == "t_root" for run in runs)
@@ -85,6 +94,8 @@ def test_accounting_worker_trace_correlates_task_model_and_tools(tmp_path: Path)
     assert all(run["outputs"]["tool_calls"] == 7 for run in runs)
     assert all(run["outputs"]["tool_error_count"] == 0 for run in runs)
     assert all(run["outputs"]["raw_payloads_sent"] is False for run in runs)
+    assert runs[1]["outputs"]["latency_ms"] == 2_200
+    assert runs[2]["outputs"]["latency_ms"] is None
 
 
 def test_zero_duration_tool_markers_are_not_reported_as_available_latency(tmp_path: Path):
@@ -199,3 +210,44 @@ def test_qa_worker_trace_uses_the_same_task_correlated_redacted_contract(tmp_pat
     assert all(run["inputs"]["request_id"] == "t_root" for run in runs)
     assert all(run["outputs"]["tool_calls"] == 2 for run in runs)
     assert all(run["outputs"]["raw_payloads_sent"] is False for run in runs)
+
+
+def test_failed_worker_trace_marks_langsmith_run_as_failed_without_raw_error(
+    tmp_path: Path,
+):
+    profile_dir = tmp_path / "profiles" / "qa-department"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "config.yaml").write_text(
+        "model:\n provider: openai-codex\n default: gpt-5.6-luna\n",
+        encoding="utf-8",
+    )
+    kanban_home = tmp_path / "shared-kanban"
+    (kanban_home / "kanban" / "logs").mkdir(parents=True)
+    env = {
+        "LANGSMITH_TRACING": "true",
+        "LANGSMITH_API_KEY": "test-key",
+        "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
+        "LANGSMITH_PROJECT": "First",
+        "HERMES_HOME": str(tmp_path),
+        "HERMES_KANBAN_HOME": str(kanban_home),
+    }
+
+    with patch(
+        "scripts.hermes_worker_observability.urllib.request.urlopen",
+        return_value=_Response(),
+    ) as open_url:
+        assert publish_department_worker_trace(
+            task_id="t_failed",
+            task_body="workflow_root_task_id=t_root",
+            task_status="timed_out",
+            run_id="43",
+            return_code=-15,
+            started_ms=1_000,
+            ended_ms=4_000,
+            argv=["-p", "qa-department", "chat"],
+            env=env,
+        )
+
+    payload = json.loads(open_url.call_args.args[0].data.decode("utf-8"))
+    assert {run["error"] for run in payload["post"]} == {"kanban_timed_out"}
+    assert all(run["extra"]["metadata"]["raw_payloads_sent"] is False for run in payload["post"])

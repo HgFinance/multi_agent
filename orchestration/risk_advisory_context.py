@@ -21,9 +21,9 @@ from orchestration.ceo_workflow_scope import read_marker
 
 def _timeout_seconds() -> float:
     try:
-        return max(0.1, min(10.0, float(os.getenv("RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS", "5"))))
+        return max(0.1, min(10.0, float(os.getenv("RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS", "2"))))
     except ValueError:
-        return 5.0
+        return 2.0
 
 
 def _compact_snapshot(payload: Any) -> str | None:
