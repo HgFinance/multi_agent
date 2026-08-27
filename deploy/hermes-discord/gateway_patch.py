@@ -29,12 +29,14 @@ from orchestration.discord_idempotency import (
     safe_json_log_fields,
 )
 from orchestration.qa_discord_feedback import (
+    HR_LANGFUSE_FEEDBACK_MARKER,
     QA_FEEDBACK_MARKER,
     SKILL_PROPOSAL_MARKER,
     QaFeedbackCommand,
     artifact_id_from_text,
     parse_qa_feedback_command,
     proposal_id_from_text,
+    hr_langfuse_channel_id,
     qa_feedback_channel_id,
     submit_qa_feedback_decision,
     submit_skill_proposal_decision,
@@ -409,6 +411,16 @@ def _qa_channel_matches(message: Any) -> bool:
     return expected in {current, parent}
 
 
+def _hr_langfuse_channel_matches(message: Any) -> bool:
+    expected = hr_langfuse_channel_id()
+    if not expected:
+        return False
+    channel = getattr(message, "channel", None)
+    current = str(getattr(channel, "id", "") or "")
+    parent = str(getattr(channel, "parent_id", "") or "")
+    return expected in {current, parent}
+
+
 def _qa_feedback_session_anchor(message_id: str) -> str | None:
     """Return the bounded-session anchor for one automatic QA card.
 
@@ -473,6 +485,29 @@ def _qa_approver_authorized(message: Any) -> bool:
         return True
     allowed_users = _csv_ids("QA_DISCORD_APPROVER_USER_IDS")
     allowed_roles = _csv_ids("QA_DISCORD_APPROVER_ROLE_IDS")
+    if not allowed_users and not allowed_roles:
+        return False
+    if author_id in allowed_users:
+        return True
+    role_ids = {
+        str(getattr(role, "id", "") or "")
+        for role in (getattr(author, "roles", None) or ())
+    }
+    return bool(role_ids.intersection(allowed_roles))
+
+
+def _hr_langfuse_approver_authorized(message: Any) -> bool:
+    """Authorize HR-channel decisions without widening the QA owner scope."""
+
+    author = getattr(message, "author", None)
+    author_id = str(getattr(author, "id", "") or "")
+    guild_owner_id = str(
+        getattr(getattr(message, "guild", None), "owner_id", "") or ""
+    )
+    if author_id and author_id == guild_owner_id:
+        return True
+    allowed_users = _csv_ids("HR_LANGFUSE_APPROVER_USER_IDS")
+    allowed_roles = _csv_ids("HR_LANGFUSE_APPROVER_ROLE_IDS")
     if not allowed_users and not allowed_roles:
         return False
     if author_id in allowed_users:
@@ -750,6 +785,186 @@ async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool 
     return True
 
 
+async def _maybe_handle_hr_langfuse_message(adapter: Any, message: Any) -> bool | None:
+    """Own HR Langfuse cards and human decisions before normal chat admission."""
+
+    if not _hr_langfuse_channel_matches(message):
+        return None
+    content = str(getattr(message, "content", "") or "")
+    author = getattr(message, "author", None)
+    client_user = getattr(getattr(adapter, "_client", None), "user", None)
+    message_id = str(getattr(message, "id", "") or "")
+    command = parse_qa_feedback_command(content)
+    marker_present = HR_LANGFUSE_FEEDBACK_MARKER in {
+        line.strip() for line in content.splitlines()
+    }
+
+    # The HR channel has one owner. Other gateways must consume HR review
+    # commands/cards instead of treating them as ordinary CEO-style work.
+    if _profile_name() != "hr-department":
+        if command is not None or marker_present:
+            logger.info(
+                "hr-langfuse-discord status=ignored_non_owner profile=%s message_id=%s",
+                _profile_name(),
+                message_id or "unknown",
+            )
+            return True
+        return None
+
+    # A card sent by the HR bot is the only automated message allowed to bypass
+    # the upstream self-message filter and invoke HR Hermes for review.
+    if author is not None and client_user is not None and author == client_user:
+        if not marker_present:
+            return None
+        try:
+            dedup_key, _context, claim = _claim_inbound(
+                adapter,
+                message,
+                handler="hr_langfuse_feedback_agent",
+            )
+        except IdempotencyStoreUnavailable:
+            logger.error(
+                "hr-langfuse-discord status=failed_closed reason=idempotency_unavailable"
+            )
+            return True
+        if not claim.admitted:
+            return True
+        _store(adapter).mark_inbound(dedup_key, "PROCESSING", _profile_name())
+        session_anchor = _qa_feedback_session_anchor(message_id)
+        session_token = _QA_FEEDBACK_SESSION_ANCHOR.set(session_anchor)
+        try:
+            result = await adapter._handle_message(message)
+            _store(adapter).mark_inbound(
+                dedup_key,
+                "COMPLETED" if result else "FAILED",
+                _profile_name(),
+            )
+            return bool(result)
+        except Exception:
+            _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+            raise
+        finally:
+            _QA_FEEDBACK_SESSION_ANCHOR.reset(session_token)
+
+    if bool(getattr(author, "bot", True)):
+        return None
+    if command is None:
+        return None
+    logger.info(
+        "hr-langfuse-discord status=decision_detected decision=%s artifact_id=%s message_id=%s",
+        command.decision,
+        command.artifact_id or "NONE",
+        message_id or "unknown",
+    )
+    try:
+        dedup_key, _context, claim = _claim_inbound(
+            adapter,
+            message,
+            handler="hr_langfuse_feedback_decision",
+        )
+    except IdempotencyStoreUnavailable:
+        await _qa_reply(message, "HR 관측 승인 원장을 사용할 수 없어 요청을 처리하지 않았습니다.")
+        return True
+    if not claim.admitted:
+        return True
+    _store(adapter).mark_inbound(dedup_key, "PROCESSING", _profile_name())
+    if not _hr_langfuse_approver_authorized(message):
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(message, "이 HR 관측 채널의 관리자 승인 권한이 없습니다.")
+        return True
+
+    artifact_id = command.artifact_id
+    reply_artifact_id, _reply_proposal_id = await _review_ids_from_reply(message)
+    if not artifact_id:
+        artifact_id = reply_artifact_id
+    if not artifact_id:
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(
+            message,
+            "관측 검토 ID를 찾지 못했습니다. HR Langfuse 카드에 Reply하거나 "
+            "`승인 feedback-... 유형=CODE_FIX <사유>` 형식으로 입력해 주세요.",
+        )
+        return True
+    if command.decision == "APPROVED" and not command.improvement_type:
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(
+            message,
+            "승인에는 `유형=CODE_FIX` 같은 개선 유형이 필요합니다. 관측만 확인하면 "
+            "`유형=NO_ACTION`이 아니라 미승인 또는 보류로 남겨 주세요.",
+        )
+        return True
+    if (
+        command.decision == "APPROVED"
+        and command.improvement_type == "SKILL_EVOLVE"
+        and not command.target_skill_slug
+    ):
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(message, "SKILL_EVOLVE 승인에는 `스킬=<slug>`가 필요합니다.")
+        return True
+    if not command.reason:
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(
+            message,
+            "결정 사유가 필요합니다. HR Langfuse 카드에 Reply해 `승인 <사유>` 또는 "
+            "`미승인 <사유>`를 입력해 주세요.",
+        )
+        return True
+
+    resolved = QaFeedbackCommand(
+        decision=command.decision,
+        artifact_id=artifact_id,
+        reason=command.reason,
+        improvement_type=command.improvement_type,
+        target_skill_slug=command.target_skill_slug,
+    )
+    try:
+        status, body = await asyncio.to_thread(
+            submit_qa_feedback_decision,
+            resolved,
+            actor_id=str(getattr(author, "id", "") or "unknown"),
+            message_id=message_id,
+        )
+    except Exception as exc:
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        logger.warning(
+            "hr-langfuse-discord status=failed_closed error_type=%s message_id=%s",
+            type(exc).__name__,
+            message_id,
+        )
+        await _qa_reply(message, "HR 관측 승인 원장 연결에 실패해 결정은 적용되지 않았습니다.")
+        return True
+    if status in {200, 201, 202}:
+        _store(adapter).mark_inbound(dedup_key, "COMPLETED", _profile_name())
+        if resolved.decision == "APPROVED":
+            await _qa_reply(
+                message,
+                "## ✅ HR Langfuse 관리자 결정\n"
+                f"- **관측 검토 ID:** `{artifact_id}`\n"
+                "- **결정:** `APPROVED`\n"
+                f"- **다음 단계:** `{body.get('benchmark_status') or 'offline benchmark PENDING'}`\n"
+                "- **자동 변경:** 없음",
+            )
+        else:
+            await _qa_reply(
+                message,
+                "## ⛔ HR Langfuse 관리자 결정\n"
+                f"- **관측 검토 ID:** `{artifact_id}`\n"
+                "- **결정:** `REJECTED`\n"
+                "- **다음 단계:** 종료\n"
+                "- **자동 변경:** 없음",
+            )
+    elif status == 409:
+        _store(adapter).mark_inbound(dedup_key, "COMPLETED", _profile_name())
+        await _qa_reply(message, f"{artifact_id}: 이미 결정된 관측 검토라 중복 적용하지 않았습니다.")
+    else:
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(
+            message,
+            f"{artifact_id}: HR 관측 승인 원장이 HTTP {status}로 거부해 적용되지 않았습니다.",
+        )
+    return True
+
+
 def _wrap_dispatch(cls: type[Any]) -> None:
     """Log the live Discord callback before any admission policy runs."""
 
@@ -761,6 +976,9 @@ def _wrap_dispatch(cls: type[Any]) -> None:
     async def wrapped(self: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
         _log_raw_message(self, message)
         handled = await _maybe_handle_qa_feedback_message(self, message)
+        if handled is not None:
+            return handled
+        handled = await _maybe_handle_hr_langfuse_message(self, message)
         if handled is not None:
             return handled
         return await original(self, message, *args, **kwargs)

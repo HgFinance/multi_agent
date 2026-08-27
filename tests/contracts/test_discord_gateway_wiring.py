@@ -61,10 +61,17 @@ class DiscordGatewayWiringTests(unittest.TestCase):
                     block,
                     service,
                 )
+            elif service == "workforce-hermes":
+                self.assertIn("dockerfile: Dockerfile.hermes-discord", block, service)
+                self.assertIn(
+                    "image: hedgefund-hermes-discord:hr-langfuse-v1",
+                    block,
+                    service,
+                )
             else:
                 self.assertIn("image: nousresearch/hermes-agent:latest", block, service)
             self.assertNotIn("HERMES_GATEWAY_IMAGE", block, service)
-            if service != "qa-hermes":
+            if service not in {"qa-hermes", "workforce-hermes"}:
                 self.assertNotIn("Dockerfile.hermes-discord", block, service)
             self.assertIn(f"HERMES_PROFILE: {profile}", block, service)
             profiles.add(profile)

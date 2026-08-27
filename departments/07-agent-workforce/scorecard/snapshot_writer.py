@@ -181,6 +181,9 @@ class WriteOutcome:
     # 어느 버킷을 적었는지. 로그만 보고 "지금 것"으로 오해하지 않게 같이 낸다.
     window_start: datetime | None = None
     window_end: datetime | None = None
+    # HR Langfuse review is deliberately separate from Snapshot writes. A
+    # Discord outage must not make the authoritative workforce snapshot fail.
+    hr_langfuse_review: str = "NOT_ATTEMPTED"
 
     def skip(self, *, kind: str, subject: str, reason: str) -> None:
         self.skipped.append({"kind": kind, "subject": subject, "reason": reason})
@@ -193,6 +196,7 @@ class WriteOutcome:
             "cost_written": self.cost_written,
             "skipped_count": len(self.skipped),
             "skipped": self.skipped,
+            "hr_langfuse_review": self.hr_langfuse_review,
         }
 
 
@@ -390,6 +394,22 @@ def run_once(
     outcome = write_observability_snapshots(observed, repository, dry_run=dry_run)
     outcome.window_start = window_start
     outcome.window_end = window_end
+    try:
+        from orchestration.hr_langfuse_feedback import publish_hr_langfuse_review
+
+        outcome.hr_langfuse_review = publish_hr_langfuse_review(
+            observed,
+            latency_warn_ms=int(
+                os.getenv("LANGSMITH_FEEDBACK_LATENCY_WARN_MS", "60000")
+            ),
+            dry_run=dry_run,
+        )
+    except Exception as exc:  # noqa: BLE001 - Discord review is fail-open
+        LOGGER.warning(
+            "HR Langfuse 검토 카드 연결 실패 - Snapshot 기록은 유지한다: %s",
+            type(exc).__name__,
+        )
+        outcome.hr_langfuse_review = "FAILED"
     return outcome
 
 

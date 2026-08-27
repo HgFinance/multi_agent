@@ -240,6 +240,55 @@ def _primary_metrics(result: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]
     return min(candidates, key=lambda item: item[0]) if candidates else None
 
 
+def _context(lab_path: Path, result: Mapping[str, Any]) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """Load the immutable plan/hypothesis context for a human report."""
+
+    plan: Mapping[str, Any] = {}
+    hypothesis: Mapping[str, Any] = {}
+    plan_id = str(result.get("plan_id") or "")
+    try:
+        plan_path = lab_path / "plans" / f"{plan_id}.json"
+        loaded = _read_object(plan_path)
+        if loaded:
+            plan = loaded
+        hypothesis_id = str(plan.get("hypothesis_id") or "")
+        if hypothesis_id:
+            loaded_hypothesis = _read_object(lab_path / "hypotheses" / f"{hypothesis_id}.json")
+            if loaded_hypothesis:
+                hypothesis = loaded_hypothesis
+    except OSError:
+        pass
+    return plan, hypothesis
+
+
+def _context_lines(plan: Mapping[str, Any], hypothesis: Mapping[str, Any]) -> list[str]:
+    lines: list[str] = []
+    if hypothesis.get("statement"):
+        lines.append(f"가설: {_clip(hypothesis['statement'], 260)}")
+    if hypothesis.get("mechanism"):
+        lines.append(f"작동 가정: {_clip(hypothesis['mechanism'], 220)}")
+    if plan.get("method"):
+        lines.append(f"실험 방법: {_clip(plan['method'], 260)}")
+    signature = plan.get("signature")
+    if signature:
+        if isinstance(signature, Mapping):
+            params = ", ".join(f"{key}={value}" for key, value in signature.items())
+        else:
+            params = str(signature)
+        lines.append(f"수식/파라미터: {_clip(params, 420)}")
+    data = plan.get("data_requirements")
+    if data:
+        lines.append(f"데이터: {_clip('; '.join(map(str, data)) if isinstance(data, (list, tuple)) else data, 240)}")
+    splits = plan.get("splits")
+    if splits:
+        lines.append(f"검증 구간: {_clip('; '.join(map(str, splits)) if isinstance(splits, (list, tuple)) else splits, 220)}")
+    if plan.get("cost_model"):
+        lines.append(f"비용 모델: {_clip(plan['cost_model'], 220)}")
+    if plan.get("seed") is not None:
+        lines.append(f"재현 seed: {plan['seed']}")
+    return lines
+
+
 def _decision(events: list[dict[str, Any]], plan_id: str) -> str:
     decisions = [
         str((event.get("payload") or {}).get("decision") or "")
@@ -260,12 +309,14 @@ def _report_content(
     plan_id = str(result.get("plan_id") or "unknown")
     decision = _decision(events, plan_id)
     status = str(result.get("status") or "UNKNOWN").upper()
+    plan, hypothesis = _context(Path(request.get("_lab_path") or ""), result) if request.get("_lab_path") else ({}, {})
     lines = [
         "📊 전략 Hermes 백테스트 완료",
         f"목표: {_clip(request.get('goal'), 360)}",
         f"상태: {status} / 판정: {decision}",
         f"실험계획: {plan_id}",
     ]
+    lines.extend(_context_lines(plan, hypothesis))
     primary = _primary_metrics(result)
     if primary:
         label, metrics = primary
@@ -286,6 +337,9 @@ def _report_content(
         lines.append("결론: 증거가 불충분해 연구를 보류했습니다.")
     lines.extend(
         [
+            f"강건성: {_clip(json.dumps(result.get('robustness') or {}, ensure_ascii=False, sort_keys=True), 360)}",
+            f"실패 모드: {_clip('; '.join(map(str, result.get('failure_modes') or ())) or '기록 없음', 300)}",
+            f"한계: {_clip('; '.join(map(str, result.get('limitations') or ())) or '기록 없음', 300)}",
             "주문 생성: 없음(연구 결과는 실거래 승인이 아님)",
             f"추적 ID: {lab_id}",
         ]
@@ -408,6 +462,9 @@ class StrategyReportNotifier:
             request = _read_object(lab_path / "request.json")
             if not request or str(request.get("source") or "") != "discord":
                 continue
+            # The lab path is an internal, non-user-facing hint used only to
+            # join immutable plan/hypothesis files into the Discord report.
+            request["_lab_path"] = str(lab_path)
             events = _events(lab_path / "events.jsonl")
             for result_path in sorted((lab_path / "results").glob("*.json")):
                 result = _read_object(result_path)

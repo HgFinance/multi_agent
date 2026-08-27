@@ -17,9 +17,11 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 QA_FEEDBACK_MARKER = "[hgfinance-qa-feedback-request-v1]"
+HR_LANGFUSE_FEEDBACK_MARKER = "[hgfinance-hr-langfuse-review-v1]"
 QA_TERMINAL_MARKER = "[hgfinance-qa-terminal-discord-v1]"
 SKILL_PROPOSAL_MARKER = "[hgfinance-skill-proposal-review-v1]"
 QA_FEEDBACK_CHANNEL_DEFAULT = "1541636723006775477"
+HR_LANGFUSE_CHANNEL_DEFAULT = "1542405626531942432"
 _ARTIFACT_RE = re.compile(r"\bfeedback-[0-9a-f]{32}\b", re.IGNORECASE)
 _PROPOSAL_RE = re.compile(
     r"\b[a-z0-9][a-z0-9-]{1,62}-v[1-9][0-9]*-[0-9a-f]{12}\b",
@@ -34,12 +36,13 @@ _SKILL_RE = re.compile(
     r"\b(?:스킬|skill)\s*=\s*([a-z0-9][a-z0-9-]{1,62})\b", re.IGNORECASE
 )
 _COMMAND_RE = re.compile(
-    r"^\s*(승인|거부|반려|approve|approved|reject|rejected)\b[\s,:-]*(.*)$",
+    r"^\s*(승인|거부|반려|미승인|approve|approved|reject|rejected)\b[\s,:-]*(.*)$",
     re.IGNORECASE,
 )
 _ACTIONABLE_FINDINGS = frozenset(
     {
         "PRIVACY_PAYLOAD_PRESENT",
+        "LANGFUSE_OBSERVABILITY_UNAVAILABLE",
         "WORKER_OR_WORKFLOW_DEGRADED",
         "LATENCY_ABOVE_THRESHOLD",
         "STRUCTURED_EVAL_SCORE_LOW",
@@ -118,6 +121,7 @@ _FINDING_LABELS = {
     "STRUCTURED_EVAL_SCORE_LOW": "구조화 평가 점수 미달",
     "WORKER_OR_WORKFLOW_DEGRADED": "부서 또는 업무 흐름 성능 저하",
     "PRIVACY_PAYLOAD_PRESENT": "민감 원문 포함 감지",
+    "LANGFUSE_OBSERVABILITY_UNAVAILABLE": "Langfuse 관측 연결 불가",
     "CORRELATION_METADATA_MISSING": "호출 연결 정보 누락",
     "DEPARTMENT_METADATA_MISSING": "부서·단계 정보 누락",
 }
@@ -341,6 +345,12 @@ def qa_feedback_channel_id() -> str:
     return os.getenv("QA_DISCORD_CHANNEL_ID", QA_FEEDBACK_CHANNEL_DEFAULT).strip()
 
 
+def hr_langfuse_channel_id() -> str:
+    return os.getenv(
+        "HR_LANGFUSE_CHANNEL_ID", HR_LANGFUSE_CHANNEL_DEFAULT
+    ).strip()
+
+
 def post_qa_discord_message(
     content: str,
     *,
@@ -363,6 +373,39 @@ def post_qa_discord_message(
             "Authorization": f"Bot {token.strip()}",
             "Content-Type": "application/json",
             "User-Agent": "HgFinance-QA-Feedback/1.0",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    message_id = str(payload.get("id") or "") if isinstance(payload, Mapping) else ""
+    if not message_id:
+        raise RuntimeError("discord_message_id_missing")
+    return message_id
+
+
+def post_hr_langfuse_discord_message(
+    content: str,
+    *,
+    token: str,
+    channel_id: str,
+    timeout: float = 8.0,
+) -> str:
+    """Post one bounded HR/Langfuse card with the HR transport identity."""
+
+    if not token.strip() or not channel_id.strip():
+        raise ValueError("HR Langfuse Discord transport is not configured")
+    request = Request(
+        f"https://discord.com/api/v10/channels/{channel_id}/messages",
+        data=json.dumps(
+            {"content": content[:1900], "allowed_mentions": {"parse": []}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        headers={
+            "Authorization": f"Bot {token.strip()}",
+            "Content-Type": "application/json",
+            "User-Agent": "HgFinance-HR-Langfuse/1.0",
         },
         method="POST",
     )
@@ -636,6 +679,108 @@ def format_qa_feedback_request(
     )[:1900]
 
 
+def format_hr_langfuse_feedback_request(
+    *,
+    artifact_id: str,
+    decision: str,
+    finding_codes: object,
+    summaries: object,
+    metadata: Mapping[str, Any],
+) -> str:
+    """Build the HR-facing, metadata-only Langfuse review card.
+
+    HR receives the aggregated Workforce read model, not trace input/output.
+    Keep this separate from the QA card so the channel makes its owner and
+    decision semantics obvious while the same central approval ledger remains
+    the single source of truth.
+    """
+
+    codes = (
+        [str(code).strip()[:80].upper() for code in finding_codes]
+        if isinstance(finding_codes, (list, tuple, set, frozenset))
+        else []
+    )
+    summary_values = (
+        [_manager_label(value, 180) for value in summaries]
+        if isinstance(summaries, (list, tuple))
+        else []
+    )
+    decision_label = {
+        "REVIEW_REQUIRED": "검토 필요",
+        "IMPROVEMENT_CANDIDATE": "개선 검토 대상",
+        "OBSERVED_PASS": "관측상 정상",
+    }.get(str(decision or "").upper(), "확인 필요")
+    observations: list[str] = []
+    window_start = _bounded(metadata.get("window_start"), 64)
+    window_end = _bounded(metadata.get("window_end"), 64)
+    if window_start or window_end:
+        observations.append(
+            f"관측 구간: {window_start or '?'} ~ {window_end or '?'}"
+        )
+    report_count = metadata.get("report_count")
+    if report_count:
+        observations.append(f"관측 보고서: {int(report_count)}건")
+    measured_count = metadata.get("measured_count")
+    unavailable_count = metadata.get("unavailable_count")
+    if measured_count is not None or unavailable_count is not None:
+        observations.append(
+            f"측정 완료 {int(measured_count or 0)}건 / 확인 불가 {int(unavailable_count or 0)}건"
+        )
+    latency_ms = metadata.get("latency_ms") or metadata.get("p95_latency_ms")
+    if latency_ms:
+        latency = f"최장 실행 p95: {float(latency_ms) / 1000:.2f}초"
+        threshold = metadata.get("latency_threshold_ms")
+        if threshold:
+            latency += f" (기준 {float(threshold) / 1000:.2f}초)"
+        observations.append(latency)
+    observations.extend(summary_values[:4])
+    observation_text = "\n".join(f"- {line}" for line in observations)
+    if not observation_text:
+        observation_text = "- 집계된 관측값 없음"
+
+    evidence_values = [
+        ("관측 출처", metadata.get("source_project") or "Langfuse"),
+        ("관측 유형", metadata.get("source_name") or "HR Workforce 관측"),
+        ("관측 기록 ID", metadata.get("source_run_id")),
+        ("연결 추적 ID", metadata.get("trace_id")),
+        ("관측 API 단계", metadata.get("observation_point") or "워크포스 관측 API"),
+    ]
+    evidence = [
+        f"- {label}: {_bounded(value, 160)}"
+        for label, value in evidence_values
+        if value
+    ]
+    evidence.append("- 원문 입력·출력 전송: 없음")
+    evidence_text = "\n".join(evidence)
+    code_text = ", ".join(
+        _FINDING_LABELS.get(code, "추가 확인 신호") for code in codes[:8]
+    ) or "없음"
+    bottleneck = qa_owner_label(metadata.get("primary_bottleneck_department"))
+    bottleneck_text = bottleneck or "미확정"
+    if bottleneck and metadata.get("primary_bottleneck_duration_ms"):
+        bottleneck_text += (
+            f" ({float(metadata['primary_bottleneck_duration_ms']) / 1000:.2f}초)"
+        )
+    return (
+        f"{HR_LANGFUSE_FEEDBACK_MARKER}\n"
+        "## HR · Langfuse 관측 요약 및 관리자 결정 요청\n"
+        f"- 관측 검토 ID: `{_bounded(artifact_id, 80)}`\n"
+        "- 대상: **인사 부서**\n"
+        f"- 자동 판정: **{decision_label}**\n"
+        f"- 확인 신호: `{code_text}`\n"
+        f"- 주요 병목: **{bottleneck_text}**\n\n"
+        "### Langfuse 관측 요약\n"
+        f"{observation_text}\n\n"
+        "### 근거 좌표 · 원문 제외\n"
+        f"{evidence_text}\n\n"
+        "### 관리자 결정\n"
+        f"- 이 카드에 답글: `승인 {_bounded(artifact_id, 80)} 유형=CODE_FIX <사유>`\n"
+        f"- 미승인: `미승인 {_bounded(artifact_id, 80)} <사유>`\n"
+        "- 보류: 답글 없이 대기\n\n"
+        "> HR Hermes는 관측 요약·근거·한계만 검토하며 권한·설정·코드 변경과 주문을 수행하지 않습니다."
+    )[:1900]
+
+
 def format_skill_proposal_request(
     *,
     proposal_id: str,
@@ -886,18 +1031,23 @@ def _post_internal_decision(
 
 
 __all__ = [
+    "HR_LANGFUSE_CHANNEL_DEFAULT",
+    "HR_LANGFUSE_FEEDBACK_MARKER",
     "QA_FEEDBACK_MARKER",
     "SKILL_PROPOSAL_MARKER",
     "QaFeedbackCommand",
     "artifact_id_from_text",
+    "format_hr_langfuse_feedback_request",
     "format_qa_feedback_request",
     "format_skill_activation_notice",
     "format_skill_proposal_request",
     "is_actionable_feedback",
     "parse_qa_feedback_command",
+    "post_hr_langfuse_discord_message",
     "post_qa_discord_message",
     "proposal_id_from_text",
     "qa_feedback_channel_id",
+    "hr_langfuse_channel_id",
     "submit_qa_feedback_decision",
     "submit_skill_proposal_decision",
 ]

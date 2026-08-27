@@ -91,6 +91,21 @@ class StrategyResearchStatus(BaseModel):
     kanban_tracking_status: Literal["CREATED", "UNAVAILABLE"] = "UNAVAILABLE"
 
 
+class StrategyPromotionAsk(BaseModel):
+    mode: Literal["shadow", "paper", "live"] = "paper"
+    confirm: bool = False
+    override_blocked: bool = False
+
+
+class StrategyPromotionAccepted(BaseModel):
+    schema_version: str = "autonomous-strategy-promotion.v1"
+    request_id: str
+    promotion_id: str
+    mode: Literal["shadow", "paper", "live"]
+    status: Literal["REQUESTED", "REVIEW_REQUIRED", "BLOCKED"]
+    message: str
+
+
 def _owner(actor: str | None) -> str:
     return str(actor or "anonymous").strip() or "anonymous"
 
@@ -264,6 +279,71 @@ def strategy_research_status(
         "CREATED" if status.get("kanban_root_task_id") else "UNAVAILABLE"
     )
     return StrategyResearchStatus.model_validate(status)
+
+
+@router.post("/requests/{request_id}/promote", response_model=StrategyPromotionAccepted, status_code=202)
+def strategy_research_promote(
+    request_id: str,
+    request: StrategyPromotionAsk,
+    owner_id: str | None = Depends(optional_current_user),
+) -> StrategyPromotionAccepted:
+    """Record an explicit promotion request without letting research self-deploy.
+
+    Candidate artifacts may enter the existing release workflow in shadow or
+    paper mode. A BLOCKED result can be explicitly escalated for human review,
+    but this endpoint never converts missing evidence into a live strategy and
+    never places an order. Live deployment requires the separate release/risk
+    authority, so it is durably recorded as BLOCKED here.
+    """
+
+    if not owner_id:
+        raise HTTPException(status_code=401, detail="strategy_promotion_authentication_required")
+    intake = ResearchIntake(_lab_root())
+    status = intake.status(request_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="strategy_research_request_not_found")
+    if status.get("actor_id") != owner_id:
+        raise HTTPException(status_code=403, detail="strategy_research_request_forbidden")
+    lab_path = intake.lab_path(request_id)
+    candidate = lab_path / "candidate.json"
+    current_status = str(status.get("status") or "").upper()
+    if current_status == "BLOCKED" and request.override_blocked and request.confirm:
+        promotion_status: Literal["REQUESTED", "REVIEW_REQUIRED", "BLOCKED"] = "REVIEW_REQUIRED"
+        message = "BLOCKED 결과를 강제 배포하지 않고, 별도 인간·Risk 검토 요청으로 등록했습니다."
+    elif not candidate.exists():
+        promotion_status = "BLOCKED"
+        message = "후보 아티팩트가 없어 승격 요청을 실행할 수 없습니다."
+    elif not request.confirm:
+        promotion_status = "BLOCKED"
+        message = "명시적 confirm=true가 없어 승격 요청을 거부했습니다."
+    elif request.mode == "live":
+        promotion_status = "BLOCKED"
+        message = "LIVE 배포는 이 연구 API의 권한 범위가 아닙니다. QA·Risk·사람 승인을 거쳐야 합니다."
+    else:
+        promotion_status = "REQUESTED"
+        message = f"{request.mode.upper()} 승격 요청을 release gate로 전달할 준비가 됐습니다."
+    promotion_id = f"promotion-{uuid4().hex}"
+    path = lab_path / "promotion-requests" / f"{promotion_id}.json"
+    intake._write_json(path, {
+        "schema": "autonomous-strategy-promotion.v1",
+        "promotion_id": promotion_id,
+        "request_id": request_id,
+        "requested_by": owner_id,
+        "mode": request.mode,
+        "confirm": request.confirm,
+        "override_blocked": request.override_blocked,
+        "research_status": current_status,
+        "candidate_path": str(candidate) if candidate.exists() else None,
+        "status": promotion_status,
+        "message": message,
+    })
+    return StrategyPromotionAccepted(
+        request_id=request_id,
+        promotion_id=promotion_id,
+        mode=request.mode,
+        status=promotion_status,
+        message=message,
+    )
 
 
 __all__ = ["accept_strategy_research_query", "looks_like_strategy_research", "router"]

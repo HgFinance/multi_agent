@@ -10950,6 +10950,24 @@ class CeoSupervisorService:
                 show = getattr(self.client, "show", None)
                 if not root_payload:
                     root_payload = show(root_id) if callable(show) else {}
+                # Strategy Hermes owns its research lifecycle.  Its Kanban
+                # root exists only as a control-plane correlation record and
+                # must never enter CEO planning, child creation, synthesis,
+                # Discord projection, or supervisor retry logic.  This guard
+                # is intentionally independent from the card status because
+                # a just-created blocked card may briefly be observed as
+                # ready/running during the dispatcher transaction race.
+                if "strategy_research_tracking_only=true" in str(
+                    root_payload.get("body") or ""
+                ):
+                    logger.info(
+                        "strategy-research-tracking-root-ignored root=%s task=%s "
+                        "event=%s",
+                        root_id,
+                        task_id,
+                        event_key,
+                    )
+                    return None
                 workflow_ready_ms = time.time_ns() // 1_000_000
                 workflow_ready_mono_ns = time.perf_counter_ns()
                 synthesis_timing_base: dict[str, Any] = {

@@ -81,7 +81,18 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       WORKFORCE_SNAPSHOT_INTERVAL_SECONDS: ${WORKFORCE_SNAPSHOT_INTERVAL_SECONDS:-600}
       WORKFORCE_SNAPSHOT_HEALTH_PATH: /tmp/workforce-snapshot-writer.health
+      # Langfuse 관측 창에 이상 신호가 있을 때만 HR 채널에 요약 카드를
+      # 발행한다. shadow/off 는 카드와 승인 원장을 만들지 않는 안전한 기본값이다.
+      HR_LANGFUSE_REVIEW_MODE: ${HR_LANGFUSE_REVIEW_MODE:-shadow}
+      HR_LANGFUSE_CHANNEL_ID: ${HR_LANGFUSE_CHANNEL_ID:-1542405626531942432}
+      DISCORD_BOT_TOKEN_HR: ${DISCORD_BOT_TOKEN_HR:-}
+      LANGSMITH_FEEDBACK_LATENCY_WARN_MS: ${LANGSMITH_FEEDBACK_LATENCY_WARN_MS:-60000}
+      LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
       PYTHONPATH: /app:/app/departments/07-agent-workforce
+    volumes:
+      # audit-api and HR review share this SQLite coordination ledger. It is
+      # used for artifact/decision/delivery idempotency only; no secrets live here.
+      - portfolio_runtime_data:/var/lib/portfolio
     healthcheck:
       # heartbeat 는 기록 0건에도 찍힌다 - Worker 가 한 시간 동안 아무것도 안 한
       # 정상 상태(arrivals=0)로 컨테이너를 재시작시키면 진짜 장애만 가려진다.
@@ -100,7 +111,10 @@ services:
   # 확정 매핑). 프로필 디렉터리 이름은 scripts/sync_hermes_profiles.sh의 매핑("hr-department")과
   # 일치해야 한다.
   workforce-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile.hermes-discord
+    image: hedgefund-hermes-discord:hr-langfuse-v1
     container_name: hedgefund-workforce-hermes
     restart: unless-stopped
     command: ["sleep", "infinity"]
@@ -112,6 +126,8 @@ services:
     volumes:
       - /home/ubuntu/.hermes/profiles/hr-department:/opt/data
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban   # 공용 Kanban board, root docker-compose.yml research-hermes 주석 참고
+      - ../../skills:/opt/shared-skills:ro
+      - ../../scripts:/opt/hgfinance/scripts:ro
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
@@ -120,6 +136,12 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      HR_LANGFUSE_CHANNEL_ID: ${HR_LANGFUSE_CHANNEL_ID:-1542405626531942432}
+      DISCORD_FREE_RESPONSE_CHANNELS: ${HR_DISCORD_FREE_RESPONSE_CHANNELS:-1542405626531942432}
+      HR_LANGFUSE_APPROVER_USER_IDS: ${HR_LANGFUSE_APPROVER_USER_IDS:-}
+      HR_LANGFUSE_APPROVER_ROLE_IDS: ${HR_LANGFUSE_APPROVER_ROLE_IDS:-}
+      QA_FEEDBACK_API_URL: http://audit-api:8000
+      QA_API_AUTH_TOKEN: ${QA_API_AUTH_TOKEN:-}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

@@ -83,3 +83,29 @@ def test_strategy_tracking_root_is_persisted_when_created(
     assert accepted.kanban_tracking_status == "CREATED"
     request = (tmp_path / "research" / "intake" / "research-root-01.json").read_text()
     assert "t_strategy_root" in request
+
+
+def test_blocked_strategy_can_only_be_escalated_for_human_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(strategy_research, "_lab_root", lambda: tmp_path / "research")
+    accepted = strategy_research.strategy_research_ask(
+        strategy_research.StrategyResearchAsk(
+            query="코스피 돌파 전략을 연구하고 백테스트해줘",
+            request_id="research-promotion-01",
+        ),
+        "user-a",
+    )
+    intake = strategy_research.ResearchIntake(tmp_path / "research")
+    intake.record_error(accepted.request_id, phase="DATA", error="PIT universe unavailable")
+
+    promoted = strategy_research.strategy_research_promote(
+        accepted.request_id,
+        strategy_research.StrategyPromotionAsk(
+            mode="live", confirm=True, override_blocked=True
+        ),
+        "user-a",
+    )
+
+    assert promoted.status == "REVIEW_REQUIRED"
+    assert "강제 배포하지 않고" in promoted.message
