@@ -192,7 +192,7 @@ function NotionReportDialog({
  * 아이콘 자리다.
  */
 const OUTPUT_ROW_GRID =
-  "grid grid-cols-[1.25rem_minmax(0,1fr)_22%_24%_1.25rem] items-center gap-3 px-4";
+  "grid grid-cols-[1.25rem_minmax(0,1fr)_15%_15%_1.25rem] items-center gap-3 px-4";
 
 /**
  * 결과물 창고 — **Notion에 실제로 발행된 리포트만** 보여준다.
