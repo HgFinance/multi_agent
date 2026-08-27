@@ -32,6 +32,8 @@ from orchestration.adapters.notion_schema_cache import BoundedNotionSchemaCache
 from orchestration.adapters.terminal_projection_utils import (
     iso_timestamp,
     merged_run_metadata,
+    qa_projection_checks,
+    qa_projection_findings,
     safe_json,
     summary,
     task_body,
@@ -56,6 +58,7 @@ DATABASE_ENV = {
     "risk": "NOTION_RISK_DB",
     "accounting": "NOTION_ACCOUNTING_DB",
     "qa": "NOTION_QA_DB",
+    "hr": "NOTION_HR_DB",
 }
 
 TITLE_PROPERTY = {
@@ -65,6 +68,8 @@ TITLE_PROPERTY = {
     "risk": "제목",
     "accounting": "제목",
     "qa": "제목",
+    # HR's native database uses the role label as its title property.
+    "hr": "후보 role_code",
 }
 
 PROJECTION_MARKER = "hgfinance.department-notion-projection.v1"
@@ -200,7 +205,10 @@ class _NotionTransport:
         for block in existing:
             block_id = str(block.get("id") or "").strip()
             if block_id:
-                self._request("PATCH", f"blocks/{block_id}", {"archived": True})
+                # ``in_trash`` is the effective Notion API field for block
+                # removal.  ``archived`` alone can return HTTP 200 while
+                # leaving the old block visible, creating duplicate reports.
+                self._request("PATCH", f"blocks/{block_id}", {"in_trash": True})
 
 
 @dataclass(frozen=True)
@@ -283,6 +291,8 @@ def _task_title(task: Mapping[str, Any], department: str) -> str:
 
     if department == "qa":
         raw = "QA 감사 결과"
+    elif department == "hr":
+        raw = raw.removeprefix("HR:").strip() or "Agent Workforce 검토 결과"
 
     return f"{tid} · {raw}"[:1900]
 
@@ -312,6 +322,48 @@ def _humanize_risk_result(value: str) -> str:
         ("판단 보류 (DEFER)", "판단 보류"),
         ("적용 가능성 주의 (WARN)", "적용 가능성 주의"),
         ("gross 노출", "총액 기준 노출"),
+        ("gross/net exposure", "총액·순액 노출"),
+        ("Risk PAPER", "리스크 분석용 가상거래"),
+        ("Proposal-only", "제안 전용"),
+        ("proposal-only", "제안 전용"),
+        ("Workforce API", "인력 운영 조회 시스템"),
+        ("Workforce", "인력 운영"),
+        ("Scorecard", "성과표"),
+        ("standard_analysis", "일반 분석"),
+        ("NO_SNAPSHOT", "확인 자료 없음"),
+        ("UNAVAILABLE", "관측 시스템에서 확인 불가"),
+        ("Agent", "에이전트"),
+        ("HR", "인사"),
+        ("스냅샷 범위", "조회 자료 범위"),
+        ("동결 스냅샷상", "동결된 조회 자료 기준"),
+        ("미매핑", "분류되지 않음"),
+        ("Mandate snapshot이", "투자지침 조회 자료가"),
+        ("결정론적 Risk Engine 검증", "결정론적 리스크 검증 시스템"),
+        ("비권위 스냅샷", "공식 확정 자료가 아닌 조회 자료"),
+        ("섹터 미매핑", "섹터 분류 누락"),
+        ("Accounting advisory snapshot", "회계 조회 자료"),
+        ("투자지침 snapshot", "투자지침 조회 자료"),
+        ("Advisory Risk", "자문성 리스크"),
+        ("Risk Engine", "결정론적 리스크 검증 시스템"),
+        ("Trading 활성화", "거래 활성화"),
+        ("snapshot", "조회 자료"),
+        ("max_gross_exposure", "총노출 한도"),
+        ("max_instrument_weight", "종목 비중 한도"),
+        ("max_sector_weight", "섹터 비중 한도"),
+        ("max_concurrent_positions", "동시 보유 종목 수 한도"),
+        ("quality_status=WARN", "자료 품질 상태: 주의"),
+        ("quality_status=PASS", "자료 품질 상태: 확인"),
+        ("quality_status", "자료 품질 상태"),
+        ("authoritative=false", "공식 확정 자료가 아님"),
+        ("authoritative=true", "공식 확정 자료"),
+        ("unavailable_reference_mapping", "참조 분류 미확인"),
+        ("REQUIRES_USER_REVIEW", "사람 검토 필요"),
+        ("PROVISIONAL_CRYPTO", "가상자산"),
+        ("as_of", "기준 시각"),
+        ("ELEVATED", "주의"),
+        ("HIGH", "높음"),
+        ("LOW", "낮음"),
+        ("DEFER", "판단 보류"),
         ("KOREA_EQUITY", "국내 주식"),
         ("PROVISIONAL_ETF", "임시 허용 ETF"),
         ("Mandate가", "투자지침이"),
@@ -327,10 +379,36 @@ def _humanize_risk_result(value: str) -> str:
     humanized = value
     for internal, friendly in replacements:
         humanized = humanized.replace(internal, friendly)
-    # NAV 만 정규식이다 - str.replace 는 부분 문자열도 바꿔서 UNAVAILABLE 이
-    # "U순자산 가치AILABLE" 로 깨졌다(2026-08-26 HR 유휴 리포트 실측). `\b` 는
-    # 한글이 \w 라 "NAV가" 를 놓치므로 ASCII 문자만 배제한다.
-    humanized = re.sub(r"(?<![A-Za-z])NAV(?![A-Za-z])", "순자산 가치", humanized)
+    # ``NAV`` is also a substring of ``UNAVAILABLE``.  Restrict this
+    # acronym replacement to a standalone runtime token so observability
+    # statuses are not corrupted (for example ``U순자산 가치AILABLE``).
+    humanized = re.sub(
+        r"(?<![A-Za-z0-9_])NAV(?![A-Za-z0-9_])",
+        "순자산 가치",
+        humanized,
+    )
+    # Contextual replacements above run before the broad terms.  These
+    # guards keep already-humanized sentences grammatical and idempotent when
+    # an existing Notion page is projected more than once.
+    humanized = humanized.replace(
+        "투자지침 조회 자료이 주문", "투자지침 조회 자료가 주문"
+    )
+    humanized = humanized.replace(
+        "결정론적 결정론적 리스크 검증 시스템 검증",
+        "결정론적 리스크 검증 시스템",
+    )
+    humanized = humanized.replace(
+        "섹터 매핑은 5개 전부 분류되지 않음",
+        "섹터 분류는 5개 모두 확인되지 않음",
+    )
+    humanized = humanized.replace(
+        "섹터 분류되지 않음", "섹터 분류가 확인되지 않음"
+    )
+    humanized = re.sub(
+        r"(조회 자료\([^\n)]*\))은",
+        r"\1는",
+        humanized,
+    )
     humanized = re.sub(
         r"(?:PAPER(?: 가상거래)? 기준 |PAPER만으로는 )?"
         r"현재 입력만으로 위반을 확인하지 못함으로 "
@@ -338,6 +416,7 @@ def _humanize_risk_result(value: str) -> str:
         "법률 위반 여부를 확정할 수 없으며",
         humanized,
     )
+    humanized = humanized.replace("PAPER", "분석용 가상거래")
 
     lines: list[str] = []
     for line in humanized.splitlines():
@@ -383,7 +462,9 @@ def _risk_body_markdown(
     rows = human_metadata_rows(metadata)
     if rows:
         parts.extend(["", "## 주요 운영 정보", ""])
-        parts.extend(f"- {label}: {value}" for label, value in rows)
+        parts.extend(
+            f"- {label}: {_humanize_risk_result(value)}" for label, value in rows
+        )
 
     risk_plan = metadata.get("position_risk_plan") or metadata.get("risk_plan")
     if isinstance(risk_plan, Mapping):
@@ -504,6 +585,19 @@ def _humanize_accounting_result(value: str) -> str:
     return humanized
 
 
+def _humanize_hr_result(value: str) -> str:
+    """Keep runtime markers and local artifact paths out of HR pages."""
+
+    humanized = str(value or "")
+    for internal, friendly in (
+        ("NO_SNAPSHOT", "확인 자료 없음"),
+        ("UNAVAILABLE", "관측 시스템에서 확인 불가"),
+        ("proposal_only_pending_evidence", "근거 보강 후 재검토하는 조건부 제안"),
+    ):
+        humanized = humanized.replace(internal, friendly)
+    return re.sub(r"/opt/data/shared-kanban/[^\s]+", "HR 제안서", humanized)
+
+
 def _humanize_qa(value: Any, limit: int = 320) -> str:
     rendered = " ".join(str(value or "").split())
     replacements = (
@@ -523,6 +617,20 @@ def _humanize_qa(value: Any, limit: int = 320) -> str:
             "원장·현금·평가·수수료·세금 대사 근거가 일치할 때까지",
         ),
         ("snapshot and broker independent reconciliation absent", "스냅샷과 브로커 독립 대사가 없음"),
+        ("broker_evidence", "브로커 증거"),
+        ("artifact/citation 좌표", "근거 좌표"),
+        ("artifact/citation", "근거 좌표"),
+        ("citation coordinates", "인용 좌표"),
+        ("provided payload", "제공된 자료"),
+        ("제공 payload", "제공된 자료"),
+        ("제공 snapshot", "제공된 조회 자료"),
+        ("payload", "제공 자료"),
+        ("Preliminary", "예비"),
+        ("gross/net exposure", "총·순 익스포저"),
+        ("PnL", "손익"),
+        ("side", "포지션 방향"),
+        ("sector", "섹터"),
+        ("broker", "브로커"),
         (
             "No investment/trading eligibility decision until evidence is independently verified",
             "근거를 독립적으로 확인하기 전에는 투자·거래 적격성을 결정하지 않음",
@@ -534,9 +642,17 @@ def _humanize_qa(value: Any, limit: int = 320) -> str:
         ("broker reconciliation", "브로커 대사"),
         ("snapshot", "조회 자료"),
         ("Require ", "필요: "),
+        ("next_ceo_synthesis", "다음 CEO 종합"),
         ("NAV", "순자산"),
         ("PIT", "기준 시점"),
         ("provenance", "자료 출처·계보"),
+        ("ceo-workflow", "CEO 업무 흐름"),
+        ("accounting-portfolio-department", "회계·포트폴리오 부서"),
+        ("MEDIUM", "중간"),
+        ("CRITICAL", "매우 높음"),
+        ("BLOCKER", "차단"),
+        ("HIGH", "높음"),
+        ("LOW", "낮음"),
         ("DEFER", "보류"),
         ("FAIL", "실패"),
         ("PASS", "통과"),
@@ -544,6 +660,11 @@ def _humanize_qa(value: Any, limit: int = 320) -> str:
     )
     for internal, friendly in replacements:
         rendered = rendered.replace(internal, friendly)
+    rendered = re.sub(
+        r"\bKRW\s*((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+))(?=\D|$)",
+        r"\1원",
+        rendered,
+    )
     return rendered[:limit]
 
 
@@ -578,7 +699,7 @@ def _qa_findings_lines(value: Any) -> list[str]:
             block = _humanize_qa(item.get("block_condition") or item.get("impact"), 180)
             finding_id = _humanize_qa(item.get("finding_id") or item.get("id"), 48)
             status = _humanize_qa(item.get("status"), 32)
-            due_date = _humanize_qa(item.get("due_date"), 32)
+            due_date = _humanize_qa(item.get("due_date") or item.get("due"), 32)
             prefix = f"{finding_id}: " if finding_id else ""
             suffix = f" 담당: {owner}" if owner else ""
             if block:
@@ -587,9 +708,37 @@ def _qa_findings_lines(value: Any) -> list[str]:
                 suffix += f" 상태: {status}"
             if due_date:
                 suffix += f" 기한: {due_date}"
+            recommended_action = _humanize_qa(
+                item.get("recommended_action"), 220
+            )
+            if recommended_action:
+                suffix += f" 조치: {recommended_action}"
             lines.append(f"- [{severity}] {prefix}{issue}{suffix}")
         elif item:
             lines.append(f"- {_humanize_qa(item)}")
+    return lines
+
+
+def _qa_evidence_lines(value: Any, *, limit: int = 4) -> list[str]:
+    """Render bounded QA facts without exposing structured field names."""
+
+    if isinstance(value, str):
+        values: Sequence[Any] = [value]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        values = value
+    else:
+        return []
+    lines: list[str] = []
+    for item in values[:limit]:
+        if isinstance(item, Mapping):
+            item = (
+                item.get("fact")
+                or item.get("statement")
+                or item.get("description")
+                or item.get("message")
+            )
+        if item:
+            lines.append(f"- {_humanize_qa(item, 260)}")
     return lines
 
 
@@ -630,6 +779,7 @@ def _qa_summary_text(
         metadata.get("verdict")
         or metadata.get("qa_verdict")
         or metadata.get("overall")
+        or metadata.get("qa_status")
         or task.get("verdict")
     )
     numerical = (
@@ -637,8 +787,8 @@ def _qa_summary_text(
         or metadata.get("numeric_posture")
         or metadata.get("decision")
     )
-    checks = _qa_check_lines(metadata.get("checks") or task.get("checks"))
-    findings = _qa_findings_lines(metadata.get("findings") or task.get("findings"))
+    checks = _qa_check_lines(qa_projection_checks(task, metadata))
+    findings = _qa_findings_lines(qa_projection_findings(task, metadata))
     passed = sum("통과" in line for line in checks)
     return (
         f"QA 검토를 완료했습니다. 종합 판정은 {_qa_decision_label(verdict)}이며, "
@@ -661,6 +811,7 @@ def _qa_body_markdown(
         metadata.get("verdict")
         or metadata.get("qa_verdict")
         or metadata.get("overall")
+        or metadata.get("qa_status")
         or task.get("verdict")
     )
     numerical = (
@@ -668,8 +819,14 @@ def _qa_body_markdown(
         or metadata.get("numeric_posture")
         or metadata.get("decision")
     )
-    findings = _qa_findings_lines(metadata.get("findings") or task.get("findings"))
-    checks = _qa_check_lines(metadata.get("checks") or task.get("checks"))
+    findings = _qa_findings_lines(qa_projection_findings(task, metadata))
+    checks = _qa_check_lines(qa_projection_checks(task, metadata))
+    verified_facts = _qa_evidence_lines(
+        metadata.get("verified_facts") or task.get("verified_facts")
+    )
+    unknowns = _qa_evidence_lines(
+        metadata.get("unknowns") or task.get("unknowns"), limit=3
+    )
     status = str(task.get("status") or "").casefold()
     status_label = "완료" if status in {"done", "completed"} else "확인 필요"
     parts = [
@@ -687,6 +844,12 @@ def _qa_body_markdown(
         "",
     ]
     parts.extend(checks or ["- 세부 점검 결과가 없습니다."])
+    if verified_facts:
+        parts.extend(["", "## 확인된 근거", ""])
+        parts.extend(verified_facts)
+    if unknowns:
+        parts.extend(["", "## 아직 확인되지 않은 점", ""])
+        parts.extend(unknowns)
     parts.extend(["", "## 주요 문제와 영향", ""])
     parts.extend(findings or ["- 중대한 문제 항목이 기록되지 않았습니다."])
     parts.extend(
@@ -709,6 +872,286 @@ def _qa_body_markdown(
         ]
     )
     return "\n".join(parts)
+
+
+def _hr_body_markdown(
+    *,
+    task: Mapping[str, Any],
+    root_task_id: str,
+    result_text: str,
+    metadata: Mapping[str, Any],
+) -> str:
+    """Render a concise Korean HR projection for managers.
+
+    The supervisor's CEO/Kanban path shares the native HR database. Keep this
+    page readable without runtime field names, raw JSON, worker session IDs,
+    or local workspace paths.
+    """
+
+    # HR worker versions keep the authoritative read snapshot under different
+    # terminal envelopes.  Flatten only the small manager-facing facts needed
+    # by this page so a successful run is not displayed as "확인 필요".
+    normalized = dict(metadata)
+    worker_result = metadata.get("result")
+    if isinstance(worker_result, Mapping):
+        improvements = worker_result.get("improvements")
+        if isinstance(improvements, Mapping):
+            normalized.setdefault(
+                "improvement_candidates", improvements.get("candidate_count")
+            )
+        if normalized.get("improvement_candidates") in (None, ""):
+            normalized["improvement_candidates"] = worker_result.get(
+                "improvement_candidate_count"
+            )
+        idle_agents = worker_result.get("idle_agents")
+        if isinstance(idle_agents, Mapping):
+            statuses = idle_agents.get("statuses")
+            if isinstance(statuses, Mapping) and statuses.get("UNAVAILABLE"):
+                normalized.setdefault("observability_risk", "UNAVAILABLE")
+        observability_result = worker_result.get("observability")
+        if isinstance(observability_result, Mapping):
+            unavailable = observability_result.get("UNAVAILABLE")
+            if unavailable is None:
+                unavailable = observability_result.get("unavailable_count")
+            normalized.setdefault(
+                "observability_risk",
+                "UNAVAILABLE" if unavailable else observability_result.get("status"),
+            )
+        scorecard_result = worker_result.get("scorecard")
+        if isinstance(scorecard_result, Mapping):
+            quality_value = scorecard_result.get("both_quality")
+            if quality_value is None and scorecard_result.get(
+                "quality_eval_run_references"
+            ) is not None:
+                quality_value = "확인 자료 없음"
+            normalized["risk_scorecard"] = {
+                "capacity": scorecard_result.get("both_capacity")
+                or scorecard_result.get("capacity"),
+                "cost": scorecard_result.get("both_cost")
+                or scorecard_result.get("cost"),
+                "quality_metrics": "확인 자료 없음"
+                if quality_value is not None
+                else scorecard_result.get("quality"),
+            }
+        api_checks = worker_result.get("api_checks")
+        if isinstance(api_checks, Sequence) and not isinstance(api_checks, (str, bytes)):
+            for check in api_checks:
+                if not isinstance(check, Mapping):
+                    continue
+                endpoint = str(check.get("endpoint") or "")
+                if "/improvements" in endpoint:
+                    normalized.setdefault(
+                        "improvement_candidates", check.get("candidate_count")
+                    )
+                elif "/observability" in endpoint and worker_result.get("idle_agents"):
+                    normalized.setdefault("observability_risk", "UNAVAILABLE")
+        idle_agents = worker_result.get("idle_agents")
+        if (
+            isinstance(idle_agents, Sequence)
+            and not isinstance(idle_agents, (str, bytes))
+            and any(
+                isinstance(agent, Mapping)
+                and str(agent.get("status") or "").strip() == "UNAVAILABLE"
+                for agent in idle_agents
+            )
+        ):
+            normalized.setdefault("observability_risk", "UNAVAILABLE")
+        summary_metadata = metadata.get("summary")
+        if isinstance(summary_metadata, Mapping):
+            observation = str(summary_metadata.get("scorecard_observation") or "")
+            if "NO_SNAPSHOT" in observation:
+                normalized["risk_scorecard"] = {
+                    "capacity": "NO_SNAPSHOT",
+                    "cost": "NO_SNAPSHOT",
+                    "quality_metrics": "NO_SNAPSHOT",
+                }
+
+    # The latest HR worker keeps receipts at the top level of run metadata.
+    direct_observability = metadata.get("observability")
+    direct_scorecard = metadata.get("scorecard")
+    direct_summary = metadata.get("summary")
+    if isinstance(direct_observability, Mapping) and isinstance(
+        direct_scorecard, Mapping
+    ):
+        if isinstance(direct_summary, Mapping):
+            normalized.setdefault(
+                "improvement_candidates",
+                direct_summary.get("improvement_candidate_count"),
+            )
+        states = direct_observability.get("states") or direct_observability.get(
+            "idle_state_counts"
+        )
+        if isinstance(states, Mapping) and states.get("UNAVAILABLE"):
+            normalized.setdefault("observability_risk", "UNAVAILABLE")
+        capacity = direct_scorecard.get("capacity")
+        cost = direct_scorecard.get("cost")
+        quality = direct_scorecard.get("quality")
+        normalized["risk_scorecard"] = {
+            "capacity": "NO_SNAPSHOT" if isinstance(capacity, Mapping) else capacity,
+            "cost": "NO_SNAPSHOT" if isinstance(cost, Mapping) else cost,
+            "quality_metrics": "NO_SNAPSHOT"
+            if isinstance(quality, Mapping)
+            else quality,
+        }
+    if isinstance(metadata.get("proposal_only_job_profile"), Mapping):
+        normalized.setdefault("proposal_only", True)
+
+    endpoint_receipts = metadata.get("endpoints")
+    if isinstance(endpoint_receipts, Sequence) and not isinstance(
+        endpoint_receipts, (str, bytes)
+    ):
+        receipts = [item for item in endpoint_receipts if isinstance(item, Mapping)]
+
+        def _receipt(fragment: str) -> Mapping[str, Any]:
+            return next(
+                (
+                    item
+                    for item in receipts
+                    if fragment in str(item.get("path") or item.get("endpoint") or "")
+                ),
+                {},
+            )
+
+        improvements = _receipt("/improvements")
+        observability = _receipt("/observability")
+        scorecard = _receipt("/scorecard-brief")
+        normalized.setdefault(
+            "improvement_candidates", improvements.get("candidate_count")
+        )
+        idle_status_counts = observability.get("idle_status_counts")
+        if isinstance(idle_status_counts, Mapping) and idle_status_counts.get(
+            "UNAVAILABLE"
+        ):
+            normalized.setdefault("observability_risk", "UNAVAILABLE")
+        capacity = scorecard.get("capacity_observation")
+        cost = scorecard.get("cost_observation")
+        quality_refs = scorecard.get("quality_eval_run_references")
+        normalized["risk_scorecard"] = {
+            "capacity": "NO_SNAPSHOT"
+            if "NO_SNAPSHOT" in str(capacity)
+            else capacity,
+            "cost": "NO_SNAPSHOT" if "NO_SNAPSHOT" in str(cost) else cost,
+            "quality_metrics": "NO_SNAPSHOT"
+            if isinstance(quality_refs, Mapping)
+            and all(not value for value in quality_refs.values())
+            else quality_refs,
+        }
+        if any("proposal-only" in str(item) for item in metadata.get("actions_not_taken", [])):
+            normalized.setdefault("proposal_only", True)
+
+    # The durable Kanban run contract stores the same authoritative snapshot
+    # under ``api_reads``.  Keep this projection tolerant of both envelopes so
+    # a successful HR run is not rendered as an unknown result for managers.
+    api_reads = metadata.get("api_reads")
+    if isinstance(api_reads, Mapping):
+        improvements = api_reads.get("improvements")
+        if isinstance(improvements, Mapping):
+            normalized.setdefault(
+                "improvement_candidates", improvements.get("candidate_count")
+            )
+
+        observability_reads = api_reads.get("observability")
+        if isinstance(observability_reads, Mapping):
+            counts = observability_reads.get("idle_state_counts")
+            unavailable = (
+                counts.get("UNAVAILABLE")
+                if isinstance(counts, Mapping)
+                else observability_reads.get("unavailable_count")
+            )
+            if unavailable:
+                normalized.setdefault("observability_risk", "UNAVAILABLE")
+
+        scorecard_reads = api_reads.get("scorecard_brief")
+        if isinstance(scorecard_reads, Mapping):
+            def _same_status(value: Any, expected: str) -> bool:
+                if isinstance(value, Mapping):
+                    values = [str(item).strip() for item in value.values()]
+                    return bool(values) and all(item == expected for item in values)
+                return str(value or "").strip() == expected
+
+            capacity = scorecard_reads.get("capacity")
+            cost = scorecard_reads.get("cost")
+            quality = scorecard_reads.get("quality")
+            normalized["risk_scorecard"] = {
+                "capacity": "NO_SNAPSHOT"
+                if _same_status(capacity, "NO_SNAPSHOT")
+                else capacity,
+                "cost": "NO_SNAPSHOT"
+                if _same_status(cost, "NO_SNAPSHOT")
+                else cost,
+                "quality_metrics": "NO_SNAPSHOT"
+                if isinstance(quality, Mapping)
+                and all(
+                    isinstance(item, Mapping)
+                    and not item.get("eval_run_refs")
+                    and str(item.get("eval_score") or "—") in {"—", ""}
+                    for item in quality.values()
+                )
+                else quality,
+            }
+
+        if api_reads.get("proposal_only") is True:
+            normalized.setdefault("proposal_only", True)
+
+    metadata = normalized
+
+    recommendation = str(metadata.get("recommendation") or "").strip()
+    if not recommendation and (
+        metadata.get("block_reason") or metadata.get("proposal_only") is True
+    ):
+        recommendation = "proposal_only_pending_evidence"
+    recommendation_label = {
+        "proposal_only_pending_evidence": "근거 보강 후 재검토하는 조건부 제안",
+    }.get(recommendation, "제안 상태")
+
+    scorecard = metadata.get("risk_scorecard")
+    scorecard = scorecard if isinstance(scorecard, Mapping) else {}
+    capacity = str(scorecard.get("capacity") or "").strip()
+    cost = str(scorecard.get("cost") or "").strip()
+    quality = str(scorecard.get("quality_metrics") or "").strip()
+    observability = str(metadata.get("observability_risk") or "").strip()
+
+    def status_label(value: str, *, unavailable: str) -> str:
+        return {
+            "NO_SNAPSHOT": "확인 자료 없음",
+            "UNAVAILABLE": unavailable,
+            "—": "기록 없음",
+        }.get(value, value or "확인 필요")
+
+    title = str(task.get("title") or "Agent Workforce 검토").strip()
+    readable_result = _humanize_hr_result(result_text) or "제안서가 작성되었습니다."
+    lines = [
+        "# HR 부서 업무·성과 요약",
+        "",
+        "## 요청 업무",
+        "",
+        f"- 검토 내용: {title.removeprefix('HR:').strip()}",
+        f"- 상위 업무 번호: {root_task_id}",
+        "- 처리 상태: 완료",
+        "",
+        "## 수행 내용",
+        "",
+        "- 리스크 분석 보조 Agent의 역할·책임·금지 범위를 설계했습니다.",
+        "- Golden 평가 사례와 Adversarial 평가 사례를 제안했습니다.",
+        "- 현재 인력 운영 근거와 관측 가능 여부를 확인했습니다.",
+        "",
+        "## 핵심 결과",
+        "",
+        f"- 결론: {recommendation_label}",
+        f"- HR 결과: {readable_result}",
+        f"- 개선 후보: {metadata.get('improvement_candidates', '확인 필요')}건",
+        f"- 처리량 자료: {status_label(capacity, unavailable='확인 불가')}",
+        f"- 비용 자료: {status_label(cost, unavailable='확인 불가')}",
+        f"- 품질 지표: {status_label(quality, unavailable='확인 불가')}",
+        f"- 최근 24시간 관측: {status_label(observability, unavailable='관측 시스템에서 확인 불가')}",
+        "",
+        "## 승인·운영 경계",
+        "",
+        "- CEO 승인, AI QA 독립 검증, Platform/IAM 권한 부여와 Agent 활성화는 수행하지 않았습니다.",
+        "- 실제 주문·투자 판단·원장 변경은 수행하지 않았습니다.",
+        "- 관측·품질·비용 자료를 보강한 뒤 독립 검증과 승인 절차를 다시 진행해야 합니다.",
+    ]
+    return "\n".join(lines)
 
 
 def _schema_select(
@@ -757,6 +1200,13 @@ def _body_markdown(
         )
     if department == "qa":
         return _qa_body_markdown(
+            task=task,
+            root_task_id=root_task_id,
+            result_text=result_text,
+            metadata=metadata,
+        )
+    if department == "hr":
+        return _hr_body_markdown(
             task=task,
             root_task_id=root_task_id,
             result_text=result_text,
@@ -989,16 +1439,28 @@ class DepartmentNotionProjection:
             result_text = _humanize_risk_result(result_text)
         elif department == "accounting":
             result_text = _humanize_accounting_result(result_text)
+        elif department == "hr":
+            result_text = _humanize_hr_result(result_text)
 
         props: dict[str, Any] = {
             title_property: _title(title),
         }
+
+        if department == "hr":
+            # HR output is proposal-only. Keep the native approval and
+            # activation gates explicitly unchecked until separate systems
+            # perform those actions.
+            for property_name in ("CEO 승인", "IAM 생성", "QA 독립검증"):
+                checkbox = _schema_checkbox(properties_schema, property_name, False)
+                if checkbox is not None:
+                    props[property_name] = checkbox
 
         if department == "qa":
             verdict = str(
                 metadata.get("verdict")
                 or metadata.get("qa_verdict")
                 or metadata.get("overall")
+                or metadata.get("qa_status")
                 or task.get("verdict")
                 or "WARN"
             ).strip().upper()
@@ -1026,12 +1488,10 @@ class DepartmentNotionProjection:
                 props["findings severity"] = severity_property
 
             findings_text = "\n".join(
-                _qa_findings_lines(
-                    metadata.get("findings") or task.get("findings")
-                )
+                _qa_findings_lines(qa_projection_findings(task, metadata))
             )
             checks_text = "\n".join(
-                _qa_check_lines(metadata.get("checks") or task.get("checks"))
+                _qa_check_lines(qa_projection_checks(task, metadata))
             )
             qa_text_properties = {
                 "findings": findings_text,

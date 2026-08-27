@@ -264,6 +264,35 @@ def _deterministic_paper_order_fast_path_enabled() -> bool:
         "production",
     }
 
+
+def _is_read_only_hr_e2e_request(raw_query: str) -> bool:
+    """Keep an HR verification request out of the high-recall order router.
+
+    The order detector intentionally recognizes negated/example language so
+    the trading boundary can reject it safely.  That is appropriate for
+    ordinary trading chat, but a cross-system HR E2E prompt can mention the
+    prohibited order boundary while asking only for diagnostics.  An explicit
+    HR + E2E/read-only marker is enough to preserve that request's analysis
+    lane without weakening normal order verification.
+    """
+
+    text = str(raw_query or "").casefold()
+    has_hr_scope = "hr-department" in text or (
+        "hr" in text and "부서" in text
+    )
+    has_read_only_scope = any(
+        marker in text
+        for marker in (
+            "e2e",
+            "읽기 전용",
+            "read-only",
+            "workforce api",
+            "연결 확인",
+            "통합 검증",
+        )
+    )
+    return has_hr_scope and has_read_only_scope
+
 _PLANNING_SCHEMA_VERSION = "ceo.query-accepted.v2"
 _PRIMARY_PROFILE_ORDER = (
     "research-liaison",
@@ -1966,8 +1995,11 @@ def ceo_query(
     fund_id = getattr(req, "fund_id", None)
     mandate = fetch_current_mandate_by_fund(fund_id) if fund_id else None
 
-    analysis_then_conditional_plan = parse_analysis_then_conditional_paper_order(
-        req.query
+    read_only_hr_e2e = _is_read_only_hr_e2e_request(req.query)
+    analysis_then_conditional_plan = (
+        None
+        if read_only_hr_e2e
+        else parse_analysis_then_conditional_paper_order(req.query)
     )
     if analysis_then_conditional_plan is not None:
         return _route_analysis_then_conditional_paper_order(
@@ -1981,14 +2013,14 @@ def ceo_query(
             discord_thread_id=discord_thread_id,
         )
 
-    if parse_compound_paper_order(req.query) is not None:
+    if not read_only_hr_e2e and parse_compound_paper_order(req.query) is not None:
         return _route_compound_user_paper_order(
             req,
             owner_id=owner_id if isinstance(owner_id, str) else None,
             mandate=mandate,
         )
 
-    if looks_like_conditional_paper_rule(req.query):
+    if not read_only_hr_e2e and looks_like_conditional_paper_rule(req.query):
         return _route_traced_user_paper_order(
             req,
             owner_id=owner_id if isinstance(owner_id, str) else None,
@@ -1996,9 +2028,11 @@ def ceo_query(
             conditional_rule=True,
         )
 
-    if looks_like_user_order_request(
-        req.query
-    ) and not is_clearly_non_executable_order_language(req.query):
+    if (
+        not read_only_hr_e2e
+        and looks_like_user_order_request(req.query)
+        and not is_clearly_non_executable_order_language(req.query)
+    ):
         return _route_traced_user_paper_order(
             req,
             owner_id=owner_id if isinstance(owner_id, str) else None,
@@ -2065,8 +2099,20 @@ def ceo_query(
                     if root_trace is not None
                     else None
                 ),
-                advisory_fund_id=getattr(req, "fund_id", None),
-                advisory_book_id=getattr(req, "book_id", None),
+                # HR E2E is an explicit Workforce read-only lane. Do not
+                # attach the unrelated default Accounting snapshot to its
+                # root: it needlessly enlarges every CEO/QA prompt and can
+                # expose irrelevant portfolio detail to an HR worker.
+                advisory_fund_id=(
+                    None
+                    if read_only_hr_e2e
+                    else getattr(req, "fund_id", None)
+                ),
+                advisory_book_id=(
+                    None
+                    if read_only_hr_e2e
+                    else getattr(req, "book_id", None)
+                ),
                 previous_question_context=getattr(
                     req, "previous_question_context", None
                 ),
@@ -2075,6 +2121,7 @@ def ceo_query(
                 ),
                 experience_hint=d5_hint,
                 approved_feedback_hint=approved_feedback,
+                include_accounting_advisory=not read_only_hr_e2e,
             ),
             idempotency_key=req.request_id,
         )

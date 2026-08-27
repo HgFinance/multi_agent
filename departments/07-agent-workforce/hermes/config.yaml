@@ -23,7 +23,9 @@ agent:
   runtime_personalities_source: workers
   legacy_personalities_are_aliases: true
   runtime_personalities: [profile-architecture-worker]
-  max_turns: 100
+  # CEO E2E reads are bounded by the repository helper; keep runaway tool
+  # probing from holding the department queue for many minutes.
+  max_turns: 24
   reasoning_effort: medium
   timeout_seconds: 60
   personalities:

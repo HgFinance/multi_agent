@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from orchestration.adapters.ceo_supervisor import (
     CeoSupervisorService,
@@ -18,8 +19,10 @@ from orchestration.adapters.ceo_supervisor import (
     SupervisorState,
     SupervisorValidationError,
     _analysis_synthesis_decision,
+    _compact_hr_qa_handoff,
     _department_progress_text,
     _initial_primary_materialization_decisions,
+    _handoff_provenance,
     _single_primary_passthrough_child,
     _terminal_payload_mapping,
     decide_supervisor,
@@ -38,6 +41,17 @@ from orchestration.ceo_workflow_scope import (
     validate_workflow_scope,
     workflow_mode_from_body,
 )
+from orchestration.answer_contract import grade_answer
+
+
+def test_answer_contract_accepts_iso_timestamp_as_observation_time() -> None:
+    grade = grade_answer(
+        "검증 시각 2026-08-26T15:22:30Z 기준으로 관측 불가를 확인했습니다. "
+        "근거 URL https://workforce.example.invalid/read"
+    )
+
+    assert grade.has_as_of is True
+    assert grade.trustworthy is True
 
 
 def child(
@@ -85,6 +99,126 @@ def test_terminal_payload_mapping_accepts_hydrated_child_state() -> None:
     assert payload["assignee"] == "risk-management"
     assert payload["status"] == "done"
     assert payload["result"] == "최종 답변"
+
+
+def test_hr_handoff_discovers_bounded_workspace_evidence_artifact() -> None:
+    with tempfile.TemporaryDirectory() as workspace:
+        evidence = Path(workspace) / "hr_e2e_evidence.json"
+        evidence.write_text('{"schema":"hgfinance.hr-workforce-evidence.v1"}\n')
+        state = ChildTaskState(
+            task_id="t_hr",
+            profile="hr-department",
+            status="done",
+            body="workflow_root_task_id=root\nworkflow_role=primary",
+            workspace_path=workspace,
+            metadata={
+                "result": {
+                    "candidate_snapshot": {"http_status": 200, "candidate_count": 0},
+                    "observability": {"http_status": 200},
+                    "scorecard": {"http_status": 200},
+                }
+            },
+        )
+
+        provenance = _handoff_provenance(state)
+
+    assert provenance["artifacts"][0]["name"] == "hr_e2e_evidence.json"
+    assert len(provenance["artifacts"][0]["sha256"]) == 64
+
+
+def test_hr_handoff_preserves_timeout_receipt_status_and_error() -> None:
+    with tempfile.TemporaryDirectory() as workspace:
+        evidence = Path(workspace) / "hr_e2e_evidence.json"
+        evidence.write_text(
+            '{"schema":"hgfinance.hr-workforce-evidence.v1",'
+            '"requests":['
+            '{"path":"/workforce/v1/improvements","http_status":200,'
+            '"duration_ms":20,"response":{"candidates":[]}},'
+            '{"path":"/workforce/v1/departments/observability?lookback_hours=24",'
+            '"http_status":null,"duration_ms":30016,"error":"TimeoutError"},'
+            '{"path":"/workforce/v1/departments/scorecard-brief",'
+            '"http_status":200,"duration_ms":64,"response":{}}],'
+            '"summary":{"idle_state_counts":{}}}'
+        )
+        state = ChildTaskState(
+            task_id="t_hr_timeout",
+            profile="hr-department",
+            status="done",
+            body="workflow_root_task_id=root\nworkflow_role=primary",
+            workspace_path=workspace,
+            metadata={
+                "result": {
+                    "candidate_snapshot": {"http_status": 200, "candidate_count": 0},
+                    "observability": {"http_status": 200, "window_start": "stale"},
+                    "scorecard": {"http_status": 200},
+                }
+            },
+        )
+
+        provenance = _handoff_provenance(state, include_evidence_content=True)
+
+    assert provenance["source_reads"]["observability"]["http_status"] is None
+    assert provenance["source_reads"]["observability"]["error"] == "TimeoutError"
+    assert provenance["normalized_result"]["observability"]["window_start"] is None
+
+
+def test_hr_qa_handoff_compacts_raw_responses_but_keeps_receipt_coordinates() -> None:
+    handoff = {
+        "provenance": {
+            "evidence_artifact": {
+                "schema": "hgfinance.hr-workforce-evidence.v1",
+                "summary": {"improvement_candidate_count": 0},
+                "requests": [
+                    {
+                        "path": "/workforce/v1/improvements",
+                        "method": "GET",
+                        "duration_ms": 20,
+                        "http_status": 200,
+                        "response_sha256": "a" * 64,
+                        "response_bytes": 17,
+                        "response": {"candidates": []},
+                    }
+                ],
+            }
+        }
+    }
+
+    _compact_hr_qa_handoff(handoff)
+
+    evidence = handoff["provenance"]["evidence_artifact"]
+    assert evidence["raw_response_bodies_omitted"] is True
+    assert evidence["requests"][0]["response_sha256"] == "a" * 64
+    assert evidence["requests"][0]["response_bytes"] == 17
+    assert "response" not in evidence["requests"][0]
+
+
+def test_startup_recovery_skips_roots_with_existing_synthesis() -> None:
+    root_body = (
+        build_root_body("query", "request")
+        + "\nselected_primary_profiles=risk-management"
+    )
+
+    class Client:
+        def recovery_candidate_rows(self):
+            return (
+                {
+                    "id": "root",
+                    "status": "done",
+                    "created_at": 1,
+                    "body": root_body,
+                    "has_active_primary": False,
+                    "has_analysis_child": True,
+                    "has_terminal_primary": True,
+                    "has_synthesis": True,
+                },
+            )
+
+        def show(self, _task_id):
+            raise AssertionError("an already-synthesized root must not be hydrated")
+
+    service = CeoSupervisorService(Client())
+
+    assert service.reconcile_existing_workflows() == ()
 
 
 class NoAnalysisChildrenOriginGuardTest(unittest.TestCase):
@@ -1574,6 +1708,52 @@ class PostResponseQaAuditTest(unittest.TestCase):
         self.assertIn(synthesis_body.replace("\n", "\\n"), qa["body"])
         self.assertIn("CEO 최종 응답", qa["body"])
 
+    def test_completed_empty_synthesis_is_edited_instead_of_completed_again(self) -> None:
+        class EditingClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.edited: list[dict[str, object]] = []
+
+            def edit_task(self, task_id: str, **kwargs: object) -> None:
+                self.edited.append({"task_id": task_id, **kwargs})
+
+        client = EditingClient()
+        root_id = "root"
+        synthesis_id = "ceo-response"
+        root = {
+            "id": root_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "body": build_root_body("결과를 설명해줘", "req-repair"),
+        }
+        synthesis = {
+            "id": synthesis_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "summary": "복구 가능한 CEO 요약",
+            "result": "",
+            "final_answer": "",
+            "body": (
+                f"workflow_root_task_id={root_id}\n"
+                "workflow_role=synthesis\n"
+                "workflow_mode=analysis\n"
+                "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
+            ),
+        }
+        client.payloads = [root, synthesis]
+        client.root_body = root["body"]
+
+        service = CeoSupervisorService(client)
+        service._project_terminal_task(
+            root_task_id=root_id,
+            task_id=synthesis_id,
+            task_payloads=(root, synthesis),
+            event={"event_id": "repair-1", "task_id": synthesis_id, "kind": "completed"},
+        )
+
+        self.assertEqual([item["task_id"] for item in client.edited], [synthesis_id])
+        self.assertEqual(client.completed, [])
+
 
 class WorkforceAdvisoryAttachmentTest(unittest.TestCase):
     def test_hr_primary_receives_existing_snapshot_without_a_second_scorecard(self):
@@ -1765,6 +1945,7 @@ class UnmaterializedPrimaryFinalDeliveryTest(unittest.TestCase):
         def __init__(self, root: dict[str, object]) -> None:
             self.root = root
             self.created: list[dict[str, object]] = []
+            self.completed: list[dict[str, object]] = []
 
         def workflow_root(self, task_id):
             return self.root["id"]
@@ -1777,7 +1958,10 @@ class UnmaterializedPrimaryFinalDeliveryTest(unittest.TestCase):
 
         def create_task(self, **kwargs):
             self.created.append(kwargs)
-            return {"id": "blocked-control"}
+            return {"id": "empty-primary-synthesis"}
+
+        def complete_task(self, task_id: str, **kwargs: object) -> None:
+            self.completed.append({"task_id": task_id, **kwargs})
 
         def comment_task(self, task_id, text):
             return None
@@ -1836,7 +2020,7 @@ class UnmaterializedPrimaryFinalDeliveryTest(unittest.TestCase):
         self.assertEqual(delivery.finals[0]["content"], "CEO usable final answer")
         self.assertEqual(client.created, [])
 
-    def test_invalid_primary_without_result_creates_existing_blocked_control(self) -> None:
+    def test_invalid_primary_without_result_creates_one_deferred_synthesis(self) -> None:
         root = self.root_payload()
         client = self.Client(root)
         delivery = self.Delivery()
@@ -1848,12 +2032,17 @@ class UnmaterializedPrimaryFinalDeliveryTest(unittest.TestCase):
             task_payloads=(root,),
         )
 
-        self.assertEqual(status, "blocked")
+        self.assertEqual(status, "deferred")
         self.assertEqual(len(delivery.finals), 0)
         self.assertEqual(len(client.created), 1)
         self.assertEqual(client.created[0]["assignee"], "ceo-agent")
         self.assertEqual(client.created[0]["initial_status"], "blocked")
-        self.assertIn("action=REQUEST_USER_INPUT", client.created[0]["body"])
+        self.assertIn("workflow_role=synthesis", client.created[0]["body"])
+        self.assertIn(
+            "synthesis_mode=deterministic_empty_primary_defer",
+            client.created[0]["body"],
+        )
+        self.assertEqual(len(client.completed), 1)
 
     def test_materialized_valid_primary_does_not_use_invalid_primary_fallback(self) -> None:
         root = self.root_payload(final_answer="CEO planner metadata")
@@ -2876,6 +3065,13 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(infer_workflow_mode("매매 실행은 하지 마"), "analysis")
         self.assertEqual(infer_workflow_mode("주문은 하지 말고 분석만 해줘"), "analysis")
         self.assertEqual(
+            infer_workflow_mode(
+                "PAPER 읽기 전용 E2E 검증이다. 주문 제출·원장 변경·설정 변경은 "
+                "절대 수행하지 말라."
+            ),
+            "analysis",
+        )
+        self.assertEqual(
             infer_workflow_mode("삼성전자 주문이나 집행은 하지 말고 분석만 해줘"),
             "analysis",
         )
@@ -3384,6 +3580,31 @@ class SupervisorWakeupTest(unittest.TestCase):
                 ],
             )
 
+    def test_root_delegation_comment_does_not_become_second_scope_root(self) -> None:
+        root = "t_aaaaaaaa"
+        validate_workflow_scope(
+            root_task_id=root,
+            root_payload={
+                "id": root,
+                "body": build_root_body("q", "req"),
+                "comments": [
+                    {
+                        "body": (
+                            "workflow_root_task_id=t_aaaaaaaa "
+                            "workflow_role=primary child=t_bbbbbbbb"
+                        )
+                    }
+                ],
+            },
+            descendants=[
+                {
+                    "id": "t_bbbbbbbb",
+                    "body": build_scoped_task_body("research", root, role="primary"),
+                    "parents": [],
+                }
+            ],
+        )
+
 
 
 
@@ -3618,10 +3839,10 @@ class ReadyPrimaryPlanRecoveryTest(unittest.TestCase):
             second = service.materialize_ready_primary_plans()
 
         self.assertEqual(len(first), 1)
-        self.assertEqual(first[0].action, SupervisorAction.REQUEST_USER_INPUT)
+        self.assertEqual(first[0].action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(len(client.created), 1)
         self.assertEqual(client.created[0]["assignee"], "ceo-agent")
-        self.assertIn("workflow_role=control", client.created[0]["body"])
+        self.assertIn("workflow_role=synthesis", client.created[0]["body"])
         self.assertEqual(second, ())
         self.assertEqual(len(client.created), 1)
         self.assertEqual(
@@ -3709,7 +3930,7 @@ class ReadyPrimaryPlanRecoveryTest(unittest.TestCase):
             second = service.materialize_ready_primary_plans()
 
         self.assertEqual(len(first), 1)
-        self.assertEqual(first[0].action, SupervisorAction.REQUEST_USER_INPUT)
+        self.assertEqual(first[0].action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(second, ())
         self.assertEqual(len(client.created), 1)
         self.assertEqual(client.show_calls, 1)
@@ -3842,9 +4063,13 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
             decisions = _initial_primary_materialization_decisions(state, body)
 
         self.assertEqual(len(decisions), 1)
-        self.assertEqual(decisions[0].action, SupervisorAction.REQUEST_USER_INPUT)
+        self.assertEqual(decisions[0].action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(decisions[0].assignee, "ceo-agent")
-        self.assertIn("action=REQUEST_USER_INPUT", decisions[0].body)
+        self.assertIn("action=SYNTHESIZE", decisions[0].body)
+        self.assertIn(
+            "synthesis_mode=deterministic_empty_primary_defer",
+            decisions[0].body,
+        )
         self.assertTrue(
             any(
                 "invalid-primary-selection" in line
@@ -3854,7 +4079,7 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
             )
         )
 
-    def test_qa_only_without_delegation_plan_requests_user_input(self) -> None:
+    def test_qa_only_without_delegation_plan_defers_without_control_card(self) -> None:
         body = (
             "origin=user-query\n"
             "workflow_role=root\n"
@@ -3876,9 +4101,9 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
             decisions = _initial_primary_materialization_decisions(state, body)
 
         self.assertEqual(len(decisions), 1)
-        self.assertEqual(decisions[0].action, SupervisorAction.REQUEST_USER_INPUT)
+        self.assertEqual(decisions[0].action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(decisions[0].assignee, "ceo-agent")
-        self.assertIn("action=REQUEST_USER_INPUT", decisions[0].body)
+        self.assertIn("action=SYNTHESIZE", decisions[0].body)
 
     def test_mixed_selection_skips_qa_but_keeps_valid_primaries(self) -> None:
         body = (

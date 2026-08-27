@@ -634,8 +634,11 @@ def infer_workflow_mode(query: str) -> str:
         "주문하지 말", "집행하지 말", "실행하지 말",
     )
     explicit_non_execution = re.search(
-        r"(?:주문|매매|집행|실행)(?:\s*실행)?\s*(?:은|는|도)?\s*"
-        r"하지\s*(?:마|말|않)",
+        r"(?:주문(?:\s*제출)?|매매|집행|실행|원장\s*변경|설정\s*변경|"
+        r"외부\s*(?:쓰기|변경))"
+        r"[^.!?\n]{0,80}"
+        r"(?:하지\s*(?:마|말라|마세요|말|않)|"
+        r"수행하지\s*(?:마|말라|마세요|말)|금지)",
         text,
     )
     if any(phrase in text for phrase in non_binding_phrases) or explicit_non_execution:
@@ -717,6 +720,7 @@ def build_root_body(
     approved_feedback_hint: Mapping[str, Any] | None = None,
     user_paper_order_include_primary_selection: bool = True,
     deferred_conditional_analysis: bool = False,
+    include_accounting_advisory: bool = True,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -836,6 +840,11 @@ def build_root_body(
                 advisory_lines += f"{marker}={normalized}\n"
     experience_lines = _experience_hint_section(experience_hint)
     feedback_lines = _approved_feedback_section(approved_feedback_hint)
+    accounting_section = (
+        _accounting_snapshot_section(advisory_fund_id, advisory_book_id)
+        if include_accounting_advisory
+        else ""
+    )
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
@@ -875,7 +884,7 @@ def build_root_body(
         # Mandate 블록은 scope 지시문 뒤, 사용자 질의 앞에 온다. `extract_user_query`가
         # `## User request` 뒤만 잘라내므로 이 블록이 질의에 섞이지 않는다.
         f"{_mandate_section(mandate)}"
-        f"{_accounting_snapshot_section(advisory_fund_id, advisory_book_id)}"
+        f"{accounting_section}"
         "\n## User request\n"
         f"{query}"
     )
@@ -1219,7 +1228,16 @@ def validate_workflow_scope(
         if payload.get("id") or payload.get("task_id")
     )
 
-    refs = extract_scope_references(root_payload)
+    # CEO planning comments may mention a materialized child as
+    # ``workflow_root_task_id=...`` while describing the delegation plan.
+    # That is a child reference, not a second root declaration.  The root's
+    # own body/metadata remain authoritative for scope validation; comments
+    # are audit annotations and must not make a valid terminal child fail
+    # after Supervisor restart.
+    root_scope_payload = {
+        key: value for key, value in root_payload.items() if key != "comments"
+    }
+    refs = extract_scope_references(root_scope_payload)
     wrong_roots = set(refs.root_ids) - {root_task_id}
     if wrong_roots:
         raise WorkflowScopeViolation(

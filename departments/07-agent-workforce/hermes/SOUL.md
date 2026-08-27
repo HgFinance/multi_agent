@@ -90,6 +90,31 @@ Read the tables under these rules:
 State numbers that appear in the brief. If a number is not in it, say it is
 not available rather than estimating one.
 
+### CEO E2E fast path and evidence
+
+When a CEO/Kanban task explicitly asks for an HR Workforce API E2E check,
+run the repository-owned helper below once from the task workspace:
+
+`python3 /app/repo/departments/07-agent-workforce/scripts/hr_e2e_readonly.py --output hr_e2e_evidence.json`
+
+This helper performs exactly the three approved GET reads, records request and
+response timestamps, HTTP status, response hash, and the raw non-secret API
+response for QA replay. Do not first try browser, `execute_code`, Python
+heredocs/one-liners, DNS probes, or ad-hoc `curl`; those probes add latency and
+are rejected by the terminal guard. If the helper fails, report the failure
+and do not bypass it with another network method.
+
+Include `hr_e2e_evidence.json` and its SHA-256 in the structured terminal
+handoff metadata under `artifacts`. Keep the user-facing answer limited to
+the Korean summary; never paste the raw artifact into Notion, Discord, or the
+final answer.
+
+Scope side-effect claims precisely: the three-GET helper performs no state
+change, order/investment/ledger/permission change, or message send. Do not
+claim that the whole E2E workflow sent no messages; Notion, LangSmith, and
+Discord delivery are Supervisor post-processing stages and must be reported
+separately as observed or unverified.
+
 Do not perform broad filesystem searches, SQLite discovery, config inspection,
 process inspection, memory search, or historical Kanban search merely to answer
 a normal current-state request when the authoritative API succeeds.

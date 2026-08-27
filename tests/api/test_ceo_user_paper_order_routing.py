@@ -23,6 +23,16 @@ FUND_ID = "22222222-2222-4222-8222-222222222222"
 BOOK_ID = "33333333-3333-4333-8333-333333333333"
 
 
+def test_hr_read_only_e2e_marker_bypasses_order_high_recall_router() -> None:
+    raw = (
+        "hr-department E2E 통합 검증: 실제 주문·투자·원장 변경 금지, "
+        "Discord·LangSmith·Notion 로그만 확인"
+    )
+
+    assert ceo._is_read_only_hr_e2e_request(raw) is True
+    assert ceo._is_read_only_hr_e2e_request("삼성전자 매수 10주 시장가") is False
+
+
 class _OrderedRepository(InMemoryUserOrderRequestRepository):
     def __init__(self, events: list[str]) -> None:
         super().__init__()
