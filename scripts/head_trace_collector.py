@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
-"""완료된 카드들을 훑어 부서장 span 트리를 Langfuse 로 보낸다. dispatcher 컨테이너 전용.
+"""완료된 카드들을 훑어 부서장 span 트리를 Langfuse 로 보낸다.
+
+## 왜 dispatcher 안이 아니라 별도 컨테이너인가
+
+읽는 파일만 보면 dispatcher 안이 맞다 - 거기에 `/home/ubuntu/.hermes` 가 통째로
+붙어 있어 `kanban.db` 와 8개 부서 `state.db` 가 전부 있고, `HERMES_KANBAN_DB` 값도
+이 파일의 기본값과 같다. 그런데도 밖으로 뺀 이유는 **수명주기**다.
+
+- dispatcher 의 command 자리는 `hermes kanban daemon` 이 쓰고 있다. 여기를 함께
+  쓰려면 수집기를 background 로 띄워야 하는데, `restart: unless-stopped` 는 PID 1
+  만 본다. 백그라운드 수집기가 죽으면 **dispatcher 는 멀쩡한 채 trace 만 끊긴다** -
+  이 파일이 `BoardUnreadable` 과 `langfuse=on|disabled` 로 없애려는 바로 그 실패
+  모드를 배포 층에서 다시 만드는 셈이다.
+- 수집기를 고칠 때마다 dispatcher 를 재생성하게 된다. 그건 SIGTERM→SIGKILL 취소
+  계약을 타서 **실행 중인 카드가 취소된다.** 관측 도구가 카드 실행을 중단시킬 수
+  있어야 할 이유가 없다.
+- 수집기의 행/누수가 카드 디스패치 경로에 얹힌다. 분리하면 mem 256m·cpu 0.25·
+  pids 64 로 가둘 수 있다.
+
+새 이미지는 아니다 - `hedgefund-operations-runtime:latest` 는 card-watchdog 이
+이미 쓰고 있어 호스트에 존재한다. 늘어나는 것은 컨테이너 하나뿐이다.
 
 ## 왜 wrapper 가 아니라 수집기인가
 
