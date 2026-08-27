@@ -52,9 +52,18 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 
-# 월 구독료. 영주(인사팀)가 실제 청구액을 넣는 자리다. 비어 있으면 UNPRICED.
+# 월 구독료. 부서장은 Codex(ChatGPT) 구독으로 도는데, 우리 기준은 **Plus 요금제**다
+# (2026-08-27 결정). Plus 좌석 1개 = 월 USD 20 을 기본값으로 두고, 요금제나 좌석
+# 수가 바뀌면 `.env` 의 이 두 값만 고친다 - 코드에 흩어 놓지 않는다.
+#
+# 이 값은 "임의로 정한 단가"가 아니라 **실제 청구액**이다. 단가는 여기서 정하지
+# 않고 청구액을 관측 토큰으로 나눠서 나온다(amortized_rate). 그래서 사용량이
+# 늘면 토큰당 단가가 저절로 내려간다 - 구독의 실제 경제와 같은 방향이다.
 SUBSCRIPTION_USD_ENV = "CODEX_SUBSCRIPTION_USD_PER_MONTH"
 SUBSCRIPTION_SEATS_ENV = "CODEX_SUBSCRIPTION_SEATS"
+# ChatGPT Plus 좌석 1개의 월 요금(USD). 요금제가 바뀌면 여기가 아니라 `.env` 를
+# 고치는 것이 정상 경로이고, 이 상수는 env 가 비었을 때의 기본값일 뿐이다.
+PLUS_SEAT_USD_PER_MONTH = "20"
 # Worker 추론 인프라(vLLM). 시간요금 × 가동시간이 그 창의 청구서다.
 INFRA_USD_PER_HOUR_ENV = "WORKER_INFRA_USD_PER_HOUR"
 
@@ -138,11 +147,18 @@ def amortized_rate(
     )
 
 
-def subscription_invoice_usd(env: Mapping[str, str] | None = None) -> Decimal | None:
-    """월 구독 청구액(좌석 수 반영). 미설정이면 None -> 비용은 UNPRICED."""
+def subscription_invoice_usd(
+    env: Mapping[str, str] | None = None, *, default_seat_usd: str = ""
+) -> Decimal | None:
+    """월 구독 청구액(좌석 수 반영). 값을 못 정하면 None -> 비용은 UNPRICED.
+
+    `default_seat_usd` 를 주면 env 가 비었을 때 그 값을 쓴다. 배포는 Plus 기준
+    (`PLUS_SEAT_USD_PER_MONTH`)을 넘기고, 라이브러리 기본값은 여전히 "모름"이다 -
+    이 함수를 다른 데서 부를 때 조용히 20 달러가 끼어들면 안 된다.
+    """
 
     source = env if env is not None else os.environ
-    monthly = _decimal(source.get(SUBSCRIPTION_USD_ENV))
+    monthly = _decimal(source.get(SUBSCRIPTION_USD_ENV)) or _decimal(default_seat_usd)
     if monthly is None or monthly == 0:
         return None
     seats = _decimal(source.get(SUBSCRIPTION_SEATS_ENV)) or Decimal("1")
@@ -187,6 +203,20 @@ if __name__ == "__main__":
         {SUBSCRIPTION_USD_ENV: "200", SUBSCRIPTION_SEATS_ENV: "4"}
     ) == Decimal("800")
     assert subscription_invoice_usd({SUBSCRIPTION_USD_ENV: "200"}) == Decimal("200")
+
+    # 2-1. Plus 기준(월 $20/좌석)은 **호출자가 명시할 때만** 쓰인다. 라이브러리
+    #      기본값이 20 이면 이 함수를 다른 데서 부를 때 조용히 요금이 끼어든다.
+    assert subscription_invoice_usd({}) is None
+    assert subscription_invoice_usd(
+        {}, default_seat_usd=PLUS_SEAT_USD_PER_MONTH
+    ) == Decimal("20")
+    assert subscription_invoice_usd(
+        {SUBSCRIPTION_SEATS_ENV: "3"}, default_seat_usd=PLUS_SEAT_USD_PER_MONTH
+    ) == Decimal("60")
+    # env 가 있으면 env 가 이긴다(요금제를 코드가 아니라 배포가 정한다).
+    assert subscription_invoice_usd(
+        {SUBSCRIPTION_USD_ENV: "200"}, default_seat_usd=PLUS_SEAT_USD_PER_MONTH
+    ) == Decimal("200")
 
     # 3. 실측 창으로 상각한다: 24일간 376,485,465 토큰(hermes insights 실측).
     rate = amortized_rate(

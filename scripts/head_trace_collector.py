@@ -55,6 +55,14 @@ from orchestration.head_span_builder import build_card_spans
 from orchestration.hermes_session_usage import read_turn
 from orchestration.langfuse_otlp import enabled as langfuse_enabled
 from orchestration.langfuse_otlp import publish
+from orchestration.model_cost import (
+    PLUS_SEAT_USD_PER_MONTH,
+    UNPRICED,
+    CostBasis,
+    UnitRate,
+    amortized_rate,
+    subscription_invoice_usd,
+)
 from scripts.head_card_trace import (
     DEPARTMENT_BY_PROFILE,
     head_persona,
@@ -64,6 +72,18 @@ from scripts.head_card_trace import (
 DEFAULT_KANBAN_DB = "/opt/data/shared-kanban/kanban.db"
 DEFAULT_LOOKBACK_SECONDS = 900
 DEFAULT_INTERVAL_SECONDS = 60
+
+# 상각 분모를 세는 창. **후행 30일**이다.
+#
+# 달력 월을 쓰면 월초에 분모가 작아 단가가 치솟는다 - 1일에 실행한 턴이 31일에
+# 실행한 같은 턴보다 몇 배 비싸게 기록되고, 그건 관측이 아니라 왜곡이다. 후행
+# 창은 항상 꽉 차 있어 그 문제가 없고, 뜻도 분명하다: "한 달치 사용량 중 이 턴의
+# 몫".
+COST_WINDOW_DAYS = 30
+# 분모를 매 회차(기본 60초)마다 다시 세지 않는다. 8개 부서 state.db 를 훑는
+# 일이라 싸긴 하지만, 1분마다 바뀌는 값도 아니다.
+_COST_CACHE_TTL_SECONDS = 3600
+_cost_cache: dict[str, Any] = {"expires_at": 0.0, "rate": None}
 # 한 번의 POST 에 담을 span 수. 카드 하나가 도구 구간까지 20~40 span 을 만들 수
 # 있어서, 창이 밀렸을 때 한 번에 수 MB 를 보내지 않도록 끊는다.
 _MAX_SPANS_PER_REQUEST = 400
@@ -75,6 +95,16 @@ _METADATA_KEYS = ("worker_session_id", "workflow_root_task_id")
 _TERMINAL_OUTCOMES = frozenset(
     {"completed", "failed", "blocked", "gave_up", "timed_out", "crashed"}
 )
+
+
+class BoardUnreadable(RuntimeError):
+    """kanban.db 를 열지 못했다.
+
+    빈 목록으로 접지 않는다. 접으면 "이 창에 끝난 카드가 없다"와 글자 그대로 같은
+    값이 되고, 그 둘은 다른 사실이다 - 경로·권한이 어긋난 컨테이너가 60초마다
+    `runs=0` 을 찍으며 건강해 보인다. `observed_tokens()` 가 부서 하나를 못 읽을 때
+    이미 같은 이유로 소리를 낸다.
+    """
 
 
 @dataclass(frozen=True)
@@ -124,7 +154,10 @@ def recent_runs(
     now_s: float,
     lookback_seconds: int = DEFAULT_LOOKBACK_SECONDS,
 ) -> list[CardRun]:
-    """최근에 끝난 카드 실행들. 원문 컬럼(summary/error)은 SELECT 하지 않는다."""
+    """최근에 끝난 카드 실행들. 원문 컬럼(summary/error)은 SELECT 하지 않는다.
+
+    보드를 못 읽으면 `BoardUnreadable` 이다 - 빈 목록이 아니다.
+    """
 
     since = int(now_s - lookback_seconds)
     connection: sqlite3.Connection | None = None
@@ -144,8 +177,8 @@ def recent_runs(
                 "select task_id, count(*) from task_runs group by task_id"
             )
         }
-    except (OSError, sqlite3.Error):
-        return []
+    except (OSError, sqlite3.Error) as exc:
+        raise BoardUnreadable(f"{type(exc).__name__}:{exc}") from exc
     finally:
         if connection is not None:
             connection.close()
@@ -171,7 +204,90 @@ def recent_runs(
     return runs
 
 
-def spans_for_run(run: CardRun, *, env: Mapping[str, str]) -> list[dict[str, Any]]:
+def observed_tokens(
+    *,
+    env: Mapping[str, str],
+    now_s: float,
+    window_days: int = COST_WINDOW_DAYS,
+) -> int:
+    """후행 창의 **전사** 관측 토큰. 상각 단가의 분모다.
+
+    이 프로세스가 8개 부서의 state.db 를 전부 보는 유일한 자리라 여기서 센다.
+    부서별로 세면 부서마다 구독료 전액을 자기 몫으로 잡아 총합이 8배가 된다.
+
+    캐시 읽기까지 더한다 - 어느 계기가 구독 쿼터를 얼마나 먹는지는 공개돼 있지
+    않으므로 가중치를 지어내는 대신 TurnUsage.total_tokens 와 같은 정의를 쓴다
+    (분해값은 span 에 그대로 남아 나중에 다시 계산할 수 있다).
+    """
+
+    since = now_s - window_days * 86_400
+    total = 0
+    seen: set[str] = set()
+    for profile in DEPARTMENT_BY_PROFILE:
+        db_path = state_db_path(profile=profile, env=env)
+        if db_path is None:
+            continue
+        key = str(db_path)
+        if key in seen:
+            # 부서 프로필 두 개가 같은 홈을 가리킬 수 있다(liaison). 같은 파일을
+            # 두 번 세면 분모가 부풀고 단가가 그만큼 싸게 나온다.
+            continue
+        seen.add(key)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True, timeout=2.0
+            )
+            row = connection.execute(
+                "select coalesce(sum(coalesce(input_tokens,0) + coalesce(output_tokens,0) "
+                "+ coalesce(cache_read_tokens,0) + coalesce(cache_write_tokens,0) "
+                "+ coalesce(reasoning_tokens,0)), 0) from sessions where started_at >= ?",
+                (since,),
+            ).fetchone()
+            total += int(row[0] or 0)
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            # 한 부서를 못 읽으면 분모가 작아져 단가가 **비싸게** 나온다. 조용히
+            # 넘어가지 않고 그 사실을 남긴다 - 비용이 갑자기 뛰면 이 줄을 본다.
+            print(
+                f"head-trace-collector cost-denominator profile={profile} status=unreadable",
+                file=sys.stderr,
+            )
+        finally:
+            if connection is not None:
+                connection.close()
+    return total
+
+
+def current_rate(*, env: Mapping[str, str], now_s: float) -> UnitRate:
+    """상각 단가. 청구액을 못 정하면 UNPRICED(0 이 아니다).
+
+    부서장은 Codex(ChatGPT) 구독으로 돌고 우리 기준은 Plus 다(2026-08-27 결정).
+    그 기본값을 **여기서** 넘긴다 - `subscription_invoice_usd` 자체의 기본값은
+    "모름" 그대로 둬서, 이 함수 말고 다른 데서 부를 때 월 20 달러가 조용히
+    끼어들지 않게 한다. `.env` 에 실제 청구액이 있으면 그쪽이 이긴다.
+    """
+
+    if now_s < float(_cost_cache["expires_at"]) and _cost_cache["rate"] is not None:
+        return _cost_cache["rate"]
+
+    invoice = subscription_invoice_usd(env, default_seat_usd=PLUS_SEAT_USD_PER_MONTH)
+    if invoice is None:
+        rate = UNPRICED
+    else:
+        rate = amortized_rate(
+            invoice_usd=invoice,
+            observed_tokens=observed_tokens(env=env, now_s=now_s),
+            basis=CostBasis.AMORTIZED_SUBSCRIPTION,
+            window_label=f"trailing-{COST_WINDOW_DAYS}d",
+        )
+    _cost_cache["rate"] = rate
+    _cost_cache["expires_at"] = now_s + _COST_CACHE_TTL_SECONDS
+    return rate
+
+
+def spans_for_run(
+    run: CardRun, *, env: Mapping[str, str], rate: UnitRate = UNPRICED
+) -> list[dict[str, Any]]:
     """카드 실행 1건 -> span 목록. 못 만들면 빈 목록."""
 
     if not run.department or not run.task_id or not run.started_ms:
@@ -199,6 +315,7 @@ def spans_for_run(run: CardRun, *, env: Mapping[str, str]) -> list[dict[str, Any
         ended_ms=max(run.ended_ms, run.started_ms),
         usage=usage,
         session_confidence=confidence,
+        rate=rate,
         attempts=run.attempts,
         run_id=run.run_id,
         environment=str(env.get("LANGFUSE_ENVIRONMENT") or ""),
@@ -214,21 +331,34 @@ def collect_once(
     """한 회차. 돌려주는 값은 로그·점검용 카운터다."""
 
     runtime = dict(env) if env is not None else dict(os.environ)
-    counters = {"runs": 0, "skipped": 0, "spans": 0, "requests": 0, "failed": 0}
+    counters = {"runs": 0, "skipped": 0, "spans": 0, "requests": 0, "failed": 0, "unreadable": 0}
     if not langfuse_enabled(runtime):
         return counters
 
-    runs = recent_runs(
-        kanban_db=runtime.get("HERMES_KANBAN_DB") or DEFAULT_KANBAN_DB,
-        now_s=time.time() if now_s is None else now_s,
-        lookback_seconds=lookback_seconds,
-    )
+    kanban_db = runtime.get("HERMES_KANBAN_DB") or DEFAULT_KANBAN_DB
+    try:
+        runs = recent_runs(
+            kanban_db=kanban_db,
+            now_s=time.time() if now_s is None else now_s,
+            lookback_seconds=lookback_seconds,
+        )
+    except BoardUnreadable as exc:
+        # 여기서 멈춘다. 이 회차에 대해 우리가 아는 것은 "모른다" 뿐이고, 그걸
+        # runs=0 으로 적으면 다음 사람이 관측 결과로 읽는다.
+        counters["unreadable"] = 1
+        print(
+            f"head-trace-collector board=unreadable db={kanban_db} detail={exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return counters
+    rate = current_rate(env=runtime, now_s=time.time() if now_s is None else now_s)
     batch: list[dict[str, Any]] = []
     for run in runs:
         if run.outcome and run.outcome.casefold() not in _TERMINAL_OUTCOMES:
             counters["skipped"] += 1
             continue
-        spans = spans_for_run(run, env=runtime)
+        spans = spans_for_run(run, env=runtime, rate=rate)
         if not spans:
             counters["skipped"] += 1
             continue
@@ -370,7 +500,7 @@ def _self_check() -> None:
 
         # 7. 스위치가 꺼져 있으면 아무 일도 하지 않는다.
         assert collect_once(env={"HERMES_KANBAN_DB": str(kanban_db)}, now_s=1787799900) == {
-            "runs": 0, "skipped": 0, "spans": 0, "requests": 0, "failed": 0
+            "runs": 0, "skipped": 0, "spans": 0, "requests": 0, "failed": 0, "unreadable": 0
         }
 
         # 8. 전송 실패는 카운터로만 남고 예외가 아니다.
@@ -382,6 +512,29 @@ def _self_check() -> None:
         counters = collect_once(env=live, now_s=1787799900)
         assert counters["runs"] == 2 and counters["failed"] == 1, counters
         assert counters["spans"] == len(spans) + len(ceo_spans)
+        assert counters["unreadable"] == 0, counters
+
+        # 9. 보드를 못 읽는 것은 "카드 0장"이 아니다. AWS 에서 경로·권한이 어긋나는
+        #    형태가 정확히 이것이고, 빈 목록으로 접으면 60초마다 runs=0 을 찍으며
+        #    건강해 보인다.
+        try:
+            recent_runs(kanban_db=home / "does-not-exist.db", now_s=1787799900)
+        except BoardUnreadable as exc:
+            # 사유가 실려야 로그만 보고 경로인지 권한인지 갈라낼 수 있다.
+            assert "OperationalError" in str(exc), exc
+        else:  # pragma: no cover - 회귀 시에만 도달
+            raise AssertionError("없는 보드를 읽고도 예외가 없다")
+
+        blind = collect_once(
+            env={**live, "HERMES_KANBAN_DB": str(home / "does-not-exist.db")},
+            now_s=1787799900,
+        )
+        assert blind["unreadable"] == 1, blind
+        assert blind["runs"] == 0 and blind["spans"] == 0, blind
+        # 꺼져 있을 때(테스트 7)와 카운터가 달라야 한다 - 그래야 로그로 구분된다.
+        assert blind != {
+            "runs": 0, "skipped": 0, "spans": 0, "requests": 0, "failed": 0, "unreadable": 0
+        }
 
     print("ok - 부서장 카드 수집기 점검 통과")
 
@@ -401,16 +554,16 @@ def main(argv: list[str] | None = None) -> int:
     if not args.once and not args.loop:
         parser.error("--once 또는 --loop 중 하나가 필요하다")
 
-    if not langfuse_enabled(os.environ):
-        # 조용히 도는 것보다 왜 안 도는지 말하는 쪽이 낫다 - 계측이 자기 부재를
-        # 관측하지 못하면 관측이 없는 것과 같다.
-        print("head-trace-collector langfuse=disabled", file=sys.stderr)
-
     while True:
         started = time.perf_counter()
+        # 매 회차에 스위치 상태를 같이 찍는다. 꺼져 있을 때의 0 과 켜져 있는데
+        # 카드가 없을 때의 0 은 로그에서 글자 그대로 같아서, 켠 줄 알았는데 안 켜진
+        # 상태를 카운터만으로는 알아낼 수 없다. 시작 한 줄로는 부족하다 - 컨테이너가
+        # 며칠 돌면 그 줄은 스크롤 밖이다.
+        switch = "on" if langfuse_enabled(os.environ) else "disabled"
         counters = collect_once(lookback_seconds=args.lookback)
         print(
-            "head-trace-collector "
+            f"head-trace-collector langfuse={switch} "
             + " ".join(f"{key}={value}" for key, value in counters.items())
             + f" elapsed_ms={int((time.perf_counter() - started) * 1000)}",
             file=sys.stderr,
