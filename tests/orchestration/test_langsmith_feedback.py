@@ -17,6 +17,7 @@ from orchestration.langsmith_feedback import (
     attribute_workflow_bottleneck,
     evaluation_run_id,
     evaluate_observation,
+    _is_workflow_feedback_source,
     observation_from_run,
 )
 from orchestration.langsmith_feedback import _aggregate_metric_window
@@ -83,6 +84,41 @@ def test_observation_allowlists_metadata_and_never_reads_payload() -> None:
     assert "prompt" not in observation.metadata
     assert "api_key" not in observation.metadata
     assert "secret" not in observation.metadata
+
+
+def test_observation_uses_terminal_output_when_initial_metadata_is_accepted() -> None:
+    class FailedRun:
+        id = "run-http-error"
+        name = "hgfinance.user-query"
+        status = "error"
+        error = "HTTPException"
+        start_time = datetime.now(timezone.utc)
+        end_time = start_time
+        extra = {
+            "metadata": {
+                "request_id": "discord:1",
+                "root_id": "discord:1",
+                "status": "accepted",
+                "trace_kind": "workflow_root",
+                "latency_scope": "end_to_end",
+            }
+        }
+        outputs = {
+            "status": "error",
+            "terminal_status": "error",
+            "terminal_reason": "HTTPException",
+            "error_code": "portfolio_authentication_required",
+            "http_status": 401,
+            "answer": "must never be copied",
+        }
+
+    observation = observation_from_run(FailedRun())
+
+    assert observation.metadata["status"] == "error"
+    assert observation.metadata["error_code"] == "portfolio_authentication_required"
+    assert observation.metadata["http_status"] == 401
+    assert observation.metadata["error_class"] == "HTTPException"
+    assert "answer" not in observation.metadata
 
 
 def test_evaluator_passes_structured_success_without_model_content() -> None:
@@ -780,3 +816,25 @@ def test_service_is_noop_when_langsmith_is_disabled(tmp_path, monkeypatch) -> No
     )
 
     assert service.run_once() == {"discovered": 0, "completed": 0, "failed": 0, "dropped": 0}
+
+
+def test_feedback_ignores_legacy_metric_and_test_roots() -> None:
+    base = {
+        "source_run_id": "run",
+        "status": "success",
+        "started_at": None,
+        "ended_at": "2026-08-26T00:00:01+00:00",
+        "metadata": {"department": "qa", "stage": "qa", "status": "success"},
+    }
+    assert not _is_workflow_feedback_source(
+        TraceObservation(name="llm.performance.metric", **base)
+    )
+    assert not _is_workflow_feedback_source(
+        TraceObservation(name="hgfinance.test.redacted", **base)
+    )
+    assert not _is_workflow_feedback_source(
+        TraceObservation(name="qa.hermes.terminal", **base)
+    )
+    assert _is_workflow_feedback_source(
+        TraceObservation(name="hgfinance.qa.worker", **base)
+    )

@@ -31,6 +31,8 @@ non-binding context; `qa-runner` calls no model at all.  Neither can change a
 binding QA verdict, approve an order, write a ledger, or close a finding.
 """
 
+# The worker loads its isolated skill package before importing package modules.
+# ruff: noqa: E402
 from __future__ import annotations
 
 import asyncio
@@ -1124,7 +1126,7 @@ def _qa_input_refs(payload: Mapping[str, Any]) -> Any:
     from runtime_contracts import sha256_hash
 
     return [{
-        "type": f"qa-{str(artifact_type)}"[:64],
+        "type": f"qa-{artifact_type!s}"[:64],
         "id": str(artifact_id),
         "content_hash": sha256_hash(artifact),
     }]

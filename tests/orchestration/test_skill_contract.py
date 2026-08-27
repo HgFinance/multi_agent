@@ -54,7 +54,7 @@ class SharedSkillContractTest(unittest.TestCase):
     def test_repository_custom_sources_are_present(self) -> None:
         for skill in (
             "agentic-rag",
-            "experiment-factory",
+            "autonomous-quant-research",
             "financial-portfolio-assessment",
             "hermes-multi-agent-pipelines",
             "methodology-scout",
@@ -68,7 +68,7 @@ class SharedSkillContractTest(unittest.TestCase):
     def test_owner_contract_rejects_wrong_profile_skill_pairs(self) -> None:
         valid = (
             ("methodology-scout", "research-department"),
-            ("experiment-factory", "quant-backtest-department"),
+            ("autonomous-quant-research", "research-department"),
             ("agentic-rag", "risk-management"),
             ("financial-portfolio-assessment", "qa-department"),
         )
@@ -81,7 +81,7 @@ class SharedSkillContractTest(unittest.TestCase):
 
         invalid = (
             ("methodology-scout", "quant-backtest-department"),
-            ("experiment-factory", "research-department"),
+            ("autonomous-quant-research", "quant-backtest-department"),
             ("agentic-rag", "ceo-agent"),
             ("financial-portfolio-assessment", "trading-department"),
         )

@@ -26,7 +26,7 @@ CEO 는 4개 workflow(investment-case / strategy-research / workforce-management
 agent-evolution)에 등장하고 흐름마다 도달한 단계가 다르므로, 안 온 단계를 전부
 escalate 로 올리면 그 신호는 곧 의미를 잃는다.
 
-지침: docs/02-engineering/CEO_RUNNER_SPEC.md
+정본: docs/02-engineering/CEO_ARCHITECTURE.md
 근거: docs/02-engineering/WORKER_ROLE_BOUNDARIES.md §"결정론 Worker(러너)를 두는 부서"
 
 자체 점검: python departments/00-ceo-office/employee_workers.py

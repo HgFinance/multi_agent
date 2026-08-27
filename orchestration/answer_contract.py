@@ -47,7 +47,10 @@ _EVIDENCE_PATTERNS = (
 
 # 시점 표기. "지금 기준"인지 "어느 거래일 기준"인지가 시세성 답의 생명이다.
 _ASOF_PATTERNS = (
-    re.compile(r"\b20\d{2}[-/.]?\d{2}[-/.]?\d{2}\b"),
+    # ISO timestamps use ``T`` immediately after the date, so a word-boundary
+    # after YYYY-MM-DD would incorrectly reject values such as
+    # ``2026-08-26T15:22:30Z``.
+    re.compile(r"\b20\d{2}[-/.]?\d{2}[-/.]?\d{2}"),
     re.compile(r"queried_at|as[_\s-]?of|기준일|조회\s*시각|검증\s*시각|기준", re.I),
 )
 

@@ -1,0 +1,47 @@
+# Non-factory control-plane runtime for small operational services.
+#
+# This image intentionally contains no strategy-factory source, database bridge,
+# Kanban dispatcher or factory runtime contract.  It is used by retained
+# watchdog, paper-control and governed skill-evolution services while the old
+# factory image is retired.
+FROM python:3.12-slim
+
+ARG DOCKER_CLI_VERSION=27.3.1
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates; \
+    curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+      -o /tmp/docker.tgz; \
+    tar -xzf /tmp/docker.tgz -C /tmp; \
+    mv /tmp/docker/docker /usr/local/bin/docker; \
+    rm -rf /tmp/docker /tmp/docker.tgz; \
+    apt-get purge -y curl; \
+    apt-get autoremove -y; \
+    rm -rf /var/lib/apt/lists/*; \
+    docker --version
+
+RUN pip install --no-cache-dir \
+      fastapi==0.116.1 "uvicorn[standard]==0.35.0" \
+      pydantic==2.11.7 PyYAML==6.0.2 "jsonschema>=4.10,<5"
+
+WORKDIR /app
+
+# Retained operational entrypoints and their small, explicit dependencies.
+COPY apps/api ./apps/api
+COPY orchestration/canonical_profiles.py ./orchestration/canonical_profiles.py
+COPY scripts/evolution_skills.py ./scripts/evolution_skills.py
+COPY orchestration/evolution_skills.py ./orchestration/evolution_skills.py
+COPY orchestration/qa_discord_feedback.py ./orchestration/qa_discord_feedback.py
+COPY orchestration/qa_feedback_benchmarks.py ./orchestration/qa_feedback_benchmarks.py
+COPY orchestration/qa_skill_evolution_bridge.py ./orchestration/qa_skill_evolution_bridge.py
+COPY orchestration/langsmith_queries.py ./orchestration/langsmith_queries.py
+COPY orchestration/langsmith_feedback.py ./orchestration/langsmith_feedback.py
+COPY orchestration/llm_observability.py ./orchestration/llm_observability.py
+COPY orchestration/semantic_qa.py ./orchestration/semantic_qa.py
+COPY orchestration/answer_contract.py ./orchestration/answer_contract.py
+COPY departments/worker_model_gateway.py ./departments/worker_model_gateway.py
+COPY departments/qwen_hybrid_runtime.py ./departments/qwen_hybrid_runtime.py
+COPY departments/01-research/config/worker_model_registry.json ./departments/01-research/config/worker_model_registry.json
+COPY benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json ./benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json
+
+ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app

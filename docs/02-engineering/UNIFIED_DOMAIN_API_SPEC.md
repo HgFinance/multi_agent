@@ -415,8 +415,8 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 
 같은 `POST /ui/portfolio-recommendations`는 다음 선택 입력도 받는다.
 
-- `category`: `PORTFOLIO_RECOMMENDATION`, `MARKET_RESEARCH`, `RISK_REVIEW`, `TAX_LIQUIDITY`, `REBALANCING_PROPOSAL`, `STRATEGY_PROPOSAL` 중 하나다. **다만 서버는 이 목록을 `Literal`로 강제하지 않는다** — 목록 밖 문자열이 와도 422가 아니라 더 넓은 부서 집합으로 fallback하고, 응답 `task_plan.category_recognized: false`로 그 사실을 남긴다. 대화형 제품에서 새 의도가 표보다 먼저 도착하므로 질문을 통째로 실패시키지 않되, 조용히 넘기지도 않는다는 뜻이다(근거: [CEO_CONVERSATIONAL_ROUTING_SPEC.md](CEO_CONVERSATIONAL_ROUTING_SPEC.md) 2.5).
-- `STRATEGY_PROPOSAL`은 `task_plan.workflow`가 `strategy-research`로 나온다 — 이 그래프가 정식 처리 주체가 아니라는 표시다. 현재 BFF는 아직 워크플로별 디스패치를 하지 않으므로 자문 전용 축소 집합(`research`·`qa`·`ceo`)만 실행된다(같은 문서 3.1).
+- `category`: `PORTFOLIO_RECOMMENDATION`, `MARKET_RESEARCH`, `RISK_REVIEW`, `TAX_LIQUIDITY`, `REBALANCING_PROPOSAL`, `STRATEGY_PROPOSAL` 중 하나다. **다만 서버는 이 목록을 `Literal`로 강제하지 않는다** — 목록 밖 문자열이 와도 422가 아니라 더 넓은 부서 집합으로 fallback하고, 응답 `task_plan.category_recognized: false`로 그 사실을 남긴다. 대화형 제품에서 새 의도가 표보다 먼저 도착하므로 질문을 통째로 실패시키지 않되, 조용히 넘기지도 않는다는 뜻이다(근거: [CEO_ARCHITECTURE.md](CEO_ARCHITECTURE.md) §3.2).
+- `STRATEGY_PROPOSAL`은 `task_plan.workflow`가 `strategy-research`로 나온다 — 일반 포트폴리오 응답 그래프가 정식 승격 workflow의 처리 주체라는 뜻은 아니다. 현재 BFF의 response-plane은 `research`·`quant`·`ceo`이며 QA는 CEO 응답 후 별도 audit으로 실행된다. 전략 승격의 QA→CEO 게이트와 실제 `strategy-research` graph dispatch는 별도 미구현 범위다([CEO_ARCHITECTURE.md](CEO_ARCHITECTURE.md) §3.2, §7).
 - `include_stock`: 주식 종목·배분 표시 여부이며 기본값은 `true`다.
 - `include_derivatives`: 파생상품 종목·배분 표시 여부이며 현재 국내 주식 전용 범위에서는 기본값이 `false`다.
 - `query`: 사용자가 자유롭게 작성하는 투자 질문·조건이다. 빈 문자열이어도 되며, 카테고리와 구조화된 프로필만으로 기본 라우팅한다.
@@ -447,8 +447,10 @@ Fund/Book 재인가를 모두 통과한 경우에만 PAPER OMS admission으로 �
 
 | Route | Method | 소유 모듈 | 역할 |
 |---|---|---|---|
-| `/ui/ceo/ask` | POST | `ceo_mirror_api.py` | CEO root Kanban Task 생성. dedup + mirror event journal이 `ceo.ceo_query`를 감싼다 |
+| `/ui/ceo/ask` | POST | `ceo_mirror_api.py` | BFF 중앙 분기. 일반 질의는 CEO root Kanban Task 생성, 전략 생성 의도는 autonomous research intake로 분기 |
 | `/ui/ceo/ingress` | POST | `ceo_mirror_api.py` | Web/Discord 공용 canonical ingress. 같은 dedup 경로 |
+| `/ui/strategy-research/ask` | POST | `strategy_research.py` | 독립 전략 연구 intake. CEO/Kanban/order 경로와 분리 |
+| `/ui/strategy-research/requests/{request_id}` | GET | `strategy_research.py` | 연구실 상태·사이클·계획·결과·후보 여부 조회 |
 | `/ui/ceo/events` | GET·POST | `ceo_mirror_api.py` | request_id 기준 mirror event 조회 / sanitized event 발행 |
 | `/ui/ceo/events/stream` | GET | `ceo_mirror_api.py` | 단명 SSE. 클라이언트는 마지막 event_id cursor로 재연결 |
 | `/ui/ceo/tasks` | GET | `ceo.py` | 계정별 root Task 목록. `owner_id` 필터는 **서버가** 적용한다 |

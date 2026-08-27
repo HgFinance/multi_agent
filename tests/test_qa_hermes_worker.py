@@ -264,6 +264,182 @@ def test_user_query_planning_and_synthesis_receive_bounded_budget(tmp_path):
     ]
 
 
+def test_qa_governance_review_gets_bounded_high_reasoning_budget(tmp_path, monkeypatch):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("workflow_role=qa\nworkflow_plane=governance",),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HGFINANCE_QA_AUDIT_MAX_TURNS", "16")
+    monkeypatch.setenv("HGFINANCE_QA_PRIMARY_MAX_TURNS", "16")
+    monkeypatch.setenv("HGFINANCE_QA_AUDIT_REASONING", "high")
+
+    assert qa_worker._bounded_worker_argv(
+        ["chat", "-q", "review"], db_path=db, task_id="t_qa", profile="qa-department"
+    ) == [
+        "chat",
+        "--max-turns",
+        "16",
+        "--reasoning",
+        "high",
+        "--toolsets",
+        "kanban",
+        "-q",
+        "review",
+    ]
+
+
+def test_direct_qa_primary_gets_the_same_bounded_review_budget(tmp_path, monkeypatch):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        (
+            "origin=user-query\n"
+            "workflow_role=primary\n"
+            "selected_primary_profiles=qa-department\n"
+            "delegation_instruction.qa-department=review",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HGFINANCE_QA_AUDIT_MAX_TURNS", "16")
+    monkeypatch.setenv("HGFINANCE_QA_PRIMARY_MAX_TURNS", "16")
+    monkeypatch.setenv("HGFINANCE_QA_AUDIT_REASONING", "high")
+
+    assert qa_worker._bounded_worker_argv(
+        ["chat", "-q", "review"],
+        db_path=db,
+        task_id="t_qa",
+        profile="qa-department",
+    ) == [
+        "chat",
+        "--max-turns",
+        "16",
+        "--reasoning",
+        "high",
+        "--toolsets",
+        "kanban,terminal",
+        "-q",
+        "review",
+    ]
+
+
+def test_qa_governance_review_replaces_broad_explicit_toolsets(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("workflow_role=qa\nworkflow_plane=governance",),
+    )
+    conn.commit()
+    conn.close()
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["chat", "--toolsets", "all", "-q", "review"],
+        db_path=db,
+        task_id="t_qa",
+        profile="qa-department",
+    )
+
+    assert bounded == [
+        "chat",
+        "--max-turns",
+        "16",
+        "--reasoning",
+        "high",
+        "--toolsets",
+        "kanban",
+        "-q",
+        "review",
+    ]
+
+
+def test_direct_qa_fast_advisory_uses_qa_primary_budget(tmp_path, monkeypatch):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        (
+            "analysis_mode=fast_advisory\n"
+            "origin=user-query\n"
+            "workflow_role=primary\n"
+            "selected_primary_profiles=qa-department",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HGFINANCE_QA_AUDIT_MAX_TURNS", "16")
+    monkeypatch.setenv("HGFINANCE_QA_PRIMARY_MAX_TURNS", "16")
+    monkeypatch.setenv("HGFINANCE_QA_AUDIT_REASONING", "high")
+
+    assert qa_worker._response_task_kind(
+        qa_worker._task_body(db, "t_qa"), profile="qa-department"
+    ) == "qa_primary"
+    bounded = qa_worker._bounded_worker_argv(
+        ["--profile", "qa-department", "chat", "-q", "work"],
+        db_path=db,
+        task_id="t_qa",
+        profile="qa-department",
+    )
+
+    assert bounded == [
+        "--profile",
+        "qa-department",
+        "chat",
+        "--max-turns",
+        "16",
+        "--reasoning",
+        "high",
+        "--toolsets",
+        "kanban,terminal",
+        "-q",
+        "work",
+    ]
+
+
+def test_qa_primary_query_is_bounded_and_does_not_reopen_general_tools():
+    bounded = qa_worker._qa_primary_worker_argv(
+        ["chat", "-q", "work kanban task t_qa"],
+        task_body="workflow_role=primary\norigin=user-query",
+    )
+
+    assert bounded[:2] == ["chat", "-q"]
+    assert "TASK PAYLOAD:" in bounded[2]
+    assert "skill_view/skill_manage" in bounded[2]
+    assert "kanban_complete exactly once" in bounded[2]
+
+
+def test_direct_qa_does_not_use_post_response_payload_prompt():
+    assert qa_worker._is_post_response_qa(
+        "workflow_role=primary\nanalysis_mode=fast_advisory"
+    ) is False
+    assert qa_worker._is_post_response_qa(
+        "qa_phase=post_response\n"
+        "qa_timing=after_ceo_response\n"
+        "response_delivered=true"
+    ) is True
+
+
+def test_qa_audit_query_inlines_one_task_payload_and_keeps_worker_command_shape():
+    bounded = qa_worker._qa_audit_worker_argv(
+        ["chat", "-q", "work kanban task t_qa"],
+        task_body="workflow_role=qa\nresponse_plane=completed\nchecks={}",
+    )
+
+    assert bounded[:2] == ["chat", "-q"]
+    assert "TASK PAYLOAD:" in bounded[2]
+    assert "workflow_role=qa" in bounded[2]
+    assert "do not call kanban_show or kanban_list" in bounded[2]
+
+
 def test_risk_user_primary_receives_budget_without_changing_other_profiles(tmp_path):
     db = tmp_path / "kanban.db"
     _db_with_running_run(db)
@@ -381,6 +557,21 @@ def test_dispatch_worker_without_run_env_drops_deprecated_terminal_cwd(monkeypat
     qa_worker._drop_dispatcher_terminal_cwd()
 
     assert "TERMINAL_CWD" not in os.environ
+
+
+def test_dispatch_worker_workspace_marker_drops_terminal_env_without_task_marker(
+    monkeypatch,
+):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    monkeypatch.setenv(
+        "HERMES_KANBAN_WORKSPACE", "/opt/data/shared-kanban/workspaces/t_12345678"
+    )
+    monkeypatch.setenv("TERMINAL_CWD", "/opt/data/shared-kanban/workspaces/t_12345678")
+
+    env = qa_worker._real_worker_environment()
+
+    assert "TERMINAL_CWD" not in env
 
 
 def test_interactive_worker_keeps_explicit_terminal_env(monkeypatch) -> None:

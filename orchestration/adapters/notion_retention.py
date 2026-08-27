@@ -108,6 +108,10 @@ class NotionPage:
     last_edited_at: datetime | None = None
     status: str = ""
     projection_marker: str = ""
+    category: str = ""
+    approval_count: str = ""
+    in_progress_count: str = ""
+    blocker_count: str = ""
 
     @property
     def exact_replay_key(self) -> str | None:
@@ -133,6 +137,21 @@ class NotionPage:
         # explicit non-terminal/unknown status is never archived automatically.
         normalized = self.status.strip().casefold()
         return not normalized or normalized in TERMINAL_STATUSES
+
+    @property
+    def resolved_ceo_briefing(self) -> bool:
+        """Identify the legacy CEO report schema without reading page blocks."""
+
+        if self.category.strip() != "저녁 브리핑" or self.status.strip() != "보고 완료":
+            return False
+        return all(
+            _is_zero(value)
+            for value in (
+                self.approval_count,
+                self.in_progress_count,
+                self.blocker_count,
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -163,6 +182,7 @@ TERMINAL_STATUSES = {
     "closed",
     "finished",
     "완료",
+    "보고 완료",
     "성공",
     "실패",
     "차단",
@@ -181,6 +201,13 @@ def _property_value(values: Mapping[str, str], *names: str) -> str:
         if normalized in aliases and value:
             return value
     return ""
+
+
+def _is_zero(value: str) -> bool:
+    try:
+        return float(str(value).replace(",", "").replace("건", "").strip() or "0") == 0
+    except (TypeError, ValueError):
+        return False
 
 
 class NotionRetentionWorker:
@@ -341,9 +368,10 @@ class NotionRetentionWorker:
                         replay_id = _property_value(
                             values, "risk_request_id", "replay_id"
                         )
+                    page_id = str(raw.get("id") or "")
                     pages.append(
                         NotionPage(
-                            page_id=str(raw.get("id") or ""),
+                            page_id=page_id,
                             database_id=database_id,
                             database_env=env_name,
                             created_at=_parse_time(raw.get("created_time")),
@@ -362,6 +390,16 @@ class NotionRetentionWorker:
                                 "trace_id",
                                 "trade_case_id",
                                 "risk_plan_id",
+                            ),
+                            category=_property_value(values, "category", "구분"),
+                            approval_count=_property_value(
+                                values, "approval_count", "승인 대기"
+                            ),
+                            in_progress_count=_property_value(
+                                values, "in_progress_count", "진행 중"
+                            ),
+                            blocker_count=_property_value(
+                                values, "blocker_count", "차단·오류"
                             ),
                         )
                     )
@@ -427,10 +465,14 @@ class NotionRetentionWorker:
                     if not (is_old or is_duplicate):
                         continue
                     # Legacy/unrelated pages can exist in a configured database.
-                    # Without a structured identity, automatic archival would
-                    # be guesswork. Explicit active/unknown statuses are also
+                    # The CEO report schema has no projection key, so its
+                    # structured terminal counters are an explicit identity
+                    # substitute. Explicit active/unknown statuses are still
                     # protected because this worker does not inspect page blocks.
-                    if not page.retention_key or not page.terminal:
+                    identifiable = bool(
+                        page.retention_key or page.resolved_ceo_briefing
+                    )
+                    if not identifiable or not page.terminal:
                         skipped += 1
                         continue
                     if archived >= self.max_archives:

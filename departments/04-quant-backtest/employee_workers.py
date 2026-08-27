@@ -1,4 +1,4 @@
-"""Quant/Backtest employee Worker registry: experiment factory, no promotion authority.
+"""Quant/Backtest employee Worker registry: validation laboratory, no promotion authority.
 
 2026-08-10 재편 (재일). 이전 편제는 LLM 직원 7인(hypothesis/dataset/backtest/release/ml/
 cost/regime)이었다. 그런데 이 부서의 일 대부분은 **이미 결정론 코드**다 - PIT 인증,
@@ -12,7 +12,7 @@ cost/regime)이었다. 그런데 이 부서의 일 대부분은 **이미 결정�
      기획안은 자연어가 섞여 있어 코드가 혼자 읽을 수 없다.
   ② 설계 - EDA 결과를 보고 창·파라미터 범위를 제안한다. 제안일 뿐 판정이 아니다.
   ②-b 전략 코드 작성 - 기성 템플릿으로 표현 안 되는 방법론은 **시그널 코드를 쓴다.**
-     이게 공장이 사람 손에 막히지 않는 지점이다. 코드는 사전등록 지문에 해시로
+     이게 고정 실행면에 막히지 않는 지점이다. 코드는 사전등록 지문에 해시로
      들어가고(strategy_spec.spec_hash), 결정론·PIT·반환형 검사를 통과해야만
      스펙이 만들어진다 - 즉 **작성은 에이전트가, 승인은 결정론 코드가** 한다.
   ③ 해석 - 카드의 통계(DSR·PBO·국면)를 사람이 읽을 문장으로 만든다. **숫자는

@@ -9,6 +9,9 @@
 바인딩 판정은 절대 바뀌지 않는다. 모든 실패를 흡수하고 {"ok": False, ...}로만 기록한다.
 """
 
+# The standalone reporter bootstraps the repository path before importing
+# shared modules; those imports intentionally follow the path setup.
+# ruff: noqa: E402
 from __future__ import annotations
 
 import json

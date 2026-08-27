@@ -199,6 +199,39 @@ def test_dispatch_guard_fails_closed_when_patch_installation_raises(monkeypatch)
     )
 
 
+def test_dispatcher_workspace_does_not_emit_false_cwd_warning(monkeypatch):
+    package = types.ModuleType("hermes_cli")
+    kanban_db = types.ModuleType("hermes_cli.kanban_db")
+    config = types.ModuleType("hermes_cli.config")
+    calls: list[str] = []
+
+    def warn_deprecated_cwd_env_vars(*_args, **_kwargs):
+        calls.append("warned")
+
+    def check_respawn_guard(connection, task_id):
+        del connection, task_id
+        return "native"
+
+    config.warn_deprecated_cwd_env_vars = warn_deprecated_cwd_env_vars
+    kanban_db.check_respawn_guard = check_respawn_guard
+    package.kanban_db = kanban_db
+    package.config = config
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", kanban_db)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
+    monkeypatch.setenv("HGFINANCE_DISPATCH_GUARD", "1")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", "/tmp/task-workspace")
+
+    runpy.run_path(str(PATCH), run_name="hgfinance_dispatch_guard_test")
+    config.warn_deprecated_cwd_env_vars()
+
+    assert calls == []
+
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACE")
+    config.warn_deprecated_cwd_env_vars()
+    assert calls == ["warned"]
+
+
 def test_dispatch_preflight_accepts_the_installed_scope_hook(
         monkeypatch, capsys):
     def original_guard(connection, task_id):

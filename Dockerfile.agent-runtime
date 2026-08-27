@@ -27,9 +27,15 @@
 #   그 코드를 고칠 수는 있고(공학 부서니까), 고친 코드는 QA·감사 대상이다.
 FROM nousresearch/hermes-agent:latest
 
+# Strategy Hermes is the actual research worker.  This small root bootstrap
+# only prepares the dedicated lab volume before the upstream image drops to
+# the hermes user; it does not make research decisions or invoke another
+# department agent.
+COPY --chmod=0755 deploy/strategy-hermes/entrypoint.sh /usr/local/bin/strategy-hermes-entrypoint
+
 # 시스템 파이썬은 Hermes 런타임 자신이 쓴다 - 건드리지 않는다. 작업용 의존성은
 # 별도 venv 에 격리한다(베이스 이미지에 pip 이 없고 uv 는 이미 들어 있다).
-# 버전은 Dockerfile.factory 와 맞춘다 - 같은 파이프라인을 호스트/공장/여기서
+# 버전은 독립 실행면과 맞춘다 - 같은 분석 코드를 호스트와 컨테이너에서
 # 돌리는데 버전이 갈리면 content_hash 가 갈릴 수 있다.
 RUN uv venv /opt/quant-venv --python python3 \
  && uv pip install --python /opt/quant-venv/bin/python --no-cache \

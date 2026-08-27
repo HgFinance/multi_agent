@@ -17,7 +17,7 @@
 
 **Quant의 위치 (2026-08-10 팀 합의로 변경)**: 이전 판은 "Quant와 HR은 포트폴리오 추천 그래프에 암묵적으로 끼워 넣지 않는다"였고, 그 결과 포트폴리오 추천에 백테스트 근거가 전혀 없었다. 팀은 검증된 전략 카탈로그를 미리 만드는 대신 **요청 시점에 `research → quant`를 호출**하기로 했다. 따라서 Quant는 이제 포트폴리오 그래프의 **선언된 단계**다 — 금지되는 것은 여전히 *암묵적* 삽입이며, 어느 카테고리가 Quant를 부르는지는 `CATEGORY_DEPARTMENTS`에 명시한다. 응답성 때문에 `MARKET_RESEARCH`·`RISK_REVIEW`·`TAX_LIQUIDITY`는 Quant를 부르지 않는다. 전략 **승격** 권한은 그대로 `strategy-research` 체인에 남는다. HR은 변함없이 포트폴리오 파이프라인과 혼합하지 않는다.
 
-세부 근거와 카테고리별 표는 [CEO_CONVERSATIONAL_ROUTING_SPEC.md](CEO_CONVERSATIONAL_ROUTING_SPEC.md) 3.6을 따른다.
+세부 근거와 카테고리별 표는 [CEO_ARCHITECTURE.md](CEO_ARCHITECTURE.md) §3을 따른다.
 
 이 문서는 사용자 적합성 포트폴리오 파이프라인의 내부 연결 기준이다. 현재
 파이프라인은 국내 주식 Watchlist를 기본 유니버스로 사용하며, 결과는 자문용

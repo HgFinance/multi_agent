@@ -179,6 +179,7 @@
 
 ```
 사용자 → ai-office → POST /ui/ceo/ask (ui-bff)
+                          │ 전략 생성 의도 → autonomous-research intake → labs/<request_id>/
                           │ ①뿌리 카드만 만들고 즉시 202 (assignee=ceo-agent)
                           │   생성은 docker exec → qa-hermes 의 hermes kanban create
                           │   scope 마커 comment 실패 시 503 fail-closed

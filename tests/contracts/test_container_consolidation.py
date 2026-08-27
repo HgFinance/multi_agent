@@ -60,12 +60,12 @@ def test_market_and_accounting_startup_dependencies_are_deep_but_bounded() -> No
     assert "market-api" not in ledger_dependencies
 
 
-def test_factory_init_remains_a_separate_one_shot_permission_boundary() -> None:
-    factory_init = _services(ROOT / "docker-compose.yml")["factory-kanban-init"]
+def test_strategy_hermes_is_an_explicit_opt_in_boundary() -> None:
+    autonomous = _services(ROOT / "docker-compose.yml")["strategy-hermes"]
 
-    assert factory_init["network_mode"] == "none"
-    assert factory_init["user"] == "0:0"
-    assert factory_init["restart"] == "no"
+    assert autonomous["profiles"] == ["strategy-hermes"]
+    assert "autonomous_research_lab" in " ".join(autonomous["volumes"])
+    assert not any("docker.sock" in volume for volume in autonomous["volumes"])
 
 
 def test_priority_runtime_services_have_explicit_healthchecks() -> None:
@@ -83,7 +83,7 @@ def test_priority_runtime_services_have_explicit_healthchecks() -> None:
         **workforce,
     }
     expected = {
-        "factory-autopilot",
+        "strategy-hermes",
         "portfolio-worker",
         "research-api",
         "trading-directive-worker",
@@ -94,11 +94,9 @@ def test_priority_runtime_services_have_explicit_healthchecks() -> None:
     }
     assert expected <= services.keys()
     assert all(services[name].get("healthcheck") for name in expected)
-    assert services["factory-autopilot"]["healthcheck"]["test"] == [
-        "CMD",
-        "python",
-        "scripts/factory_runtime_contract.py",
-        "check",
+    assert services["strategy-hermes"]["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        "test -d /var/lib/autonomous-research/intake && test -d /var/lib/autonomous-research/labs",
     ]
     assert "--healthcheck" in services["accounting-ledger-consumer"]["healthcheck"]["test"]
     assert "--healthcheck" in services["accounting-ls-paper-reconciler"]["healthcheck"]["test"]

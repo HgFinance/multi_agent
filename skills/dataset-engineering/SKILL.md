@@ -6,7 +6,7 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [dataset, pit, parquet, diagnosis, autonomy]
-    related_skills: [experiment-factory, wiring-audit]
+    related_skills: [autonomous-quant-research, wiring-audit]
 ---
 
 # 데이터셋 공학 — 네가 찾고, 네가 만들고, 막히면 네가 뚫는다
@@ -178,7 +178,7 @@ PITView.closes / volatility / adv / sma …     # 전부 가격 파생
 
 ### 고치기 전에 카드에 적는다
 
-러너를 고쳐도 된다(`experiment-factory` §4). 안전한 이유는 구조에 있다:
+러너를 고쳐도 된다(`autonomous-quant-research`의 검증 루프). 안전한 이유는 구조에 있다:
 
 ```
 code_version() = RUNNER_VERSION + sha256(파일)
@@ -211,7 +211,7 @@ krx-microstructure-daily/v1-20260812   148,931행 · 59일 · 2,558종목
 만한 가설이다.
 
 기간이 59일뿐이라 walk-forward 창이 몇 개 나오는지 먼저 세라
-(`experiment-factory` 의 창 산수). **창이 안 나오면 판정이 안 선다** —
+(`autonomous-quant-research`의 창 산수). **창이 안 나오면 판정이 안 선다** —
 그때는 실험을 접는 게 아니라 수집 기간이 쌓일 때까지 다른 것을 하고,
 그 사실을 카드에 적는다.
 

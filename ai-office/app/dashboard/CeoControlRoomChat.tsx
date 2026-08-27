@@ -8,8 +8,11 @@ import {
   ceoWorkflowResult,
   ceoWorkflowStatus,
   paperOrderWorkflowStatus,
+  strategyResearchStatus,
   type CardOutcome,
   type CeoQueryPlanning,
+  type StrategyResearchAccepted,
+  type StrategyResearchStatus,
 } from "../lib/ceoClient";
 import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
 import { DEFAULT_ACCOUNT } from "../lib/currentAccount";
@@ -68,6 +71,7 @@ type SubmittedRequest = {
   planning: CeoQueryPlanning | null;
   orderRequestId: string | null;
   orderState: string | null;
+  researchRequestId: string | null;
 };
 
 export function CeoControlRoomChat() {
@@ -107,6 +111,7 @@ function CeoControlRoomChatSession() {
 
   const activeTaskId = submitted?.taskId ?? null;
   const activeOrderRequestId = submitted?.orderRequestId ?? null;
+  const activeResearchRequestId = submitted?.researchRequestId ?? null;
 
   // 본부별 진행 — 10초 간격. 모든 카드가 끝나면 폴링을 멈춘다.
   const statusQuery = useQuery({
@@ -145,6 +150,16 @@ function CeoControlRoomChatSession() {
     },
   });
 
+  const researchStatusQuery = useQuery<StrategyResearchStatus>({
+    queryKey: ["autonomous-research", activeResearchRequestId],
+    queryFn: () => strategyResearchStatus(activeResearchRequestId as string),
+    enabled: Boolean(activeResearchRequestId),
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      return data?.status === "CANDIDATE" || data?.status === "BLOCKED" ? false : 10_000;
+    },
+  });
+
   const sendMutation = useMutation({
     mutationFn: ({ text, bookId, fundId }: { text: string; bookId?: string; fundId?: string }) =>
       askCeo(text, undefined, bookId, fundId),
@@ -170,6 +185,7 @@ function CeoControlRoomChatSession() {
       planning: null,
       orderRequestId: null,
       orderState: null,
+      researchRequestId: null,
     });
 
     try {
@@ -178,14 +194,28 @@ function CeoControlRoomChatSession() {
         fundId: effectiveFundId ?? undefined,
         ...(selectedBookId ? { bookId: selectedBookId } : {}),
       });
-      setSubmitted({
-        taskId: response.task_id,
-        query: value,
-        answer: response.answer,
-        planning: response.planning ?? null,
-        orderRequestId: response.order_request_id ?? null,
-        orderState: response.order_state ?? null,
-      });
+      if ("lab_id" in response) {
+        const research = response as StrategyResearchAccepted;
+        setSubmitted({
+          taskId: null,
+          query: value,
+          answer: research.message,
+          planning: null,
+          orderRequestId: null,
+          orderState: null,
+          researchRequestId: research.request_id,
+        });
+      } else {
+        setSubmitted({
+          taskId: response.task_id,
+          query: value,
+          answer: response.answer,
+          planning: response.planning ?? null,
+          orderRequestId: response.order_request_id ?? null,
+          orderState: response.order_state ?? null,
+          researchRequestId: null,
+        });
+      }
     } catch {
       // 실패 원인은 mutation.error로 보존되고 아래 에러 배너가 보여준다.
     }
@@ -270,7 +300,9 @@ function CeoControlRoomChatSession() {
             </div>
 
             <div className="self-start max-w-[92%] rounded-lg border border-outline-variant bg-surface-container-low p-3">
-              <div className="font-bold text-body-sm font-body-sm text-primary mb-1">CEO Hermes</div>
+              <div className="font-bold text-body-sm font-body-sm text-primary mb-1">
+                {submitted.researchRequestId ? "Hermes 자율 연구실" : "CEO Hermes"}
+              </div>
               <p className="text-body-sm font-body-sm text-on-surface m-0 whitespace-pre-line">
                 {submitted.answer ?? "CEO Hermes가 답변을 준비하는 중입니다…"}
               </p>
@@ -374,6 +406,31 @@ function CeoControlRoomChatSession() {
                   <p className="mt-1 mb-0 text-[11px] text-error">주문 상태를 다시 확인하고 있습니다.</p>
                 ) : null}
                 <code className="mt-1 block text-[10px] text-outline">{activeOrderRequestId}</code>
+              </div>
+            ) : null}
+
+            {activeResearchRequestId ? (
+              <div
+                className="self-start max-w-[92%] border border-primary/30 rounded p-3 bg-secondary-container/20"
+                aria-live="polite"
+              >
+                <div className="text-xs font-bold text-primary">자율 전략 연구실</div>
+                <p className="mt-1 mb-0 text-xs text-on-surface">
+                  {researchStatusQuery.data?.status === "CANDIDATE"
+                    ? "검증 게이트를 통과한 후보가 기록되었습니다. 별도 QA·Risk·사람 심사가 필요합니다."
+                    : researchStatusQuery.data?.status === "BLOCKED"
+                      ? `연구가 일시 중단되었습니다: ${researchStatusQuery.data.error ?? "오류 원인 기록을 확인하세요."}`
+                    : `Hermes가 연구 중입니다 · ${researchStatusQuery.data?.cycle ?? 0}회차 · 계획 ${researchStatusQuery.data?.plan_count ?? 0}개 · 결과 ${researchStatusQuery.data?.result_count ?? 0}개`}
+                </p>
+                {researchStatusQuery.data?.last_action ? (
+                  <p className="mt-1 mb-0 text-[11px] text-on-surface-variant">
+                    현재 단계: {researchStatusQuery.data.last_action}
+                  </p>
+                ) : null}
+                {researchStatusQuery.isError ? (
+                  <p className="mt-1 mb-0 text-[11px] text-error">연구실 상태를 다시 확인하고 있습니다.</p>
+                ) : null}
+                <code className="mt-1 block text-[10px] text-outline">{activeResearchRequestId}</code>
               </div>
             ) : null}
           </>

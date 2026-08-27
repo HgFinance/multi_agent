@@ -2,14 +2,35 @@
 
 활성 역할은 Hermes Head `qa-audit-supervisor`, LLM `hallucination-critic-worker`·`incident-postmortem-worker`, 결정론 `qa-runner`다. 모델·fallback은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md), 권한은 [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md)를 따른다. 바인딩 판정은 결정론적 QA Engine이 소유한다.
 
-## 현재 승인 상태 (2026-08-04)
+## 현재 운영 기준 (2026-08-26)
+
+일반 CEO 응답에서 QA는 사후 감사다. CEO가 primary 결과를 종합하고 사용자에게
+응답을 전달한 뒤 QA task가 비동기로 생성되며, QA·Notion·Discord 관찰자는 이미
+전달된 응답을 지연하거나 다시 쓰지 않는다. 전략 승격·HR 권한 변경처럼 별도
+거버넌스 승인이 필요한 흐름은 이 규칙의 예외다. 전체 순서는
+[CEO 아키텍처 정본](../../docs/02-engineering/CEO_ARCHITECTURE.md)을 따른다.
+
+출력 계약은 다음과 같다.
+
+- Notion: 관리자용 한국어 업무·성과 요약. 내부 변수명이나 원문 payload를 쓰지 않는다.
+- LangSmith `First`: Agent/QA용 metadata-only trace. 요청·root·task 상관관계, 단계,
+  모델·도구·지연·재시도·오류·상태를 기록하고 원문 input/output은 보내지 않는다.
+- Discord 일반 채널: 사용자용 한국어 최종 요약. Discord QA/운영 채널: 문제 위치,
+  영향, 근거, 조치, 재검증을 한국어로 표시한다.
+
+직접 생성된 QA primary가 운영 연결 상태를 점검할 때는 실제 관측 원장이나 redacted
+evidence가 task에 포함되어야 한다. 해당 근거가 없으면 미연결 부서를 추측하지 않고
+`WARN`으로 남긴다. `qa_phase=post_response`가 있는 사후 QA에만 payload-only 도구 제한을
+적용한다.
+
+## 과거 개발 기록 (2026-08-04; 현재 운영 판정의 근거 아님)
 
 - Evidence QA `qa-check`는 Evidence QA Gate v1로 승인됐고, production은 `QA_CHECK_CONTRACT_APPROVED=true`일 때만 활성화된다.
 - Model Risk/Internal Audit는 governed 입력 신호가 있을 때만 결정론 엔진이 실행되며, 그 결과는
   `qa-runner`(2026-08-06 tool 강등, 아래 참고)가 옮긴다. PASS가 아니면 에스컬레이션한다.
 - Worker의 ACTIVE Profile·운영 Trace는 migration 적용과 `QA_TRACE_PERSIST=true`가 필요하다. `SAMPLE_PLACEHOLDER` 정책 Corpus는 운영 근거가 아니며 실제 문서·임베딩·pgvector 적재 전에는 ESCALATE한다.
 
-## P1 현재 상태 (2026-08-03)
+## 과거 P1 개발 기록 (2026-08-03; 현재 운영 판정의 근거 아님)
 
 - `model_risk.py`는 모델·프롬프트·데이터셋 계보와 평가량/Calibration/Drift 지표를 결정론적으로 검사하고, 근거가 없으면 `ESCALATE`한다.
 - `internal_audit.py`와 `/qa/v1/internal-audit/evaluate`는 Trace·권한·ACTIVE Profile·부서 경계·금지 Tool을 검사한다. QA가 Risk/OMS/원장 권한을 스스로 승인하지 않는다.
@@ -60,7 +81,7 @@ PASS/WARN/FAIL 판정과 Ops Incident 심각도는 `evidence/evidence_qa_engine.
 
 동규님 — [TEAM_DONGGYU_RISK_QA_GUIDE](../../docs/05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md)
 
-## 입력·출력 계약
+## 독립 QA 모듈 계약 (운영 Projection과 분리)
 
 - 입력: Research/Trading Artifact(Claim + Evidence 인용), Agent Health Metrics(에러율·지연·비용),
   Agent/Tool 실행 이벤트(Run 시작·Tool Call·완료) — `EvidenceStore`/`AgentHealthMetrics`/

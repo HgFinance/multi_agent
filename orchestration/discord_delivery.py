@@ -245,6 +245,15 @@ class DiscordFinalDelivery:
             ("DEFER", "판단 보류"),
         )
         rendered = str(content or "")
+        # Some model/provider paths serialize line breaks as the two literal
+        # characters ``\\`` and ``n``.  Normalize those at the single outbound
+        # boundary so Discord receives readable paragraphs instead of a
+        # visible ``\\n`` sequence.  Actual newlines are preserved.
+        rendered = (
+            rendered.replace("\\r\\n", "\n")
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+        )
         for internal, friendly in replacements:
             rendered = rendered.replace(internal, friendly)
         # NAV 만 정규식이다 - str.replace 는 부분 문자열도 바꿔서 UNAVAILABLE 이
@@ -258,6 +267,7 @@ class DiscordFinalDelivery:
             "법률 위반 여부를 확정할 수 없으며",
             rendered,
         )
+        rendered = rendered.replace("PAPER", "분석용 가상거래")
         return rendered
 
     @staticmethod

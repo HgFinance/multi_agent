@@ -7,15 +7,16 @@
       계획서 3.3 "본부 간 호출은 HTTP", Hermes `mcp add --url` (HTTP/SSE 지원 실측)
 
 ▶ 이 다리가 없으면 헤르메스는 '대화만 되는 껍데기'다
-  분석 실체는 가설 공장의 결정론 러너와 명시적으로 등록된 LangGraph 직원이며,
-  헤르메스는 부서 인터페이스·기억·위임 계층이다. 퇴역한 종목별 Research Packet
-  파이프라인은 이 MCP 표면과 Runtime 이미지에 포함하지 않는다.
+  분석 실체는 자율 연구실의 결정론 검증기와 명시적으로 등록된 LangGraph
+  직원이며, 헤르메스는 부서 인터페이스·기억·위임 계층이다. 퇴역한 종목별
+  Research Packet 및 전략공장 파이프라인은 이 MCP 표면과 Runtime 이미지에
+  포함하지 않는다.
 
 ▶ 노출 원칙 (권한 경계)
   - **읽기 도구가 기본이다.** 리서치본부는 주문·리스크 판정·원장에 관여하지
     않는다(config.yaml forbidden_tools). 여기 없는 것은 호출할 수 없다.
-  - 쓰기성 작업은 가설 공장 lead/proposal 제출뿐이며 거래 결정이 아니다.
-    Agent Decision != Order (CLAUDE.md).
+  - 이 서버는 전략·주문·승격을 쓰지 않는다. 자율 연구실이 만드는 산출물은
+    별도 lab 경계에서 검증되며, Agent Decision != Order (CLAUDE.md)다.
   - 직원 LLM 작업은 수 분이 걸릴 수 있다. MCP 호출이 그동안 묶이면 대화가
     죽으므로 **비동기 시작 + 조회** 두 도구로 나눈다.
 
@@ -43,8 +44,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _BASE = Path(__file__).resolve().parent.parent
+_REPO_ROOT = _BASE.parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_BASE))
 sys.path.insert(0, str(_BASE / "collectors"))
+sys.path.insert(0, str(_BASE / "evidence"))
 sys.path.insert(0, str(_BASE.parent / "04-quant-backtest" / "pipeline"))
 
 from stock_universe import governed_stock_evidence_sql  # noqa: E402
@@ -107,6 +111,8 @@ MAX_WORKER_JOBS_KEPT = 50
 _GOVERNED_MCP_EVIDENCE = governed_stock_evidence_sql(
     experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
+# Retained read-only SQL fixture for historical contract tests. The old
+# Historical outcome SQL is retained only for audit/tests; no legacy tool is live.
 _SQL_FACTORY_OUTCOMES = """
     select o.experiment_id::text, o.trial_family_id, o.decision,
            o.lesson_codes, o.oos_summary, coalesce(o.notes, '') as notes,
@@ -764,13 +770,42 @@ def load_persisted_skeptic_reviews(conn, skeptic_run: str,
     return reviews, ""
 
 
+def _review_blocks(planner_text: str) -> list[dict[str, str]]:
+    """Extract only the fields needed to bind a skeptic review.
+
+    This MCP boundary must not import the retired proposal-intake contract just
+    to persist a review.  Full proposal parsing belongs to the autonomous lab;
+    the Worker review ledger only needs exact TITLE/LEAD_IDS pairing.
+    """
+    blocks: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for raw_line in str(planner_text or "").splitlines():
+        key, separator, value = raw_line.partition(":")
+        if not separator:
+            continue
+        normalized = key.strip().upper()
+        if normalized == "TITLE":
+            if current is not None:
+                blocks.append(current)
+            current = {"TITLE": value.strip()}
+        elif normalized == "LEAD_IDS" and current is not None:
+            current["LEAD_IDS"] = value.strip()
+    if current is not None:
+        blocks.append(current)
+    return blocks
+
+
+def _review_lead_ids(value: str) -> list[str]:
+    return [item for item in re.split(r"[,;\\s]+", str(value or "").strip())
+            if item]
+
+
 def persist_skeptic_reviews(conn, planner_text: str, reviews: list[dict], *,
                             case_id: str, planner_run: str,
                             skeptic_run: str, known_lead_ids: set[str]) -> int:
     """Persist causally verified reviews even when STOP blocks publication."""
-    import proposal_intake as PI
 
-    blocks = PI.parse_blocks(planner_text, PI.PLANNER_KEYS)
+    blocks = _review_blocks(planner_text)
     if not blocks or not reviews:
         return 0
     by_title = {str(r.get("title") or "").strip(): r for r in reviews}
@@ -783,10 +818,8 @@ def persist_skeptic_reviews(conn, planner_text: str, reviews: list[dict], *,
             review = by_title.get(title) or singleton
             if not title or review is None:
                 continue
-            lead_ids = sorted(
-                lead_id for lead_id in PI._split(block.get("LEAD_IDS", ""))
-                if lead_id in known_lead_ids
-            )
+            lead_ids = sorted(lead_id for lead_id in _review_lead_ids(
+                block.get("LEAD_IDS", "")) if lead_id in known_lead_ids)
             if not lead_ids:
                 continue
             review_id = "review_" + hashlib.sha256(
@@ -1170,13 +1203,48 @@ def _server_class():
 # Agency)의 도구 최소화, capability 원칙(건네지 않은 권한은 우회 불가).
 # 창구는 조회·설명 전용이고, 상태를 바꾸거나 파이프라인을 낳는 손은
 # 실험대(부서 본체) 프로필에만 있다.
-#   factory_submit_leads    - 공장 리드 적재(쓰기)
-#   factory_submit_proposal - 공장 기획안 발행(쓰기) = 질의→공장 순환의 입구
 LIAISON_EXCLUDED_TOOLS = frozenset({
+    "run_research_workers", "worker_model_health"})
+
+# Keep the deny-list as a fail-closed audit guard while historical callers are
+# migrated. These names are removed from every live MCP surface before return;
+# no autonomous session can discover or invoke them.
+RETIRED_FACTORY_TOOLS = frozenset({
+    "factory_brief",
+    "factory_submit_leads",
     "factory_generate_formula_population",
-    "factory_submit_leads", "factory_submit_evolved_formulas",
-    "factory_submit_proposal", "run_research_workers",
-    "worker_model_health"})
+    "factory_submit_evolved_formulas",
+    "factory_submit_proposal",
+    "factory_outcomes",
+})
+
+
+def _remove_registered_tools(server, names: frozenset[str]) -> set[str]:
+    """Remove named tools and verify the SDK no longer advertises them."""
+    import asyncio
+
+    for name in sorted(names):
+        remove = getattr(server, "remove_tool", None)
+        if callable(remove):
+            try:
+                remove(name)
+                continue
+            except Exception:  # noqa: BLE001 - private fallback below is audited
+                pass
+        tm = getattr(server, "_tool_manager", None)
+        tools = getattr(tm, "_tools", None)
+        if isinstance(tools, dict):
+            tools.pop(name, None)
+    advertised = {tool.name for tool in asyncio.run(server.list_tools())}
+    return advertised & names
+
+
+def _retire_factory_surface(server) -> None:
+    leaked = _remove_registered_tools(server, RETIRED_FACTORY_TOOLS)
+    if leaked:
+        raise RuntimeError(
+            f"retired factory tools remain advertised: {sorted(leaked)}"
+        )
 
 
 def _restrict_to_liaison(server) -> None:
@@ -1186,26 +1254,11 @@ def _restrict_to_liaison(server) -> None:
     실제 표면을 재확인한다 - "지웠다고 믿었는데 남아 있는" 것이 최악의 상태라
     재확인이 최종 판정이다.
     """
-    import asyncio
-
-    for name in sorted(LIAISON_EXCLUDED_TOOLS):
-        remove = getattr(server, "remove_tool", None)
-        if callable(remove):
-            try:
-                remove(name)
-                continue
-            except Exception:  # noqa: BLE001 - 아래 경로와 재확인이 받는다
-                pass
-        tm = getattr(server, "_tool_manager", None)
-        tools = getattr(tm, "_tools", None)
-        if isinstance(tools, dict):
-            tools.pop(name, None)
-    names = {t.name for t in asyncio.run(server.list_tools())}
-    leaked = names & LIAISON_EXCLUDED_TOOLS
+    leaked = _remove_registered_tools(server, LIAISON_EXCLUDED_TOOLS)
     if leaked:
         raise RuntimeError(
-            f"liaison 면에서 쓰기 도구를 제거하지 못했다: {sorted(leaked)} - "
-            f"창구가 공장 쓰기 손을 가진 채 뜨는 것은 금지다(기동 거부)")
+            f"liaison 면에서 제한 도구를 제거하지 못했다: {sorted(leaked)} - "
+            f"창구가 제한 capability를 가진 채 뜨는 것은 금지다(기동 거부)")
 
 
 def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
@@ -1221,12 +1274,12 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
     liaison = str(surface).strip().lower() == "liaison"
     instructions = (
         "리서치본부 응대 창구(도서관)다. 조회·설명 전용 - 실험을 만들거나 "
-        "공장에 무엇도 제출하지 않으며, 그 도구 자체가 이 면에 없다. 사용자 "
+        "연구 상태를 변경하지 않으며, 그 도구 자체가 이 면에 없다. 사용자 "
         "질의에는 조회 도구의 결과만으로 답하고, 새 분석·실험·수집이 필요한 "
         "요청은 즉석 수행 대신 '연구소 격상 필요'를 명시해 접수 사실만 답한다. "
         "도구 결과는 결정론 산출물이므로 그대로 인용하고, 수치를 다시 계산하거나 "
         "지어내지 않는다.") if liaison else (
-        "리서치본부(RES)의 도구 면이다. 시세·요청형 Evidence 조회와 가설 공장 "
+        "리서치본부(RES)의 도구 면이다. 시세·요청형 Evidence 조회와 자율 연구실 "
         "작업만 한다. 주문 제출·리스크 판정·원장 기록은 이 본부의 권한이 "
         "아니며 여기에 도구도 없다. 도구 결과는 결정론 산출물이므로 그대로 "
         "인용하고, 수치를 다시 계산하거나 지어내지 않는다.")
@@ -1498,310 +1551,12 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             from research.analyst_calibration
             order by n desc, node limit 50""")
 
-    # ── 공장 도구 ──────────────────────────────────────────────────────────
-    # ▶ **에이전트가 공장을 직접 돌리게 하는 손이다.** 지금까지 스카우트 산출을
-    #   사람이 파일로 받아 CLI 에 넣었다 - 그 사람이 빠지면 루프가 멈췄다.
-    #
-    # ▶ **쓰기 권한이 생기는 첫 도구들이라 경계를 좁게 긋는다.**
-    #   에이전트는 **제출만** 한다. 파싱·검증·판정·적재는 전부 코드가 한다.
-    #   그래서 `quant.hypotheses` 에 닿는 도구는 여기 없다 - 있으면 에이전트가
-    #   Gate 0 를 우회해 자기 가설을 등록할 수 있고, 그러면 생성자·검증자 분리가
-    #   조직이 아니라 코드 수준에서 무너진다. 접수는 `factory_bridge --intake`
-    #   가 별도로 돌린다.
-    def _factory_path():
-        import sys as _s
-        from pathlib import Path as _P
-        _s.path.insert(0, str(_P(__file__).resolve().parents[1] / "factory"))
-        _s.path.insert(0, str(_P(__file__).resolve().parents[1] / "collectors"))
-
-    @server.tool(
-        name="factory_brief",
-        description="회차 브리핑. 원장에서 읽은 사실만 준다 - 지난 실험이 왜 "
-                    "끝났는지(교훈), 계열별 남은 시도 예산, 최근 돌린 질의, 지금 "
-                    "데이터가 지원하는 범위. 스카우트를 소집하기 전에 반드시 읽어라: "
-                    "여기 적힌 기각 사유에 대응하지 않으면 Gate 0 가 접수를 막는다.")
-    def factory_brief() -> str:
-        _factory_path()
-        import cycle_brief
-
-        conn = _db()
-        mkt = None
-        try:
-            import psycopg2
-            from source_registry import load_project_env
-
-            try:
-                mkt = psycopg2.connect(
-                    load_project_env()["TIMESCALE_DATABASE_URL"], connect_timeout=10)
-            except Exception:
-                mkt = None          # 못 재면 커버리지를 비운다(지어내지 않는다)
-            return cycle_brief.build(conn, market_conn=mkt).as_prompt()
-        finally:
-            conn.close()
-            if mkt:
-                mkt.close()
-
-    @server.tool(
-        name="factory_submit_leads",
-        description="스카우트 산출을 방법론 리드로 제출한다. TITLE/URL/MECHANISM/READINESS "
-                    "블록 형식 원문을 그대로 넣어라. 코드가 링크를 실제로 열어 보고, "
-                    "메커니즘 없는 블록을 반려하고, 중복을 접어서 적재한다. "
-                    "lens는 탐색 관점이고 source_type은 자료 매체다. source_type은 "
-                    "PAPER, BLOG, VIDEO, COMMUNITY, INVESTOR_LETTER, INTERNAL_FAILURE 중 "
-                    "하나만 쓰며 PRACTITIONER/CROSS_DOMAIN 같은 lens 값을 넣지 않는다. "
-                    "AST_READY에는 OBSERVABLES와 CANDIDATE_SIGNAL_EXPR, DATA_BLOCKED에는 "
-                    "MISSING_DATA, SEMANTIC_MISMATCH에는 MAPPING_LOSS가 필수다. "
-                    "AST_READY는 DERIVATION_MODE도 필수다. DIRECT_REPLICATION은 공개식 "
-                    "대조군으로만 보존되고, MECHANISM_MUTATION은 SOURCE_BASELINE_EXPR·"
-                    "DERIVATION_TRANSFORMS·NOVELTY_RATIONALE가 필요하며 창만 바꾼 식은 "
-                    "신규 후보가 아니다. CROSS_DOMAIN_TRANSFER는 시장 구조 대응을 적는다. "
-                    "AST_READY 수식은 반드시 호가·체결 미시구조 필드를 하나 이상 "
-                    "사용해야 한다. 짧은 미시구조 표본을 returns/close 일봉 대리식으로 "
-                    "바꾸지 말고, 일봉은 실행가격·벤치마크·레짐 보조로만 사용한다. "
-                    "INTRADAY_EVENT 노드는 field={'op':'field','field':'필드명'}이고 "
-                    "temporal={'op':'rolling_mean','arg':field,'seconds':300}이다. "
-                    "'name' 키는 금지다. OBSERVABLES는 AST가 실제 쓴 필드와 정확히 "
-                    "같아야 하며, 상태 조건을 SEMANTIC_PLAN에 선언했으면 AST의 where로 "
-                     "구현한다. DERIVATION_TRANSFORMS의 대괄호를 쓰려면 문자열을 인용한 "
-                     "유효 JSON이어야 한다. 신규 INTRADAY_EVENT AST_READY는 target·"
-                     "functional_form·expected_sign·coefficient_policy·terms·identification "
-                     "키를 가진 FORMULA_THESIS JSON도 필수다. target은 SEMANTIC_PLAN "
-                     "output과 같고 terms는 AST의 모든 field를 경제적 역할에 정확히 "
-                     "한 번씩 사상해야 한다. OOS 결과에 계수를 맞추지 않는다. "
-                     "**네가 적재 여부를 판단하지 않는다** - 반려 사유를 받아 고쳐라. "
-                     "성공 응답의 lead_ids는 revision 라우팅까지 끝난 실제 원장 ID다. "
-                     "후속 factory_submit_proposal에는 이 ID만 사용하라.")
-    def factory_submit_leads(text: str, lens: str = "ACADEMIC",
-                             source_type: str = "PAPER",
-                             model_version: str = "", prompt_version: str = "") -> dict:
-        _factory_path()
-        import lead_intake
-
-        if not model_version.strip() or not prompt_version.strip():
-            # 계보 없는 리드는 재현할 수 없다. 여기서 막지 않으면 손으로 넣은
-            # 것과 에이전트가 찾은 것이 DB 에서 구분되지 않는다.
-            return {"ok": False,
-                    "error": "model_version·prompt_version 이 필요하다 - "
-                             "계보 없는 리드는 재현할 수 없어 받지 않는다"}
-        from datetime import datetime as _dt
-        from datetime import timezone as _tz
-
-        case_id = f"scout-{lens.lower()}-{_dt.now(_tz.utc):%Y%m%d}"
-        r = lead_intake.intake(text, lens=lens, source_type=source_type,
-                               case_id=case_id, model_version=model_version,
-                               prompt_version=prompt_version)
-        new = dup = 0
-        lead_ids: list[str] = []
-        if r.leads:
-            conn = _db()
-            try:
-                new, dup, lead_ids = lead_intake.persist(
-                    conn, r.leads, return_ids=True)
-            finally:
-                conn.close()
-        return {"ok": bool(r.leads), "accepted": len(r.leads),
-                "new": new, "merged_as_mention": dup,
-                "lead_ids": lead_ids,
-                "rejected": [{"title": x.title, "why": x.reason} for x in r.rejected],
-                "link_checks": r.link_notes}
-
-    @server.tool(
-        name="factory_generate_formula_population",
-        description=(
-            "Generate 8-128 deterministic, typed intraday AST drafts from persisted "
-            "source-backed seeds plus governed experiment/failure memory. Use this instead "
-            "of writing a research report when a formula-breeder card is assigned. The "
-            "engine still builds the full population, but the MCP result carries at most 12 "
-            "diverse, single-parent delivery_candidates so exact ASTs cannot be lost to tool "
-            "output truncation. Copy each submission_template exactly and replace only its "
-            "REQUIRES_HERMES text values before calling factory_submit_evolved_formulas. "
-            "The generator does not fit coefficients, weaken costs, read a forward lockbox, "
-            "or promote alpha."
-        ))
-    def factory_generate_formula_population(
-            population_size: int = 64, generation: int = 1) -> dict:
-        _factory_path()
-        import formula_breeder
-
-        conn = _db()
-        try:
-            batch = formula_breeder.generate(
-                conn, population_size=population_size, generation=generation)
-            return formula_breeder.delivery_view(batch)
-        except (TypeError, ValueError) as exc:
-            conn.rollback()
-            return {"ok": False, "error": str(exc)}
-        finally:
-            conn.close()
-
-    @server.tool(
-        name="factory_submit_evolved_formulas",
-        description=(
-            "Submit a bounded JSON population of outcome-conditioned intraday AST "
-            "children for one existing source-backed parent lead. This is the formula "
-            "breeder path: do not write a literature report and do not invent a new URL. "
-            "Each child must provide candidate_signal_expr, semantic_plan, formula_thesis, "
-            "evolution_operators, expected_increment, ablations, and economic_mechanism. "
-            "Deterministic intake revalidates source derivation, parent/child structural "
-            "novelty, completed AST grammar, units, semantic direction, financial-math "
-            "roles, and OOS-safe coefficient policy before persisting revision leads."
-        ))
-    def factory_submit_evolved_formulas(
-            parent_lead_id: str, candidates_json: str,
-            model_version: str = "", prompt_version: str = "") -> dict:
-        _factory_path()
-        import evolution_candidate_intake
-
-        if not model_version.strip() or not prompt_version.strip():
-            return {
-                "ok": False,
-                "error": "model_version and prompt_version are required for lineage",
-            }
-        conn = _db()
-        try:
-            return evolution_candidate_intake.submit(
-                conn, parent_lead_id=parent_lead_id,
-                candidates=candidates_json, model_version=model_version,
-                prompt_version=prompt_version)
-        except (TypeError, ValueError) as exc:
-            conn.rollback()
-            return {"ok": False, "error": str(exc)}
-        finally:
-            conn.close()
-
-    @server.tool(
-        name="factory_submit_proposal",
-        description="기획안을 발행 게이트에 제출한다. **이 호출이 곧 납품이다** - "
-                    "카드 텍스트·요약은 납품으로 세지 않는다. `planner_run` 에 "
-                    "지금 작업 중인 칸반 카드 ID(t_ 로 시작)를 넣으면 납품이 그 "
-                    "카드 몫으로 대조된다. 먼저 run_research_workers에 "
-                    "proposal_draft를 주고 get_worker_job에서 COMPLETED·비-degraded "
-                    "결과를 확인하라. 반환된 실제 job_id를 skeptic_run에 넣으면 "
-                    "typed skeptic_reviews를 이 도구가 직접 접수 형식으로 변환한다. "
-                    "skeptic_text는 구버전 호출 호환용이며 판정 근거로 쓰지 않는다. "
-                    "자기 서명이나 임의 실행명은 거부된다. 근거 "
-                    "리드는 원장에서 다시 읽어 대조하므로 없는 리드를 대면 막힌다. "
-                    "차단 사유가 이 도구의 결과로 즉시 돌아온다 - 사유에 답해 같은 "
-                    "카드 안에서 다시 제출하라. `llm_model_id` 와 "
-                    "`llm_training_cutoff`(YYYY-MM-DD, 네 지식 컷오프)를 함께 "
-                    "넣어라 - 백테스트 성적을 컷오프 이전/이후로 가르는 데 쓴다.")
-    def factory_submit_proposal(planner_text: str, skeptic_text: str,
-                                planner_run: str, skeptic_run: str,
-                                planner_prompt: str = "",
-                                skeptic_prompt: str = "",
-                                llm_model_id: str = "",
-                                llm_training_cutoff: str = "") -> dict:
-        _factory_path()
-        import proposal_intake as PI
-
-        task_id = planner_task_id(planner_run)
-        if task_id is None:
-            return {
-                "ok": False, "published": 0, "already_present": 0,
-                "unknown_lead_ids": [], "gate": [],
-                "rejected": [{
-                    "title": "(submission)",
-                    "why": "planner_run must start with the current kanban task id (t_...)"
-                }],
-            }
-        conn = _db()
-        try:
-            skeptic_reviews, critic_error = verified_skeptic_reviews(
-                skeptic_run, planner_text)
-            if critic_error:
-                skeptic_reviews, durable_error = load_persisted_skeptic_reviews(
-                    conn, skeptic_run, planner_run, planner_text)
-                if durable_error:
-                    return {
-                        "ok": False, "published": 0, "already_present": 0,
-                        "unknown_lead_ids": [], "gate": [],
-                        "rejected": [{"title": "(independent skeptic)",
-                                      "why": (critic_error + "; " +
-                                              durable_error)}],
-                    }
-            wanted = {i for b in PI.parse_blocks(planner_text, PI.PLANNER_KEYS)
-                      for i in PI._split(b.get("LEAD_IDS", ""))}
-            leads = PI.load_leads(conn, sorted(wanted))
-            missing = sorted(wanted - set(leads))
-            # ▶ **계열 이력을 넘긴다** (2026-08-13). 호스트 수확 경로와 같은
-            #   버그가 여기에도 있었다 - 인자가 빠져 모든 기획안이 "이 계열은
-            #   처음" 으로 접수됐고, 승격 관문만 진짜 이력을 봐서 뒤늦게
-            #   영구 반려했다. 에이전트가 실제로 쓰는 경로가 이쪽이므로
-            #   여기가 안 맞으면 고쳐도 안 고쳐진 것과 같다.
-            # ▶ **납품을 카드 몫으로 각인한다** (2026-08-13, 납품=도구 호출 계약)
-            #   planner_run 에 칸반 카드 ID(t_...)가 오면 case_id 에 그대로
-            #   찍는다. 수확기 `_mcp_deliveries` 가 이 각인으로 "이 카드가
-            #   납품했는가" 를 원장에서 결정론적으로 대조한다 - 텍스트 채널의
-            #   2,434자/123자 변동성이 납품 판정과 무관해지는 자리다.
-            canonical_skeptic_text = render_skeptic_reviews(skeptic_reviews)
-            review_records = persist_skeptic_reviews(
-                conn, planner_text, skeptic_reviews,
-                case_id=f"card-{task_id}", planner_run=planner_run,
-                skeptic_run=skeptic_run, known_lead_ids=set(leads),
-            )
-            r = PI.intake(planner_text, canonical_skeptic_text,
-                          case_id=f"card-{task_id}",
-                          planner_run=planner_run, skeptic_run=skeptic_run,
-                          leads=leads,
-                          outcomes_for=lambda b: PI.load_past_outcomes(
-                              conn,
-                              (b.get("EDGE_TYPE") or "").strip().lower(),
-                              (b.get("UNIVERSE_KEY") or "").strip().lower(),
-                              label=(b.get("LABEL") or "").strip(),
-                              baseline=(b.get("BASELINE") or "").strip(),
-                              signal_expr=PI.signal_expr_from_block(b),
-                              research_lane=(b.get("RESEARCH_LANE") or
-                                             "DAILY_CROSS_SECTIONAL").strip()))
-            for prop, _g in r.proposals:
-                setattr(prop, "_planner_prompt", planner_prompt)
-                setattr(prop, "_skeptic_prompt", skeptic_prompt)
-            pub = r.publishable
-            new = dup = 0
-            if pub:
-                new, dup = PI.persist(conn, pub)
-                # ▶ **LLM 시점 스탬프** (2026-08-13, 관문 9조항의 계측 기초)
-                #   Sarkar-Vafa 실증: 익명화해도 LLM 은 재식별한다 - 방어선은
-                #   시간 분할이고, 그 전제가 "가설을 쓴 모델의 지식 컷오프가
-                #   원장에 각인돼 있는 것" 이다. 스탬프가 있어야 나중에 성적을
-                #   컷오프 이전(참고치)/이후(판정치)로 가를 수 있다. 값이 없으면
-                #   NULL 로 남는다 - 지어내지 않는다.
-                if llm_model_id.strip() or llm_training_cutoff.strip():
-                    with conn.cursor() as _cu:
-                        _cu.execute(
-                            "update research.experiment_proposals set"
-                            "  llm_model_id = coalesce(nullif(%s,''), llm_model_id),"
-                            "  llm_training_cutoff = coalesce(nullif(%s,'')::date,"
-                            "                                 llm_training_cutoff)"
-                            " where proposal_id = any(%s)",
-                            (llm_model_id.strip()[:120],
-                             llm_training_cutoff.strip()[:10],
-                             [p.proposal_id for p in pub]))
-                    conn.commit()
-            return {
-                "ok": bool(pub), "published": new, "already_present": dup,
-                "review_records": review_records,
-                "unknown_lead_ids": missing,
-                "rejected": [{"title": x.title, "why": x.reason} for x in r.rejected],
-                "gate": [{"proposal_id": p.proposal_id, "passed": g.ok,
-                          "blockers": g.blockers, "warnings": g.warnings}
-                         for p, g in r.proposals],
-            }
-        finally:
-            conn.close()
-
-    @server.tool(
-        name="factory_outcomes",
-        description="최근 실험 종결 기록(판정·교훈 코드·지표). 같은 계열을 다시 "
-                    "제안하기 전에 읽어라 - 기각 교훈에 대응이 없으면 Gate 0 가 "
-                    "DUPLICATE_UNADDRESSED 로 막는다.")
-    def factory_outcomes(limit: int = 10) -> list[dict]:
-        n = max(1, min(int(limit), 50))
-        return _rows(_SQL_FACTORY_OUTCOMES, (n,))
-
+    # Strategy generation and proposal intake are owned by the autonomous lab.
+    # This MCP server intentionally exposes no legacy factory tools or imports.
     # ── Library 조회 면 (2026-08-14) ────────────────────────────────────────
     # ▶ 왜 필요했나 (코드 실측)
-    #   공장은 원장에 계속 쌓는데 **읽을 면이 없었다** - factory 테이블 위
-    #   view 0건, BFF/UI 참조 0건, 창구는 `factory_outcomes`(최근 N건 덤프)
+    #   과거 실험은 원장에 계속 쌓였는데 **읽을 면이 없었다** - legacy 테이블 위
+    #   view 0건, BFF/UI 참조 0건, 창구는 최근 결과 덤프 하나뿐이었다.
     #   하나뿐. 그래서 "저변동 계열은 어디까지 갔나" 같은 질문에 답할 수
     #   없었고, 사용자 질의가 Library 를 먼저 읽는 구조가 성립하지 않았다.
     #
@@ -1855,6 +1610,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
     register_macro_tools(server)
     register_global_tools(server)
 
+    _retire_factory_surface(server)
     if liaison:
         _restrict_to_liaison(server)
     return server
@@ -1968,8 +1724,6 @@ def _check_worker_job_lifecycle():
 
 def _check_skeptic_review_persistence():
     """STOP is durable even though it correctly publishes no proposal."""
-    sys.path.insert(0, str(_BASE / "factory"))
-
     class _Cursor:
         def __init__(self, rows=None):
             self.calls = []
@@ -2242,6 +1996,7 @@ def _check_tool_surface():
 
     names = {t.name for t in asyncio.run(server.list_tools())}
     assert "collector_health" in names, names
+    assert not names & RETIRED_FACTORY_TOOLS, names
     assert not {"run_research_packet", "get_packet_job", "list_recent_packets",
                 "geopolitical_state"} & names, names
     # 직원 Worker 실행 간선(2026-08-13) - 이 셋이 빠지면 본부장은 다시
@@ -2258,9 +2013,8 @@ def _check_tool_surface():
 def _check_liaison_surface():
     """**창구 면에는 쓰기 손이 없어야 한다** (2026-08-13, 도서관/연구소 분리).
 
-    질의→공장 무한루프의 유일한 코드 수준 입구가 factory_submit_* 이다.
-    창구가 그 도구를 가진 채 뜨면 SOUL.md 의 산문 금지는 장식이 된다 -
-    프롬프트가 아니라 등록 제거(capability 절단)로 막고, 여기서 고정한다.
+    레거시 전략 생성 도구는 어떤 면에도 등록하지 않는다. 창구는
+    프롬프트가 아니라 capability 절단으로 검증한다.
     """
     import asyncio
 
@@ -2270,9 +2024,8 @@ def _check_liaison_surface():
     assert not leaked, f"창구 면에 쓰기 도구가 남았다: {sorted(leaked)}"
     # Worker 실행과 모델 plane 진단은 본부(full) 면의 capability다. 창구는
     # durable library/결과 조회만 가지며 worker runtime 파일도 배포받지 않는다.
-    for required in ("factory_brief", "factory_outcomes", "collector_health",
-                     "get_worker_job",
-                     # Library 조회 면 (2026-08-14) - 질의가 공장에 일을 시키지
+    for required in ("collector_health", "get_worker_job",
+                     # Library 조회 면 (2026-08-14) - 질의가 연구 상태를 바꾸지
                      # 않고 **먼저 읽는** 대상이다. 창구에 없으면 그 구조가
                      # 성립하지 않는다.
                      "library_signal_shelf", "library_families",
@@ -2293,8 +2046,8 @@ if __name__ == "__main__":
 
         token = os.environ.get("MCP_RESEARCH_API_KEY", "").strip()
         # 같은 이미지가 두 면으로 뜬다(도서관/연구소 분리, 2026-08-13):
-        #   full    - 부서 본체(실험대). 공장 쓰기 도구 포함.
-        #   liaison - 응대 창구(도서관). 쓰기 도구가 등록에서 빠진다.
+        #   full    - 부서 본체(실험대). 자율 연구 관측·Worker capability.
+        #   liaison - 응대 창구(도서관). Worker capability가 등록에서 빠진다.
         surface = os.environ.get("RESEARCH_MCP_SURFACE", "full").strip().lower()
         srv = build_server(host="0.0.0.0", port=DEFAULT_PORT, surface=surface)
         s = getattr(srv, "settings", None)

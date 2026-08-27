@@ -394,6 +394,47 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(captured[0].fund_id, "fund-abc")
         self.assertEqual(captured[0].book_id, "book-abc")
 
+    def test_central_router_sends_strategy_queries_to_the_lab_for_web_and_discord(self) -> None:
+        from apps.api.ceo import CeoAsk
+
+        accepted = ceo_mirror_api.StrategyResearchAccepted(
+            request_id="strategy-central-1",
+            lab_id="strategy-central-1",
+            message="연구실에 등록했습니다.",
+            status_url="/ui/strategy-research/requests/strategy-central-1",
+        )
+        with (
+            patch.object(ceo_mirror_api, "accept_strategy_research_query", return_value=accepted) as admit,
+            patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
+        ):
+            web = ceo_mirror_api.mirror_ask(
+                CeoAsk(
+                    query="코스피 단기 반전 전략을 연구하고 백테스트해줘",
+                    request_id="central-web-1",
+                ),
+                x_source_message_id=None,
+                x_actor_id=None,
+                owner_id=None,
+            )
+            discord = ceo_mirror_api.mirror_ingress(
+                CanonicalIngress(
+                    query="Find and backtest a robust momentum strategy",
+                    request_id="discord:555555555555555555",
+                    source="discord",
+                    source_message_id="555555555555555555",
+                    actor_id="discord-user",
+                    discord_channel_id="channel-1",
+                    discord_message_id="555555555555555555",
+                ),
+                _http_request(internal_discord=True),
+            )
+
+        self.assertEqual(web["schema_version"], "autonomous-research-request.v1")
+        self.assertEqual(discord.ceo["schema_version"], "autonomous-research-request.v1")
+        self.assertEqual(admit.call_count, 2)
+        self.assertEqual(ceo_query.call_count, 0)
+        self.assertTrue(admit.call_args_list[0].kwargs["request_id"].startswith("strategy-"))
+
     def test_non_binding_ceo_query_forwards_source_to_ceo_boundary(self) -> None:
         response = {
             "task_id": "t_trace_root",

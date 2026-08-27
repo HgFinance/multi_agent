@@ -13,10 +13,10 @@ Research Evidence를 전략 가설과 독립 검증으로 연결하는 목표 Gr
 
 ## Mission
 
-**실험 공장이다.** 리서치본부의 실험 기획안(`ExperimentProposalV1`)을 접수해 결과를 보기 전에
-사전 등록하고, Point-in-Time 데이터로 결정론 실험을 돌리고, 시도 압력·DSR·PBO·국면 분해로
-과적합을 검사해 `ExperimentCardV1`을 낸다. 그리고 **성공·기각·킬을 가리지 않고**
-`ExperimentOutcomeV1`으로 리서치에 환류한다 — 환류 적재가 실험 종결의 전제 조건이다.
+**검증 실험실이다.** Research의 자율 연구실이 등록한 계획과 불변 결과를 받아, Point-in-Time
+데이터·현실적 비용·OOS 분리·강건성·거래 경로·실패 모드를 결정론적으로 검증한다. 결과는
+QA·Risk·사람의 별도 심사를 위한 후보 보고로만 반환하며, 이 부서는 가설을 만들거나 주문·승격을
+수행하지 않는다.
 
 **가설 발굴은 이 부서 일이 아니다**(2026-08-10 이관). 스스로 낸 가설을 스스로 검증하면
 제안자와 승인자가 같아져 생성자·검증자 분리가 조직 안에서 무너진다. 발굴은 리서치, 검증은 퀀트다.
@@ -31,10 +31,9 @@ Research Evidence를 전략 가설과 독립 검증으로 연결하는 목표 Gr
 
 ## 입력·출력 계약
 
-- 입력: **`ExperimentProposalV1`**(리서치본부), TimescaleDB 시장 시계열, Versioned Universe
+- 입력: **자율 연구 계획/불변 결과 아티팩트**, TimescaleDB 시장 시계열, Versioned Universe
 - 내부 기록: `quant.dataset_*`, `hypotheses`, `experiments`, `backtest_*`, `experiment_metrics`
-- 출력: `ExperimentCardV1`(Dataset·Code·Cost·Metric·Fragility·과적합 통계 연결),
-  Strategy Candidate, **`ExperimentOutcomeV1`**(통제 어휘 `lesson_codes` → 리서치 환류)
+- 출력: 검증 리포트와 `autonomous-strategy-candidate.v1` 후보 아티팩트(비용·OOS·강건성·실패 모드 포함)
 - Handoff: Release Gate(결정론) → QA 재현 검증 → Risk Capability Review → 인간 승인
 
 ## 직원 편제 (LLM Worker 2인)
@@ -71,7 +70,7 @@ walk-forward·DSR·PBO·국면·릴리스 관문)은 **이미 `pipeline/`의 결
 | 경로 | 역할 | 상태 |
 |---|---|---|
 | `agents/strategy_hypothesis_agent.py` | 관측 근거에서 가설 생성·등록 | **은퇴 예정.** 가설 생성은 리서치 소관이다 — 스스로 낸 가설을 스스로 검증하면 생성자·검증자 분리가 무너진다 |
-| **`pipeline/factory_bridge.py`** | Gate 0(어휘·원천·예산·기각이력 4검사)과 환류. `finalize()` 가 적재와 전이를 **한 트랜잭션**으로 묶는다 | 자체 점검 14개 영역, 실전이 확인 |
+| **`pipeline/factory_bridge.py`** | 기존 DB 실행·감사 기록이 참조하는 **보존된 레거시 브리지**. 새 자율 연구실의 입력·출력 계약에는 연결하지 않는다 | 의존성 이관 전 삭제 금지 |
 | **`pipeline/data_resolution.py`** | 원천 테이블 -> 데이터셋 매니페스트 사상. 사상표를 코드에 박지 않고 `source_versions` 에서 유도하고, **로컬 DB 를 조회해 커버리지를 실측**한다 | 자체 점검 11/11 |
 | **`pipeline/strategy_templates.py`** | 시그널 템플릿 8종 + `PITView`(기준일 초과 데이터를 꺼낼 접근자가 **없다**) | 자체 점검 10개 영역 |
 | **`pipeline/strategy_spec.py`** | 템플릿에 없는 방법론을 위한 코드 작성면. AST 화이트리스트, 코드 해시가 사전등록 지문에 들어간다 | 자체 점검 12개 영역 |
@@ -82,7 +81,11 @@ walk-forward·DSR·PBO·국면·릴리스 관문)은 **이미 `pipeline/`의 결
 | `pipeline/walk_forward.py` | 겹치지 않는 Window와 Fragility 판정 | 자체 점검 6개 통과 |
 | `pipeline/intraday_microstructure.py` | 수신시각 기준 호가·체결 동기화, 복수 horizon markout, taker 및 보수적 passive FIFO 평가 | `tests/test_intraday_microstructure_lane.py` |
 | `pipeline/experiment_orchestrator.py` | 데이터·전략 가능성 Gate와 상태 전이 | 자체 점검 3개 통과, 실제 Experiment 4개 |
-| `hermes/` | 본부장 Profile, 직원 Persona와 Strategy Research Workflow | Runtime 통합 전 |
+| `hermes/` | 검증 실험실 Profile과 독립 조회 프로필 | 사용 중 |
+
+> 새 전략 생성은 `departments/01-research/autonomous/`가 소유합니다. 이 README의
+> `ExperimentProposalV1`·factory 관련 표와 기록은 기존 DB 실행 경로의 보존 설명이며, 새
+> 파이프라인의 생성/제안 표면이 아닙니다.
 
 2026-08-03 실제 Supabase에서 Dataset Manifest 1개, Hypothesis 5개(`TESTING 4`, `REJECTED 1`),
 Experiment 6개(`COMPLETED 5`, `RUNNING 1`)와 Backtest Run 3개를 확인했다. 이는 Script가

@@ -213,6 +213,33 @@ def test_recovery_candidate_rows_are_discovery_only(tmp_path) -> None:
     assert [row["id"] for row in rows] == [ROOT]
     assert rows[0]["status"] == "done"
     assert rows[0]["has_active_primary"] is False
+    assert rows[0]["has_analysis_child"] is True
+    assert rows[0]["has_terminal_primary"] is True
+    assert rows[0]["has_synthesis"] is False
+    assert rows[0]["has_selection_comment"] is False
+
+
+def test_recovery_candidate_rows_mark_selection_comments(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    _make_board(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE task_comments ("
+        "id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, body TEXT NOT NULL"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO task_comments(id, task_id, body) VALUES (?, ?, ?)",
+        (1, ROOT, "selected_primary_profiles=risk-management"),
+    )
+    conn.commit()
+    conn.close()
+
+    rows = SQLiteRootScopedIndex(
+        {"HERMES_KANBAN_DB": str(path)}
+    ).recovery_candidate_rows()
+
+    assert rows[0]["has_selection_comment"] is True
 
 
 def test_recovery_candidates_mark_only_roots_with_active_primary(tmp_path) -> None:

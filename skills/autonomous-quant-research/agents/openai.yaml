@@ -1,0 +1,4 @@
+interface:
+  display_name: "Autonomous Quant Research"
+  short_description: "Evidence-driven autonomous strategy research"
+  default_prompt: "Use $autonomous-quant-research to run an evidence-driven quant research cycle."

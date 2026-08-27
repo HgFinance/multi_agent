@@ -95,6 +95,8 @@ def test_worker_trace_config_carries_request_root_task_correlation() -> None:
     assert config["metadata"]["root_id"] == "root-1"
     assert config["metadata"]["task_id"] == "task-1"
     assert config["metadata"]["trace_id"] == "trace-1"
+    assert config["metadata"]["profile"] == "qa-department"
+    assert config["metadata"]["department"] == "qa"
     assert "prompt" not in config["metadata"]
 
 
@@ -520,9 +522,10 @@ def test_close_root_trace_updates_only_terminal_fields_without_renaming_root(
         "source": "discord",
         "status": "completed",
         "terminal_status": "completed",
-        "terminal_reason": "HTTPException",
-        "error_code": "paper_order_hermes_runtime_unavailable",
-    }
+            "terminal_reason": "HTTPException",
+            "error_code": "paper_order_hermes_runtime_unavailable",
+            "http_status": 503,
+        }
 
 
 def test_close_root_trace_prefers_explicit_start_run_id(
@@ -550,6 +553,28 @@ def test_close_root_trace_prefers_explicit_start_run_id(
     )
     assert client.update_run.call_args.kwargs["run_id"] == "run-from-start"
     client.flush.assert_called_once_with()
+
+
+def test_close_root_trace_treats_langsmith_duplicate_patch_as_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    client.update_run.side_effect = RuntimeError(
+        "Duplicate run update requests for the same run are not supported."
+    )
+    monkeypatch.setattr(observability, "_structured_langsmith_client", lambda: client)
+
+    assert close_root_trace(
+        "trace-root",
+        run_id="run-from-start",
+        request_id="discord:req-1",
+        status="completed",
+    )
 
 
 def test_close_root_trace_recovers_legacy_root_id_from_context(

@@ -130,6 +130,33 @@ class DiscordDeliveryTests(unittest.TestCase):
                 ),
             )
 
+    def test_user_facing_content_renders_serialized_line_breaks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store_with_inbound(directory)
+            sent: list[dict[str, object]] = []
+
+            def sender(channel: str, payload: str, _headers: dict[str, str]):
+                sent.append({"channel": channel, "payload": json.loads(payload)})
+                return {"id": "response-message"}
+
+            result = DiscordFinalDelivery(
+                environment={"DISCORD_BOT_TOKEN": "test-token"}, sender=sender
+            ).deliver(
+                root_task_id="root-newlines",
+                synthesis_task={
+                    "body": "discord_message_id=message\ndiscord_channel_id=channel\n"
+                },
+                content="🧠 CEO 업무 분배\\n\\n리스크 부서 PAPER\\n산술 검토",
+                store=store,
+            )
+
+            self.assertEqual(result, "sent")
+            rendered = sent[0]["payload"]["content"]
+            self.assertEqual(
+                rendered, "🧠 CEO 업무 분배\n\n리스크 부서 분석용 가상거래\n산술 검토"
+            )
+            self.assertNotIn("\\n", rendered)
+
     def test_missing_correlation_fails_closed_without_send(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = DiscordIdempotencyStore(Path(directory))

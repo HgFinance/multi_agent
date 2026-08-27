@@ -10,7 +10,7 @@
   133번째 줄 근처 주석).
 
   같은 저장소에 이미 있는 "docker-outside-of-docker" 선례
-  (`factory-autopilot`/`card-watchdog`)를 그대로 따른다 - 소켓이 필요한 일은
+  (retained operational control services)를 그대로 따른다 - 소켓이 필요한 일은
   외부에 노출되지 않는 별도 컨테이너에서 하고, 노출된 BFF는 내부 네트워크로만
   그 컨테이너를 호출한다. 이 서비스는 host 포트를 publish하지 않는다.
 

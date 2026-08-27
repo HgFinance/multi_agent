@@ -12,6 +12,13 @@ model:
   default: gpt-5.6-luna
   base_url: https://chatgpt.com/backend-api/codex
 
+# QA terminal은 독립 감사 결과만 남긴다. 자동 자기개선 fork는 감사 대상과
+# 무관한 skill_manage 호출을 만들고 관리자 채널에 내부 오류를 남길 수 있다.
+# 명시적인 /refine는 별도 수동 동작이다.
+auxiliary:
+  background_review:
+    enabled: false
+
 # 부서장은 Hermes가 담당하며 Codex를 기본으로 사용하고 Claude Code를 승인된 대체 경로로 둔다.
 # 부서장 서술은 Worker Context를 종합·에스컬레이션할 뿐 결정론적 QA Engine을 대체하지 않는다.
 head_runtime:
@@ -322,3 +329,14 @@ validation_record:
   accepted_result: "11 passed, skipped 0; 실행 환경은 /Users/baiohelseu/claude/bin/python"
   p1_status: "결정론적 Evidence QA·Model Risk·Internal Audit·Trace/Incident baseline 완료; 실제 Corpus/pgvector·ACTIVE Profile FK·qa-check 계약·운영 E2E는 외부 조건 대기"
   p2_status: "별도 P2 기능을 임의 활성화하지 않음; 실제 운영 Corpus·Trace·상위 계약 승인 후 재평가"
+
+# QA 채널은 관리자용 최종 카드만 노출한다. 도구 진행문·사고 메모가
+# 검토 결과와 섞이면 중복 응답으로 오인되고, QA 지연 원인도 흐려진다.
+display:
+  memory_notifications: off
+  platforms:
+    discord:
+      tool_progress: off
+      thinking_progress: off
+      interim_assistant_messages: off
+      live_status: off

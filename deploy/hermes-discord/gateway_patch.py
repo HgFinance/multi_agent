@@ -8,9 +8,11 @@ history backfill policy, or the Hermes session/worker implementation.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import functools
 import logging
+import math
 import os
 import re
 import threading
@@ -40,6 +42,11 @@ from orchestration.qa_discord_feedback import (
 
 logger = logging.getLogger(__name__)
 _INSTALL_MARKER = "_hgfinance_discord_idempotency_installed"
+_QA_FEEDBACK_SESSION_ANCHOR: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "hgfinance_qa_feedback_session_anchor",
+    default=None,
+)
+_QA_FEEDBACK_SESSION_PREFIX = "hgfinance-qa-feedback:"
 _PREFILTER_DROP_REASONS = frozenset(
     {
         "BOT_AUTHOR",
@@ -375,6 +382,51 @@ def _qa_channel_matches(message: Any) -> bool:
     return expected in {current, parent}
 
 
+def _qa_feedback_session_anchor(message_id: str) -> str | None:
+    """Return the bounded-session anchor for one automatic QA card.
+
+    QA feedback cards are independent review jobs, not a user conversation.
+    The normal Discord adapter deliberately keeps one channel session, which
+    is correct for interactive chat but caused automated cards to accumulate
+    an unbounded transcript.  ``prospective_thread_id`` is already the
+    Hermes-supported per-message session-key coordinate; using it here does
+    not change the real Discord reply target because it is only set when the
+    source has no actual thread.
+    """
+
+    value = str(message_id or "").strip()
+    if not value:
+        return None
+    return f"{_QA_FEEDBACK_SESSION_PREFIX}{value}"
+
+
+def _qa_feedback_recovery_kwargs(source: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep automatic QA cards out of legacy peer-based session recovery.
+
+    Hermes first looks up the exact session key, then (for unthreaded Discord
+    messages) can fall back to the channel/user tuple.  That fallback is
+    useful for normal conversations, but it can re-adopt an old, oversized QA
+    transcript when a new card has a fresh prospective key.  The exact-key
+    lookup remains enabled, so retries of the same card still recover their
+    own session deterministically.
+    """
+
+    platform = getattr(getattr(source, "platform", None), "value", None)
+    if (
+        getattr(source, "_hgfinance_qa_feedback_isolated", False)
+        and platform == "discord"
+        and not getattr(source, "thread_id", None)
+    ):
+        updated = dict(kwargs)
+        updated["allow_peer_fallback"] = False
+        logger.info(
+            "qa-discord-feedback status=recovery_peer_fallback_disabled anchor=%s",
+            getattr(source, "prospective_thread_id", "unknown"),
+        )
+        return updated
+    return dict(kwargs)
+
+
 def _csv_ids(name: str) -> set[str]:
     raw = os.getenv(name, "")
     return {
@@ -490,6 +542,8 @@ async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool 
         if not claim.admitted:
             return True
         _store(adapter).mark_inbound(dedup_key, "PROCESSING", _profile_name())
+        session_anchor = _qa_feedback_session_anchor(message_id)
+        session_token = _QA_FEEDBACK_SESSION_ANCHOR.set(session_anchor)
         try:
             result = await adapter._handle_message(message)
             if not result:
@@ -498,6 +552,8 @@ async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool 
         except Exception:
             _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
             raise
+        finally:
+            _QA_FEEDBACK_SESSION_ANCHOR.reset(session_token)
 
     if bool(getattr(author, "bot", True)):
         return None
@@ -682,6 +738,67 @@ def _wrap_dispatch(cls: type[Any]) -> None:
     cls._dispatch_discord_message = wrapped
 
 
+def _wrap_build_source(cls: type[Any]) -> None:
+    """Give automated QA cards bounded Hermes session identities."""
+
+    if not hasattr(cls, "build_source"):
+        return
+    original = cls.build_source
+
+    @functools.wraps(original)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        source = original(self, *args, **kwargs)
+        anchor = _QA_FEEDBACK_SESSION_ANCHOR.get()
+        if (
+            anchor
+            and getattr(source, "platform", None) is not None
+            and str(getattr(source.platform, "value", source.platform)) == "discord"
+            and not getattr(source, "thread_id", None)
+        ):
+            # Hermes uses this existing field in build_session_key(). Because
+            # no real thread_id is changed, Discord egress remains the QA
+            # channel and only the in-process conversation session is split.
+            source.prospective_thread_id = anchor
+            # Keep the admission decision attached to this in-process source
+            # until SessionStore performs recovery.  The private marker is
+            # intentionally not part of the serialized source metadata.
+            source._hgfinance_qa_feedback_isolated = True
+            logger.info(
+                "qa-discord-feedback status=session_isolated anchor=%s",
+                anchor,
+            )
+        return source
+
+    cls.build_source = wrapped
+
+
+def _wrap_session_recovery(_adapter_cls: type[Any]) -> None:
+    """Prevent only automatic QA cards from reviving a legacy peer session."""
+
+    method_name = "_find_gateway_session_row"
+    try:
+        from gateway.session import SessionStore
+    except Exception:  # pragma: no cover - unavailable outside the Hermes image
+        logger.debug("qa-discord-feedback status=session_store_unavailable")
+        return
+    if not hasattr(SessionStore, method_name):
+        return
+    marker = "_hgfinance_qa_feedback_recovery_wrapped"
+    if getattr(SessionStore, marker, False):
+        return
+    original = getattr(SessionStore, method_name)
+
+    @functools.wraps(original)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        source = kwargs.get("source")
+        if source is not None:
+            kwargs = _qa_feedback_recovery_kwargs(source, kwargs)
+        return original(self, *args, **kwargs)
+
+    setattr(SessionStore, method_name, wrapped)
+    setattr(SessionStore, marker, True)
+
+
 def _wrap_admission(cls: type[Any]) -> None:
     original = cls._discord_message_admission
 
@@ -834,7 +951,7 @@ def _ingress_alert_cooldown_seconds() -> float:
         )
     except (TypeError, ValueError):
         return _INGRESS_ALERT_DEFAULT_COOLDOWN_SECONDS
-    if configured != configured:  # NaN must not disable the storm guard.
+    if math.isnan(configured):  # NaN must not disable the storm guard.
         return _INGRESS_ALERT_DEFAULT_COOLDOWN_SECONDS
     return max(0.0, min(configured, 3600.0))
 
@@ -979,7 +1096,7 @@ def _ingress_timeout_seconds() -> float:
         )
     except (TypeError, ValueError):
         return _INGRESS_DEFAULT_TIMEOUT_SECONDS
-    if configured != configured:  # NaN must not reach urllib's socket timeout.
+    if math.isnan(configured):  # NaN must not reach urllib's socket timeout.
         return _INGRESS_DEFAULT_TIMEOUT_SECONDS
     return max(1.0, min(configured, 30.0))
 
@@ -1340,13 +1457,9 @@ async def _resolve_thread_followup_context(adapter: Any, message: Any) -> Any:
         # The BFF persists it in an explicit root section; direct Hermes
         # fallback receives the same section through ``with_routing_context``.
         resolved.content = content
-        setattr(resolved, "_hgfinance_previous_question_context", original[:1600])
-        setattr(
-            resolved,
-            "_hgfinance_previous_question_context_source_message_id",
-            starter_id,
-        )
-        setattr(resolved, "_hgfinance_previous_question_context_resolved", True)
+        resolved._hgfinance_previous_question_context = original[:1600]
+        resolved._hgfinance_previous_question_context_source_message_id = starter_id
+        resolved._hgfinance_previous_question_context_resolved = True
     except (AttributeError, TypeError, ValueError):
         return message
 
@@ -1832,6 +1945,8 @@ def install(cls: type[Any]) -> None:
     _wrap_init(cls)
     _wrap_dispatch(cls)
     _wrap_admission(cls)
+    _wrap_build_source(cls)
+    _wrap_session_recovery(cls)
     _wrap_handle_message(cls)
     _wrap_processing_complete(cls)
     _wrap_send(cls)

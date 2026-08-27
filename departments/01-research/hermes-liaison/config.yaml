@@ -1,4 +1,4 @@
-# 사용자 질의용 Research 조회 프로필. 공장 쓰기 면과 DB 실행 자격을 갖지 않는다.
+# 사용자 질의용 Research 조회 프로필. 연구 실행·쓰기 면과 DB 실행 자격을 갖지 않는다.
 model:
   provider: openai-codex
   default: gpt-5.6-luna
@@ -11,7 +11,7 @@ agent:
     research-liaison: >-
       You are the Research Reference Desk. Answer user questions only from the
       read-only research library tools, keep source time and evidence quality
-      explicit, and never start factory work, submit a proposal, run an
+      explicit, and never start research work, submit a proposal, run an
       experiment, or create a strategy or order. When existing evidence cannot
       answer the question, report the missing evidence and emit an ESCALATE line
       for the CEO instead of mutating research state.
@@ -20,10 +20,6 @@ agent:
     - ledger.write
     - risk.decision.write
     - strategy.promote
-    - factory_submit_leads
-    - factory_submit_evolved_formulas
-    - factory_submit_proposal
-    - factory_generate_formula_population
     - run_research_workers
 mcp_servers:
   research:

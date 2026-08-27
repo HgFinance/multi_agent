@@ -193,5 +193,9 @@ def test_publishes_idempotent_redacted_risk_worker_profile(monkeypatch, tmp_path
     assert payload["outputs"]["llm_call_count"] == 1
     assert payload["outputs"]["legal_wiki_call_count"] == 1
     assert payload["extra"]["metadata"]["raw_payloads_sent"] is False
+    assert payload["extra"]["metadata"]["request_id"] == "t_root"
+    assert payload["extra"]["metadata"]["trace_id"] == payload["id"]
+    assert payload["extra"]["metadata"]["latency_scope"] == "worker_execution"
+    assert payload["extra"]["metadata"]["tool_latency_available"] is True
     assert "secret-not-sent" not in json.dumps(payload)
     assert captured["timeout"] == 3.0

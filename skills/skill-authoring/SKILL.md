@@ -4,7 +4,7 @@ description: "반복 실행에서 관측된 병목을 검증 가능한 Hermes �
 metadata:
   hermes:
     tags: [meta, autonomy, knowledge, self-improvement]
-    related_skills: [wiring-audit, dataset-engineering, experiment-factory]
+    related_skills: [wiring-audit, dataset-engineering, autonomous-quant-research]
 ---
 
 # 스킬 작성과 진화

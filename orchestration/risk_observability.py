@@ -241,10 +241,25 @@ def publish_risk_hermes_profile(
         "trace_kind": "department_worker_profile",
         "source": "risk-hermes-agent-log",
         "department": "risk-management",
+        "profile": "risk-management",
         "task_id": str(task_id)[:160],
+        "request_id": str(root_id)[:160],
         "root_id": str(root_id)[:160],
+        "trace_id": str(run_id)[:160],
         "status": safe_status,
         "latency_ms": ended - started,
+        "latency_scope": "worker_execution",
+        "attempts": 1,
+        "retries": 0,
+        "tool_duration_total_ms": int(profile.get("tool_latency_ms_total", 0) or 0),
+        "tool_latency_available": bool(profile.get("tool_latency_ms_total", 0)),
+        "tool_timing_source": (
+            "risk-hermes-agent-log"
+            if profile.get("tool_latency_ms_total", 0)
+            else "unavailable"
+        ),
+        "model_name": str(profile.get("model") or "unknown")[:120],
+        "provider": str(profile.get("provider") or "unknown")[:120],
         "raw_payloads_sent": False,
         **profile,
     }
@@ -257,7 +272,9 @@ def publish_risk_hermes_profile(
         "session_name": str(env.get("LANGSMITH_PROJECT", "First"))[:120] or "First",
         "inputs": {
             "task_id": str(task_id)[:160],
+            "request_id": str(root_id)[:160],
             "root_id": str(root_id)[:160],
+            "trace_id": str(run_id)[:160],
             "session_id": str(session_id)[:160],
         },
         "outputs": profile,

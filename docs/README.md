@@ -62,7 +62,7 @@ Workforce를 분리한 개인형 멀티에이전트 금융 연구·PAPER 운용 
 
 - [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 - [Discord/Web CEO Mirroring](02-engineering/DISCORD_WEB_CEO_MIRRORING.md)
-- [CEO/HR Role Classification](02-engineering/CEO_HR_AGENT_ROLE_CLASSIFICATION.md)
+- [CEO Hermes Architecture](02-engineering/CEO_ARCHITECTURE.md)
 - [Agent Employee Profiles](04-organization/AGENT_EMPLOYEE_PROFILES.md)
 
 ### 외부 연동 참조

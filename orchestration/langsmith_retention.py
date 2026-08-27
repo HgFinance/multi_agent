@@ -6,9 +6,9 @@ policy.  Querying uses the SmithDB v2 adapter; deletion uses LangSmith's
 documented trace-delete endpoint because the SDK's high-level delete helpers
 are not a stable read-path contract.
 
-The default is enabled in the scheduler but dry-run.  An operator must set
-``LANGSMITH_RETENTION_DRY_RUN=false`` after reviewing the candidate counts to
-perform recoverable-at-API-level trace deletion.  Each pass is capped.
+The scheduler can perform recoverable-at-API-level trace deletion.  Each pass
+uses a small deletion budget so the provider's hourly deletion limit cannot
+turn a normal overflow cleanup into a burst of failed requests.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
 from orchestration.langsmith_queries import query_runs, resolve_project_id
@@ -104,7 +105,9 @@ class LangSmithRetentionWorker:
         enabled: bool | None = None,
         dry_run: bool | None = None,
         max_traces: int | None = None,
+        max_delete_per_pass: int | None = None,
         scan_window_days: int | None = None,
+        pending_state_path: str | os.PathLike[str] | None = None,
         opener: Any | None = None,
     ) -> None:
         self.api_key = (api_key or os.getenv("LANGSMITH_API_KEY", "")).strip()
@@ -124,8 +127,24 @@ class LangSmithRetentionWorker:
         self.max_traces = max_traces or _env_int(
             "LANGSMITH_RETENTION_MAX_TRACES", 1000, minimum=1, maximum=1000
         )
+        self.max_delete_per_pass = (
+            _env_int(
+                "LANGSMITH_RETENTION_DELETE_PER_PASS",
+                100,
+                minimum=1,
+                maximum=1000,
+            )
+            if max_delete_per_pass is None
+            else max(1, min(int(max_delete_per_pass), 1000))
+        )
         self.scan_window_days = scan_window_days or _env_int(
             "LANGSMITH_RETENTION_SCAN_WINDOW_DAYS", 400, minimum=1, maximum=400
+        )
+        configured_pending_path = pending_state_path or os.getenv(
+            "LANGSMITH_RETENTION_PENDING_PATH", ""
+        ).strip()
+        self.pending_state_path = (
+            Path(configured_pending_path) if configured_pending_path else None
         )
         self.retention_scopes = _retention_scopes()
         self.opener = opener or urllib.request.urlopen
@@ -209,6 +228,45 @@ class LangSmithRetentionWorker:
                 raise RuntimeError("langsmith_delete_retry_exhausted")
         return deleted
 
+    def _load_pending(self) -> dict[str, set[str]]:
+        if self.pending_state_path is None:
+            return {}
+        try:
+            payload = json.loads(self.pending_state_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            str(project_id): {
+                str(trace_id)
+                for trace_id in trace_ids
+                if str(trace_id).strip()
+            }
+            for project_id, trace_ids in payload.items()
+            if isinstance(trace_ids, list)
+        }
+
+    def _save_pending(self, pending: dict[str, set[str]]) -> None:
+        if self.pending_state_path is None:
+            return
+        path = self.pending_state_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    project_id: sorted(trace_ids)
+                    for project_id, trace_ids in pending.items()
+                    if trace_ids
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+
     def run_once(
         self,
         *,
@@ -223,6 +281,7 @@ class LangSmithRetentionWorker:
 
         current = now or datetime.now(timezone.utc)
         scanned = eligible = deleted = skipped = 0
+        pending = self._load_pending()
         try:
             from langsmith import Client
 
@@ -231,10 +290,11 @@ class LangSmithRetentionWorker:
                 retention_days = self._retention_days(scope, default_days)
                 scan_start = current - timedelta(days=max(self.scan_window_days, retention_days))
                 project_id = resolve_project_id(client, project_name)
-                # Read one retention-cap window plus one bounded deletion
-                # batch.  Asking for cap+1 only detects that an overflow
-                # exists; it leaves the rest of the oldest tail behind and
-                # makes a 1,000-trace cap converge one item per pass.
+                # Read one retention-cap window plus a bounded overflow tail.
+                # The newest max_traces roots are retained; only the oldest
+                # deletion budget is sent in this pass. This keeps cleanup
+                # below provider hourly deletion limits while converging on
+                # the configured cap across scheduled passes.
                 query_limit = min(self.max_traces * 2, 2000)
                 runs = query_runs(
                     client,
@@ -253,17 +313,38 @@ class LangSmithRetentionWorker:
                 # are candidates; the age setting controls the bounded scan
                 # window, not an unbounded delete.
                 ordered = sorted(runs, key=self._started_at, reverse=True)
-                excess = ordered[self.max_traces : self.max_traces * 2]
-                trace_ids = [self._run_id(run) for run in excess if self._run_id(run)]
+                current_ids = {
+                    self._run_id(run) for run in ordered if self._run_id(run)
+                }
+                project_pending = pending.setdefault(project_id, set())
+                # LangSmith processes deletes asynchronously. Keep only IDs
+                # still visible in the bounded scan so a completed deletion
+                # leaves the pending ledger naturally.
+                project_pending.intersection_update(current_ids)
+                excess = ordered[
+                    self.max_traces : self.max_traces + self.max_delete_per_pass
+                ]
+                candidate_ids = [
+                    self._run_id(run) for run in excess if self._run_id(run)
+                ]
+                skipped += sum(trace_id in project_pending for trace_id in candidate_ids)
+                trace_ids = [
+                    trace_id
+                    for trace_id in candidate_ids
+                    if trace_id not in project_pending
+                ]
                 eligible += len(trace_ids)
                 if effective_dry_run:
                     continue
-                deleted += self._delete_trace_ids(
+                queued = self._delete_trace_ids(
                     project_id=project_id,
                     trace_ids=trace_ids,
                 )
+                deleted += queued
+                project_pending.update(trace_ids[:queued])
+                self._save_pending(pending)
             LOG.info(
-                "langsmith-retention enabled=true dry_run=%s scanned=%d eligible=%d deleted=%d skipped=%d",
+                "langsmith-retention enabled=true dry_run=%s scanned=%d eligible=%d queued=%d skipped=%d",
                 str(effective_dry_run).lower(),
                 scanned,
                 eligible,

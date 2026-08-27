@@ -49,6 +49,8 @@ _ACTIONABLE_FINDINGS = frozenset(
 )
 
 _MANAGER_TERMS = (
+    ("HTTPException", "HTTP 요청 오류"),
+    ("http_status=", "HTTP 상태코드="),
     (
         "end-to-end latency exceeded the configured observation threshold",
         "전체 처리 시간이 설정된 기준을 초과했습니다.",
@@ -83,11 +85,30 @@ _MANAGER_TERMS = (
     ("Risk owner", "리스크 담당자"),
     ("and Accounting", "및 회계"),
     ("Accounting Engine", "회계 시스템"),
+    # These are structured QA fields, not administrator-facing wording. Keep
+    # the longer forms before the generic ``evidence`` label replacement.
+    ("broker_evidence", "브로커 증거"),
+    ("artifact/citation 좌표", "근거 좌표"),
+    ("artifact/citation", "근거 좌표"),
+    ("citation coordinates", "근거 좌표"),
+    ("artifact metadata", "근거 자료 정보"),
+    ("artifact", "근거 자료"),
+    ("provided payload", "제공된 자료"),
+    ("제공 payload", "제공된 자료"),
+    ("제공 snapshot", "제공된 조회 자료"),
+    ("payload", "제공 자료"),
+    ("Preliminary", "예비"),
+    ("gross/net exposure", "총·순 익스포저"),
+    ("PnL", "손익"),
+    ("side", "포지션 방향"),
+    ("sector", "섹터"),
+    ("broker", "브로커"),
     ("NAV", "순자산"),
     ("PIT", "기준 시점"),
     ("Mandate", "투자지침"),
     ("snapshot", "조회 자료"),
     ("Require ", "필요: "),
+    ("next_ceo_synthesis", "다음 CEO 종합"),
 )
 
 _FINDING_LABELS = {
@@ -97,6 +118,8 @@ _FINDING_LABELS = {
     "STRUCTURED_EVAL_SCORE_LOW": "구조화 평가 점수 미달",
     "WORKER_OR_WORKFLOW_DEGRADED": "부서 또는 업무 흐름 성능 저하",
     "PRIVACY_PAYLOAD_PRESENT": "민감 원문 포함 감지",
+    "CORRELATION_METADATA_MISSING": "호출 연결 정보 누락",
+    "DEPARTMENT_METADATA_MISSING": "부서·단계 정보 누락",
 }
 
 QA_CHECK_LABELS = {
@@ -109,11 +132,108 @@ QA_CHECK_LABELS = {
     "mandate_decision_eligibility": "투자 결정 적격성",
     "long_short_direction": "롱·숏 방향",
     "citation": "인용 근거",
+    "official_source_pit": "공식 자료·기준 시점",
+    "official_metrics_consistency": "공식 지표 일관성",
+    "arithmetic_reproducibility": "계산 재현성",
+    "quant_evidence_reproducibility": "정량 근거 재현성",
+    "mandate_nav_portfolio_suitability": "투자지침·순자산·포트폴리오 적합성",
+    "conditional_conclusion_scope": "조건부 결론 범위",
+    "target_and_window_consistency": "대상·기간 일관성",
+    "reported_arithmetic": "보고 수치 계산 일관성",
+    "cross_report_metric_consistency": "보고서 간 지표 일관성",
+    "provenance_and_reproducibility": "자료 출처·재현성",
+    "point_in_time_verifiability": "기준 시점 검증 가능성",
+    "interpretive_claim_grounding": "해석 주장 근거성",
+    "decision_readiness": "의사결정 준비도",
+    "scope": "검토 범위 준수",
+    "snapshot_value_consistency": "스냅샷 수치 일치",
+    "nav_bridge_reconciliation_disclosure": "순자산 대사 공개",
+    "evidence_provenance": "근거 재현성",
+    "point_in_time": "기준 시점 처리",
+    "uncertainty_handling": "불확실성 처리",
+    "unsupported_claims": "근거 없는 주장 여부",
+    "scope_binding": "검토 범위 준수",
+    "numeric_consistency": "수치 일관성",
+    "provenance_reproducibility": "자료 출처·재현성",
+    "point_in_time_validity": "기준 시점 검증",
+    "scope_paper_read_only": "PAPER 읽기 전용 범위",
+    "position_exposure_consistency": "포지션·익스포저 일치",
+    "provenance_citations": "자료 출처·인용",
+    "point_in_time_reproducibility": "기준 시점 재현성",
+    "prohibited_actions": "금지 행위 준수",
+    # Post-response QA uses these compact keys. Keep them human-readable in
+    # both the manager-facing Notion projection and the QA Discord card.
+    "evidence": "근거 충실성",
+    "citations": "출처 인용",
+    "reproducibility": "재현성",
+    "completeness": "응답 완전성",
+    "paper_read_only_safety": "PAPER 읽기 전용 준수",
+    "response_delivery_nonblocking": "CEO 응답 비차단",
+    # Post-response QA receipts use these explicit check identifiers. Keep
+    # them in the same manager-facing dictionary so Notion and Discord do not
+    # fall back to the generic "추가 점검 항목" label.
+    "evidence_and_citations": "근거·인용",
+    "improvements_candidate_count": "개선 후보 조회",
+    "observability_window": "관측 기간",
+    "scorecard_window_and_scope": "성과표 기간·범위",
+    "latency_reproducibility": "지연 재현성",
+    "failure_retry_duplicate_reporting": "실패·재시도·중복 보고",
+    "scorecard_content_claim": "성과표 내용 근거",
+    "workflow_e2e_coverage": "전체 흐름 검증 범위",
+    "scope_and_safety": "검토 범위·안전",
+    "record_consistency": "기록 일관성",
+    "failure_gate_and_delivery": "응답 비차단·전달",
+    "fail_checks": "결정 차단 여부",
+    # Accounting/portfolio QA receipts use a few source-shaped keys that
+    # should remain readable in both operational surfaces.
+    "position_value_sum": "포지션 평가액 합계",
+    "pnl_completeness": "손익 자료 완전성",
+    "broker_ledger_reconciliation": "브로커 원장 대사",
+    "sector_mapping": "섹터 분류",
+    "short_leg_status": "숏 포지션 상태",
+    "mandate_scope_readiness": "투자지침 범위 적격성",
+    "data_quality": "자료 품질",
+}
+
+_OWNER_LABELS = {
+    "quant": "정량 분석 부서",
+    "quant-backtest-department": "정량 분석 부서",
+    "research": "리서치 부서",
+    "research-department": "리서치 부서",
+    "risk": "리스크 부서",
+    "risk-management": "리스크 부서",
+    "research / risk": "리서치·리스크 부서",
+    "accounting": "회계·포트폴리오 부서",
+    "accounting-portfolio-department": "회계·포트폴리오 부서",
+    "accounting-portfolio": "회계·포트폴리오 부서",
+    "ceo-workflow": "CEO 업무 흐름",
+    "observability": "관측 시스템",
+}
+_SEVERITY_LABELS = {
+    "BLOCKER": "차단",
+    "CRITICAL": "매우 높음",
+    "HIGH": "높음",
+    "MEDIUM": "중간",
+    "LOW": "낮음",
 }
 
 
 def qa_check_label(value: Any) -> str:
-    return QA_CHECK_LABELS.get(str(value or "").strip().casefold(), _manager_label(value, 100))
+    normalized = str(value or "").strip().casefold()
+    return QA_CHECK_LABELS.get(normalized, "추가 점검 항목")
+
+
+def qa_owner_label(value: Any) -> str:
+    normalized = _bounded(value, 100).casefold()
+    if normalized in _OWNER_LABELS:
+        return _OWNER_LABELS[normalized]
+    rendered = _manager_label(value, 100)
+    # Do not leak an unmapped machine owner such as ``foo-bar-department`` to
+    # an administrator-facing card. Preserve human-written Korean/English
+    # prose, but replace opaque identifier-shaped values with one safe label.
+    if not rendered or re.fullmatch(r"[a-z0-9_.:/ -]+", rendered):
+        return "담당 부서 확인 필요" if normalized else ""
+    return rendered
 
 
 def _qa_result_label(value: Any) -> str:
@@ -129,11 +249,46 @@ def _manager_label(value: Any, limit: int = 160) -> str:
     rendered = _bounded(value, limit)
     for internal, friendly in _MANAGER_TERMS:
         rendered = rendered.replace(internal, friendly)
+    for internal, friendly in QA_CHECK_LABELS.items():
+        rendered = re.sub(
+            rf"(?<![A-Za-z0-9]){re.escape(internal)}(?![A-Za-z0-9])",
+            friendly,
+            rendered,
+            flags=re.IGNORECASE,
+        )
+    rendered = re.sub(
+        r"\bKRW\s*((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+))(?=\D|$)",
+        r"\1원",
+        rendered,
+    )
     return rendered
 
 
 def _bounded(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def _qa_evidence_lines(value: Any, *, limit: int = 4) -> list[str]:
+    """Render bounded worker-declared facts for the QA/operations card."""
+
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return []
+    lines: list[str] = []
+    for item in values[:limit]:
+        if isinstance(item, Mapping):
+            item = (
+                item.get("fact")
+                or item.get("statement")
+                or item.get("description")
+                or item.get("message")
+            )
+        if item:
+            lines.append(f"- {_manager_label(item, 260)}")
+    return lines
 
 
 def qa_feedback_channel_id() -> str:
@@ -243,7 +398,10 @@ def format_qa_terminal_report(record: Any) -> str:
     if isinstance(raw_findings, (list, tuple)):
         for item in raw_findings[:5]:
             if isinstance(item, Mapping):
-                severity = _manager_label(item.get("severity") or "확인 필요", 24)
+                severity = _SEVERITY_LABELS.get(
+                    str(item.get("severity") or "").strip().upper(),
+                    _manager_label(item.get("severity") or "확인 필요", 24),
+                )
                 issue = _manager_label(
                     item.get("summary")
                     or item.get("statement")
@@ -253,11 +411,13 @@ def format_qa_terminal_report(record: Any) -> str:
                     or "근거 보완 필요",
                     300,
                 )
-                owner = _manager_label(item.get("owner") or item.get("responsible_party"), 100)
+                owner = qa_owner_label(
+                    item.get("owner") or item.get("responsible_party")
+                )
                 impact = _manager_label(item.get("block_condition") or item.get("impact"), 150)
                 finding_id = _manager_label(item.get("finding_id") or item.get("id"), 48)
                 status = _manager_label(item.get("status"), 32)
-                due_date = _manager_label(item.get("due_date"), 32)
+                due_date = _manager_label(item.get("due_date") or item.get("due"), 32)
                 prefix = f"{finding_id}: " if finding_id else ""
                 suffix = f" 담당: {owner}" if owner else ""
                 if impact:
@@ -266,7 +426,15 @@ def format_qa_terminal_report(record: Any) -> str:
                     suffix += f" 상태: {status}"
                 if due_date:
                     suffix += f" 기한: {due_date}"
+                recommended_action = _manager_label(
+                    item.get("recommended_action"), 220
+                )
+                if recommended_action:
+                    suffix += f" 조치: {recommended_action}"
                 findings.append(f"- [{severity}] {prefix}{issue}{suffix}")
+
+    verified_facts = _qa_evidence_lines(evidence.get("verified_facts"))
+    unknowns = _qa_evidence_lines(evidence.get("unknowns"), limit=3)
 
     latency = evidence.get("latency_ms")
     latency_line = ""
@@ -280,14 +448,21 @@ def format_qa_terminal_report(record: Any) -> str:
         if decision != "PASS"
         else "현재 확인 결과를 유지하고, 다음 변경 시 동일한 QA 점검을 다시 수행합니다."
     )
-    return (
+    report = (
         f"{QA_TERMINAL_MARKER}\n"
         "## QA 감사 결과\n"
-        f"- 판정: **{decision_label}**\n"
+        "- QA 검토 상태: 완료\n"
+        f"- 업무 판정: **{decision_label}**\n"
         f"- 수치 판단: **{numerical}**\n"
         f"{latency_line}\n"
         "\n### 확인된 사실\n"
         f"{chr(10).join(checks) or '- 세부 점검 결과 없음'}\n"
+    )
+    if verified_facts:
+        report += f"{chr(10).join(verified_facts)}\n"
+    if unknowns:
+        report += f"\n### 아직 확인되지 않은 점\n{chr(10).join(unknowns)}\n"
+    report += (
         "\n### 문제 위치와 영향\n"
         f"{chr(10).join(findings) or '- 차단성 문제 없음'}\n"
         "\n### 조치\n"
@@ -298,13 +473,18 @@ def format_qa_terminal_report(record: Any) -> str:
         f"- QA 업무: `{_bounded(getattr(record, 'qa_task_id', ''), 80)}`\n"
         f"- 평가 기록: `{_bounded(getattr(record, 'eval_run_id', ''), 100)}`\n"
         "\n> PAPER·읽기 전용 검토입니다. 주문 제출과 원장 변경은 수행하지 않았습니다."
-    )[:1900]
+    )
+    return report[:1900]
 
 
 def is_actionable_feedback(finding_codes: object) -> bool:
     if not isinstance(finding_codes, (list, tuple, set, frozenset)):
         return False
-    return bool(_ACTIONABLE_FINDINGS.intersection(str(code) for code in finding_codes))
+    return bool(
+        _ACTIONABLE_FINDINGS.intersection(
+            str(code).strip().upper() for code in finding_codes
+        )
+    )
 
 
 def format_qa_feedback_request(
@@ -319,7 +499,7 @@ def format_qa_feedback_request(
     """Build a bounded metadata-only request for the QA Hermes Agent."""
 
     codes = (
-        [str(code)[:80] for code in finding_codes]
+        [str(code).strip()[:80].upper() for code in finding_codes]
         if isinstance(finding_codes, (list, tuple))
         else []
     )
@@ -366,11 +546,11 @@ def format_qa_feedback_request(
             f"{_bounded(metadata.get('window_end'), 64) or '?'}"
         )
     evidence_text = "\n".join(evidence) or "- artifact metadata 참조"
-    code_text = (
-        ", ".join(_FINDING_LABELS.get(code, code) for code in codes[:8]) or "없음"
-    )
-    primary_bottleneck = _manager_label(
-        metadata.get("primary_bottleneck_department"), 64
+    code_text = ", ".join(
+        _FINDING_LABELS.get(code, "추가 확인 신호") for code in codes[:8]
+    ) or "없음"
+    primary_bottleneck = qa_owner_label(
+        metadata.get("primary_bottleneck_department")
     )
     joint_targets = _manager_label(metadata.get("joint_improvement_targets"), 120)
     observation_point = _manager_label(
@@ -386,13 +566,13 @@ def format_qa_feedback_request(
     else:
         attribution_text = (
             "- **주요 병목:** `미확정` (단계별 실행시간 근거 필요)\n"
-            f"- **관측 시작 지점:** `{observation_point or _manager_label(department, 64)}` "
+            f"- **관측 시작 지점:** `{observation_point or qa_owner_label(department)}` "
             "(원인 부서로 간주하지 않음)\n"
         )
     return (
         f"{QA_FEEDBACK_MARKER}\n"
         "## ① 자동 감지 · QA 검토 요청\n"
-        f"feedback_artifact_id={_bounded(artifact_id, 80)}\n"
+        f"- 피드백 기록 ID: `{_bounded(artifact_id, 80)}`\n"
         f"{attribution_text}"
         f"- **자동 분류:** `{_manager_label(decision, 40).replace('IMPROVEMENT_CANDIDATE', '개선 검토 대상')}`\n"
         f"- **감지 신호:** `{code_text}`\n\n"
@@ -432,7 +612,7 @@ def format_skill_proposal_request(
     return (
         f"{SKILL_PROPOSAL_MARKER}\n"
         "## ⑨ Evolution Skill 2차 검토 요청\n"
-        f"skill_proposal_id={_bounded(proposal_id, 100)}\n"
+        f"- 개선안 기록 ID: `{_bounded(proposal_id, 100)}`\n"
         f"- **스킬:** `{_bounded(slug, 64)}` v{int(version)}\n"
         f"- **소유자:** `{_bounded(owner_profile, 64)}`\n"
         f"- **SKILL SHA-256:** `{_bounded(content_hash, 64)}`\n"

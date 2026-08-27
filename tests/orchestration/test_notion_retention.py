@@ -92,3 +92,66 @@ def test_retention_deduplicates_by_latest_activity_and_caps_external_mutations()
     assert summary.archived == 1
     assert summary.duplicate_archived == 1
     assert summary.limit_reached is True
+
+
+def test_retention_archives_only_old_resolved_ceo_briefings_without_projection_key() -> None:
+    now = datetime(2026, 8, 26, tzinfo=timezone.utc)
+    old = NotionPage(
+        page_id="old-ceo-briefing",
+        database_id="db-1",
+        database_env="NOTION_CEO_DB",
+        created_at=now - timedelta(days=8),
+        title="CEO report",
+        input_hash="",
+        replay_id="",
+        status="보고 완료",
+        category="저녁 브리핑",
+        approval_count="0",
+        in_progress_count="0",
+        blocker_count="0",
+    )
+    recent = NotionPage(
+        page_id="recent-ceo-briefing",
+        database_id="db-1",
+        database_env="NOTION_CEO_DB",
+        created_at=now - timedelta(days=1),
+        title="CEO report",
+        input_hash="",
+        replay_id="",
+        status="보고 완료",
+        category="저녁 브리핑",
+        approval_count="0",
+        in_progress_count="0",
+        blocker_count="0",
+    )
+    unresolved = NotionPage(
+        page_id="old-unresolved-ceo-briefing",
+        database_id="db-1",
+        database_env="NOTION_CEO_DB",
+        created_at=now - timedelta(days=8),
+        title="CEO report",
+        input_hash="",
+        replay_id="",
+        status="보고 완료",
+        category="저녁 브리핑",
+        approval_count="1",
+        in_progress_count="0",
+        blocker_count="0",
+    )
+    worker = NotionRetentionWorker(
+        token="token",
+        database_env_names=("NOTION_CEO_DB",),
+        retention_days=7,
+        request_delay_seconds=0,
+    )
+    worker._database_ids = lambda: [("NOTION_CEO_DB", "db-1")]
+    worker._query_database = lambda _env, _database: [old, recent, unresolved]
+    archived: list[str] = []
+    worker._archive = lambda page, dry_run: archived.append(page.page_id) or True
+
+    summary = worker.run_once(now=now)
+
+    assert archived == ["old-ceo-briefing"]
+    assert summary.archived == 1
+    assert summary.old_archived == 1
+    assert summary.skipped == 1

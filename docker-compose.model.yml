@@ -182,8 +182,8 @@ services:
   skill-evolution-worker:
     build:
       context: .
-      dockerfile: Dockerfile.factory
-    image: hedgefund-factory:latest
+      dockerfile: Dockerfile.operations-runtime
+    image: hedgefund-operations-runtime:latest
     container_name: hedgefund-skill-evolution-worker
     restart: unless-stopped
     depends_on:
@@ -191,7 +191,7 @@ services:
         condition: service_healthy
     command:
       - python
-      - scripts/evolution_skills.py
+      - /app/scripts/evolution_skills.py
       - --state-root
       - /var/lib/evolution-skills
       - --registry
@@ -235,13 +235,13 @@ services:
   skill-evolution-control-worker:
     build:
       context: .
-      dockerfile: Dockerfile.factory
-    image: hedgefund-factory:latest
+      dockerfile: Dockerfile.operations-runtime
+    image: hedgefund-operations-runtime:latest
     container_name: hedgefund-skill-evolution-control-worker
     restart: unless-stopped
     command:
       - python
-      - scripts/evolution_skills.py
+      - /app/scripts/evolution_skills.py
       - --state-root
       - /var/lib/evolution-skills
       - --registry
@@ -257,4 +257,5 @@ services:
       DISCORD_BOT_TOKEN_QA: ${DISCORD_BOT_TOKEN_QA:-}
     volumes:
       - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
+      - .:/workspace:ro
       - ./skills:/workspace/skills:rw

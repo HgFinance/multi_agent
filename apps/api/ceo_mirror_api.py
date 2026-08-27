@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from hashlib import sha256
 import os
 import time
 from typing import Any
@@ -39,6 +40,11 @@ try:
     )
     from .discord_mirror import post_question
     from .governance_client import fetch_fund_id_by_user
+    from .strategy_research import (
+        StrategyResearchAccepted,
+        accept_strategy_research_query,
+        looks_like_strategy_research,
+    )
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_mirror import (  # type: ignore[no-redef]
@@ -70,6 +76,11 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     )
     from discord_mirror import post_question  # type: ignore[no-redef]
     from governance_client import fetch_fund_id_by_user  # type: ignore[no-redef]
+    from strategy_research import (  # type: ignore[no-redef]
+        StrategyResearchAccepted,
+        accept_strategy_research_query,
+        looks_like_strategy_research,
+    )
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-mirror"])
@@ -137,6 +148,22 @@ def _require_mirror_request_owner(request_id: str, owner_id: object) -> Any:
     if record.request.fund_id is not None:
         require_fund_membership(owner, record.request.fund_id)
     return record
+
+
+def _strategy_request_id(request: CanonicalIngress) -> str:
+    """Make one stable, filesystem-safe lab ID for every canonical message."""
+
+    identity = f"{request.source}:{request.request_id}"
+    return f"strategy-{sha256(identity.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _strategy_query(request: CanonicalIngress) -> StrategyResearchAccepted:
+    return accept_strategy_research_query(
+        query=request.query,
+        request_id=_strategy_request_id(request),
+        actor_id=request.actor_id,
+        source=request.source,
+    )
 
 
 def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
@@ -267,7 +294,7 @@ def _execute(request: CanonicalIngress):
     "/ask",
     status_code=202,
     operation_id="ceo_query_mirror_compat",
-    response_model=CeoQueryAcceptedResponse,
+    response_model=CeoQueryAcceptedResponse | StrategyResearchAccepted,
 )
 def mirror_ask(
     request: CeoAsk,
@@ -283,8 +310,9 @@ def mirror_ask(
     `_ceo_query`가 실제로 `ceo.ceo_query`를 부를 때도 같은 `CeoAsk`를 그대로
     새로 만들어 넘기므로(값만 옮겨 담는다), 두 모듈이 서로 다른 요청 스키마를
     독자적으로 들고 있다가 조용히 갈라지는 상태가 구조적으로 불가능하다.
-    dedup(`_execute`/`MirrorStore`)과 Web/Discord 공용 event journal
-    (`publish_workflow_projection`)이 이 함수를 감싸는 layer다.
+    일반 CEO 질의는 dedup(`_execute`/`MirrorStore`)과 Web/Discord 공용 event journal
+    (`publish_workflow_projection`)이 감싼다. 전략 생성 의도는 이 지점에서 먼저
+    독립 intake로 분기되어 CEO root와 Kanban을 만들지 않는다.
 
     `owner_id`는 로컬 모의투자에서 BFF가 선택한 고정 데모 ID다. 브라우저 로그인이나
     외부 JWT를 검증하지 않으며, 같은 의존성이 `X-User-Id`를 읽는다. `actor_id`를 그대로 재사용하는
@@ -292,6 +320,20 @@ def mirror_ask(
     `actor_id`를 쓰지 않아 안전하기 때문이다 - `ceo_mirror.py`의
     `InMemoryMirrorStore._source_key`/`RedisMirrorStore._source_key` 참고.
     """
+
+    # Central routing belongs to the BFF.  The strategy lane has its own
+    # ownership/intake contract and must not create a CEO root or touch Kanban.
+    if looks_like_strategy_research(request.query):
+        return _strategy_query(
+            CanonicalIngress(
+                query=request.query,
+                request_id=request.request_id,
+                source="web",
+                source_message_id=x_source_message_id or request.request_id,
+                actor_id=owner_id or x_actor_id or "web-user",
+                actor_type="user",
+            )
+        ).model_dump()
 
     require_fund_membership(owner_id, request.fund_id)
     canonical = CanonicalIngress(
@@ -336,6 +378,17 @@ def mirror_ingress(
         if request.fund_id is not None:
             require_fund_membership(owner, request.fund_id)
         canonical = request.model_copy(update={"actor_id": owner, "actor_type": "user"})
+    if looks_like_strategy_research(canonical.query):
+        accepted = _strategy_query(canonical)
+        return MirrorIngressResponse(
+            accepted=True,
+            duplicate=accepted.duplicate,
+            reason="strategy_research_duplicate" if accepted.duplicate else "strategy_research_accepted",
+            request_id=canonical.request_id,
+            source=canonical.source,
+            execution_count=0 if accepted.duplicate else 1,
+            ceo=accepted.model_dump(),
+        )
     execution = _execute(canonical)
     response = execution.response
     return MirrorIngressResponse(

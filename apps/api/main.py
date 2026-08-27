@@ -88,10 +88,12 @@ from apps.api import hermes_boundary
 try:
     from .ceo import router as ceo_router
     from .ceo_mirror_api import router as ceo_mirror_router
+    from .strategy_research import router as strategy_research_router
     from .conditional_rules import router as conditional_rules_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo import router as ceo_router
     from ceo_mirror_api import router as ceo_mirror_router
+    from strategy_research import router as strategy_research_router
     from conditional_rules import router as conditional_rules_router
 import trading
 from account_snapshot import router as account_snapshot_router
@@ -211,9 +213,10 @@ app = FastAPI(
         "**계약 두 개**\n\n"
         "1. Agent 텍스트는 공식 수치가 아니다(`binding: false`). 공식 Position·PnL·"
         "NAV는 `/ui/snapshot`에서만 나온다.\n"
-        "2. CEO 워크플로는 비동기다. `POST /ui/ceo/ask`는 202로 Task ID만 주고,"
+        "2. CEO 워크플로는 비동기다. 일반 질의의 `POST /ui/ceo/ask`는 202로 Task ID만 주고,"
         " 진행은 `GET /ui/ceo/tasks/{task_id}` polling(2~5초), 결과는"
-        " `GET /ui/ceo/tasks/{task_id}/result`로 가져간다.\n\n"
+        " `GET /ui/ceo/tasks/{task_id}/result`로 가져간다. 전략 생성 의도는 같은 BFF에서"
+        " 자율 연구실 요청으로 분기되어 CEO/Kanban을 만들지 않는다.\n\n"
         "Swagger UI: `/docs` · ReDoc: `/redoc` · 스키마: `/openapi.json`"
     ),
     openapi_tags=[
@@ -438,6 +441,9 @@ app.include_router(department_agent_router)
 # 조합이 중복 등록되면 실패하도록 고정한다.
 app.include_router(ceo_mirror_router)
 app.include_router(ceo_router)
+# Strategy-generation chat is an independent file-backed research session;
+# it deliberately does not enter the CEO Kanban or the retired factory plane.
+app.include_router(strategy_research_router)
 # 사실 조회는 에이전트를 거치지 않는다. "내 잔고"에 CEO 라우팅 + 부서 5곳을
 # 태우면 4분이 걸리고 답도 못 낸다(2026-08-11 실측) - 결정론 조회는 직행이다.
 app.include_router(account_snapshot_router)
@@ -1914,6 +1920,10 @@ if __name__ == "__main__":
         "/ui/ceo/ingress",
         "/ui/ceo/events",
         "/ui/ceo/events/stream",
+        # Central strategy-research branch. These are file-backed research
+        # session surfaces and never create CEO/Kanban/order state.
+        "/ui/strategy-research/ask",
+        "/ui/strategy-research/requests/{request_id}",
         # 준비 상태 조회. /health와 달리 의존성까지 확인한다.
         "/health/ready",
         # 대시보드 Domain Read Model(문서 10.4). 전부 읽기 전용 projection이다.

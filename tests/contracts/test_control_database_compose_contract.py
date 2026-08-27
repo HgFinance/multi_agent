@@ -25,8 +25,6 @@ EXPECTED_DEFAULT_CONTROL_DB_CONSUMERS = {
     "batch-collectors",
     "ceo-kanban-supervisor",
     "control-event-worker",
-    "factory-autopilot",
-    "factory-experiment-worker",
     "governance-api",
     "ls-realtime",
     "market-api",

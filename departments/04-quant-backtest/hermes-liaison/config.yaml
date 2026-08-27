@@ -1,4 +1,4 @@
-# 사용자 질의용 Quant 조회 프로필. 실험 러너·공장 쓰기·승격 권한을 갖지 않는다.
+# 사용자 질의용 Quant 조회 프로필. 검증 러너·쓰기·승격 권한을 갖지 않는다.
 model:
   provider: openai-codex
   default: gpt-5.6-luna
@@ -14,16 +14,12 @@ agent:
       read-only promotion status exposed by the research library. Never launch
       a backtest, change a gate, submit a proposal, promote a strategy, or place
       an order. If new work is required, describe the missing work in an
-      ESCALATE line for the CEO without changing factory state.
+      ESCALATE line for the CEO without changing laboratory state.
   forbidden_tools:
     - oms.submit
     - ledger.write
     - risk.decision.write
     - strategy.promote
-    - factory_submit_leads
-    - factory_submit_evolved_formulas
-    - factory_submit_proposal
-    - factory_generate_formula_population
     - run_research_workers
 mcp_servers:
   research:

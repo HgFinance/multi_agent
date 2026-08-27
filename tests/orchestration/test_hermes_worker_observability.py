@@ -70,12 +70,63 @@ def test_accounting_worker_trace_correlates_task_model_and_tools(tmp_path: Path)
     assert metadata[0]["provider"] == "openai-codex"
     assert metadata[0]["tool_names"] == ["kanban_sh", "skill", "kanban_co"]
     assert metadata[0]["tool_call_count"] == 7
+    assert metadata[0]["tool_calls"] == 7
+    assert metadata[0]["llm_calls"] == 1
+    assert metadata[0]["tool_error_count"] == 0
+    assert metadata[0]["tool_latency_available"] is True
+    assert metadata[0]["tool_timing_source"] == "hermes-log-duration"
+    assert metadata[0]["telemetry_completeness"] == "runtime-and-boundary"
     assert all(item["raw_payloads_sent"] is False for item in metadata)
     assert all(run["inputs"]["task_id"] == "t_primary" for run in runs)
     assert all(run["inputs"]["workflow_root_task_id"] == "t_root" for run in runs)
+    assert all(run["inputs"]["request_id"] == "t_root" for run in runs)
     assert all(run["inputs"]["task_body_present"] is True for run in runs)
     assert all(run["outputs"]["status"] == "completed" for run in runs)
+    assert all(run["outputs"]["tool_calls"] == 7 for run in runs)
+    assert all(run["outputs"]["tool_error_count"] == 0 for run in runs)
     assert all(run["outputs"]["raw_payloads_sent"] is False for run in runs)
+
+
+def test_zero_duration_tool_markers_are_not_reported_as_available_latency(tmp_path: Path):
+    kanban_home = tmp_path / "shared-kanban"
+    log_dir = kanban_home / "kanban" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "t_qa.log").write_text(
+        "┊ ⚡ kanban_show 0.0s\n"
+        "┊ ⚡ kanban_co 0s\n"
+        "Messages: 3 (1 user, 2 tool calls)\n",
+        encoding="utf-8",
+    )
+    from scripts.hermes_worker_observability import worker_log_metrics
+
+    metrics = worker_log_metrics(
+        task_id="t_qa",
+        env={"HERMES_KANBAN_HOME": str(kanban_home)},
+    )
+    assert metrics["tool_duration_total_ms"] == 0
+    assert metrics["tool_latency_available"] is False
+    assert metrics["tool_timing_source"] == "unavailable"
+
+
+def test_worker_log_metrics_counts_structured_tool_errors(tmp_path: Path):
+    kanban_home = tmp_path / "shared-kanban"
+    log_dir = kanban_home / "kanban" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "t_qa.log").write_text(
+        "Tool execute_code returned error\n"
+        "returned_error=command blocked\n"
+        "Messages: 4 (1 user, 2 tool calls)\n",
+        encoding="utf-8",
+    )
+
+    from scripts.hermes_worker_observability import worker_log_metrics
+
+    metrics = worker_log_metrics(
+        task_id="t_qa",
+        env={"HERMES_KANBAN_HOME": str(kanban_home)},
+    )
+
+    assert metrics["tool_error_count"] == 2
 
 
 def test_accounting_worker_trace_is_fail_open_when_disabled():
@@ -143,5 +194,8 @@ def test_qa_worker_trace_uses_the_same_task_correlated_redacted_contract(tmp_pat
     ]
     assert all(run["extra"]["metadata"]["department"] == "qa" for run in runs)
     assert all(run["extra"]["metadata"]["task_id"] == "t_qa" for run in runs)
+    assert all(run["extra"]["metadata"]["llm_calls"] == 1 for run in runs)
     assert all(run["inputs"]["workflow_root_task_id"] == "t_root" for run in runs)
+    assert all(run["inputs"]["request_id"] == "t_root" for run in runs)
+    assert all(run["outputs"]["tool_calls"] == 2 for run in runs)
     assert all(run["outputs"]["raw_payloads_sent"] is False for run in runs)

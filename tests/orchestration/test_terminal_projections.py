@@ -580,6 +580,37 @@ class TerminalProjectionTests(unittest.TestCase):
         self.assertEqual(metric["telemetry_completeness"], "terminal-handoff")
         self.assertNotIn("findings", metric)
 
+    def test_qa_terminal_uses_log_observed_tool_errors(self) -> None:
+        repository = FakeAuditRepository()
+        client = FakeSupervisorClient(self.root, self.workflow[1:])
+        with patch(
+            "orchestration.llm_observability.langsmith_enabled", return_value=True
+        ), patch(
+            "orchestration.llm_observability.publish_metric", return_value=True
+        ) as publish, patch(
+            "scripts.hermes_worker_observability.worker_log_metrics",
+            return_value={
+                "llm_calls": 4,
+                "tool_calls": 3,
+                "tool_error_count": 2,
+                "tool_duration_total_ms": 150,
+                "tool_latency_available": True,
+                "tool_timing_source": "hermes-log-duration",
+            },
+        ):
+            QaAuditProjection(
+                repository=repository,
+                kanban_client=client,
+                env={"HERMES_HOME": "/nonexistent"},
+            ).project(root_task_id=ROOT, task=self.qa, workflow_tasks=self.workflow)
+
+        metric = publish.call_args.args[0]
+        self.assertEqual(metric["tool_error_count"], 2)
+        self.assertEqual(metric["tool_calls"], 3)
+        self.assertTrue(metric["tool_latency_available"])
+        self.assertEqual(metric["tool_timing_source"], "hermes-log-duration")
+        self.assertEqual(metric["telemetry_completeness"], "runtime-and-terminal")
+
     def test_qa_accepts_worker_overall_as_the_verdict(self) -> None:
         repository = FakeAuditRepository()
         qa = dict(self.qa)

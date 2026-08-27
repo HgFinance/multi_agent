@@ -158,3 +158,80 @@ def test_retention_scope_can_be_restricted_to_first(monkeypatch) -> None:
     worker = LangSmithRetentionWorker(api_key="key", enabled=True, dry_run=True)
 
     assert [project_name for _, project_name, _ in worker._projects()] == ["First"]
+
+
+def test_retention_deletes_only_the_oldest_budget_per_pass(monkeypatch) -> None:
+    monkeypatch.setenv("LANGSMITH_RETENTION_SCOPES", "workflow")
+    _fake_client_module(monkeypatch)
+    monkeypatch.setattr(
+        retention,
+        "resolve_project_id",
+        lambda _client, project_name: f"id-{project_name}",
+    )
+    monkeypatch.setattr(
+        retention,
+        "query_runs",
+        lambda _client, **_kwargs: [
+            SimpleNamespace(
+                id=f"trace-{index}",
+                start_time=datetime(2026, 8, 26 - index, tzinfo=timezone.utc),
+            )
+            for index in range(6)
+        ],
+    )
+    requests = []
+    worker = LangSmithRetentionWorker(
+        api_key="key",
+        endpoint="https://example.test",
+        enabled=True,
+        dry_run=False,
+        max_traces=3,
+        max_delete_per_pass=1,
+        opener=lambda request, timeout: requests.append(request) or _Response(),
+    )
+
+    summary = worker.run_once(now=datetime(2026, 8, 26, tzinfo=timezone.utc))
+
+    assert summary.deleted == 1
+    assert len(requests) == 1
+    assert json.loads(requests[0].data)["trace_ids"] == ["trace-3"]
+
+
+def test_retention_does_not_requeue_pending_trace_ids(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LANGSMITH_RETENTION_SCOPES", "workflow")
+    _fake_client_module(monkeypatch)
+    monkeypatch.setattr(
+        retention,
+        "resolve_project_id",
+        lambda _client, project_name: f"id-{project_name}",
+    )
+    monkeypatch.setattr(
+        retention,
+        "query_runs",
+        lambda _client, **_kwargs: [
+            SimpleNamespace(
+                id=f"trace-{index}",
+                start_time=datetime(2026, 8, 26 - index, tzinfo=timezone.utc),
+            )
+            for index in range(6)
+        ],
+    )
+    requests = []
+    worker = LangSmithRetentionWorker(
+        api_key="key",
+        endpoint="https://example.test",
+        enabled=True,
+        dry_run=False,
+        max_traces=3,
+        max_delete_per_pass=1,
+        pending_state_path=tmp_path / "pending.json",
+        opener=lambda request, timeout: requests.append(request) or _Response(),
+    )
+
+    first = worker.run_once(now=datetime(2026, 8, 26, tzinfo=timezone.utc))
+    second = worker.run_once(now=datetime(2026, 8, 26, tzinfo=timezone.utc))
+
+    assert first.deleted == 1
+    assert second.deleted == 0
+    assert second.skipped == 1
+    assert len(requests) == 1

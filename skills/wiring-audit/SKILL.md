@@ -6,7 +6,7 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [debug, wiring, evidence, pipeline]
-    related_skills: [experiment-factory, dataset-engineering, skill-authoring]
+    related_skills: [autonomous-quant-research, dataset-engineering, skill-authoring]
 ---
 
 # 배관 점검 - 값이 없을 때 어디를 먼저 보는가

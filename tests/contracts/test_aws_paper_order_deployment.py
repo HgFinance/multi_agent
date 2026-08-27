@@ -382,19 +382,6 @@ def test_market_consumers_receive_only_the_market_database_for_timeseries() -> N
         ("ls-realtime", "TIMESCALE_DATABASE_URL"),
         ("batch-collectors", "TIMESCALE_DATABASE_URL"),
         ("market-api", "TIMESCALE_DATABASE_URL"),
-        ("factory-autopilot", "TIMESCALE_DATABASE_URL"),
-        ("factory-experiment-worker", "TIMESCALE_DATABASE_URL"),
         ("qa-reproduction-worker", "QA_REPRODUCTION_TIMESCALE_DATABASE_URL"),
     ):
         assert services[service_name]["environment"][key].endswith("/market")
-
-
-def test_factory_autopilot_scopes_only_its_planning_connection() -> None:
-    environment = _yaml(OVERLAY_PATH)["services"]["factory-autopilot"]["environment"]
-    source = (
-        ROOT / "departments/01-research/factory/factory_autopilot.py"
-    ).read_text(encoding="utf-8")
-
-    assert environment["DATABASE_SESSION_URL"] == environment["DATABASE_URL"]
-    assert "DATABASE_RUNTIME_ROLE" not in environment
-    assert 'runtime_role="svc_quant"' in source

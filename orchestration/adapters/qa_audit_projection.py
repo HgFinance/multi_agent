@@ -19,6 +19,8 @@ from orchestration.adapters.terminal_projection_utils import (
     is_request_scoped_role,
     iso_timestamp,
     merged_run_metadata,
+    qa_projection_checks,
+    qa_projection_findings,
     safe_json,
     summary,
     task_id,
@@ -31,13 +33,13 @@ from orchestration.discord_idempotency import (
     IdempotencyStoreUnavailable,
     canonical_discord_dedup_key,
 )
+from orchestration.qa_contract import split_planner_selection
 from orchestration.qa_discord_feedback import (
     QA_FEEDBACK_CHANNEL_DEFAULT,
     edit_qa_discord_message,
     format_qa_terminal_report,
     post_qa_discord_message,
 )
-from orchestration.qa_contract import split_planner_selection
 
 logger = logging.getLogger(__name__)
 PROJECTION_VERSION = "v2"
@@ -70,6 +72,7 @@ def _verdict(metadata: Mapping[str, Any], task: Mapping[str, Any]) -> str:
         metadata.get("verdict")
         or metadata.get("qa_verdict")
         or metadata.get("overall")
+        or metadata.get("qa_status")
         or task.get("verdict")
         or task.get("overall")
     )
@@ -331,12 +334,19 @@ class QaAuditProjection:
                 "evaluated_primary_task_ids": list(primary),
                 "original_verdict": original,
                 "highest_severity": metadata.get("highest_severity") or task.get("highest_severity"),
-                "findings": metadata.get("findings") or task.get("findings") or [],
-                "checks": metadata.get("checks") or task.get("checks") or [],
+                "findings": qa_projection_findings(task, metadata),
+                "checks": qa_projection_checks(task, metadata),
                 "sources_http": metadata.get("sources_http") or task.get("sources_http") or [],
                 "artifacts": metadata.get("artifacts") or task.get("artifacts") or [],
                 "tests_run": metadata.get("tests_run") or task.get("tests_run") or [],
                 "worker_session_id": metadata.get("worker_session_id") or task.get("worker_session_id") or "",
+                # Keep the bounded, worker-declared facts available to the
+                # manager-facing projections.  These are not sent as raw
+                # LangSmith payloads; the projections humanize and cap them.
+                "verified_facts": metadata.get("verified_facts") or task.get("verified_facts") or [],
+                "unknowns": metadata.get("unknowns") or task.get("unknowns") or [],
+                "limitations": metadata.get("limitations") or task.get("limitations") or [],
+                "safety": metadata.get("safety") or task.get("safety") or {},
                 "summary": summary(task, metadata),
                 "numerical_posture": (
                     metadata.get("numerical_posture")
@@ -417,14 +427,30 @@ class QaAuditProjection:
                 return "disabled"
             metadata = merged_run_metadata(task)
             provider, model, model_source = _profile_model(self.env)
+            log_metrics: dict[str, Any] = {}
+            try:
+                from scripts.hermes_worker_observability import worker_log_metrics
+
+                log_metrics = worker_log_metrics(
+                    task_id=record.qa_task_id,
+                    env=self.env,
+                )
+            except Exception:  # noqa: BLE001 - log enrichment is fail-open
+                logger.debug("qa_worker_log_metrics_unavailable", exc_info=True)
             observed_llm_calls = _count_observed(
-                metadata.get("llm_calls") or metadata.get("llm_call_count")
+                metadata.get("llm_calls")
+                or metadata.get("llm_call_count")
+                or log_metrics.get("llm_calls")
             )
             observed_tool_calls = _count_observed(
-                metadata.get("tool_calls") or metadata.get("tool_call_count")
+                metadata.get("tool_calls")
+                or metadata.get("tool_call_count")
+                or log_metrics.get("tool_calls")
             )
             observed_tool_errors = _count_observed(
-                metadata.get("tool_error_count") or metadata.get("tool_errors")
+                metadata.get("tool_error_count")
+                or metadata.get("tool_errors")
+                or log_metrics.get("tool_error_count")
             )
             runs = task.get("runs")
             run_count = (
@@ -471,6 +497,19 @@ class QaAuditProjection:
                 "llm_calls": observed_llm_calls,
                 "tool_calls": observed_tool_calls,
                 "tool_error_count": observed_tool_errors,
+                "tool_duration_total_ms": _count_observed(
+                    metadata.get("tool_duration_total_ms")
+                    or log_metrics.get("tool_duration_total_ms")
+                ),
+                "tool_latency_available": bool(
+                    metadata.get("tool_latency_available")
+                    or log_metrics.get("tool_latency_available")
+                ),
+                "tool_timing_source": (
+                    metadata.get("tool_timing_source")
+                    or log_metrics.get("tool_timing_source")
+                    or "unavailable"
+                ),
                 "error_count": 0,
                 "error_class": None,
                 "output_verdict": record.original_verdict,
@@ -483,6 +522,15 @@ class QaAuditProjection:
                 "observability_source": "kanban_terminal_projection",
                 "raw_payloads_sent": False,
             }
+            if (
+                latency_ms is not None
+                and metric["tool_duration_total_ms"] is not None
+                and metric["tool_latency_available"]
+            ):
+                metric["model_latency_ms"] = max(
+                    0,
+                    latency_ms - int(metric["tool_duration_total_ms"]),
+                )
             if metadata.get("input_hash"):
                 metric["input_hash"] = metadata["input_hash"]
             published = publish_metric(
@@ -573,8 +621,8 @@ class QaAuditProjection:
             if not existing_message_id:
                 try:
                     store.mark_outbound(response_key, "FAILED", profile)
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 - cleanup must not mask the failure
+                    logger.debug("qa_discord_outbound_failure_mark_failed", exc_info=True)
             logger.warning(
                 "qa_discord_terminal_projection_failed",
                 extra={"error": type(exc).__name__},
@@ -647,9 +695,9 @@ class QaAuditProjection:
 
 
 __all__ = [
+    "EVAL_SET_VERSION",
     "PROJECTION_MARKER",
     "PROJECTION_VERSION",
-    "EVAL_SET_VERSION",
     "QaAuditProjection",
     "QaAuditProjectionRecord",
 ]

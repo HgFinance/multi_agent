@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -59,6 +60,16 @@ _ACTIONABLE_FEEDBACK_CODES = frozenset(
 )
 TERMINAL_STATUSES = frozenset({"success", "completed", "complete", "error", "failed", "blocked", "degraded"})
 ERROR_STATUSES = frozenset({"error", "failed", "blocked", "degraded", "gave_up", "timed_out"})
+_NON_WORKFLOW_ROOT_NAMES = frozenset(
+    {
+        "llm.performance.metric",
+        "qa.trace.evaluation",
+        # This is the post-response terminal envelope, not a new workflow.
+        # Feeding it back into the same QA loop creates self-referential
+        # latency artifacts beside the real worker trace.
+        "qa.hermes.terminal",
+    }
+)
 _DEPARTMENT_CANONICAL = {
     "research": "research",
     "research-department": "research",
@@ -111,10 +122,16 @@ _SAFE_METADATA_KEYS = frozenset(
         "workflow_root_task_id",
         "kanban_run_id",
         "tool_call_count",
+        "tool_names",
+        "tool_duration_total_ms",
         "llm_turn_count_observed",
         "model_call_count_observed",
         "tool_latency_ms",
+        "tool_timing_source",
         "model_latency_ms",
+        "return_code",
+        "latency_available",
+        "tool_latency_available",
         "telemetry_completeness",
         "observability_source",
         "output_verdict",
@@ -209,6 +226,8 @@ _INT_METADATA_KEYS = frozenset(
         "model_call_count_observed",
         "tool_latency_ms",
         "model_latency_ms",
+        "tool_duration_total_ms",
+        "return_code",
     }
 )
 _SCORE_METADATA_KEYS = frozenset(
@@ -227,6 +246,10 @@ _SCORE_METADATA_KEYS = frozenset(
 def _normalized_metadata_value(key: str, value: Any) -> Any:
     """Copy one safe scalar from a run without ever retaining payload text."""
 
+    if key == "tool_names":
+        if not isinstance(value, (list, tuple)):
+            return None
+        return [_bounded_text(item, 80) for item in value[:32] if _bounded_text(item, 80)]
     if key in _TEXT_METADATA_KEYS:
         return _bounded_text(value, 160)
     if key in _INT_METADATA_KEYS:
@@ -236,6 +259,8 @@ def _normalized_metadata_value(key: str, value: Any) -> Any:
     if key in _SCORE_METADATA_KEYS:
         return _bounded_score(value)
     if key == "raw_payloads_sent":
+        return bool(value)
+    if key in {"latency_available", "tool_latency_available"}:
         return bool(value)
     return None
 
@@ -314,7 +339,7 @@ def _bounded_score(value: Any) -> float | None:
         score = float(value)
     except (TypeError, ValueError):
         return None
-    if score != score:  # NaN
+    if math.isnan(score):
         return None
     return max(0.0, min(score, 1.0))
 
@@ -344,7 +369,7 @@ class FeedbackConfig:
     kanban_db_path: str | None = None
 
     @classmethod
-    def from_env(cls) -> "FeedbackConfig":
+    def from_env(cls) -> FeedbackConfig:
         def _float(name: str, default: float, minimum: float, maximum: float) -> float:
             try:
                 return max(minimum, min(float(os.getenv(name, str(default))), maximum))
@@ -469,6 +494,15 @@ def observation_from_run(run: Any) -> TraceObservation:
         started_at=start_time.isoformat() if start_time else None,
         ended_at=end_time.isoformat() if end_time else None,
         metadata=metadata,
+    )
+
+
+def _is_workflow_feedback_source(observation: TraceObservation) -> bool:
+    """Keep legacy/test roots out of the production workflow feedback loop."""
+
+    name = observation.name.strip().casefold()
+    return name not in _NON_WORKFLOW_ROOT_NAMES and not name.startswith(
+        ("hgfinance.test.", "test.")
     )
 
 
@@ -1493,7 +1527,11 @@ def publish_evaluation(result: EvaluationResult, project_name: str) -> str | Non
 
     try:
         from langsmith import RunTree
-        from orchestration.llm_observability import _safe_langsmith_client, langsmith_enabled
+
+        from orchestration.llm_observability import (
+            _safe_langsmith_client,
+            langsmith_enabled,
+        )
 
         if not langsmith_enabled():
             return None
@@ -1708,6 +1746,8 @@ class LangSmithFeedbackService:
             )
             for run in root_runs:
                 observation = observation_from_run(run)
+                if not _is_workflow_feedback_source(observation):
+                    continue
                 observation = attribute_workflow_bottleneck(
                     observation,
                     kanban_db_path=self.config.kanban_db_path,
@@ -1840,9 +1880,9 @@ def approved_feedback_hint() -> dict[str, Any] | None:
 
 __all__ = [
     "FEEDBACK_SCHEMA",
+    "EvaluationResult",
     "FeedbackConfig",
     "FeedbackLedger",
-    "EvaluationResult",
     "LangSmithFeedbackService",
     "TraceObservation",
     "approved_feedback_hint",

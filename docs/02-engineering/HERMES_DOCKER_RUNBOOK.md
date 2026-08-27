@@ -228,11 +228,14 @@ projection을 통해 CEO supervisor action을 결정한다. DB를 직접 읽거�
 변경하지 않는다.
 
 Supervisor action은 `SYNTHESIZE`, `CREATE_TASK`, `RETRY_TASK`,
-`REQUEST_USER_INPUT`, `RUN_QA`, `BLOCK/ABORT` 중 하나이며, retry 2회와 wake-up
+`REQUEST_USER_INPUT`, `BLOCK/ABORT` 중 하나이며, retry 2회와 wake-up
 8회를 기본 상한으로 둔다. `blocked`는 실패와 구별한다. `needs_input` blocked는
 사용자 입력 요청으로 남기고, transient blocked만 retry하며, 그 외 blocked는 제한된
-replan 후 중단한다. QA는 기본 활성화하지만 CEO가 terminal completion metadata에
-`qa_required: false`를 명시한 경우 해당 요청에서는 생략할 수 있다.
+replan 후 중단한다. 일반 CEO 응답의 QA는 synthesis 선행 action이 아니다. CEO final
+response를 전달한 뒤 supervisor가 `RUN_QA` audit child를 별도로 생성하며, QA는 응답을
+지연·차단·재작성하지 않는다. 전략 승격·HR lifecycle처럼 별도 governance 승인이
+필요한 workflow만 자체 QA→CEO gate를 가진다. 상세 정본은
+[CEO_ARCHITECTURE.md](CEO_ARCHITECTURE.md) §3.4다.
 
 모든 Hermes `kanban create` 경계는 `orchestration/canonical_profiles.py`의 exact
 allowlist를 통과해야 한다. 논리 단계(`risk`, `qa`)는 CLI 직전에 각각

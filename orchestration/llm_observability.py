@@ -64,6 +64,14 @@ _LANGSMITH_ROOT_CONTEXT_RE = re.compile(
 )
 
 WORKFLOW_LANGSMITH_PROJECT = "First"
+_STAGE_PROFILES = {
+    "research": "research-department",
+    "quant": "quant-backtest-department",
+    "trading": "trading-department",
+    "risk": "risk-management",
+    "accounting": "accounting-portfolio-department",
+    "qa": "qa-department",
+}
 
 
 def _root_run_id_from_trace_context(trace_context: str | None) -> str:
@@ -198,6 +206,10 @@ def _metric_metadata(
         "observability_source",
         "tool_calls",
         "tool_error_count",
+        "tool_duration_total_ms",
+        "tool_latency_available",
+        "tool_timing_source",
+        "model_latency_ms",
         "finding_count",
         "output_verdict",
         "input_hash",
@@ -327,6 +339,8 @@ def worker_graph_trace_config(
         "trace_kind": "worker_graph",
         "latency_scope": "worker_execution",
         "stage": stage,
+        "profile": _STAGE_PROFILES.get(stage),
+        "department": stage if stage in _STAGE_PROFILES else None,
         "worker_id": worker_id,
         "role": role,
         "raw_payloads_sent": False,
@@ -763,9 +777,14 @@ def close_root_trace(
             extra={"metadata": metadata},
         )
         return True
-    except Exception:  # noqa: BLE001 - root finalization is fail-open.
+    except Exception as exc:  # noqa: BLE001 - root finalization is fail-open.
+        # LangSmith rejects a second PATCH for the same run with a 409 after
+        # the first PATCH has already been accepted.  Supervisor reconciliation
+        # can legitimately reach the same terminal root through both the live
+        # event and its durable recovery pass, so this provider response is an
+        # idempotent success rather than an unconfirmed trace.
         # LangSmith must not delay or fail a durable finalization.
-        return False
+        return "duplicate run update requests" in str(exc).casefold()
 
 
 def langfuse_worker_event_name(*, stage: str, worker_id: str) -> str:

@@ -277,7 +277,7 @@ def main(argv: list[str]) -> int:
   Market 은 가격 시계열이고, 이 데이터셋에는 체결할 가격이 없다.
   이건 결함이 아니라 **아직 없는 기능**이다 - 피처 데이터셋을 쓰려면
   가격 데이터셋(체결용)과 피처 데이터셋(신호용)을 함께 받는 길을
-  실행면에 내야 한다. 러너를 고쳐도 된다(experiment-factory §4).
+  실행면에 내야 한다. 러너를 고쳐도 된다(autonomous-quant-research 검증 루프).
   고치기 전에 그 설계를 카드에 적어라 - 사전등록이 먼저다.""")
     return 0 if p.stopped_at is None else 2
 

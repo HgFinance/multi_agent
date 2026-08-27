@@ -17,19 +17,16 @@ WORKDIR /app/departments/01-research
 COPY departments/01-research/collectors/source_registry.py \
      departments/01-research/collectors/symbol_universe.py \
      ./collectors/
-COPY departments/01-research/contracts ./contracts
 COPY departments/01-research/repository ./repository
 COPY departments/01-research/api ./api
-COPY departments/01-research/factory ./factory
 COPY departments/01-research/evidence ./evidence
 
 # 퇴역한 종목별 Packet 파이프라인(agents/, scripts.py)은 이미지에 넣지 않는다.
 # 활성 직원 registry는 compose가 employee_workers.py를 명시적으로 read-only
 # 마운트하며, liaison surface에는 실행 capability 자체가 없다.
 
-# Factory read/write tools share the quant-owned fail-closed KRX stock evidence
-# predicate.  MCP imports are lazy, so an image can otherwise look healthy but
-# fail only when Hermes submits or reads a proposal.
+# The MCP server has no strategy-generation write surface.  Strategy research
+# runs in the autonomous lab and writes only its own file-backed artifacts.
 COPY departments/04-quant-backtest/pipeline/stock_universe.py \
      /app/departments/04-quant-backtest/pipeline/stock_universe.py
 

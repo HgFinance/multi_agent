@@ -227,6 +227,9 @@ services:
       UI_MIRROR_DEDUPE_TTL_SECONDS: ${UI_MIRROR_DEDUPE_TTL_SECONDS:-604800}
       UI_MIRROR_DEDUPE_WAIT_SECONDS: ${UI_MIRROR_DEDUPE_WAIT_SECONDS:-3}
       UI_MIRROR_SSE_SECONDS: ${UI_MIRROR_SSE_SECONDS:-25}
+      # Natural-language strategy requests are written as intake manifests;
+      # the autonomous research worker materializes and owns each lab.
+      AUTONOMOUS_RESEARCH_LAB_ROOT: /var/lib/autonomous-research
       # These are the internal read/proxy endpoints used by apps.api.main.
       # The production portfolio BFF stays on the pinned Hermes CLI/local
       # boundary above; it does not gain a Docker-exec transport.
@@ -337,6 +340,7 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
+      - autonomous_research_lab:/var/lib/autonomous-research
       # BFF uses Hermes CLI only for the repository-owned Kanban create
       # boundary. CEO profile/auth stays inside ceo-hermes and is never
       # mounted here; the BFF has no gateway command or full ~/.hermes view.
@@ -467,7 +471,7 @@ services:
     pids_limit: 96
 
   # Confirmed conditional rules are evaluated outside Hermes and outside the
-  # always-on research factory. The worker owns no browser token, broker key,
+  # always-on research support. The worker owns no browser token, broker key,
   # or USER_DIRECTIVE database privilege; it can only claim rule rows and call
   # Trading's separately authenticated conditional execution endpoint.
   conditional-rule-worker:
@@ -1227,8 +1231,8 @@ services:
 
   # ── research-liaison-mcp: 리서치 응대 창구(도서관) 도구 면 (2026-08-13) ──
   # 같은 이미지·같은 코드가 RESEARCH_MCP_SURFACE=liaison 으로 뜬다 - 파이프라인
-  # Worker 실행·factory 쓰기 도구(run_research_workers·factory_submit_*)가 **등록에서
-  # 빠진** 조회 전용 면이다(도서관/연구소 분리). 사용자 질의 파생 카드를 받는
+  # Worker 실행 도구가 **등록에서 빠진** 조회 전용 면이다(도서관/연구소 분리).
+  # 사용자 질의 파생 카드를 받는
   # research-liaison·quant-liaison 프로필만 이 서버를 물고, 부서 본체 프로필은
   # 위 research-mcp(full)를 그대로 쓴다. 창구가 쓰기 손을 못 갖는 것은 프롬프트
   # 지시가 아니라 capability 절단이다 - 서버가 제거를 검증 못 하면 기동을 거부한다.
@@ -1419,6 +1423,61 @@ services:
     pids_limit: 256
     stop_grace_period: 20s
 
+  # ── Independent Strategy Hermes ───────────────────────────────────────────
+  # Opt-in. The intake/supervisor is only a lifecycle boundary; the actual
+  # researcher is the direct Hermes process it launches. Existing
+  # research-hermes and quant-hermes are not called from this service.
+  strategy-hermes:
+    profiles: ["strategy-hermes"]
+    build:
+      context: .
+      dockerfile: Dockerfile.agent-runtime
+    image: hedgefund-strategy-hermes:latest
+    container_name: hedgefund-strategy-hermes
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/strategy-hermes-entrypoint"]
+    working_dir: /app/repo
+    command:
+      ["python3", "/app/repo/departments/01-research/autonomous/strategy_hermes_supervisor.py",
+       "--lab-root", "/var/lib/autonomous-research", "--repo-root", "/app/repo", "--loop"]
+    volumes:
+      - .:/app/repo:ro
+      - autonomous_research_lab:/var/lib/autonomous-research
+      - strategy_hermes_home:/opt/data
+      - /home/ubuntu/.hermes/profiles/research-department/auth.json:/opt/strategy-credentials/auth.json:ro
+      - ./departments/01-research/strategy-hermes/config.yaml:/opt/data/config.yaml:ro
+      - ./departments/01-research/strategy-hermes/SOUL.md:/opt/data/SOUL.md:ro
+      - ./skills:/opt/shared-skills:ro
+      - ./quant-data:/app/quant-data:ro
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_PROFILE: strategy-hermes
+      HERMES_UID: 1000
+      HERMES_GID: 1000
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      AUTONOMOUS_RESEARCH_LAB_ROOT: /var/lib/autonomous-research
+      AUTONOMOUS_RESEARCH_REPO_ROOT: /app/repo
+      AUTONOMOUS_RESEARCH_HERMES_PROVIDER: openai-codex
+      AUTONOMOUS_RESEARCH_HERMES_MODEL: gpt-5.6-luna
+      AUTONOMOUS_RESEARCH_INTERVAL_MIN: ${AUTONOMOUS_RESEARCH_INTERVAL_MIN:-30}
+      AUTONOMOUS_RESEARCH_TIMEOUT_SECONDS: ${AUTONOMOUS_RESEARCH_TIMEOUT_SECONDS:-1800}
+      AUTONOMOUS_RESEARCH_MAX_AGENT_ATTEMPTS: ${AUTONOMOUS_RESEARCH_MAX_AGENT_ATTEMPTS:-3}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-Hermes-Autonomous-Research}
+    healthcheck:
+      test: ["CMD-SHELL", "test -d /var/lib/autonomous-research/intake && test -d /var/lib/autonomous-research/labs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: 4g
+    mem_reservation: 512m
+    cpus: 2.0
+    pids_limit: 256
+    stop_grace_period: 30s
+
   quant-hermes:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-quant-hermes
@@ -1447,7 +1506,7 @@ services:
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       # Profile MCP headers expand this token for the read-only research
-      # liaison.  Job mutation stays on quant-api/factory workers; Hermes gets
+      # liaison.  Job mutation stays on quant-api/validation workers; Hermes gets
       # neither a database credential nor an implied write-capable MCP tool.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
     mem_limit: 1g
@@ -1812,6 +1871,14 @@ services:
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       HERMES_BIN: /opt/hgfinance/scripts/qa_hermes_worker.py
+      # QA terminal work is evidence-bound and must finish within the
+      # dispatcher lease; retain high reasoning but cap runaway tool loops.
+      HGFINANCE_QA_AUDIT_MAX_TURNS: ${HGFINANCE_QA_AUDIT_MAX_TURNS:-16}
+      HGFINANCE_QA_AUDIT_REASONING: ${HGFINANCE_QA_AUDIT_REASONING:-high}
+      # Primary QA E2E diagnostics use a separate short budget and retain only
+      # the existing Kanban/terminal tools; post-response QA remains Kanban-only.
+      HGFINANCE_QA_PRIMARY_MAX_TURNS: ${HGFINANCE_QA_PRIMARY_MAX_TURNS:-8}
+      HGFINANCE_QA_PRIMARY_REASONING: ${HGFINANCE_QA_PRIMARY_REASONING:-high}
       QA_DISCORD_CHANNEL_ID: ${QA_DISCORD_CHANNEL_ID:-1541636723006775477}
       # This is the dedicated QA room. It lets the exact self-authored
       # observability marker reach Hermes without creating an extra bot.
@@ -2061,71 +2128,6 @@ services:
     pids_limit: 256
     stop_grace_period: 20s
 
-  # Alpha factory queue is physically isolated from the user/CEO queue.
-  # It has its own persistent SQLite DB, workspace tree, dispatcher process,
-  # and cgroup.  The factory dispatcher mounts only profile state from the
-  # shared Hermes home, so it cannot open the user board DB even accidentally.
-  factory-kanban-init:
-    image: nousresearch/hermes-agent:latest
-    container_name: hedgefund-factory-kanban-init
-    user: "0:0"
-    restart: "no"
-    network_mode: none
-    entrypoint: ["/bin/sh", "-c"]
-    command: ["install -d -o 1000 -g 1000 -m 0750 /opt/factory-kanban && chown -R 1000:1000 /opt/factory-kanban"]
-    volumes:
-      - factory_kanban_data:/opt/factory-kanban
-
-  factory-kanban-dispatcher:
-    image: nousresearch/hermes-agent:latest
-    container_name: hedgefund-factory-kanban-dispatcher
-    restart: unless-stopped
-    depends_on:
-      factory-kanban-init:
-        condition: service_completed_successfully
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    init: true
-    command:
-      ["/bin/sh", "-c", "set -eu; python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py; if [ ! -f /opt/factory-kanban/kanban/boards/alpha-factory/board.json ]; then hermes kanban boards create alpha-factory --name 'Alpha Factory' --description 'Isolated continuous alpha discovery queue'; fi; hermes kanban --board alpha-factory init; exec hermes kanban --board alpha-factory daemon --force --interval \"$${FACTORY_KANBAN_DISPATCH_INTERVAL:-5}\" --max \"$${FACTORY_KANBAN_MAX_SPAWN_PER_TICK:-2}\" --pidfile /opt/factory-kanban/alpha-factory-dispatcher.pid --verbose"]
-    volumes:
-      - /home/ubuntu/.hermes/profiles:/opt/data/profiles
-      - factory_kanban_data:/opt/factory-kanban
-      # 2026-08-25: 스킬 축적이 헤르메스를 쓰는 이유다. 읽기전용이면
-      #   에이전트가 배운 것을 남길 데가 없다. 디스패처(에이전트가 실제로
-      #   뜨는 곳)만 쓰기 가능으로 연다 - 다른 부서 컨테이너는 :ro 유지.
-      - ./skills:/opt/shared-skills
-      - .:/app/repo:ro
-      - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
-      - ./quant-data:/app/quant-data
-    environment:
-      PYTHONPATH: /app/repo/deploy/hermes-dispatch-guard
-      HGFINANCE_DISPATCH_GUARD: "1"
-      HERMES_HOME: /opt/data
-      HERMES_UID: 1000
-      HERMES_GID: 1000
-      HERMES_KANBAN_HOME: /opt/factory-kanban
-      HERMES_KANBAN_BOARD: alpha-factory
-      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
-      FACTORY_KANBAN_DISPATCH_INTERVAL: ${FACTORY_KANBAN_DISPATCH_INTERVAL:-5}
-      FACTORY_KANBAN_MAX_SPAWN_PER_TICK: ${FACTORY_KANBAN_MAX_SPAWN_PER_TICK:-2}
-      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-    healthcheck:
-      test: ["CMD-SHELL", "test -s /opt/factory-kanban/kanban/boards/alpha-factory/kanban.db"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 10s
-    mem_limit: 8g
-    mem_reservation: 192m
-    cpus: 4.0
-    pids_limit: 256
-    stop_grace_period: 20s
-
   ceo-kanban-supervisor:
     build:
       context: .
@@ -2314,6 +2316,8 @@ services:
       LANGSMITH_RETENTION_EVALS_DAYS: ${LANGSMITH_RETENTION_EVALS_DAYS:-30}
       LANGSMITH_RETENTION_SCAN_WINDOW_DAYS: ${LANGSMITH_RETENTION_SCAN_WINDOW_DAYS:-400}
       LANGSMITH_RETENTION_MAX_TRACES: ${LANGSMITH_RETENTION_MAX_TRACES:-1000}
+      LANGSMITH_RETENTION_DELETE_PER_PASS: ${LANGSMITH_RETENTION_DELETE_PER_PASS:-100}
+      LANGSMITH_RETENTION_PENDING_PATH: ${LANGSMITH_RETENTION_PENDING_PATH:-/opt/data/shared-kanban/langsmith-retention-pending.json}
       # Retry on the next provider quota window without repeatedly hammering
       # the deletion endpoint during the same hourly limit window.
       LANGSMITH_RETENTION_INTERVAL_SECONDS: ${LANGSMITH_RETENTION_INTERVAL_SECONDS:-3600}
@@ -2348,111 +2352,11 @@ services:
   # 현재 비활성 상태다. 두 패키지 모두 Compose HTTP 컨테이너로 감싸면
   # 즉시 종료하거나 MCP API 호환성 오류로 재시작 루프에 들어간다.
 
-  # ──────────────────────────────────────────────────────────────────────────
-  # 공장 상주 3종 (재일님 결정 2026-08-12)
-  #
-  # 셋 다 호스트 셸 프로세스였다. 세션이 끊기거나 Docker 를 재기동하면 **공장이
-  # 조용히 멈추고 아무도 안 알려줬다** - 실측으로 새벽 3시대에 죽은 것을 다섯
-  # 시간 뒤에 발견했다. `restart: unless-stopped` 가 그것을 없앤다.
-  #
-  # 셋이 같은 이미지를 쓴다(Dockerfile.factory). 저장소 코드가 같으므로 이미지를
-  # 나누면 배포마다 버전이 어긋난다.
-  #
-  # ▶ docker 소켓을 물리는 이유
-  #   칸반 보드는 Windows 바인드 마운트 위의 SQLite 다. 컨테이너 밖에서 그 파일을
-  #   직접 열면 `-shm` 매핑이 생겨 **부서 컨테이너의 보드 쓰기가 전부 죽는다**.
-  #   그래서 보드 접근은 `docker exec <부서 컨테이너>` 로만 한다. 데몬이 아니라
-  #   클라이언트만 이미지에 있다(docker-outside-of-docker).
-  # ──────────────────────────────────────────────────────────────────────────
-  factory-autopilot:
+  card-watchdog:
     build:
       context: .
-      dockerfile: Dockerfile.factory
-    image: hedgefund-factory:latest
-    container_name: hedgefund-factory-autopilot
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    command: ["python", "departments/01-research/factory/factory_autopilot.py",
-              "--loop", "--interval-min", "15"]
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-      factory-kanban-dispatcher:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
-      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
-      # 카드 생성·보드 조회를 돌릴 컨테이너. 부서에 매이지 않는 kanban 명령용이다.
-      # Never route factory reads/writes through the user/CEO dispatcher.
-      KANBAN_CLI_CONTAINER: hedgefund-factory-kanban-dispatcher
-      KANBAN_READER_CONTAINER: hedgefund-factory-kanban-dispatcher
-      FACTORY_KANBAN_BOARD: alpha-factory
-      KANBAN_ATTACH_ROOT: /opt/factory-kanban/kanban/boards/alpha-factory/attachments
-      KANBAN_WORKSPACE_ROOT: /opt/factory-kanban/kanban/boards/alpha-factory/workspaces
-      KANBAN_ACCESS_MODE: docker
-      HERMES_EXEC_MODE: docker
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      # 수확 멱등 표식·반려 이력이 재시작을 넘어 남아야 한다. 컨테이너가
-      # 지워지면 같은 카드를 다시 수확하고 같은 반려를 다시 싣는다.
-      - factory_state:/root
-      - factory_kanban_data:/opt/factory-kanban:ro
-      # ▶ 자동 조종이 하루 한 번 파티션을 다시 굳힌다(0.7단계). 이게 없으면
-      #   컨테이너 안에만 쓰고 사라져, 워커가 읽을 때는 파일이 없다 -
-      #   "게이트는 통과했는데 로드에서 죽는" 상태가 매일 재생산된다.
-      - ./quant-data:/app/quant-data
-    healthcheck:
-      test: ["CMD", "python", "scripts/factory_runtime_contract.py", "check"]
-      interval: 60s
-      timeout: 10s
-      retries: 1
-      start_period: 10s
-
-  factory-experiment-worker:
-    image: hedgefund-factory:latest
-    container_name: hedgefund-experiment-worker
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    command: ["python", "departments/04-quant-backtest/pipeline/experiment_worker.py",
-              "--serve"]
-    depends_on:
-      factory-autopilot:
-        # The worker must not consume hypotheses from a factory whose AST
-        # registry or execution files differ from the sealed image contract.
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: ${QUANT_DATABASE_URL:-${DATABASE_URL:?}}
-      # SET ROLE is session state, so db_writer uses this explicit session DSN
-      # or upgrades the standard Supavisor 6543 endpoint to session port 5432.
-      DATABASE_SESSION_URL: ${QUANT_DATABASE_SESSION_URL:-}
-      DATABASE_RUNTIME_ROLE: ${QUANT_DATABASE_RUNTIME_ROLE:-svc_quant}
-      # 백테스트가 커버리지를 **실제로 재려면** 이게 있어야 한다. 없으면
-      # NOT_RUNNABLE 로 막히는데, 로그만 보면 데이터가 모자란 것처럼 보인다.
-      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
-    volumes:
-      # ▶ 파티션 실물 (2026-08-12). 매니페스트는 DB 에 있지만 **행 데이터는
-      #   파일**이다(pit_dataset.py 머리말: "행 데이터 = quant-data/…csv.gz").
-      #   backtest_runner 가 파티션마다 content_hash 를 재검증하므로 이게 없으면
-      #   게이트를 통과한 실험이 로드 단계에서 죽는다. 실험이 전부 NOT_RUNNABLE
-      #   이던 동안에는 로드까지 가지 못해 이 구멍이 드러나지 않았다.
-      #   pit_dataset.DATA_ROOT 가 `parents[3]/quant-data` = /app/quant-data 다.
-      - ./quant-data:/app/quant-data
-      # Keep the rebuildable evolutionary-screen cache off the host OneDrive
-      # bind while retaining governed datasets on the canonical quant-data path.
-      - intraday_sample_cache:/app/quant-data/intraday-discovery-cache
-
-  card-watchdog:
-    image: hedgefund-factory:latest
+      dockerfile: Dockerfile.operations-runtime
+    image: hedgefund-operations-runtime:latest
     container_name: hedgefund-card-watchdog
     restart: unless-stopped
     logging:
@@ -2461,9 +2365,6 @@ services:
         max-size: "10m"
         max-file: "3"
     command: ["python", "apps/api/card_watchdog.py", "--loop", "--interval-min", "3"]
-    depends_on:
-      factory-autopilot:
-        condition: service_started
     environment:
       KANBAN_CLI_CONTAINER: ${KANBAN_CLI_CONTAINER:-hedgefund-qa-hermes}
       KANBAN_READER_CONTAINER: ${KANBAN_READER_CONTAINER:-hedgefund-qa-hermes}
@@ -2480,7 +2381,10 @@ services:
   # 않는다 - `portfolio-bff`만 내부 네트워크로 부른다
   # (`STRATEGY_RUNTIME_API_URL`).
   strategy-runtime-control:
-    image: hedgefund-factory:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.operations-runtime
+    image: hedgefund-operations-runtime:latest
     container_name: hedgefund-strategy-runtime-control
     restart: unless-stopped
     logging:
@@ -2506,6 +2410,5 @@ volumes:
   tsdb_data:
   ls_token_cache:
   portfolio_runtime_data:
-  factory_state:
-  factory_kanban_data:
-  intraday_sample_cache:
+  autonomous_research_lab:
+  strategy_hermes_home:

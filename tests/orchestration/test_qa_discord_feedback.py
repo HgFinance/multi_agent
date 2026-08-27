@@ -66,6 +66,115 @@ def test_qa_terminal_report_preserves_structured_finding_statement() -> None:
     assert "구체적인 문제 설명이 없습니다" not in report
 
 
+def test_qa_terminal_report_humanizes_checks_and_separates_review_from_verdict() -> None:
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="FAIL",
+            evidence={"numerical_posture": "DEFER", "latency_ms": 70_000},
+            checks=[
+                {"check": "official_source_pit", "result": "PASS"},
+                {"check": "decision_readiness", "result": "FAIL"},
+            ],
+            findings=[
+                {
+                    "severity": "HIGH",
+                    "summary": "evidence is incomplete",
+                    "owner": "quant-backtest-department",
+                }
+            ],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "QA 검토 상태: 완료" in report
+    assert "업무 판정: **실패·투자 결정 차단**" in report
+    assert "공식 자료·기준 시점: 통과" in report
+    assert "의사결정 준비도: 실패" in report
+    assert "정량 분석 부서" in report
+    assert "official_source_pit" not in report
+    assert "decision_readiness" not in report
+
+
+def test_qa_terminal_report_humanizes_post_response_check_keys() -> None:
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="WARN",
+            evidence={"numerical_posture": "DEFER"},
+            checks=[
+                {"check": "evidence", "result": "WARN"},
+                {"check": "citations", "result": "WARN"},
+                {"check": "paper_read_only_safety", "result": "PASS"},
+                {"check": "response_delivery_nonblocking", "result": "PASS"},
+            ],
+            findings=[],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "근거 충실성: 주의" in report
+    assert "출처 인용: 주의" in report
+    assert "PAPER 읽기 전용 준수: 통과" in report
+    assert "CEO 응답 비차단: 통과" in report
+    assert "추가 점검 항목" not in report
+
+
+def test_qa_terminal_report_humanizes_extended_check_keys() -> None:
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="WARN",
+            evidence={"numerical_posture": "DEFER"},
+            checks=[
+                {"check": "evidence_and_citations", "result": "PASS"},
+                {"check": "workflow_e2e_coverage", "result": "WARN"},
+                {"check": "position_value_sum", "result": "PASS"},
+                {"check": "sector_mapping", "result": "WARN"},
+            ],
+            findings=[],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "근거·인용: 통과" in report
+    assert "전체 흐름 검증 범위: 주의" in report
+    assert "포지션 평가액 합계: 통과" in report
+    assert "섹터 분류: 주의" in report
+    assert "추가 점검 항목" not in report
+
+
+def test_qa_terminal_report_does_not_rewrite_structured_terms_into_mixed_labels() -> None:
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="WARN",
+            evidence={"numerical_posture": "DEFER"},
+            checks=[],
+            findings=[
+                {
+                    "severity": "LOW",
+                    "statement": "broker_evidence is absent from artifact/citation data; sector is unmapped",
+                    "owner": "accounting-portfolio-department",
+                }
+            ],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "브로커 증거" in report
+    assert "근거 좌표" in report
+    assert "broker_evidence" not in report
+    assert "artifact/citation" not in report
+    assert "브로커_근거 충실성" not in report
+    assert "섹터" in report
+    assert "sector" not in report
+
+
 def test_qa_card_and_commands_keep_only_redacted_contract() -> None:
     card = format_qa_feedback_request(
         artifact_id=ARTIFACT_ID,
@@ -91,6 +200,8 @@ def test_qa_card_and_commands_keep_only_redacted_contract() -> None:
     assert "### 관측" in card
     assert "### 문제 추적 정보 · 원문 제외" in card
     assert "### 관리자 결정" in card
+    assert f"피드백 기록 ID: `{ARTIFACT_ID}`" in card
+    assert "feedback_artifact_id=" not in card
     assert "보류:" in card and "`대기` 상태 유지" in card
     assert "154.91초 > 기준 60.00초 (전체 처리 시간)" in card
     assert "실행 기록 ID: run-redacted-1" in card

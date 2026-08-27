@@ -7,6 +7,7 @@ import time
 import unittest
 import asyncio
 import importlib.util
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -24,6 +25,48 @@ _PATCH_SPEC.loader.exec_module(gateway_patch)
 
 
 class DiscordGatewayPatchTests(unittest.TestCase):
+    def test_qa_feedback_cards_use_existing_bounded_session_coordinate(self) -> None:
+        class Adapter:
+            def build_source(self, **kwargs):
+                return SimpleNamespace(
+                    platform=SimpleNamespace(value="discord"),
+                    thread_id=None,
+                    prospective_thread_id=None,
+                )
+
+        gateway_patch._wrap_build_source(Adapter)
+        token = gateway_patch._QA_FEEDBACK_SESSION_ANCHOR.set(
+            gateway_patch._qa_feedback_session_anchor("message-qa-1")
+        )
+        try:
+            source = Adapter().build_source(chat_id="qa-channel")
+        finally:
+            gateway_patch._QA_FEEDBACK_SESSION_ANCHOR.reset(token)
+
+        self.assertEqual(
+            source.prospective_thread_id,
+            "hgfinance-qa-feedback:message-qa-1",
+        )
+        self.assertIsNone(source.thread_id)
+
+    def test_qa_feedback_cards_disable_only_peer_fallback(self) -> None:
+        source = SimpleNamespace(
+            platform=SimpleNamespace(value="discord"),
+            thread_id=None,
+            prospective_thread_id="hgfinance-qa-feedback:message-qa-2",
+            _hgfinance_qa_feedback_isolated=True,
+        )
+        original = {"allow_peer_fallback": True, "raise_on_lookup_error": False}
+
+        updated = gateway_patch._qa_feedback_recovery_kwargs(source, original)
+
+        self.assertFalse(updated["allow_peer_fallback"])
+        self.assertTrue(original["allow_peer_fallback"])
+
+        source.thread_id = "real-discord-thread"
+        threaded = gateway_patch._qa_feedback_recovery_kwargs(source, original)
+        self.assertTrue(threaded["allow_peer_fallback"])
+
     def test_ceo_repeat_command_replays_prior_answer_without_handler(self) -> None:
         class Sent:
             id = "9004"

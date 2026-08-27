@@ -1,8 +1,10 @@
 import os
 import inspect
 import sqlite3
+import sys
 import threading
 import time
+from functools import wraps
 
 
 _SENSITIVE_WORKER_ENV = (
@@ -19,9 +21,71 @@ def _fail_closed_secret_scope(reason):
     os.environ["HGFINANCE_DISPATCH_SECRET_SCOPE_STATUS"] = \
         f"FAIL_CLOSED:{reason}"
 
+
+def _suppress_dispatcher_cwd_warning():
+    """Ignore the dispatcher-owned cwd bridge in worker startup diagnostics.
+
+    Hermes' gateway warning cannot distinguish a task-scoped ``TERMINAL_CWD``
+    injected by Kanban from a stale profile ``.env`` value.  The dispatcher
+    already supplies the authoritative ``HERMES_KANBAN_WORKSPACE`` marker;
+    suppress the warning only for that worker scope and leave interactive
+    profile diagnostics unchanged.
+    """
+
+    if not os.environ.get("HERMES_KANBAN_WORKSPACE"):
+        return
+    try:
+        import hermes_cli.config as hermes_config
+    except Exception:
+        return
+
+    original = getattr(hermes_config, "warn_deprecated_cwd_env_vars", None)
+    if not callable(original) or getattr(original, "_hgfinance_dispatcher_cwd", False):
+        return
+
+    @wraps(original)
+    def _dispatcher_safe_cwd_warning(*args, **kwargs):
+        if os.environ.get("HERMES_KANBAN_WORKSPACE"):
+            return None
+        return original(*args, **kwargs)
+
+    _dispatcher_safe_cwd_warning._hgfinance_dispatcher_cwd = True
+    hermes_config.warn_deprecated_cwd_env_vars = _dispatcher_safe_cwd_warning
+
 if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
     try:
         import hermes_cli.kanban_db as kb
+
+        _suppress_dispatcher_cwd_warning()
+
+        # The shared dispatcher is the real process that runs CEO workers.
+        # The CEO gateway image has the same validator, but it is not the
+        # execution boundary for cards spawned by this daemon. Reuse the
+        # repository validator here so a planner cannot create a QA card as a
+        # second analysis primary. This wraps the existing Kanban primitive;
+        # it does not create another task path or alter non-CEO workers.
+        _repo_root = "/app/repo"
+        if _repo_root not in sys.path:
+            sys.path.insert(0, _repo_root)
+        from orchestration.primary_task_idempotency import (
+            validate_primary_create,
+        )
+
+        _original_create_task = kb.create_task
+
+        @wraps(_original_create_task)
+        def _hgfinance_guarded_create_task(*args, **kwargs):
+            if os.environ.get("HERMES_PROFILE", "").strip() == "ceo-agent":
+                rejection = validate_primary_create(
+                    kwargs.get("body"),
+                    kwargs.get("assignee"),
+                    kwargs.get("idempotency_key"),
+                )
+                if rejection:
+                    raise ValueError(rejection)
+            return _original_create_task(*args, **kwargs)
+
+        kb.create_task = _hgfinance_guarded_create_task
 
         _original_check_respawn_guard = kb.check_respawn_guard
         _original_guard_accepts_lane = (
@@ -158,19 +222,27 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                         timeout = 630.0
                     deadline = time.monotonic() + timeout
                     return_code = 0
+                    process_reaped = False
                     while time.monotonic() < deadline:
                         try:
                             waited_pid, wait_status = os.waitpid(int(pid), os.WNOHANG)
                         except (ChildProcessError, OSError):
-                            return
+                            # The native dispatcher may reap the child before
+                            # this fail-open observer wins the waitpid race.
+                            # The task-run row remains the authoritative
+                            # terminal signal in that case; do not lose the
+                            # LangSmith join key merely because the PID was
+                            # reaped by another dispatcher loop.
+                            break
                         if waited_pid == int(pid):
                             try:
                                 return_code = os.waitstatus_to_exitcode(wait_status)
                             except (AttributeError, ValueError):
                                 return_code = 0
+                            process_reaped = True
                             break
                         time.sleep(0.5)
-                    else:
+                    if not process_reaped and time.monotonic() >= deadline:
                         return
 
                     try:
@@ -187,40 +259,108 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                         db_path = os.environ.get("HERMES_KANBAN_DB", "")
                         task_status = ""
                         latest_run_id = run_id
-                        try:
-                            connection = sqlite3.connect(
-                                f"file:{Path(db_path).resolve()}?mode=ro",
-                                uri=True,
-                                timeout=1.0,
-                            )
-                            try:
-                                row = connection.execute(
-                                    "SELECT status FROM tasks WHERE id = ?",
-                                    (task_id,),
-                                ).fetchone()
-                                task_status = str(row[0] or "") if row else ""
-                                if latest_run_id is None:
-                                    row = connection.execute(
-                                        "SELECT id FROM task_runs WHERE task_id = ? "
-                                        "ORDER BY id DESC LIMIT 1",
-                                        (task_id,),
-                                    ).fetchone()
-                                    latest_run_id = row[0] if row else None
-                            finally:
-                                connection.close()
-                        except (OSError, TypeError, ValueError, sqlite3.Error):
-                            pass
-
                         started_at = getattr(task, "started_at", None) or \
                             getattr(task, "created_at", None) or time.time()
-                        publish_accounting_worker_trace(
+                        ended_at = time.time()
+
+                        def _read_task_run_state():
+                            if not db_path:
+                                return None
+                            try:
+                                connection = sqlite3.connect(
+                                    f"file:{Path(db_path).resolve()}?mode=ro",
+                                    uri=True,
+                                    timeout=1.0,
+                                )
+                                try:
+                                    if run_id is None:
+                                        row = connection.execute(
+                                            "SELECT t.status, t.started_at, t.completed_at, "
+                                            "r.id, r.status, r.ended_at, r.outcome "
+                                            "FROM tasks t LEFT JOIN task_runs r "
+                                            "ON r.id = (SELECT id FROM task_runs "
+                                            "WHERE task_id = t.id ORDER BY id DESC LIMIT 1) "
+                                            "WHERE t.id = ?",
+                                            (task_id,),
+                                        ).fetchone()
+                                    else:
+                                        row = connection.execute(
+                                            "SELECT t.status, t.started_at, t.completed_at, "
+                                            "r.id, r.status, r.ended_at, r.outcome "
+                                            "FROM tasks t LEFT JOIN task_runs r ON r.id = ? "
+                                            "WHERE t.id = ?",
+                                            (run_id, task_id),
+                                        ).fetchone()
+                                    return row
+                                finally:
+                                    connection.close()
+                            except (OSError, TypeError, ValueError, sqlite3.Error):
+                                return None
+
+                        if not process_reaped:
+                            # A task run can be terminal even when the native
+                            # loop already collected the PID. Poll only the
+                            # single task/run row and keep the observer off the
+                            # CEO response path.
+                            while time.monotonic() < deadline:
+                                state = _read_task_run_state()
+                                if state:
+                                    (
+                                        board_status,
+                                        board_started_at,
+                                        board_ended_at,
+                                        state_run_id,
+                                        run_status,
+                                        run_ended_at,
+                                        outcome,
+                                    ) = state
+                                    terminal_status = str(
+                                        board_status or run_status or outcome or ""
+                                    ).casefold()
+                                    if terminal_status in {
+                                        "done",
+                                        "completed",
+                                        "archived",
+                                        "blocked",
+                                        "gave_up",
+                                        "timed_out",
+                                        "crashed",
+                                        "failed",
+                                    } or str(run_status or "").casefold() not in {
+                                        "",
+                                        "running",
+                                    }:
+                                        task_status = str(
+                                            board_status or run_status or outcome or ""
+                                        )
+                                        latest_run_id = state_run_id or run_id
+                                        started_at = board_started_at or started_at
+                                        ended_at = board_ended_at or run_ended_at or ended_at
+                                        return_code = 0 if task_status.casefold() in {
+                                            "done",
+                                            "completed",
+                                            "archived",
+                                        } else 1
+                                        break
+                                time.sleep(0.5)
+                            else:
+                                return
+                        else:
+                            state = _read_task_run_state()
+                            if state:
+                                task_status = str(state[0] or state[4] or state[6] or "")
+                                latest_run_id = state[3] or run_id
+                                started_at = state[1] or started_at
+                                ended_at = state[2] or state[5] or ended_at
+
+                        publish_department_worker_trace(
                             task_id=task_id,
                             task_body=str(getattr(task, "body", "") or ""),
                             task_status=task_status,
                             run_id=str(latest_run_id or "unknown"),
                             return_code=int(return_code),
                             started_ms=int(float(started_at) * 1000),
-                            ended_ms=int(time.time() * 1000),
+                            ended_ms=int(float(ended_at) * 1000),
                             argv=["-p", assignee],
                             env=os.environ,
                         )

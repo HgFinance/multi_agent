@@ -58,6 +58,9 @@ agent-ops-monitor/incident-postmortem-agent/tool-permission-security-reviewer는
                                    # 하는 순수 함수다 - LLM이 리포트 형식·내용을 자유 창작하지 않는다.
 """
 
+# The standalone QA script bootstraps its sibling modules before importing them.
+# Keep E402 disabled only for this deliberate path setup.
+# ruff: noqa: E402
 from __future__ import annotations
 
 # Current runtime: Evidence QA is always evaluated first; Model Risk and Internal
@@ -100,7 +103,7 @@ from reporting import (
 )
 
 PIPELINE_VERSION = "qa-department-pipeline-v1"
-from apps.observability.risk_qa import get_runtime_telemetry, observe_pipeline
+from apps.observability.risk_qa import get_runtime_telemetry
 
 QA_TELEMETRY = get_runtime_telemetry("qa")
 from src.resilience import register_circuit_breaker_observer
@@ -338,7 +341,7 @@ def _fallback_assessment(state: QAState, exc: Exception) -> dict:
 
 
 # ── 노드 1: Evidence 검사 (결정론 직원 - EvidenceQaEngine) ─────────────────
-def check_evidence(state: QAState) -> dict:
+def _check_evidence_core(state: QAState) -> dict:
     from evidence_qa_engine import (
         Artifact,
         EvidenceChunk,
@@ -468,7 +471,7 @@ def model_and_internal_audit(state: QAState) -> dict:
 
 
 # ── 노드 1.5: Hallucination Critic (skills/agentic-rag, evidence-qa-agent 코퍼스 재사용) ──
-def hallucination_review(state: QAState) -> dict:
+def _hallucination_review_core(state: QAState) -> dict:
     from src.graph import run_compliance_check
 
     a = state["assessment"]
@@ -498,7 +501,7 @@ def hallucination_review(state: QAState) -> dict:
 
 
 # ── 노드 2: Claim 서술 (LLM 직원 - 내부 Ollama, grounded 서술만) ───────────
-def draft_claim_narrative(state: QAState) -> dict:
+def _draft_claim_narrative_core(state: QAState) -> dict:
     a = state["assessment"]
     report = run_qa_employee_workers(
         {
@@ -566,7 +569,7 @@ def _hermes_chat(persona: str, task: str) -> str:
         return agent.chat(task)
 
 
-def supervise(state: QAState, *, chat=None) -> dict:
+def _supervise_core(state: QAState, *, chat=None) -> dict:
     a = state["assessment"]
     bundle = {
         "decision": a["decision"],
@@ -609,7 +612,7 @@ Evidence:
     }
 
 
-def _assemble_out(state: QAState) -> dict:
+def _assemble_out_core(state: QAState) -> dict:
     """QAState -> run_qa_department()/notion_report 공용 결과 dict. 필드 목록을 한 곳에서만
     유지한다(03-risk/scripts.py와 동일 패턴) - 그래프 노드와 외부 인터페이스가 따로 베끼면
     한쪽만 필드를 늘렸을 때 드리프트가 생긴다."""
@@ -801,20 +804,6 @@ def _record_execution_evidence(
         }
 
 
-# ── 노드 4: Notion 업로드 (Reporter Node - 결정론, LLM 아님) ────────────────
-def notion_report(state: QAState, *, uploader=None) -> dict:
-    from notion_reporter import upload_case
-
-    out = _assemble_out(state)
-    report_md = _render_report_md(state["artifact"], state["decision_time"], out)
-    upload = uploader or upload_case
-    return {
-        "notion_upload": upload(
-            state["artifact"], state["decision_time"], out, report_md=report_md
-        )
-    }
-
-
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
 def build_pipeline():
     g = StateGraph(QAState)
@@ -834,21 +823,6 @@ def build_pipeline():
     return g.compile()
 
 
-@observe_pipeline(QA_TELEMETRY, "pipeline")
-def run_qa_department(artifact: dict, evidence_store: dict, decision_time: str) -> dict:
-    """본부 단독 실행 - Risk/Research 의 run_<dept>_department 와 같은 외부 인터페이스."""
-    out = build_pipeline().invoke(
-        {
-            "artifact": artifact,
-            "evidence_store": evidence_store,
-            "decision_time": decision_time,
-        }
-    )
-    result = _assemble_out(out)
-    result["notion_upload"] = out.get("notion_upload")
-    return result
-
-
 # ── 자체 점검 (Ollama·Hermes 없음) ──────────────────────────────────────────
 def _check_graph_shape():
     p = build_pipeline()
@@ -861,53 +835,67 @@ def _check_fail_still_narrates():
     # 그대로 유지되는지 - Ollama·Hermes·Agentic RAG 콜은 전부 스텁으로 대체한다. notion_report 도
     # 스텁한다 - 안 그러면 ai-office/.dev.vars 에 실제 토큰이 있을 때 자체 점검이 진짜 Notion에
     # 네트워크 호출을 낸다(03-risk/scripts.py와 동일 이유).
-    global \
-        check_evidence, \
-        hallucination_review, \
-        _call_internal_llm, \
-        _hermes_chat, \
-        notion_report
-    orig = (
-        check_evidence,
-        hallucination_review,
-        _call_internal_llm,
-        _hermes_chat,
-        notion_report,
-    )
-    check_evidence = lambda s: {
-        "assessment": {
-            "qa_decision_id": "d1",
-            "decision": "FAIL",
-            "reason_codes": ["fact_without_evidence"],
-            "claim_checks": [
+    def stub_check_evidence(_state):
+        return {
+            "assessment": {
+                "qa_decision_id": "d1",
+                "decision": "FAIL",
+                "reason_codes": ["fact_without_evidence"],
+                "claim_checks": [
+                    {
+                        "claim_index": 0,
+                        "claim": "x",
+                        "result": "UNSUPPORTED",
+                        "reason": "근거 없음",
+                    }
+                ],
+                "findings": [
+                    {
+                        "finding_type": "unsupported_claim",
+                        "severity": "HIGH",
+                        "description": "d",
+                    }
+                ],
+            }
+        }
+
+    def stub_hallucination_review(_state):
+        return {
+            "hallucination_reviews": [
                 {
                     "claim_index": 0,
-                    "claim": "x",
-                    "result": "UNSUPPORTED",
-                    "reason": "근거 없음",
+                    "answer": {"verdict": "HALLUCINATION"},
+                    "grounded": True,
                 }
-            ],
-            "findings": [
-                {
-                    "finding_type": "unsupported_claim",
-                    "severity": "HIGH",
-                    "description": "d",
-                }
-            ],
+            ]
         }
-    }
-    hallucination_review = lambda s: {
-        "hallucination_reviews": [
-            {"claim_index": 0, "answer": {"verdict": "HALLUCINATION"}, "grounded": True}
-        ]
-    }
-    _call_internal_llm = lambda prompt: "요약: 근거 없는 주장 1건"
-    _hermes_chat = lambda persona, task: (
-        '{"narrative": "차단됨", "escalate": true, "cited_checks": ["0"]}'
+
+    def stub_internal_llm(_prompt):
+        return "요약: 근거 없는 주장 1건"
+
+    def stub_hermes_chat(_persona, _task):
+        return '{"narrative": "차단됨", "escalate": true, "cited_checks": ["0"]}'
+
+    def stub_notion_report(_state):
+        return {"notion_upload": {"ok": False, "reason": "self-check stub"}}
+
+    names = (
+        "check_evidence",
+        "hallucination_review",
+        "_call_internal_llm",
+        "_hermes_chat",
+        "notion_report",
     )
-    notion_report = lambda s: {
-        "notion_upload": {"ok": False, "reason": "self-check stub"}
-    }
+    originals = {name: globals()[name] for name in names}
+    globals().update(
+        {
+            "check_evidence": stub_check_evidence,
+            "hallucination_review": stub_hallucination_review,
+            "_call_internal_llm": stub_internal_llm,
+            "_hermes_chat": stub_hermes_chat,
+            "notion_report": stub_notion_report,
+        }
+    )
     try:
         out = build_pipeline().invoke(
             {"artifact": {}, "evidence_store": {}, "decision_time": "x"}
@@ -917,13 +905,7 @@ def _check_fail_still_narrates():
         assert out["escalate"] is True
         assert out["hallucination_reviews"][0]["answer"]["verdict"] == "HALLUCINATION"
     finally:
-        (
-            check_evidence,
-            hallucination_review,
-            _call_internal_llm,
-            _hermes_chat,
-            notion_report,
-        ) = orig
+        globals().update(originals)
     print("  FAIL 판정에도 서술 계속됨   OK")
 
 
@@ -979,7 +961,8 @@ def _check_hallucination_review_conditional():
 
 def _check_supervisor_guard():
     a = {"decision": "PASS", "reason_codes": [], "claim_checks": [], "findings": []}
-    bad_chat = lambda persona, task: '{"narrative": "n"}'  # escalate/cited_checks 누락
+    def bad_chat(_persona, _task):  # escalate/cited_checks 누락
+        return '{"narrative": "n"}'
     try:
         supervise({"assessment": a, "claim_narrative": "n"}, chat=bad_chat)
         raise AssertionError("불완전 종합 결과가 통과했다")
@@ -1209,10 +1192,10 @@ def _check_notion_report_node():
     print("  Notion Reporter 노드        OK")
 
 
-_RAW_CHECK_EVIDENCE = check_evidence
-_RAW_HALLUCINATION_REVIEW = hallucination_review
-_RAW_DRAFT_CLAIM_NARRATIVE = draft_claim_narrative
-_RAW_SUPERVISE = supervise
+_RAW_CHECK_EVIDENCE = _check_evidence_core
+_RAW_HALLUCINATION_REVIEW = _hallucination_review_core
+_RAW_DRAFT_CLAIM_NARRATIVE = _draft_claim_narrative_core
+_RAW_SUPERVISE = _supervise_core
 
 
 def check_evidence(state: QAState) -> dict:
@@ -1292,7 +1275,7 @@ def supervise(state: QAState, *, chat=None) -> dict:
         }
 
 
-_RAW_ASSEMBLE_OUT = _assemble_out
+_RAW_ASSEMBLE_OUT = _assemble_out_core
 
 
 def _assemble_out(state: QAState) -> dict:
@@ -1339,9 +1322,6 @@ def _assemble_out(state: QAState) -> dict:
     return out
 
 
-_RAW_NOTION_REPORT = notion_report
-
-
 def notion_report(state: QAState, *, uploader=None) -> dict:
     out = _assemble_out(state)
     report_md = _render_report_md(state["artifact"], state["decision_time"], out)
@@ -1366,9 +1346,6 @@ def notion_report(state: QAState, *, uploader=None) -> dict:
         "report_markdown": report_md,
         "evaluation": evaluation,
     }
-
-
-_RAW_RUN_QA_DEPARTMENT = run_qa_department
 
 
 def run_qa_department(
@@ -1484,7 +1461,7 @@ def _fallback_ops_assessment(state: OpsIncidentState, exc: Exception) -> dict:
     }
 
 
-def evaluate_ops_health(state: OpsIncidentState) -> dict:
+def _evaluate_ops_health_core(state: OpsIncidentState) -> dict:
     from decimal import Decimal
 
     from ops_health_monitor import AgentHealthMetrics, OpsHealthMonitor, OpsThresholds
@@ -1536,7 +1513,7 @@ def _ops_incident_detected(state: OpsIncidentState) -> bool:
     return (state.get("ops_assessment") or {}).get("incident") is not None
 
 
-def record_incident_fact(state: OpsIncidentState) -> dict:
+def _record_incident_fact_core(state: OpsIncidentState) -> dict:
     from incident_timeline import IncidentEntryType, IncidentTimeline
 
     incident = state["ops_assessment"]["incident"]
@@ -1552,7 +1529,7 @@ def record_incident_fact(state: OpsIncidentState) -> dict:
     return {"incident_events": [_event_dict(event)]}
 
 
-def draft_incident_postmortem(state: OpsIncidentState) -> dict:
+def _draft_incident_postmortem_core(state: OpsIncidentState) -> dict:
     from incident_timeline import IncidentEntryType, IncidentTimeline
 
     incident = state["ops_assessment"]["incident"]
@@ -1606,9 +1583,9 @@ def run_ops_incident_review(
     }
 
 
-_RAW_EVALUATE_OPS_HEALTH = evaluate_ops_health
-_RAW_RECORD_INCIDENT_FACT = record_incident_fact
-_RAW_DRAFT_INCIDENT_POSTMORTEM = draft_incident_postmortem
+_RAW_EVALUATE_OPS_HEALTH = _evaluate_ops_health_core
+_RAW_RECORD_INCIDENT_FACT = _record_incident_fact_core
+_RAW_DRAFT_INCIDENT_POSTMORTEM = _draft_incident_postmortem_core
 
 
 def evaluate_ops_health(state: OpsIncidentState) -> dict:
@@ -1644,9 +1621,10 @@ def _check_ops_incident_conditional():
     # OpsAssessment.incident를 그대로 물려받아 FACT/INFERENCE가 남는지 확인한다.
     global _call_internal_llm
     orig = _call_internal_llm
-    _call_internal_llm = lambda prompt: (
-        "지연 원인은 market-api 응답 지연으로 추정됨(확정 아님)"
-    )
+    def stub_internal_llm(_prompt):
+        return "지연 원인은 market-api 응답 지연으로 추정됨(확정 아님)"
+
+    _call_internal_llm = stub_internal_llm
     now = datetime.now(timezone.utc)
     healthy_metrics = {
         "scope": "research-department",
@@ -1692,7 +1670,7 @@ class ToolPermissionState(TypedDict, total=False):
     fallbacks: list[dict]
 
 
-def check_tool_permission_node(state: ToolPermissionState) -> dict:
+def _check_tool_permission_node_core(state: ToolPermissionState) -> dict:
     from tool_permission_check import AgentToolPolicy, check_tool_permission
 
     p = state["policy"]
@@ -1711,7 +1689,7 @@ def _permission_denied(state: ToolPermissionState) -> bool:
     return (state.get("permission_check") or {}).get("result") == "DENIED"
 
 
-def narrate_permission_violation(state: ToolPermissionState) -> dict:
+def _narrate_permission_violation_core(state: ToolPermissionState) -> dict:
     prompt = f"""{_persona("tool-permission-security-reviewer")}
 
 아래는 결정론적 Tool Allowlist 판정 결과다(DENIED). 새 판정을 내리지 말고, 위반 사실과 왜
@@ -1745,8 +1723,8 @@ def run_tool_permission_review(policy: dict, tool_name: str) -> dict:
     }
 
 
-_RAW_CHECK_TOOL_PERMISSION_NODE = check_tool_permission_node
-_RAW_NARRATE_PERMISSION_VIOLATION = narrate_permission_violation
+_RAW_CHECK_TOOL_PERMISSION_NODE = _check_tool_permission_node_core
+_RAW_NARRATE_PERMISSION_VIOLATION = _narrate_permission_violation_core
 
 
 def check_tool_permission_node(state: ToolPermissionState) -> dict:
@@ -1777,7 +1755,10 @@ def narrate_permission_violation(state: ToolPermissionState) -> dict:
 def _check_tool_permission_conditional():
     global _call_internal_llm
     orig = _call_internal_llm
-    _call_internal_llm = lambda prompt: "Allowlist 밖 Tool 호출 - 즉시 Escalation 필요"
+    def stub_internal_llm(_prompt):
+        return "Allowlist 밖 Tool 호출 - 즉시 Escalation 필요"
+
+    _call_internal_llm = stub_internal_llm
     policy = {
         "agent_id": str(uuid4()),
         "profile_version_id": str(uuid4()),

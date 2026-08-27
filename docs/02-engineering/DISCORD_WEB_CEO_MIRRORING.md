@@ -9,15 +9,20 @@ Hermes profile, Discord token, systemd gateway, Kanban DB를 프론트엔드가 
 ```text
 Web/Discord human message
   → POST /ui/ceo/ingress
-  → request_id + source_message_id dedup
-  → single POST /ui/ceo/ask implementation
-  → one CEO root Kanban task
-  → Redis hf:ui-ceo-mirror:v1
-  → GET /ui/ceo/events or /ui/ceo/events/stream
+  → BFF central intent router
+  ├─ 일반 질의: request_id + source_message_id dedup
+  │             → one CEO root Kanban task
+  │             → Redis hf:ui-ceo-mirror:v1
+  │             → GET /ui/ceo/events or /ui/ceo/events/stream
+  └─ 전략 질의: Strategy Hermes intake
+                → labs/<request_id>/ (CEO/Kanban 없음)
+                → GET /ui/strategy-research/requests/<request_id>
 ```
 
 기존 `POST /ui/ceo/ask`도 `source=web` canonical ingress로 보호된다. 기존 응답
-필드와 `202 Accepted` 계약은 유지한다. 기존 `/ui/ceo/tasks*` read API도 그대로
+필드와 `202 Accepted` 계약은 일반 CEO 질의에 대해 유지한다. 전략 생성 의도는 같은
+BFF endpoint에서 `autonomous-research-request.v1`을 반환하고 `/ui/strategy-research/
+requests/<request_id>`로 상태를 조회한다. 기존 `/ui/ceo/tasks*` read API도 그대로
 사용한다.
 
 ## 입력 계약

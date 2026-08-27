@@ -247,6 +247,12 @@ class SQLiteRootScopedIndex:
                 str(row[1])
                 for row in conn.execute("PRAGMA table_xinfo(tasks)")
             }
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
             completed_at_expression = (
                 "completed_at" if "completed_at" in columns else "NULL"
             )
@@ -271,6 +277,53 @@ class SQLiteRootScopedIndex:
                 if ROOT_COLUMN in columns
                 else "1"
             )
+            analysis_child_expression = (
+                "CASE WHEN EXISTS ("
+                "SELECT 1 FROM tasks AS analysis_child "
+                "WHERE analysis_child.workflow_root_task_id = tasks.id "
+                "AND instr(char(10) || replace(coalesce(analysis_child.body, ''), "
+                "char(13), '') || char(10), "
+                "char(10) || 'workflow_role=primary' || char(10)) > 0"
+                ") THEN 1 ELSE 0 END"
+                if ROOT_COLUMN in columns
+                else "0"
+            )
+            terminal_primary_expression = (
+                "CASE WHEN EXISTS ("
+                "SELECT 1 FROM tasks AS terminal_primary "
+                "WHERE terminal_primary.workflow_root_task_id = tasks.id "
+                "AND instr(char(10) || replace(coalesce(terminal_primary.body, ''), "
+                "char(13), '') || char(10), "
+                "char(10) || 'workflow_role=primary' || char(10)) > 0 "
+                "AND lower(coalesce(terminal_primary.status, '')) IN ("
+                "'done','completed','archived','blocked','failed','gave_up',"
+                "'crashed','timed_out','spawn_failed','triage','cancelled'"
+                ")"
+                ") THEN 1 ELSE 0 END"
+                if ROOT_COLUMN in columns
+                else "0"
+            )
+            synthesis_expression = (
+                "CASE WHEN EXISTS ("
+                "SELECT 1 FROM tasks AS synthesis_child "
+                "WHERE synthesis_child.workflow_root_task_id = tasks.id "
+                "AND instr(char(10) || replace(coalesce(synthesis_child.body, ''), "
+                "char(13), '') || char(10), "
+                "char(10) || 'workflow_role=synthesis' || char(10)) > 0"
+                ") THEN 1 ELSE 0 END"
+                if ROOT_COLUMN in columns
+                else "0"
+            )
+            selection_comment_expression = (
+                "CASE WHEN EXISTS ("
+                "SELECT 1 FROM task_comments AS selection_comment "
+                "WHERE selection_comment.task_id = tasks.id "
+                "AND instr(replace(coalesce(selection_comment.body, ''), "
+                "char(13), ''), 'selected_primary_profiles=') > 0"
+                ") THEN 1 ELSE 0 END"
+                if "task_comments" in tables
+                else "0"
+            )
             # An empty-primary clarification is a durable terminal handling
             # marker for the invalid plan.  Exclude only that exact control
             # child from recovery discovery; other REQUEST_USER_INPUT tasks
@@ -285,7 +338,11 @@ class SQLiteRootScopedIndex:
             rows = conn.execute(
                 "SELECT id, body, status, created_at, "
                 f"{completed_at_expression} AS completed_at, "
-                f"{active_primary_expression} AS has_active_primary "
+                f"{active_primary_expression} AS has_active_primary, "
+                f"{analysis_child_expression} AS has_analysis_child, "
+                f"{terminal_primary_expression} AS has_terminal_primary, "
+                f"{synthesis_expression} AS has_synthesis, "
+                f"{selection_comment_expression} AS has_selection_comment "
                 "FROM tasks "
                 "WHERE body IS NOT NULL AND ("
                 "instr(body, 'workflow_role=root') > 0 OR "
@@ -313,6 +370,10 @@ class SQLiteRootScopedIndex:
                     "created_at": row["created_at"],
                     "completed_at": row["completed_at"],
                     "has_active_primary": bool(row["has_active_primary"]),
+                    "has_analysis_child": bool(row["has_analysis_child"]),
+                    "has_terminal_primary": bool(row["has_terminal_primary"]),
+                    "has_synthesis": bool(row["has_synthesis"]),
+                    "has_selection_comment": bool(row["has_selection_comment"]),
                 }
                 for row in rows
                 if row["id"]

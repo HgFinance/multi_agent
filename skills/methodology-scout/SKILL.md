@@ -1,6 +1,6 @@
 ---
 name: methodology-scout
-description: "Turn open-web methodology (papers, investor letters, practitioner writing, communities, other fields) into falsifiable experiment proposals the Quant department can preregister. Enforces source discipline, competing explanations, and prior-art checks."
+description: "Turn open-web methodology (papers, investor letters, practitioner writing, communities, other fields) into source-grounded hypotheses for the autonomous quant research lab. Enforces source discipline, competing explanations, and prior-art checks."
 version: 0.1.0
 platforms: [linux, macos, windows]
 metadata:
@@ -9,19 +9,20 @@ metadata:
     related_skills: [agentic-rag]
 ---
 
-# Methodology Scout: 방법론 → 실험 기획안
+# Methodology Scout: 방법론 → 근거·가설
 
 ## Overview
 
-이 스킬은 리서치본부의 본업 절차다. **웹에서 방법을 찾아 실험 기획안으로 만든다.**
-산출물은 사람이 읽는 리포트가 아니라 퀀트가 질문 없이 사전 등록할 수 있는
-`ExperimentProposalV1` 이다.
+이 스킬은 자율 연구실의 탐색 렌즈다. **웹에서 방법을 찾아 근거와 경쟁 가설로 만든다.**
+산출물은 사람이 읽는 리포트에 그치지 않고, 연구실의 영속 `hypotheses/`와 등록 계획으로
+넘길 수 있는 source-grounded evidence다. 계획 생성·실험 실행·결과 판정은
+`autonomous-quant-research` 러너와 결정론 검증면이 소유한다.
 
 종목 방향·확률 예측은 이 스킬의 범위가 아니다. 방향 판단은 실험을 통과해 승격된
 전략의 몫이고, 여기서 그것을 하면 프레임워크가 다시 투자판단을 하게 된다.
 
-계약: `departments/01-research/contracts/factory_contracts.py`
-발행 게이트: `departments/01-research/factory/publish_gate.py` (결정론)
+연구실: `departments/01-research/autonomous/`
+결과 게이트: `departments/01-research/autonomous/result.py` (결정론)
 
 ## When to use
 
@@ -43,15 +44,15 @@ metadata:
 
 ## 절차
 
-### 1. 수집 — 리드를 만든다
+### 1. 수집 — 근거 카드를 만든다
 
-각 소스마다 `MethodologyLeadV1` 하나. **다음이 없으면 리드가 아니다:**
+각 소스마다 근거 카드 하나. **다음이 없으면 연구 근거가 아니다:**
 
 - `refs` — URL, 제목, 발행일, 접근 시각, **원문 발췌**(≤500자). 요약이 아니라 인용이다
 - `claimed_edge` — 소스가 주장하는 엣지 한 문장. 당신의 해석이 아니라 소스의 주장
 - `market_context` — 소스가 실제로 다룬 시장과 기간
 
-**출처 없는 리드는 폐기한다.** 기억으로 재구성하지 않는다 — 그것이 이 파이프라인의
+**출처 없는 카드는 폐기한다.** 기억으로 재구성하지 않는다 — 그것이 이 파이프라인의
 첫 번째 오염원이고, 하류의 어떤 검사도 그것을 못 잡는다(결정론 검사는 URL 존재는
 보지만 발췌가 원문과 같은지는 못 본다).
 
@@ -80,24 +81,22 @@ metadata:
 후보 AST도 공개 기준선과 달라야 한다. 공개 문헌은 메커니즘과 반증 조건의 근거이지,
 그 공개 수식이 지금도 수익을 낸다는 근거가 아니다.
 
-### 2. 기각 이력 대조 — 회사가 이미 산 실험인가
+### 2. 실패 기억 대조 — 이미 소진한 경로인가
 
-기획안을 쓰기 **전에** 같은 trial family 의 `ExperimentOutcomeV1` 을 조회한다.
-기각 교훈(`lesson_codes`)마다 `lessons_addressed` 에 대응을 적는다. 대응 없는
-재도전은 발행 게이트와 퀀트 Gate 0 양쪽에서 막힌다.
+가설을 등록하기 **전에** `FAILURE_MEMORY.md`와 기존 결과를 조회한다. 같은
+representation·label·sampling·regime 경로가 반복되면 숫자만 바꾸지 말고 pivot한다.
 
 대응은 "다시 해보겠다"가 아니라 **무엇을 바꿔서 그 교훈을 피하는가**다.
 예: `BEAR_FRAGILE` → "하락장 표본을 2창에서 5창으로 늘려 재검증한다"
 
-### 3. 기획 — 통제 어휘로 사상한다
+### 3. 가설 설계 — 연구 차원으로 사상한다
 
-`edge_type` 과 `universe_key` 는 퀀트 실행면의 통제 어휘에만 있는 값을 쓴다.
-**자유 서술 금지.** 같은 뜻을 매번 다르게 쓰면("KRX 전체 시장" vs "KRX 시장 전 종목")
-같은 아이디어가 서로 다른 trial family 로 흩어지고, 그러면 다중검정 가드가
-조용히 무력화된다.
+`representation`, `label`, `sampling`, `horizon`, `regime`, `model`을 명시한다.
+**자유 서술만 남기지 않는다.** 같은 아이디어가 다른 이름으로 반복되면 연구실의
+anti-loop가 작동하지 않으므로, 차원과 parent lineage를 함께 기록한다.
 
-어휘에 없으면 **기획안을 만들지 않고 어휘 등재를 요청한다.** 비슷한 것으로 대신
-돌리면 그 결과는 이 가설의 증거가 아니라 다른 전략의 성적이다.
+실행에 필요한 데이터나 방법이 없으면 **계획을 억지로 만들지 않고 BLOCKED**로 기록한다.
+비슷한 것으로 대신 돌리면 그 결과는 이 가설의 증거가 아니라 다른 전략의 성적이다.
 
 ### 4. 경제적 근거 — 누가 반대편에서 잃어주는가
 
@@ -111,16 +110,16 @@ metadata:
 비-알파 설명을 만든다: `BETA_EXPOSURE` / `LIQUIDITY_PREMIUM` / `DATA_MINING` /
 `COST_UNACCOUNTED` 중 최소 하나.
 
-서명(`skeptic_sign`) 없이는 발행되지 않는다. 자기가 쓴 것을 자기가 반박하면
-그것은 반증이 아니라 자기 검열이다.
+경쟁 설명과 falsifier 없이는 계획을 만들지 않는다. 자기가 쓴 것을 자기가 반박하면
+그것은 반증이 아니라 자기 검열이므로, 별도 검토 기록으로 남긴다.
 
-### 6. 발행 — 결정론 게이트를 통과한다
+### 6. 계획 등록 — 결정론 게이트로 넘긴다
 
-`publish_gate.evaluate()` 가 판정한다. 막는 것: 성과 서술만인 근거, 끊어진 리드 참조,
-`UNUSABLE` 리드, 기각 교훈 미대응, 예산 소진.
+자율 연구실의 계획·결과 게이트가 판정한다. 막는 것: 출처 없는 근거, 측정 불가능한
+가설, 누수, 비용·OOS·강건성 증거 누락, 같은 경로의 무의미한 반복.
 
-**게이트는 "그럴듯한가"를 판정하지 않는다** — 답해야 할 질문에 답을 적었는지만 본다.
-그럴듯한지는 실험이 판정한다.
+**게이트는 "그럴듯한가"를 판정하지 않는다** — 등록 가능한 질문과 반증 조건을 확인하고,
+그럴듯한지는 독립 실험과 결과가 판정한다.
 
 ## 도구
 

@@ -288,25 +288,6 @@ services:
     depends_on: *control-dependency
     environment: *control-environment
 
-  factory-kanban-dispatcher:
-    # 실행면 이미지(quant-py·agent-reach 포함). 카드를 도는 에이전트가
-    # 이 컨테이너 안에서 뜨므로 작업면은 여기 있어야 한다
-    # (Dockerfile.agent-runtime 머리말 참고, 2026-08-23 배선).
-    image: hedgefund-agent-runtime:latest
-    environment:
-      # 퀀트 프로필 config.yaml 의 ${QUANT_DATABASE_URL} 이 여기서 풀린다.
-      # RLS: quant.hypotheses/experiments 정책은 svc_quant 전용이라
-      # runtime 롤 그대로면 오류 없이 0행이 보인다(2026-08-23 실측).
-      # trading 과 같은 SET ROLE 패턴을 쓴다 - runtime 은 이미 멤버다.
-      QUANT_DATABASE_URL: "postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_quant"
-      # 퀀트 프로필의 TIMESCALE_DATABASE_URL 이 이 변수를 **전체-값**으로
-      # 치환한다. hermes 프로필 env 는 문자열 중간 ${VAR} 를 치환하지
-      # 않는다(2026-08-24 실측) - 완성 URL 을 여기서 내린다.
-      HEDGEFUND_TSDB_PASSWORD: ${HEDGEFUND_TSDB_PASSWORD:?}
-      # The dispatcher only needs market reads. Keep the deployment runtime
-      # on the least-privilege market login; admin-market is bootstrap-only.
-      TIMESCALE_DATABASE_URL: *market-database-url
-
   research-mcp:
     depends_on: *control-dependency
     environment:
@@ -379,30 +360,6 @@ services:
       DATABASE_URL: *control-database-url
       MEMOHARNESS_D5_DATABASE_URL: *control-database-url
       MEMOHARNESS_D5_RETENTION_VACUUM_ANALYZE: "false"
-
-  factory-autopilot:
-    environment:
-      <<: *control-and-market-environment
-      QUANT_DATABASE_URL: *control-database-url
-      DATABASE_SESSION_URL: *control-database-url
-
-  factory-experiment-worker:
-    environment:
-      <<: *control-session-environment
-      QUANT_DATABASE_URL: *control-database-url
-      TIMESCALE_DATABASE_URL: *market-database-url
-      # 63세션 틱 리플레이는 30분을 넘긴다 - 일하는 중인 실험을 좀비로
-      # 몰아 죽이지 않도록 실측 전까지 넉넉히 둔다(2026-08-24 실측: 두 건이
-      # 정확히 30:00 에 CANCELLED 로 닫혔다).
-      HYPOTHESIS_STALL_MIN: ${HYPOTHESIS_STALL_MIN:-180}
-    volumes:
-      # ▶ 코드를 마운트한다 (2026-08-24 실측)
-      #   이 컨테이너는 코드가 이미지에 구워져 있어 저장소 수정이 닿지 않았다.
-      #   HYPOTHESIS_STALL_MIN 을 env 로 열어 놓고 180 을 줬는데도 워커는
-      #   이미지 안의 옛 상수 30 을 계속 썼고, 33분째 일하던 실험을 죽였다.
-      #   디스패처는 이미 같은 방식으로 저장소를 마운트한다 - 관례를 맞춘다.
-      - ./departments/04-quant-backtest:/app/departments/04-quant-backtest:ro
-      - ./departments/01-research:/app/departments/01-research:ro
 
   governance-api:
     depends_on: *control-dependency

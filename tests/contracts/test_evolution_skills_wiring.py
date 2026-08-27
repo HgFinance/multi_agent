@@ -71,12 +71,24 @@ def test_feedback_producer_and_worker_share_persistent_occurrence_path() -> None
     )
 
 
-def test_factory_image_contains_generator_entrypoint_and_model_gateway() -> None:
-    dockerfile = (ROOT / "Dockerfile.factory").read_text(encoding="utf-8")
+def test_operations_image_contains_generator_entrypoint_and_model_gateway() -> None:
+    dockerfile = (ROOT / "Dockerfile.operations-runtime").read_text(encoding="utf-8")
     assert "COPY scripts/evolution_skills.py" in dockerfile
     assert "COPY departments/worker_model_gateway.py" in dockerfile
+    for source in (
+        "orchestration/qa_feedback_benchmarks.py",
+        "orchestration/qa_skill_evolution_bridge.py",
+        "orchestration/llm_observability.py",
+        "orchestration/semantic_qa.py",
+        "orchestration/answer_contract.py",
+        "departments/qwen_hybrid_runtime.py",
+        "benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json",
+    ):
+        assert f"COPY {source}" in dockerfile
     assert "COPY departments/01-research/config/worker_model_registry.json" in dockerfile
     assert "PyYAML==6.0.2" in dockerfile
+    assert '"jsonschema>=4.10,<5"' in dockerfile
+    assert "COPY departments/01-research/factory" not in dockerfile
     entrypoint = (ROOT / "scripts/evolution_skills.py").read_text(encoding="utf-8")
     assert '"skill-evolution-proposal-worker", env=env' in entrypoint
     registry = yaml.safe_load(

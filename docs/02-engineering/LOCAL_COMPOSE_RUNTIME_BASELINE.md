@@ -92,6 +92,7 @@ AI Office 로컬 모의투자는 이 BFF의 고정 데모 ID 경계와 LS PAPER 
 - `GET /ui/snapshot`: 금융 Read Model과 운영 Projection
 - `GET /ws/operations`: `agent.status.v1`·sequence 기반 운영 Event
 - `POST /ui/ceo/ask`: 일반 질의는 기존 CEO workflow로 보낸다. 명시적인 사용자 주문은 인증된 user/Fund/Book에 결박된 PAPER 전용 CEO root와 pre-created Trading primary를 만들고 `202 Accepted`, `order_request_id`, `trading_task_id`를 반환한다.
+- `POST /ui/ceo/ask`: 전략 생성·백테스트 의도는 BFF 중앙 라우터가 자율 연구실 intake로 분기한다. 연구 상태는 `GET /ui/strategy-research/requests/{request_id}`로 조회하며 CEO/Kanban은 생성하지 않는다.
 - `GET /ui/paper-order-requests/{order_request_id}`: Trading Hermes 해석, PAPER directive, fill 및 Accounting ACK까지의 상태를 조회한다.
 - `POST /ui/portfolio-recommendations`: 비구속 포트폴리오 추천 실행
 - `GET /health`, `GET /health/ready`: BFF와 의존성 상태

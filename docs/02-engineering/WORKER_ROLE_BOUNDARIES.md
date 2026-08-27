@@ -124,7 +124,7 @@ LLM Worker **10개**(2026-08-10~11 Research 6→2·Quant 7→2 축소 전 19개,
 
 #### CEO는 왜 러너를 두는가 (2026-08-11)
 
-CEO는 **기준 1을 HR과 같은 방식으로는 통과하지 못한다.** 부서장이 4개 workflow에 등장하고 `input_contract`가 넷이다 — `accounting_snapshot`(investment-case), `strategy_qa_assessment`(strategy-research), `permission_review`(workforce-management), `revision_qa_assessment`(agent-evolution). [CEO_RUNNER_SPEC.md](CEO_RUNNER_SPEC.md) §2가 investment-case 하나만 보고 "역할이 하나라 봉투 모양이 고정"이라고 적은 것은 정확하지 않다.
+CEO는 **기준 1을 HR과 같은 방식으로는 통과하지 못한다.** 부서장이 4개 workflow에 등장하고 `input_contract`가 넷이다 — `accounting_snapshot`(investment-case), `strategy_qa_assessment`(strategy-research), `permission_review`(workforce-management), `revision_qa_assessment`(agent-evolution). [CEO_ARCHITECTURE.md](CEO_ARCHITECTURE.md) §4가 이 차이와 runner 성립 근거를 정본으로 설명한다.
 
 **그런데도 러너가 성립하는 이유는 기준의 취지가 봉투의 *개수*가 아니라 봉투를 *만들 수 있는가*이기 때문이다.** HR이 막힌 진짜 지점은 기준 2였다 — `approve_request()`는 특정 `AccessRequest` 객체를, `transition()`은 특정 Candidate를 요구하는데 셋 다 dispatch payload에 없어서, 러너를 만들어도 계산할 것이 없었다. CEO는 다르다. 네 흐름 전부 `paper_pipeline._store()`가 **계약 이름을 키로** 산출물을 `context["artifacts"]`에 쌓고, 그 dict가 CEO dispatch payload 안에 그대로 들어온다(investment-case는 `artifacts`, 나머지 셋은 `workflow_context.artifacts`). 이름이 같으므로 러너는 어느 흐름인지 **묻지 않고** 같은 6개 이름을 조회하면 된다.
 

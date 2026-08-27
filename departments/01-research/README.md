@@ -11,9 +11,19 @@ Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 �
 
 ## Mission
 
-**가설 공급 조직이다.** 웹(논문·투자자 서한·실무자 글·커뮤니티·타 분야)에서 방법론을 수집해
-반증 가능한 **실험 기획안**으로 만들어 퀀트본부에 넘긴다. 종목 방향·확률 예측은 하지 않는다 —
-방향 판단은 실험을 통과해 승격된 전략의 몫이다.
+**자율 연구실이다.** 웹(논문·투자자 서한·실무자 글·커뮤니티·타 분야)과 내부 증거를 스스로
+탐색하고, 가설·계획·실험·반증·학습을 영속 아티팩트로 남긴다. 종목 방향·확률 예측과 주문은
+하지 않으며, 강건성 검증을 통과한 경우에도 별도 검증·Risk·사람 심사를 위한 후보만 낸다.
+
+### 현행 전략 연구 경로
+
+`departments/01-research/autonomous/`의 Hermes 연구 러너가 정본입니다. 사용자의 자연어 목표는
+`POST /ui/strategy-research/ask`로 `intake/`에 멱등 매니페스트로 등록되고, 워커가 이를
+`labs/<request_id>/`의 독립 연구실로 물질화합니다. 그 폴더 안에서 `objective.json`,
+`hypotheses/`, `plans/`, `results/`, `agent-runs/`, `events.jsonl`과 사람이 읽는 요약 파일을
+영속화하며, 재시작해도 같은 `request_id`로 이어집니다. PIT·비용·OOS·강건성·누수·실패 모드
+게이트를 통과하지 못한 결과는 후보로 승격되지 않습니다. 기존 DB/팩토리 계약은 안전한 의존성
+이관과 감사 증거를 위해 보존되어 있지만 이 경로에 연결되지 않습니다.
 
 수집·PIT·인용 검증 인프라는 그대로 쓴다. 바뀐 것은 **무엇을 만드느냐**다.
 
@@ -30,10 +40,10 @@ Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 �
 
 - 입력: 웹 방법론 소스(논문·프리프린트·투자자 서한·실무 블로그·커뮤니티·영상·타 분야 문헌),
   퀀트의 `ExperimentOutcomeV1` 기각 이력, 내부 시장 데이터(실행 가능성 판정용)
-- 출력: **`ExperimentProposalV1`** (경제적 근거, 반대편 주체, 경쟁 설명, 통제 어휘 사상,
-  데이터 요구, 반증 검사, 기각 이력 대응) → 퀀트본부 Gate 0
-- 부가 출력: `MethodologyLeadV1`(스카우트 리드), Holding Brief(사용자 질의 응답 —
-  **공장 입력이 아니고 주문 경로에도 닿지 않는다**)
+- 출력: **자율 연구 계획과 불변 결과 아티팩트** (경제적 근거, 경쟁 설명, 데이터 요구,
+  반증 검사, 실패 이력, 계보) → 퀀트본부 검증 실험실
+- 부가 출력: 근거 카드·방법론 메모, Holding Brief(사용자 질의 응답 —
+  **자율 연구실 입력과 주문 경로에 닿지 않는다**)
 - 시장 시계열 저장·조회 경계는 `repository/market_repository.py`의 `MarketDataRepository`다.
   다른 본부는 이 Repository가 아니라 실행 중인 `market-api`를 호출한다
 
@@ -44,7 +54,7 @@ Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 �
 | `methodology-scout-academic` (RES-11) | 논문·프리프린트 + **타 분야 전용(轉用)** 2렌즈 | 소집 (`scout_cycle`) |
 | `methodology-scout-practitioner` (RES-12) | 투자자 서한·실무자 글 + **커뮤니티·영상** 2렌즈 | 소집 |
 | `competing-explanation-worker` (RES-15) | 경쟁 설명·반증 — **기획자와 입력 격리** | 소집 (`proposal_draft`) |
-| `holdings-analyst-worker` (RES-18) | 보유 종목 질의 응답 — **서비스 자리, 공장 미연결** | 소집 (`holding_question`) |
+| `holdings-analyst-worker` (RES-18) | 보유 종목 질의 응답 — **서비스 자리, 연구실 미연결** | 소집 (`holding_question`) |
 
 > **2026-08-11 감축 (8 → 4).** 직원은 병렬성·맥락격리·독립성·권한격리 중 하나가
 > 명확할 때만 둔다 — 본부장이 순차로 해도 되는 일은 본부장이 한다.
@@ -66,7 +76,7 @@ Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 �
 소스의 갱신 주기가 검색 주기의 상한이다 — arXiv는 하루 한 번 발행하는데 15분마다
 뒤지면 같은 것을 96번 본다. 렌즈마다 주기가 다른 이유다.
 
-숫자는 **병목에서 거꾸로** 잡았다. 공장의 처리량은 검색이 아니라 실험이 정한다.
+숫자는 **병목에서 거꾸로** 잡았다. 연구실의 처리량은 검색이 아니라 검증 가능한 실험이 정한다.
 
 | 단계 | 하루 물량 | 통과율 | 담당 계층 |
 |---|---:|---:|---|
@@ -107,10 +117,9 @@ PBO 성립 하한**이기도 하다(`pbo_cscv.MIN_VARIANTS = 4`) — 예산을 �
 | 경로 | 내용 | 상태 |
 |---|---|---|
 | `hermes/` | Git 기준 Hermes Profile 사본 (`config.yaml`, `SOUL.md`) | 사용 중 |
-| **`contracts/factory_contracts.py`** | 공장 계약 3종 — `MethodologyLeadV1`·`ExperimentProposalV1`·`ExperimentOutcomeV1`, `lead_id_for()` 중복 접기, 통제 교훈 어휘 11종 | 자체 점검 17개 영역 |
-| **`factory/lead_intake.py`** | 스카우트 산출 -> `research.methodology_leads`. 링크 실측, 메커니즘 없는 리드 반려, 계보 없으면 적재 거부 | 자체 점검 16/16, **실적재 5건** |
-| **`factory/proposal_intake.py`** | 기획자·회의론자 산출 -> `research.experiment_proposals`. **서명이 기획자와 같은 실행이면 발행 거부**(생성자·검증자 분리를 구조로 강제) | 자체 점검 12/12, 발행 1건 |
-| **`factory/publish_gate.py`** | 발행 게이트 — 성과 서술만인 근거, 끊어진 리드, 기각 교훈 미대응, 예산 소진 차단 | 자체 점검 11개 영역 |
+| **`autonomous/`** | 영속 Objective → Hypothesis → Plan → Result 루프, anti-loop/pivot, 실패 기억과 계보 | 현행 전략 연구 경로 |
+| **`contracts/factory_contracts.py`** | 기존 DB 계약의 감사·이관용 보존본. 새 Hermes 러너는 import하지 않는다 | 의존성 이관 전 삭제 금지 |
+| **`factory/`** | 기존 제안/리드 경로의 보존본. 컨테이너·MCP에는 복사하지 않으며 새 경로와 연결하지 않는다 | 안전한 단계적 삭제 대기 |
 | **`collectors/ls_unified_parser.py`** | LS 통합시세(US3/UH1) 파서. KRX+NXT 한 소켓, 수신 시각 3종 보존 | 이식 완료, **호출처 0건** |
 | **`collectors/import_external_microstructure.py`** | 외부 프로젝트 호가·체결 이관. PIT 없는 구간을 `market.pit_provenance` 에 `NONE` 으로 못박는다 | 72거래일 이관 진행 |
 | `contracts/market_events.py` | 정규 Market Event 계약 — `instrument_id`, 시각 규칙, `MarketTick`/`MarketQuote`, 멱등 `source_event_id`, Quarantine, Event Envelope | Sprint J0 완료 |
@@ -132,7 +141,7 @@ PBO 성립 하한**이기도 하다(`pbo_cscv.MIN_VARIANTS = 4`) — 예산을 �
 | `collectors/market_data_steward.py` | 시장 데이터 실행·신선도·DQ Gate | 시장 데이터 전용 |
 | `collectors/market_archive_exporter.py`, `replay_restore_drill.py` | 검증된 Parquet Archive와 복구 Drill | 자체 점검·팀 가이드 증거 존재 |
 
-남은 핵심 (2026-08-10 기준, 공장 관점에서 다시 매긴 순서):
+남은 핵심 (2026-08-10 기준, 자율 연구실 관점에서 다시 매긴 순서):
 
 1. **수집기 통합시세 교체** — `ls_realtime_adapter.py` 의 `TR_TO_KIND` 가 아직
    `S3_/K3_/H1_/HA_`(코스피·코스닥 분리)라 **NXT 를 못 받는다.** 이관한 72거래일
@@ -189,7 +198,7 @@ LSE TugOfWar, Oxford ORA, arXiv 1312.0514 — 링크 전부 HTTP 200 확인).
 > **한때 MCP가 병목이라고 적혀 있었지만 사실이 아니었다.** 웹 도달 수단은 처음부터
 > 있었고, 없던 것은 **스카우트 산출을 원장에 옮기는 코드**였다. 그래서 DB의 리드가
 > 전부 손으로 넣은 데모였다(`model_version` 이 빈 문자열인 것이 그 증거였다).
-> `factory/lead_intake.py` 가 그 자리를 메운다.
+> 자율 연구실의 근거 카드와 `autonomous/runner.py`가 그 역할을 담당한다.
 
 에이전트는 제안하고 **코드가 판정한다**:
 

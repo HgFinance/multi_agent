@@ -178,6 +178,121 @@ def merged_run_metadata(task: Mapping[str, Any]) -> dict[str, Any]:
     return merged
 
 
+_QA_FLATTENED_CHECK_KEYS = (
+    "scope",
+    "prohibited_action_compliance",
+    "snapshot_value_consistency",
+    "nav_bridge_reconciliation_disclosure",
+    "evidence_provenance",
+    "point_in_time",
+    "uncertainty_handling",
+    "unsupported_claims",
+)
+
+
+def _qa_nav_gap_text(metadata: Mapping[str, Any]) -> str:
+    gap = metadata.get("nav_cash_securities_gap_krw") or metadata.get(
+        "nav_bridge_gap_krw"
+    )
+    if gap in (None, ""):
+        verified = metadata.get("math_verified")
+        gap = verified.get("nav_residual") if isinstance(verified, Mapping) else None
+    if gap in (None, ""):
+        return ""
+    try:
+        return f"{int(str(gap)):,}원"
+    except (TypeError, ValueError):
+        return str(gap)
+
+
+def qa_projection_checks(
+    task: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> Any:
+    """Normalize QA arrays and the newer flattened metadata contract."""
+
+    checks = metadata.get("checks") or task.get("checks")
+    if checks:
+        return checks
+    return [
+        {"check": key, "result": metadata[key]}
+        for key in _QA_FLATTENED_CHECK_KEYS
+        if key in metadata and metadata[key] not in (None, "")
+    ]
+
+
+def qa_projection_findings(
+    task: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> Any:
+    """Normalize QA findings without fabricating source coordinates."""
+
+    findings = metadata.get("findings") or task.get("findings")
+    if findings:
+        gap_text = _qa_nav_gap_text(metadata)
+        mapped = metadata.get("mapped_positions")
+        total = metadata.get("positions_count")
+        pnl_available = metadata.get("pnl_available")
+        enriched: list[Any] = []
+        for item in findings:
+            if not isinstance(item, Mapping):
+                enriched.append(item)
+                continue
+            copy = dict(item)
+            issue = copy.get("summary") or copy.get("statement") or copy.get("issue")
+            issue_text = str(issue or "").strip()
+            issue_lower = issue_text.casefold()
+            if issue_text and any(
+                term in issue_lower for term in ("reconciliation", "sector", "mapping", "대사")
+            ) and gap_text:
+                detail = f"순자산 대사 차이 {gap_text}"
+                if mapped not in (None, "") and total not in (None, ""):
+                    detail += f", 섹터 매핑 {mapped}/{total}건"
+                if pnl_available is not None:
+                    detail += ", PnL 제공" if pnl_available else ", PnL 미제공"
+                if detail not in issue_text:
+                    copy["issue"] = f"{issue_text} ({detail})"
+            enriched.append(copy)
+        return enriched
+    statement = metadata.get("finding") or task.get("finding")
+    if not statement:
+        return []
+    if isinstance(statement, Mapping):
+        finding = dict(statement)
+        if not any(
+            finding.get(key)
+            for key in ("summary", "statement", "description", "issue", "message")
+        ):
+            finding["statement"] = "재현 가능한 출처 좌표가 없습니다."
+            gap_text = _qa_nav_gap_text(metadata)
+            if gap_text:
+                finding["statement"] += f" (순자산 대사 차이 {gap_text})"
+            finding["block_condition"] = "공식 수치 확정·주문·리스크 결정에 사용하지 않음"
+            finding["recommended_action"] = (
+                "원자료 출처, 기준 시점, 업무 식별자를 다음 CEO 합성에 포함합니다."
+            )
+        return [finding]
+    gap_text = _qa_nav_gap_text(metadata)
+    if gap_text:
+        detail = f"순자산 대사 차이 {gap_text}"
+        mapped = metadata.get("mapped_positions")
+        total = metadata.get("positions_count")
+        if mapped not in (None, "") and total not in (None, ""):
+            detail += f", 섹터 매핑 {mapped}/{total}건"
+        if metadata.get("pnl_available") is not None:
+            detail += ", PnL 제공" if metadata["pnl_available"] else ", PnL 미제공"
+        statement = f"{statement} ({detail})"
+    decision_status = str(metadata.get("decision_status") or "").strip().upper()
+    severity = "BLOCKER" if decision_status == "BLOCKED_FOR_DECISION" else "HIGH"
+    return [
+        {
+            "severity": severity,
+            "statement": statement,
+            "block_condition": "공식 수치 확정과 투자 결정 보류",
+            "status": "OPEN",
+            "recommended_action": metadata.get("recommended_action"),
+        }
+    ]
+
+
 def terminal_success(task: Mapping[str, Any]) -> bool:
     status = str(task.get("status") or "").casefold()
     outcome = str(task.get("outcome") or "").casefold()

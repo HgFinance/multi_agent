@@ -140,12 +140,12 @@ case "$MODE" in
       sync_one "$dept" "$SRC_ROOT/$folder/hermes-liaison" "$(dest_for "$dept")"
     done
     sync_local_skill "ceo-agent" "ceo/hermes-multi-agent-pipelines" "orchestration/hermes-multi-agent-pipelines"
+    sync_local_skill "research-department" "autonomous-quant-research" "research/autonomous-quant-research"
     sync_local_skill "research-department" "methodology-scout" "research/methodology-scout"
     # Shared /opt/shared-skills is the canonical copy for this byte-identical
     # research skill; retire only an identical profile duplicate so qualified
     # and categorized skill_view names do not become ambiguous.
     retire_duplicate_skill_if_identical "research-department" "research/financial-equity-research"
-    sync_local_skill "quant-backtest-department" "experiment-factory" "quant/experiment-factory"
     # The same byte-identical skill is mounted at /opt/shared-skills in the
     # runtime. Keeping a profile mirror makes Hermes skill_view report an
     # ambiguity and forces an avoidable provider re-plan. The shared copy is

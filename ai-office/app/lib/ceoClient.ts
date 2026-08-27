@@ -1,6 +1,9 @@
 /**
  * CEO Hermes 질의 클라이언트 — FastAPI BFF `/ui/ceo/ask`.
  *
+ * BFF가 중앙 분류기이므로 이 호환 경로에서 전략 생성 요청은 CEO/Kanban 대신
+ * `autonomous-research-request.v1` 연구실 접수 계약으로 반환될 수 있다.
+ *
  * 같은 ingress에서 자문과 사용자 PAPER 주문 명령을 받는다. 선택된 `book_id`는
  * 주문 범위를 서버에 전달할 뿐이며, 권한 확인과 실행 판단은 BFF가 소유한다.
  *
@@ -19,6 +22,35 @@ export const ACCEPTED_QUERY_VERSIONS = [
   "ceo.query-accepted.v1",
   "ceo.query-accepted.v2",
 ] as const;
+
+export type StrategyResearchAccepted = {
+  schema_version: "autonomous-research-request.v1";
+  accepted: true;
+  duplicate: boolean;
+  request_id: string;
+  lab_id: string;
+  status: "QUEUED" | "RESEARCHING" | "BLOCKED" | "CANDIDATE";
+  message: string;
+  status_url: string;
+};
+
+export type StrategyResearchStatus = {
+  schema_version: "autonomous-research-status.v1";
+  request_id: string;
+  lab_id: string;
+  goal: string;
+  universe: string;
+  horizon: string;
+  status: "QUEUED" | "RESEARCHING" | "BLOCKED" | "CANDIDATE";
+  cycle: number;
+  last_action: string | null;
+  active_plan_id: string | null;
+  plan_count: number;
+  result_count: number;
+  candidate_available: boolean;
+  updated_at: string;
+  error: string | null;
+};
 
 export type CeoQueryPlanning = {
   selected_departments: string[];
@@ -196,7 +228,7 @@ export async function askCeo(
   requestId?: string,
   bookId?: string,
   fundId?: string,
-): Promise<CeoQueryResult> {
+): Promise<CeoQueryResult | StrategyResearchAccepted> {
   const resolvedFundId = fundId ?? currentFundId();
   let response: Response;
   try {
@@ -232,6 +264,18 @@ export async function askCeo(
     throw new Error("CEO Hermes 응답 계약이 올바르지 않습니다.");
   }
 
+  // The BFF is the central classifier.  Strategy intents may return the
+  // independent research-session contract from this legacy-compatible path.
+  const strategy = body as Partial<StrategyResearchAccepted>;
+  if (
+    strategy.schema_version === "autonomous-research-request.v1" &&
+    strategy.accepted === true &&
+    typeof strategy.request_id === "string" &&
+    typeof strategy.status_url === "string"
+  ) {
+    return strategy as StrategyResearchAccepted;
+  }
+
   const result = body as Partial<CeoQueryResult>;
   const knownVersion = ACCEPTED_QUERY_VERSIONS.includes(
     result.schema_version as (typeof ACCEPTED_QUERY_VERSIONS)[number],
@@ -246,6 +290,55 @@ export async function askCeo(
     );
   }
   return result as CeoQueryResult;
+}
+
+/**
+ * Submit a strategy-generation sentence to the isolated autonomous lab.
+ * This is intentionally separate from the CEO/Kanban and PAPER-order paths.
+ */
+export async function askStrategyResearch(
+  query: string,
+  requestId?: string,
+): Promise<StrategyResearchAccepted> {
+  const response = await bffFetch("/ui/strategy-research/ask", {
+    method: "POST",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      query,
+      ...(requestId ? { request_id: requestId } : {}),
+    }),
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok || typeof body !== "object" || body === null) {
+    throw new Error(explainError(body, response.status));
+  }
+  const result = body as Partial<StrategyResearchAccepted>;
+  if (
+    result.schema_version !== "autonomous-research-request.v1" ||
+    result.accepted !== true ||
+    typeof result.request_id !== "string" ||
+    typeof result.status_url !== "string"
+  ) {
+    throw new Error("자율 전략 연구실 응답 계약이 올바르지 않습니다.");
+  }
+  return result as StrategyResearchAccepted;
+}
+
+export async function strategyResearchStatus(
+  requestId: string,
+): Promise<StrategyResearchStatus> {
+  return getJson<StrategyResearchStatus>(
+    `/ui/strategy-research/requests/${encodeURIComponent(requestId)}`,
+  );
+}
+
+/** Keep client routing conservative; the server remains the authority on state. */
+export function looksLikeStrategyResearchQuery(query: string): boolean {
+  const value = query.toLocaleLowerCase();
+  const noun = /전략|strategy|알파|시그널|백테스트|트레이딩\s*전략|quant|backtest/;
+  const verb = /생성|만들|개발|연구|검증|발굴|찾아|설계|generate|create|build|develop|research|validate|discover|find|design/;
+  return (noun.test(value) && verb.test(value)) || /백테스트/.test(value);
 }
 
 function outcomeFor(

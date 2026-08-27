@@ -19,11 +19,11 @@ import re
 import sqlite3
 import urllib.error
 import urllib.request
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
-
 
 ACCOUNTING_PROFILE = "accounting-portfolio-department"
 QA_PROFILE = "qa-department"
@@ -47,8 +47,18 @@ _TOOL_DURATION_RE = re.compile(
     r"⚡\s+(?P<name>[A-Za-z0-9_.-]+)\s+(?P<duration>\d+(?:\.\d+)?)s\b"
 )
 _TOOL_SUMMARY_RE = re.compile(r"(?:\(|,|\s)(?P<count>\d+)\s+tool calls?\b", re.IGNORECASE)
+_TOOL_ERROR_RE = re.compile(
+    r"(?:\bTool\s+[A-Za-z0-9_.-]+\s+returned\s+error\b|"
+    r"\breturned_error\s*=|\btool[_\s-]*error\b|"
+    r"\btool[_\s-]*(?:blocked|failed)\b)",
+    re.IGNORECASE,
+)
 _REASONING_RE = re.compile(r"Reasoning", re.IGNORECASE)
 _ROOT_RE = re.compile(r"(?:workflow_root_task_id|root_task_id)=(?P<id>t_[A-Za-z0-9_-]+)")
+_REQUEST_RE = re.compile(
+    r"(?:^|\n)(?:request_id|discord_request_id)=(?P<id>[^\s\n]+)",
+    re.IGNORECASE,
+)
 _TASK_RE = re.compile(r"\bt_[A-Za-z0-9_-]+\b")
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
@@ -142,6 +152,12 @@ def _observed_tool_stats(log_text: str) -> dict[str, tuple[int, int]]:
     return dict(list(stats.items())[:32])
 
 
+def _observed_tool_error_count(log_text: str) -> int:
+    """Count tool failures without copying the tool result or log text."""
+
+    return min(len(_TOOL_ERROR_RE.findall(log_text)), 100)
+
+
 def _task_attempt_count(
     db_path: str | os.PathLike[str] | None,
     task_id: str,
@@ -161,12 +177,50 @@ def _task_attempt_count(
         return 1
 
 
+def worker_log_metrics(
+    *, task_id: str, env: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    """Read redacted timing counters from one persisted Hermes task log.
+
+    This is the read half of the same worker-boundary contract used by
+    ``publish_department_worker_trace``.  It returns labels and durations
+    only; prompts, answers, arguments, and log lines never leave the helper.
+    """
+
+    runtime_env = env or os.environ
+    try:
+        log_text = _log_path(
+            task_id=_safe_id(task_id, limit=160), env=runtime_env
+        ).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    tool_names, tool_count = _observed_tools(log_text)
+    tool_stats = _observed_tool_stats(log_text)
+    tool_duration_total_ms = sum(total for _count, total in tool_stats.values())
+    return {
+        "tool_names": tool_names,
+        "tool_calls": tool_count,
+        "tool_duration_total_ms": tool_duration_total_ms,
+        "tool_latency_available": tool_duration_total_ms > 0,
+        "tool_timing_source": (
+            "hermes-log-duration" if tool_duration_total_ms > 0 else "unavailable"
+        ),
+        "tool_error_count": _observed_tool_error_count(log_text),
+        "llm_calls": len(_REASONING_RE.findall(log_text)) or None,
+    }
+
+
 def _root_id(*, task_id: str, task_body: str) -> str:
     match = _ROOT_RE.search(task_body)
     if match:
         return match.group("id")
     # The direct CEO root itself has no workflow_root marker.
     return task_id if _TASK_RE.fullmatch(task_id) else _safe_id(task_id)
+
+
+def _request_id(*, root_id: str, task_body: str) -> str:
+    match = _REQUEST_RE.search(task_body)
+    return _safe_id(match.group("id"), limit=160) if match else root_id
 
 
 def _status(*, task_status: str, return_code: int) -> tuple[str, str | None]:
@@ -186,6 +240,7 @@ def _metadata(
     *,
     task_id: str,
     root_id: str,
+    request_id: str,
     run_id: str,
     profile: str,
     provider: str,
@@ -203,6 +258,8 @@ def _metadata(
     trace_id: str,
     attempts: int,
     tool_duration_total_ms: int,
+    tool_error_count: int,
+    tool_latency_available: bool,
 ) -> dict[str, Any]:
     return {
         "schema_version": profile_spec["schema_version"],
@@ -212,7 +269,7 @@ def _metadata(
         "department": profile_spec["department"],
         "profile": profile,
         "task_id": task_id,
-        "request_id": root_id,
+        "request_id": request_id,
         "root_id": root_id,
         "trace_id": trace_id,
         "workflow_root_task_id": root_id,
@@ -223,8 +280,11 @@ def _metadata(
         "model_name": model,
         "tool_names": list(tool_names),
         "tool_call_count": tool_count,
+        "tool_calls": tool_count,
         "tool_duration_total_ms": max(0, int(tool_duration_total_ms)),
+        "tool_error_count": max(0, int(tool_error_count)),
         "llm_turn_count_observed": llm_turn_count,
+        "llm_calls": max(0, int(llm_turn_count)),
         "attempts": max(1, int(attempts)),
         "retries": max(0, int(attempts) - 1),
         "started_at_ms": int(started_ms),
@@ -232,6 +292,15 @@ def _metadata(
         "latency_ms": max(int(ended_ms) - int(started_ms), 0),
         "latency_scope": "worker_execution",
         "latency_available": True,
+        "tool_latency_available": bool(tool_latency_available),
+        "tool_timing_source": (
+            "hermes-log-duration" if tool_latency_available else "unavailable"
+        ),
+        "telemetry_completeness": (
+            "runtime-and-boundary"
+            if tool_names or llm_turn_count
+            else "boundary-only"
+        ),
         "return_code": int(return_code),
         "raw_payloads_sent": False,
     }
@@ -325,6 +394,7 @@ def publish_department_worker_trace(
         return False
 
     root_id = _root_id(task_id=task_id, task_body=task_body)
+    request_id = _request_id(root_id=root_id, task_body=task_body)
     provider, model = _model_info(profile=profile, env=runtime_env, argv=argv)
     try:
         log_text = _log_path(task_id=task_id, env=runtime_env).read_text(encoding="utf-8", errors="replace")
@@ -334,6 +404,8 @@ def publish_department_worker_trace(
     tool_stats = _observed_tool_stats(log_text)
     attempts = _task_attempt_count(runtime_env.get("HERMES_KANBAN_DB"), task_id)
     tool_duration_total_ms = sum(total for _count, total in tool_stats.values())
+    tool_error_count = _observed_tool_error_count(log_text)
+    tool_latency_available = tool_duration_total_ms > 0
     llm_turn_count = len(_REASONING_RE.findall(log_text))
     if llm_turn_count == 0 and return_code == 0:
         # The Hermes log may omit reasoning blocks in quiet mode. One completed
@@ -358,6 +430,7 @@ def publish_department_worker_trace(
     worker_metadata = _metadata(
         task_id=task_id,
         root_id=root_id,
+        request_id=request_id,
         run_id=run_id,
         profile=profile,
         provider=provider,
@@ -375,6 +448,8 @@ def publish_department_worker_trace(
         trace_id=str(trace_uuid),
         attempts=attempts,
         tool_duration_total_ms=tool_duration_total_ms,
+        tool_error_count=tool_error_count,
+        tool_latency_available=tool_latency_available,
     )
     safe_inputs = {
         "task_id": task_id,
@@ -383,15 +458,36 @@ def publish_department_worker_trace(
         "profile": profile,
         "task_body_present": bool(str(task_body).strip()),
         "task_body_length": len(str(task_body)),
+        "request_id": request_id,
         "raw_payloads_sent": False,
         "attempts": attempts,
         "retries": max(0, attempts - 1),
+        "llm_calls": llm_turn_count,
+        "tool_calls": tool_count,
+        "tool_error_count": tool_error_count,
+        "tool_duration_total_ms": tool_duration_total_ms,
+        "tool_latency_available": tool_latency_available,
+        "tool_timing_source": (
+            "hermes-log-duration" if tool_latency_available else "unavailable"
+        ),
+        "telemetry_completeness": worker_metadata["telemetry_completeness"],
     }
     safe_outputs = {
         "status": status,
         "error_code": error_code,
         "return_code": int(return_code),
         "latency_ms": max(int(ended_ms) - int(started_ms), 0),
+        "attempts": attempts,
+        "retries": max(0, attempts - 1),
+        "llm_calls": llm_turn_count,
+        "tool_calls": tool_count,
+        "tool_error_count": tool_error_count,
+        "tool_duration_total_ms": tool_duration_total_ms,
+        "tool_latency_available": tool_latency_available,
+        "tool_timing_source": (
+            "hermes-log-duration" if tool_latency_available else "unavailable"
+        ),
+        "telemetry_completeness": worker_metadata["telemetry_completeness"],
         "raw_payloads_sent": False,
     }
     runs = [
@@ -458,8 +554,10 @@ def publish_department_worker_trace(
                     "tool_call_index": index,
                     "tool_call_count": tool_count_for_name,
                     "tool_latency_ms": tool_duration_ms,
-                    "tool_latency_available": bool(tool_duration_ms),
-                    "tool_timing_source": "hermes-log-duration",
+                    "tool_latency_available": tool_duration_ms > 0,
+                    "tool_timing_source": (
+                        "hermes-log-duration" if tool_duration_ms > 0 else "unavailable"
+                    ),
                 },
                 project_name=project_name,
                 parent_run_id=worker_uuid,
@@ -481,4 +579,5 @@ __all__ = [
     "QA_PROFILE",
     "publish_accounting_worker_trace",
     "publish_department_worker_trace",
+    "worker_log_metrics",
 ]
