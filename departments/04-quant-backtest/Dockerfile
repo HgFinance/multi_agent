@@ -38,8 +38,13 @@ COPY departments/04-quant-backtest/agents ./departments/04-quant-backtest/agents
 # .env 로더. 퀀트가 리서치 모듈을 읽기만 한다(쓰기는 리서치만).
 COPY departments/01-research/collectors/source_registry.py \
      ./departments/01-research/collectors/source_registry.py
+# The intraday runner imports these shared, unit-safe research contracts as
+# top-level modules. The API image did not need them, but the resident worker's
+# forward-confirmation sweep does; omitting them made the worker look healthy
+# while logging ModuleNotFoundError on every sweep.
+COPY departments/01-research/contracts ./departments/01-research/contracts
 
-ENV PYTHONPATH=/app/departments/04-quant-backtest/pipeline:/app/departments/04-quant-backtest/contracts:/app/departments/01-research/collectors
+ENV PYTHONPATH=/app/departments/04-quant-backtest/pipeline:/app/departments/04-quant-backtest/contracts:/app/departments/01-research/contracts:/app/departments/01-research/collectors
 
 WORKDIR /app/departments/04-quant-backtest/api
 CMD ["uvicorn", "quant_api:app", "--host", "0.0.0.0", "--port", "8037"]

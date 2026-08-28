@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+import threading
 
 import pytest
 
@@ -1839,3 +1840,58 @@ def test_busy_ordinary_queue_does_not_starve_forward_sweep(monkeypatch) -> None:
     assert result["results"] == [{
         "job_id": "ordinary-job", "worker": "quant-worker-test"}]
     assert result["forward_confirmations"]["checked"] == 1
+
+
+def test_quant_experiment_batch_runs_jobs_concurrently_on_isolated_connections(
+    monkeypatch,
+) -> None:
+    """A leased batch must not serialize long replays on one DB connection."""
+
+    monkeypatch.setenv("QUANT_EXPERIMENT_WORKERS", "2")
+    jobs = [
+        {"job_id": "job-a", "hypothesis_id": "hyp-a"},
+        {"job_id": "job-b", "hypothesis_id": "hyp-b"},
+    ]
+    connections = []
+
+    class JobConnection:
+        def close(self):
+            self.closed = True
+
+    def connect():
+        connection = JobConnection()
+        connections.append(connection)
+        return connection
+
+    barrier = threading.Barrier(2)
+    seen = []
+
+    def run_with_heartbeat(conn, job, *, worker, connect):
+        del worker, connect
+        seen.append(conn)
+        barrier.wait(timeout=2)
+        return {"job_id": job["job_id"], "result": "DONE"}
+
+    monkeypatch.setattr(worker, "_conn", connect)
+    monkeypatch.setattr(worker, "run_with_lease_heartbeat", run_with_heartbeat)
+
+    result = worker.execute_jobs(object(), jobs, worker="quant-worker-test")
+
+    assert [item["job_id"] for item in result] == ["job-a", "job-b"]
+    assert len(seen) == 2
+    assert seen[0] is not seen[1]
+    assert len(connections) == 2
+    assert all(getattr(connection, "closed", False) for connection in connections)
+
+
+def test_quant_experiment_worker_healthcheck_requires_a_recent_heartbeat(
+    tmp_path, monkeypatch
+) -> None:
+    health_path = tmp_path / "worker-health"
+    monkeypatch.setattr(worker, "HEALTH_PATH", health_path)
+
+    worker._touch_health()
+    touched_at = health_path.stat().st_mtime
+
+    assert worker.healthcheck(now=touched_at) is True
+    assert worker.healthcheck(now=touched_at + worker.HEALTH_STALE_SEC + 1) is False

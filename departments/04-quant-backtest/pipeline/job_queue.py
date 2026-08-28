@@ -38,8 +38,9 @@ MODULE_VERSION = "quant-job-queue-v2"
 # 경계**다. heartbeat 없는 장기 실행은 정상이어도 다른 worker에게 뺏긴다.
 LEASE_TIMEOUT_MIN = 30
 
-# 한 번에 집어가는 작업 수. 기본 1 - 워커가 죽으면 잡고 있던 것이 전부 회수
-# 대기가 되므로 많이 쥘수록 지연이 커진다.
+# 한 번에 집어가는 작업 수. 기본 2 - 실험 워커가 작업별 연결로 제한 병렬
+# 실행하므로 큐 대기시간을 줄인다. 실제 자원에 맞춰 환경변수로 낮추거나
+# 높일 수 있으며, 상한은 실수로 과도한 DB/CPU fan-out이 생기지 않게 둔다.
 #
 # ▶ **상수로 박지 않는다** (2026-08-12, 재일 지시)
 #   병렬도는 상황에 따라 다르다. 백테스트가 v2 에서 2.5초, v3 에서 110초였다
@@ -56,7 +57,11 @@ LEASE_TIMEOUT_MIN = 30
 #   작업을 집지 않는다. 집는 순간 `attempts` 가 오르므로 무한 재시도도 막힌다.
 #   그리고 `register_and_run` 이 `input_hash` 로 중복 실험을 거부하므로,
 #   설령 같은 가설이 두 번 돌아도 원장에 두 번 남지 않는다.
-BATCH = max(1, int(os.getenv("QUANT_EXPERIMENT_BATCH", "1")))
+try:
+    _configured_batch = int(os.getenv("QUANT_EXPERIMENT_BATCH", "2"))
+except ValueError:
+    _configured_batch = 2
+BATCH = max(1, min(_configured_batch, 16))
 
 
 @dataclass(frozen=True)

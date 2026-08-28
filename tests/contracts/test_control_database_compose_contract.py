@@ -34,6 +34,7 @@ EXPECTED_DEFAULT_CONTROL_DB_CONSUMERS = {
     "qa-reproduction-worker",
     "qa-worker",
     "quant-api",
+    "quant-experiment-worker",
     "research-api",
     "research-liaison-mcp",
     "research-mcp",

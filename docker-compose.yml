@@ -1087,6 +1087,44 @@ services:
     cpus: 0.5
     pids_limit: 64
 
+  # ── quant-experiment-worker: 상주 큐 실행면 (quant-api와 분리) ─────────────
+  # The old queue code existed but no Compose service launched it.  This
+  # worker owns leasing/execution and uses one private DB connection per
+  # parallel experiment, so API requests cannot be blocked by a long replay.
+  quant-experiment-worker:
+    build:
+      context: .
+      dockerfile: departments/04-quant-backtest/Dockerfile
+    container_name: hedgefund-quant-experiment-worker
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    command: ["python", "/app/departments/04-quant-backtest/pipeline/experiment_worker.py", "--serve"]
+    environment:
+      DATABASE_URL: ${QUANT_DATABASE_URL:-${DATABASE_URL:?DATABASE_URL is required}}
+      DATABASE_SESSION_URL: ${QUANT_DATABASE_SESSION_URL:-}
+      DATABASE_RUNTIME_ROLE: ${QUANT_DATABASE_RUNTIME_ROLE:-svc_quant}
+      TIMESCALE_DATABASE_URL: ${QUANT_TIMESCALE_DATABASE_URL:-postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}@timescaledb:5432/market}
+      QUANT_EXPERIMENT_BATCH: ${QUANT_EXPERIMENT_BATCH:-2}
+      QUANT_EXPERIMENT_WORKERS: ${QUANT_EXPERIMENT_WORKERS:-2}
+      QUANT_EXPERIMENT_HEALTH_PATH: /tmp/hgfinance-quant-experiment-worker-health
+    healthcheck:
+      test: ["CMD", "python", "/app/departments/04-quant-backtest/pipeline/experiment_worker.py", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 256
+    stop_grace_period: 30s
+
   # ── market-api: 시세 읽기 전용 조회면 (F03 "DB 없이 Snapshot API" + 통합계획 6.2) ──
   # 트레이딩·리스크·팀원은 TSDB Credential 없이 이 API 로 Snapshot/Bar/Breadth/DQ 조회.
   market-api:

@@ -11,11 +11,24 @@ from apps.api import strategy_research
 
 @pytest.fixture(autouse=True)
 def no_real_kanban_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    # This suite verifies the production PAPER-ordering path.  Signal-only is
+    # covered separately by the explicit switch test below.
+    monkeypatch.setenv("STRATEGY_PAPER_ORDERS_ENABLED", "true")
     monkeypatch.setattr(
         strategy_research,
         "_ensure_tracking_root",
         lambda **_kwargs: (None, "UNAVAILABLE"),
     )
+
+
+def test_strategy_paper_switch_supports_ordering_and_signal_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRATEGY_PAPER_ORDERS_ENABLED", "true")
+    assert strategy_research._strategy_paper_orders_enabled() is True
+
+    monkeypatch.setenv("STRATEGY_PAPER_ORDERS_ENABLED", "false")
+    assert strategy_research._strategy_paper_orders_enabled() is False
 
 
 def test_strategy_operational_data_gate_blocks_stale_market_stream(
@@ -289,7 +302,7 @@ def test_human_deployment_request_is_exactly_scoped_and_not_active(
             encoding="utf-8"
         )
     )
-    assert manifest["runtime_config"]["orders_enabled"] is False
+    assert manifest["runtime_config"]["orders_enabled"] is True
     assert manifest["runtime_config"]["symbols"] == ["000660"]
 
     replay = strategy_research.request_strategy_deployment(
@@ -360,6 +373,7 @@ def test_candidate_deployment_waits_for_explicit_approval_then_starts_paper_runt
             "runtime_status": "RUNNING",
             "container_name": "strategy-paper-test",
             "container_id": "container-test",
+            "execution_status": "PAPER_ORDERING",
         }
 
     monkeypatch.setattr(strategy_research, "_start_strategy_paper_container", fake_runtime)
@@ -376,7 +390,7 @@ def test_candidate_deployment_waits_for_explicit_approval_then_starts_paper_runt
     assert approved.approved_by == "user-a"
     assert approved.bundle_hash and len(approved.bundle_hash) == 64
     assert approved.runtime_status == "RUNNING"
-    assert approved.execution_status == "SIGNAL_ONLY"
+    assert approved.execution_status == "PAPER_ORDERING"
     assert runtime_calls == [(requested.deployment_id, f"{requested.deployment_id}.json")]
     bundle_path = intake.lab_path(request_id) / "deployments" / "bundles" / f"{requested.deployment_id}.json"
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
@@ -391,7 +405,7 @@ def test_candidate_deployment_waits_for_explicit_approval_then_starts_paper_runt
         "entry_execution": "NEXT_BAR_OPEN",
         "exit_execution": "NEXT_BAR_OPEN",
     }
-    assert bundle["execution"]["orders_enabled"] is False
+    assert bundle["execution"]["orders_enabled"] is True
 
     replay = strategy_research.approve_strategy_deployment(
         request_id,
@@ -459,6 +473,7 @@ def test_top_level_human_can_override_review_required_for_signal_only_paper_runt
             "runtime_status": "RUNNING",
             "container_name": "strategy-paper-override-test",
             "container_id": "container-override-test",
+            "execution_status": "PAPER_ORDERING",
         }
 
     monkeypatch.setattr(strategy_research, "_start_strategy_paper_container", fake_runtime)
@@ -476,7 +491,7 @@ def test_top_level_human_can_override_review_required_for_signal_only_paper_runt
     assert approved.status == "ACTIVE"
     assert approved.override_review_required is True
     assert approved.approved_by == "user-admin"
-    assert approved.execution_status == "SIGNAL_ONLY"
+    assert approved.execution_status == "PAPER_ORDERING"
     assert runtime_calls == [requested.deployment_id]
 
     manifest = json.loads(
@@ -494,8 +509,8 @@ def test_top_level_human_can_override_review_required_for_signal_only_paper_runt
         )
     )
     assert bundle["approval_type"] == "HUMAN_TOP_LEVEL_OVERRIDE"
-    assert bundle["execution"]["orders_enabled"] is False
-    assert bundle["execution"]["signal_only"] is True
+    assert bundle["execution"]["orders_enabled"] is True
+    assert bundle["execution"]["signal_only"] is False
 
 
 def test_review_required_exception_is_fail_closed_for_non_top_level_human(

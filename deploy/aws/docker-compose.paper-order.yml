@@ -284,6 +284,16 @@ services:
       <<: *control-session-environment
       QUANT_DATABASE_URL: *control-database-url
 
+  quant-experiment-worker:
+    depends_on: *control-dependency
+    environment:
+      <<: *control-session-environment
+      DATABASE_RUNTIME_ROLE: ${QUANT_DATABASE_RUNTIME_ROLE:-svc_quant}
+      TIMESCALE_DATABASE_URL: *market-database-url
+      QUANT_EXPERIMENT_BATCH: ${QUANT_EXPERIMENT_BATCH:-2}
+      QUANT_EXPERIMENT_WORKERS: ${QUANT_EXPERIMENT_WORKERS:-2}
+      QUANT_EXPERIMENT_HEALTH_PATH: /tmp/hgfinance-quant-experiment-worker-health
+
   market-api:
     environment: *control-and-market-environment
 

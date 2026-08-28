@@ -85,6 +85,20 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         self.assertNotIn("insert", migration.lower())
         self.assertNotIn("update", migration.lower())
 
+    def test_quant_image_contains_shared_intraday_contracts_for_worker_sweep(self) -> None:
+        dockerfile = (
+            ROOT / "departments/04-quant-backtest/Dockerfile"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "COPY departments/01-research/contracts ./departments/01-research/contracts",
+            dockerfile,
+        )
+        self.assertIn(
+            "/app/departments/01-research/contracts",
+            dockerfile,
+        )
+
     def test_quant_hermes_gets_mcp_auth_but_no_database_secret(self) -> None:
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         service = _service_block(compose, "quant-hermes")

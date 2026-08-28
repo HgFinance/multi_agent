@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,6 +53,17 @@ sys.path.insert(0, str(_HERE.parent.parent / "01-research" / "collectors"))
 # 큐가 비었을 때 쉬는 시간. 짧으면 DB 를 계속 두드리고, 길면 주문이 오래 대기한다.
 IDLE_SLEEP_SEC = 15
 
+# The health file is intentionally local to the worker container.  It proves
+# that the long-running loop is still making progress without exposing queue
+# contents or database credentials through an HTTP endpoint.
+HEALTH_PATH = Path(
+    os.getenv(
+        "QUANT_EXPERIMENT_HEALTH_PATH",
+        "/tmp/hgfinance-quant-experiment-worker-health",
+    )
+)
+HEALTH_STALE_SEC = max(120, IDLE_SLEEP_SEC * 8)
+
 # Full-universe event replay is measured in tens of minutes.  Keep this far
 # below job_queue.LEASE_TIMEOUT_MIN (30m) so a healthy worker cannot look
 # stale even if one heartbeat is delayed by the pooler.
@@ -59,9 +71,52 @@ LEASE_HEARTBEAT_SEC = max(
     15, int(os.getenv("QUANT_EXPERIMENT_LEASE_HEARTBEAT_SEC", "60")))
 
 
+def _job_parallelism(job_count: int) -> int:
+    """Bound experiment fan-out without sharing a psycopg connection.
+
+    A single DB connection is deliberately never used by two experiment
+    threads.  Each parallel job gets its own connection and its own lease
+    heartbeat connections, so a long replay cannot block another job's
+    completion transaction.  The cap protects a small host from an accidental
+    environment typo while still removing the old one-job-at-a-time bottleneck.
+    """
+
+    if job_count <= 1:
+        return 1
+    try:
+        configured = int(os.getenv("QUANT_EXPERIMENT_WORKERS", "2"))
+    except ValueError:
+        configured = 2
+    return max(1, min(configured, job_count, 8))
+
+
 def worker_name() -> str:
     """어느 워커가 집었는지 남긴다. 여럿 띄웠을 때 추적이 안 되면 회수를 못 한다."""
     return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _touch_health() -> None:
+    """Publish a best-effort local liveness timestamp for Compose."""
+
+    try:
+        HEALTH_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HEALTH_PATH.touch()
+    except OSError as exc:  # noqa: BLE001 - the loop must survive probe I/O
+        print(
+            f"⚠ 워커 health timestamp 기록 실패: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def healthcheck(*, now: float | None = None) -> bool:
+    """Return whether the serve loop has touched its liveness file recently."""
+
+    try:
+        age = float(now if now is not None else time.time()) - HEALTH_PATH.stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age <= HEALTH_STALE_SEC
 
 
 def _conn():
@@ -472,6 +527,53 @@ def run_with_lease_heartbeat(conn, job: dict, *, worker: str,
         thread.join(timeout=5)
 
 
+def _run_isolated_job(job: dict, *, worker: str) -> dict:
+    """Execute one leased job on a private connection.
+
+    ``tick`` owns a metadata connection for reclaim/lease operations.  It must
+    not be shared with long-running orchestrators or with another thread.
+    Connection setup failures are returned as deferred work; the lease reaper
+    remains the final recovery path when no connection exists to record it.
+    """
+
+    job_conn = None
+    try:
+        job_conn = _conn()
+        return run_with_lease_heartbeat(
+            job_conn, job, worker=worker, connect=_conn
+        )
+    except Exception as exc:  # noqa: BLE001 - lease recovery handles setup faults
+        return {
+            "job_id": job.get("job_id"),
+            "result": "DEFERRED",
+            "reason": f"job connection unavailable: {type(exc).__name__}: {exc}"[:400],
+        }
+    finally:
+        if job_conn is not None:
+            try:
+                job_conn.close()
+            except Exception:  # noqa: BLE001 - connection is already being retired
+                pass
+
+
+def execute_jobs(conn, jobs: list[dict], *, worker: str) -> list[dict]:
+    """Run claimed jobs with bounded parallelism and isolated connections."""
+
+    if not jobs:
+        return []
+    parallelism = _job_parallelism(len(jobs))
+    if parallelism == 1:
+        return [run_with_lease_heartbeat(conn, job, worker=worker) for job in jobs]
+    with ThreadPoolExecutor(
+        max_workers=parallelism,
+        thread_name_prefix="quant-experiment",
+    ) as pool:
+        futures = [
+            pool.submit(_run_isolated_job, job, worker=worker) for job in jobs
+        ]
+        return [future.result() for future in futures]
+
+
 # ── 가설 스톨 회수 ───────────────────────────────────────────────────────────
 #
 # ▶ 왜 필요한가 (2026-08-12 실측)
@@ -790,8 +892,7 @@ def tick(conn, *, worker: str) -> dict:
     # 집는 순간부터 반납 대상이다 - 실행 중에 신호가 와도 놓아줄 수 있어야 한다
     _HELD["jobs"] = [str(j["job_id"]) for j in jobs]
     try:
-        results = [run_with_lease_heartbeat(conn, j, worker=worker)
-                   for j in jobs]
+        results = execute_jobs(conn, jobs, worker=worker)
     finally:
         _HELD["jobs"] = []
     return {"hypotheses": hyp, "terminal_zombies": terminal_zombies,
@@ -839,13 +940,16 @@ def serve() -> None:
             signal.signal(_sig, _on_shutdown)
         except (ValueError, OSError):  # noqa: PERF203 - 메인 스레드가 아니면 건너뛴다
             pass
+    _touch_health()
     conn = _conn()
     try:
         while True:
+            _touch_health()
             try:
                 if not connection_is_usable(conn):
                     conn = _conn()
                 r = tick(conn, worker=worker)
+                _touch_health()
                 # 되돌린 것은 항상 드러낸다 - 조용히 되돌리면 같은 실험을
                 # 새 것으로 착각한다.
                 for v in r["hypotheses"]["items"]:
@@ -883,6 +987,7 @@ def serve() -> None:
                     time.sleep(IDLE_SLEEP_SEC)
             except Exception as e:  # noqa: BLE001
                 # 순회가 죽어도 워커는 산다 - 죽으면 큐가 멈춘다
+                _touch_health()
                 print(f"⚠ 순회 실패(계속 돈다): {type(e).__name__}: {e}",
                       file=sys.stderr, flush=True)
                 try:
@@ -1864,6 +1969,9 @@ def _check_orphan_sweep_is_throttled_and_isolated():
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+
+    if "--healthcheck" in sys.argv:
+        raise SystemExit(0 if healthcheck() else 1)
 
     if "--serve" in sys.argv:
         serve()

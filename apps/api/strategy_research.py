@@ -1566,20 +1566,30 @@ def power_strategy_deployment(
         path=f"/deployments/{deployment_id}/power",
         payload={"action": request.action},
     )
+    runtime_config = record.get("runtime_config")
+    orders_enabled = (
+        isinstance(runtime_config, dict)
+        and runtime_config.get("orders_enabled") is True
+        and _strategy_paper_orders_enabled()
+    )
+    if request.action == "start":
+        lifecycle_message = (
+            "PAPER 전략 컨테이너를 다시 시작했습니다. 조건 충족 시 PAPER 주문을 제출합니다."
+            if orders_enabled
+            else "PAPER 전략 컨테이너를 다시 시작했습니다. 주문은 생성하지 않습니다."
+        )
+    else:
+        lifecycle_message = "PAPER 전략 컨테이너를 중지했습니다."
     updated = dict(record)
     updated.update(
         {
             "status": "ACTIVE" if request.action == "start" else "PAUSED",
             "runtime_status": str(runtime.get("runtime_status") or ("RUNNING" if request.action == "start" else "STOPPED")),
-            "execution_status": "SIGNAL_ONLY",
+            "execution_status": "PAPER_ORDERING" if orders_enabled else "SIGNAL_ONLY",
             "lifecycle_reason": request.reason,
             "container_name": runtime.get("container_name", record.get("container_name")),
             "container_id": runtime.get("container_id", record.get("container_id")),
-            "message": (
-                "PAPER 전략 컨테이너를 다시 시작했습니다. 주문은 생성하지 않습니다."
-                if request.action == "start"
-                else "PAPER 전략 컨테이너를 중지했습니다. 연구 증거와 배포 Bundle은 보존됩니다."
-            ),
+            "message": lifecycle_message,
         }
     )
     with intake._locked():
