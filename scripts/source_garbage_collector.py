@@ -55,10 +55,12 @@ def _static_references(root: Path, candidate: Path) -> list[str]:
     dotted = str(candidate.with_suffix("")).replace("/", ".")
     references: list[str] = []
     scanner_path = Path(__file__).resolve()
+    audit_path = (root / "scripts/release_readiness_audit.py").resolve()
     for path in _tracked_python_files(root):
         if (
             path.relative_to(root) == candidate
             or path.resolve() == scanner_path
+            or path.resolve() == audit_path
             or not path.is_file()
         ):
             continue
