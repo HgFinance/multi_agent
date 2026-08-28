@@ -381,12 +381,39 @@ class DelayedPaperOrderPlan:
     trigger_span: tuple[int, int]
 
 
+# "3분 뒤" was the only delay wording the parser knew, so "3분 기다렸다가" fell
+# through to the immediate lane where the unconsumed phrase corrupted the
+# instrument span and surfaced as MISSING_OR_CONFLICTING_INSTRUMENT — a message
+# about the wrong field entirely (2026-08-28).  Longer alternatives come first
+# so the trailing boundary check cannot truncate one of them.
+RELATIVE_DELAY_SUFFIX = (
+    r"(?:뒤|후|있다가|기다렸다가|기다렸다|기다린\s*(?:뒤|후)"
+    r"|지나서|지나면|지난\s*(?:뒤|후))(?:에)?"
+)
+
 _RELATIVE_DELAY_RE = re.compile(
     rf"(?<![가-힣A-Za-z0-9,.])(?P<token>{_INTEGER_TOKEN})\s*"
-    r"(?P<unit>초|분|시간)\s*뒤(?:에)?(?![가-힣A-Za-z0-9])"
+    rf"(?P<unit>초|분|시간)\s*{RELATIVE_DELAY_SUFFIX}(?![가-힣A-Za-z0-9])"
 )
 _RELATIVE_DELAY_UNIT_SECONDS = {"초": 1, "분": 60, "시간": 3600}
 MAX_RELATIVE_DELAY_SECONDS = 24 * 60 * 60
+
+
+# A duration the delay grammar does not cover still occupies the sentence, so
+# the leftover text corrupts the instrument span and the user was told the
+# *instrument* was missing or conflicting (2026-08-28, "3분 기다렸다가").  Name
+# the real gap instead.  "3분봉" is excluded by the trailing boundary.
+_UNPARSED_DURATION_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9,.])\d+\s*(?:초|분|시간)(?![가-힣A-Za-z0-9])"
+)
+
+
+def _instrument_or_delay_reason(raw_text: str) -> "OrderReasonCode":
+    if _RELATIVE_DELAY_RE.search(raw_text) is None and _UNPARSED_DURATION_RE.search(
+        raw_text
+    ):
+        return OrderReasonCode.UNSUPPORTED_DELAY_EXPRESSION
+    return OrderReasonCode.MISSING_OR_CONFLICTING_INSTRUMENT
 
 
 def raw_text_sha256(raw_text: str) -> str:
@@ -753,7 +780,7 @@ def _verify_place_order(
         raw_text, list(dict.fromkeys(consumed))
     )
     if authoritative_instrument_span is None:
-        return _clarify(digest, OrderReasonCode.MISSING_OR_CONFLICTING_INSTRUMENT)
+        return _clarify(digest, _instrument_or_delay_reason(raw_text))
     authoritative_instrument = raw_text[
         authoritative_instrument_span[0] : authoritative_instrument_span[1]
     ]
@@ -788,7 +815,7 @@ def _verify_place_order(
         or instrument.normalized != candidate.instrument_mention
         or not _INSTRUMENT_RE.fullmatch(instrument.text)
     ):
-        return _clarify(digest, OrderReasonCode.MISSING_OR_CONFLICTING_INSTRUMENT)
+        return _clarify(digest, _instrument_or_delay_reason(raw_text))
     if (
         ((instrument.start, instrument.end), instrument.text)
         not in allowed_instrument_evidence

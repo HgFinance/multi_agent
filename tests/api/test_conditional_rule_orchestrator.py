@@ -250,9 +250,57 @@ def test_missing_ast_requires_clarification_without_creating_a_rule(
     assert result["binding"] is False
     assert result["rule_active"] is False
     assert result["reason_codes"] == ["QUANTITY_REQUIRED"]
+    assert result["awaiting_user_reply"] is True
     assert rules.list_for_user(USER_ID) == []
     record = next(iter(orders._records.values()))
     assert record.state == "CLARIFICATION_REQUIRED"
+
+
+def test_capability_gap_rejection_reaches_the_user_as_a_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validator rejection used to surface as ``str({"code":..., "message":...})``.
+
+    The user saw a raw Python dict under "확인 필요" (2026-08-28) and had
+    nothing to act on.  A capability gap must read as a stated limit, and must
+    not invite the same sentence back the way an ambiguity does.
+    """
+
+    orders, rules, _tasks = _install_workflow(monkeypatch)
+    candidate = conditional_rules.ConditionalRuleCandidate.model_validate(
+        {
+            "symbol": "삼성전자",
+            "condition": {
+                "type": "COMPARISON",
+                "operator": "GTE",
+                "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                "right": {"type": "PORTFOLIO", "field": "AVG_BUY_PRICE"},
+            },
+            "action": {
+                "side": "SELL",
+                "sizing": {"type": "ALL"},
+            },
+            "evaluation": {"clock": "QUOTE"},
+        }
+    )
+
+    result = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidate=candidate,
+    )
+
+    assert result["rule_active"] is False
+    assert rules.list_for_user(USER_ID) == []
+    message = result["user_message"]
+    assert "{" not in message and "'code'" not in message
+    assert "지원하지 않습니다" in message
+    assert "다시 요청하셔도 동일하게 거부됩니다" in message
+    assert "명시해 주세요" not in message
+    assert result["awaiting_user_reply"] is False
+    # The audit trail still names the offending field for Hermes to correct.
+    assert "UNSUPPORTED_PORTFOLIO_FIELD" in result["reason_codes"][0]
+    assert "AVG_BUY_PRICE" in result["reason_codes"][0]
 
 
 def test_multiple_price_actions_activate_as_independent_one_shot_rules(

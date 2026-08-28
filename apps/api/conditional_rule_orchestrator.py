@@ -20,6 +20,12 @@ from orchestration.canonical_profiles import canonical_profile_for_department
 from orchestration.conditional_rules import RuleSemanticError, RuleState
 
 try:
+    from .conditional_rule_clarification import (
+        ClarificationSource,
+        clarification_message,
+        extract_code,
+        should_ask,
+    )
     from .conditional_rule_status import build_conditional_execution_status
     from .conditional_rule_workflow import (
         ConditionalRuleConflict,
@@ -50,6 +56,12 @@ try:
         read_paper_directive_status_for_admitted_authority,
     )
 except ImportError:  # pragma: no cover - direct module execution compatibility
+    from conditional_rule_clarification import (  # type: ignore[no-redef]
+        ClarificationSource,
+        clarification_message,
+        extract_code,
+        should_ask,
+    )
     from conditional_rule_status import (
         build_conditional_execution_status,  # type: ignore[no-redef]
     )
@@ -110,25 +122,31 @@ def _validate_task_states(
     _reject("TRADING_TASK_STATE_NOT_EXECUTABLE")
 
 
+def _audit_code(detail: Any) -> str:
+    """Flatten a rejection into one durable "CODE: offending detail" line."""
+
+    if isinstance(detail, Mapping):
+        code = str(detail.get("code") or "").strip()
+        message = str(detail.get("message") or "").strip()
+        return f"{code}: {message}" if code and message else code or message
+    return str(detail)
+
+
 def _clarification_message(
-    codes: tuple[str, ...], *, raw_instruction: str | None = None
+    codes: tuple[str, ...],
+    *,
+    source: ClarificationSource = ClarificationSource.HERMES_REASON,
+    raw_instruction: str | None = None,
 ) -> str:
-    labels = {
-        "AMBIGUOUS_POSITION_PERCENT": "매도 비중의 기준(보유수량 기준)을 명시해 주세요",
-        "AMBIGUOUS_RETURN_BASELINE": "상승·하락률의 기준(평균 매입가 등)을 명시해 주세요",
-        "TIMEFRAME_NOT_IN_INSTRUCTION": "지표의 봉 주기를 명시해 주세요",
-        "TIMEFRAME_3M_UNSUPPORTED": "3분봉 데이터는 지원하지 않습니다. 5분봉으로 수행하려면 5분봉으로 다시 요청해 주세요",
-        "QUANTITY_REQUIRED": "매수 수량을 명시해 주세요(예: 1주)",
-    }
-    details = "; ".join(labels.get(code, code) for code in codes)
-    if raw_instruction and "3분봉" in " ".join(raw_instruction.split()):
-        details = "3분봉 데이터는 지원하지 않아 5분봉으로 수행합니다" + (
-            "; " + details if details else ""
-        )
-    return (
-        "조건주문을 활성화하지 않았습니다. "
-        + (details or "조건을 한 가지 의미로 확정할 수 없습니다")
-        + ". 주문·체결·원장 반영은 없습니다."
+    """Answer in the shape the rejection class calls for.
+
+    Only an ambiguous *sentence* earns a question.  A capability gap or an
+    interpreter defect is stated, never asked back, so the user is not sent to
+    rephrase something no rewording can fix.
+    """
+
+    return clarification_message(
+        codes, source=source, raw_instruction=raw_instruction
     )
 
 
@@ -342,8 +360,13 @@ def process_user_conditional_paper_rule(
             "mode": "PAPER",
             "rule_active": False,
             "reason_codes": [reason],
+            "awaiting_user_reply": should_ask(
+                (reason,), source=ClarificationSource.HERMES_REASON
+            ),
             "user_message": _clarification_message(
-                (reason,), raw_instruction=admission.raw_instruction
+                (reason,),
+                source=ClarificationSource.HERMES_REASON,
+                raw_instruction=admission.raw_instruction,
             ),
         }
 
@@ -399,7 +422,12 @@ def process_user_conditional_paper_rule(
         message = str(exc).strip()
         if getattr(exc, "detail", None) is None and message and message != str(detail):
             detail = f"{detail}: {message}"
-        code = str(detail)[:500]
+        # ``detail`` may be the {"code","message"} mapping raised by
+        # ``_validate_semantics``.  Stringifying it verbatim is what showed the
+        # user a raw Python dict instead of a sentence (2026-08-28), so the
+        # bare code drives classification while the audit trail keeps both.
+        classified = extract_code(getattr(exc, "detail", None) or detail)
+        code = _audit_code(detail)[:500]
         orders.mark_outcome(
             admission.order_request_id,
             state="CLARIFICATION_REQUIRED",
@@ -411,8 +439,13 @@ def process_user_conditional_paper_rule(
             "mode": "PAPER",
             "rule_active": False,
             "reason_codes": [code],
+            "awaiting_user_reply": should_ask(
+                (classified,), source=ClarificationSource.SEMANTIC_REJECTION
+            ),
             "user_message": _clarification_message(
-                (code,), raw_instruction=admission.raw_instruction
+                (classified,),
+                source=ClarificationSource.SEMANTIC_REJECTION,
+                raw_instruction=admission.raw_instruction,
             ),
         }
 
@@ -436,8 +469,13 @@ def process_user_conditional_paper_rule(
             "rule_active": False,
             "reason_codes": list(clarification_codes),
             "assumptions": [list(preview.assumptions) for preview in previews],
+            "awaiting_user_reply": should_ask(
+                clarification_codes, source=ClarificationSource.AMBIGUITY_DETECTOR
+            ),
             "user_message": _clarification_message(
-                clarification_codes, raw_instruction=admission.raw_instruction
+                clarification_codes,
+                source=ClarificationSource.AMBIGUITY_DETECTOR,
+                raw_instruction=admission.raw_instruction
             ),
         }
 

@@ -823,19 +823,38 @@ def _aggregate_report_content(
 ) -> str:
     """Render one user-facing report after the complete experiment set."""
 
-    ordered_results = sorted(results, key=lambda item: str(item.get("plan_id") or ""))
-    statuses = {str(item.get("status") or "UNKNOWN").upper() for item in ordered_results}
+    decision_order: dict[str, int] = {}
+    for index, event in enumerate(events):
+        if event.get("event_type") != "DECISION":
+            continue
+        plan_id = str((event.get("payload") or {}).get("plan_id") or "").strip()
+        if plan_id:
+            decision_order[plan_id] = index
+    ordered_results = sorted(
+        results,
+        key=lambda item: (
+            decision_order.get(str(item.get("plan_id") or ""), -1),
+            str(item.get("plan_id") or ""),
+        ),
+    )
+    latest_result = ordered_results[-1] if ordered_results else {}
+    latest_status = str(latest_result.get("status") or "UNKNOWN").upper()
+    latest_decision = _decision(events, str(latest_result.get("plan_id") or ""))
     decisions = {_decision(events, str(item.get("plan_id") or "")) for item in ordered_results}
-    if "BLOCKED" in statuses:
+    if latest_status == "BLOCKED":
         final_status, final_decision, icon = "BLOCKED", "PAUSE", "⛔"
-    elif "FAILED" in statuses:
+    elif latest_status == "FAILED":
         final_status, final_decision, icon = "FAILED", "PAUSE", "❌"
-    elif "CANDIDATE" in statuses:
+    elif latest_status == "CANDIDATE":
         final_status, final_decision, icon = "CANDIDATE", "REVIEW", "🟢"
     else:
-        final_status, final_decision, icon = "COMPLETED", (
-            "PIVOT" if "PIVOT" in decisions else "PAUSE" if "PAUSE" in decisions else "REVIEW"
-        ), "✅"
+        final_status = "COMPLETED"
+        final_decision = (
+            latest_decision
+            if latest_decision != "UNAVAILABLE"
+            else "PIVOT" if "PIVOT" in decisions else "PAUSE" if "PAUSE" in decisions else "REVIEW"
+        )
+        icon = "✅"
 
     lines = [
         f"{icon} 전략 Hermes 백테스트 완료 · 최종 보고서",
@@ -868,22 +887,22 @@ def _aggregate_report_content(
     failed = sum(str(item.get("status") or "").upper() == "FAILED" for item in ordered_results)
     blocked = sum(str(item.get("status") or "").upper() == "BLOCKED" for item in ordered_results)
     lines.extend(["", "[종합판정]"])
-    if blocked:
+    if blocked and latest_status != "BLOCKED":
+        lines.append(f"이력상 BLOCKED {blocked}건은 후속 결과가 있어 현재 판정에서 제외했습니다.")
+    elif blocked:
         lines.append(f"{blocked}건은 필요한 데이터/계약 부족으로 차단됐습니다.")
-    if failed:
+    if failed and latest_status != "FAILED":
+        lines.append(f"이력상 FAILED {failed}건은 후속 결과가 있어 현재 판정에서 제외했습니다.")
+    elif failed:
         lines.append(f"{failed}건은 증거 게이트를 통과하지 못했습니다.")
-    if not failed and not blocked:
+    if latest_status not in {"BLOCKED", "FAILED"}:
         if "PIVOT" in decisions:
             lines.append("결과는 기록됐지만 강건성 검증 조건이 남아 PIVOT 판정입니다. 후보 승격하지 않습니다.")
         else:
             lines.append("전체 실험이 결과 계약을 통과했습니다. 후보 승격은 별도 승인 대상입니다.")
-    reasons = [
-        str(item.get("failure_reason") or "").strip()
-        for item in ordered_results
-        if str(item.get("failure_reason") or "").strip()
-    ]
-    if reasons:
-        lines.append(f"주요 사유: {_clip(reasons[-1], 360)}")
+    latest_reason = str(latest_result.get("failure_reason") or "").strip()
+    if latest_reason:
+        lines.append(f"주요 사유: {_clip(latest_reason, 360)}")
     lines.extend(
         [
             "주문 생성: 없음 · 후보 승격: 없음(연구 결과는 실거래 승인이 아님)",
@@ -1172,7 +1191,12 @@ class StrategyReportNotifier:
                 lab_scanned += 1
             result_ids = {path.stem for path in result_paths if path.is_file()}
             if _lab_is_final(lab_path, events=events, result_ids=result_ids):
-                final_key = f"{lab_path.name}:final"
+                # A retry appends a new decided result to the same lab. The
+                # old stable key suppressed that corrected report forever,
+                # even though the lab signature had changed. Keep each exact
+                # artifact set idempotent while allowing a new final report
+                # for a genuinely new experiment result.
+                final_key = f"{lab_path.name}:final:{signature}"
                 if final_key not in sent:
                     content = _aggregate_report_content(
                         request,

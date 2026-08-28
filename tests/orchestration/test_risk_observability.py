@@ -135,6 +135,46 @@ def test_risk_trace_sampling_keeps_diagnostic_work_and_samples_normal_work():
     )
 
 
+def test_risk_hermes_terminal_receipt_is_redacted_and_fail_open(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class Response:
+        status = 202
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(risk_observability.urllib_request, "urlopen", fake_urlopen)
+    assert risk_observability.record_risk_hermes_terminal_activity(
+        event_id="risk-terminal-1",
+        task_id="t-risk-1",
+        root_id="t-root-1",
+        request_id="request-1",
+        status="completed",
+        started_ms=1_000,
+        ended_ms=2_500,
+        discord_status="sent",
+        discord_channel_id="channel-1",
+        discord_thread_id="thread-1",
+        discord_message_id="message-1",
+        environment={"RISK_API_URL": "http://risk-api:8000"},
+    )
+
+    payload = captured["payload"]
+    assert payload["duration_ms"] == 1_500
+    assert "result" not in payload
+    assert "secret" not in json.dumps(payload)
+    assert captured["timeout"] == 0.5
+
+
 def test_risk_span_is_fail_open_when_langsmith_is_unavailable(monkeypatch):
     class UnavailableLangSmith:
         @staticmethod
@@ -220,23 +260,9 @@ def test_publishes_idempotent_redacted_risk_worker_profile(monkeypatch, tmp_path
         "agent.conversation_loop: Turn ended: reason=text_response\n",
         encoding="utf-8",
     )
-    captured: dict[str, object] = {}
-
-    class Response:
-        status = 202
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-    def fake_urlopen(request, timeout):
-        captured["payload"] = json.loads(request.data)
-        captured["timeout"] = timeout
-        return Response()
-
-    monkeypatch.setattr(risk_observability.urllib_request, "urlopen", fake_urlopen)
+    client = type("FakeClient", (), {})()
+    client.create_run = lambda **kwargs: setattr(client, "payload", kwargs)
+    monkeypatch.setattr(risk_observability, "_client", lambda: client)
     environment = {
         "LANGSMITH_TRACING": "true",
         "LANGSMITH_API_KEY": "secret-not-sent",
@@ -257,7 +283,7 @@ def test_publishes_idempotent_redacted_risk_worker_profile(monkeypatch, tmp_path
         environment=environment,
     )
 
-    payload = captured["payload"]["post"][0]
+    payload = client.payload
     from scripts.hermes_worker_observability import department_worker_trace_identity
 
     identity = department_worker_trace_identity(
@@ -280,5 +306,4 @@ def test_publishes_idempotent_redacted_risk_worker_profile(monkeypatch, tmp_path
     assert payload["extra"]["metadata"]["parent_run_id"] == payload["parent_run_id"]
     assert payload["extra"]["metadata"]["latency_scope"] == "worker_execution"
     assert payload["extra"]["metadata"]["tool_latency_available"] is True
-    assert "secret-not-sent" not in json.dumps(payload)
-    assert captured["timeout"] == 3.0
+    assert "secret-not-sent" not in json.dumps(payload, default=str)

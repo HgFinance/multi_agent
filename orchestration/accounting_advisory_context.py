@@ -216,6 +216,16 @@ def _compact_broker(payload: Any) -> dict[str, Any] | None:
         "positions": _safe_rows(payload.get("positions"), position_keys, limit=50),
         "position_check": _safe_rows(payload.get("position_check"), position_keys, limit=50),
         "position_reconciliation": payload.get("position_reconciliation"),
+        # This is intentionally an invariant of the evidence contract.  The
+        # Accounting Hermes must not manufacture a second Engine↔broker break
+        # by subtracting snapshots with different as-of/settlement bases.
+        "position_reconciliation_scope": "broker_internal_only",
+        "position_reconciliation_note": (
+            "Use only the deterministic broker comparison above: "
+            "CSPAQ12300 매매기준 보유수량 vs t0424 체결기준 잔고수량. "
+            "Accounting Engine 포지션과 증권사 포지션을 직접 비교해 새 대사 차이를 만들지 말고, "
+            "별도 결정론적 차이 자료가 있을 때만 보고한다."
+        ),
         "activity": safe_activity,
         "performance": {
             "summary": performance.get("summary") if isinstance(performance.get("summary"), dict) else {},

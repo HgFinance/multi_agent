@@ -20,6 +20,7 @@ from orchestration.langsmith_feedback import (
     _is_workflow_feedback_source,
     attribute_workflow_bottleneck,
     evaluate_observation,
+    evaluation_is_worthy,
     evaluation_run_id,
     observation_from_run,
 )
@@ -437,6 +438,50 @@ def test_semantic_failure_becomes_qa_review_signal_without_answer_text() -> None
     assert result.decision == "IMPROVEMENT_CANDIDATE"
     assert "SEMANTIC_QA_FAILED" in result.finding_codes
     assert "짧은 답" not in str(result.metadata)
+
+
+def test_semantic_relevance_is_a_review_signal() -> None:
+    result = evaluate_observation(
+        TraceObservation(
+            source_run_id="run-relevance-fail",
+            name="hgfinance.user-query",
+            status="completed",
+            started_at=None,
+            ended_at=None,
+            metadata={
+                "request_id": "req-relevance",
+                "root_id": "root-relevance",
+                "stage": "ceo-terminal",
+                "status": "completed",
+                "semantic_qa_score": 0.9,
+                "semantic_qa_relevance": 0.5,
+                "raw_payloads_sent": False,
+            },
+        )
+    )
+    assert "SEMANTIC_QA_RELEVANCE_LOW" in result.finding_codes
+    assert evaluation_is_worthy(result)
+
+
+def test_normal_pass_is_not_evaluation_worthy() -> None:
+    result = evaluate_observation(
+        TraceObservation(
+            source_run_id="run-pass",
+            name="hgfinance.user-query",
+            status="completed",
+            started_at=None,
+            ended_at=None,
+            metadata={
+                "request_id": "req-pass",
+                "root_id": "root-pass",
+                "stage": "ceo-terminal",
+                "status": "completed",
+                "raw_payloads_sent": False,
+            },
+        )
+    )
+    assert result.decision == "OBSERVED_PASS"
+    assert not evaluation_is_worthy(result)
 
 
 def test_prompt_answer_relevance_is_local_and_bounded() -> None:

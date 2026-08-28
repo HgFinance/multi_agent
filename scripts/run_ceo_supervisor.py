@@ -973,14 +973,21 @@ def run_recovery_reconciler(
 
     poll_interval = max(float(interval), 5.0)
 
-    # Startup recovery is intentionally on this background lane. Running it
-    # before opening the watch stream leaves a blind window proportional to a
-    # full-board scan.
+    # Startup recovery is intentionally on this background lane. Restrict the
+    # live startup pass to active/recent roots: historical repair remains an
+    # explicit service capability and must not occupy the CLI lane while new
+    # CEO requests are being handled.
     reconcile_existing = getattr(service, "reconcile_existing_workflows", None)
     if callable(reconcile_existing) and not stop_event.is_set():
         try:
             with cli_lane("startup"):
-                for decision in reconcile_existing():
+                try:
+                    decisions = reconcile_existing(include_historical=False)
+                except TypeError:
+                    # Keep older embedding services compatible while the
+                    # production service adopts the bounded startup lane.
+                    decisions = reconcile_existing()
+                for decision in decisions:
                     print(
                         f"ceo-supervisor reconcile action={decision.action.value} "
                         f"parent={decision.parent_task_id} reason={decision.reason}",
@@ -1006,7 +1013,17 @@ def run_recovery_reconciler(
         if callable(candidate_rows):
             try:
                 with cli_lane("recovery"):
-                    listed_rows = candidate_rows()
+                    try:
+                        # Historical synthesis recovery is performed once at
+                        # startup. The steady-state poll only needs active
+                        # workflows and the short terminal race window;
+                        # repeatedly rediscovering old roots creates needless
+                        # CLI contention with live CEO responses.
+                        listed_rows = candidate_rows(include_historical=False)
+                    except TypeError:
+                        # Keep older test/embedding adapters compatible while
+                        # the production index adopts the bounded argument.
+                        listed_rows = candidate_rows()
             except (
                 RootScopedIndexUnavailable,
                 SupervisorWorkflowError,
@@ -1112,7 +1129,14 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+    shutdown_cleanup_started = False
+
     def shutdown_handler(signum: int, _frame: Any) -> None:
+        # A container may deliver a follow-up TERM while worker queues are
+        # draining.  Do not raise through queue.join()/thread.join() after
+        # cleanup has started; that only produces a shutdown traceback.
+        if shutdown_cleanup_started:
+            return
         raise GracefulShutdown(f"signal {signum}")
 
     signal.signal(signal.SIGINT, shutdown_handler)
@@ -1155,6 +1179,13 @@ def main() -> int:
     )
     recovery_thread.start()
 
+    def close_services() -> None:
+        nonlocal shutdown_cleanup_started
+        shutdown_cleanup_started = True
+        recovery_stop.set()
+        event_queue.close(drain=True)
+        observer_queue.close(drain=True)
+
     try:
         for event in watch_events(
             executable=client.executable,
@@ -1163,20 +1194,14 @@ def main() -> int:
         ):
             event_queue.submit(event)
     except GracefulShutdown as exc:
-        recovery_stop.set()
-        event_queue.close(drain=True)
-        observer_queue.close(drain=True)
+        close_services()
         print(f"ceo-supervisor normal-shutdown={exc}", flush=True)
         return 0
     except (WatchOutputError, WatchProcessError) as exc:
-        recovery_stop.set()
-        event_queue.close(drain=True)
-        observer_queue.close(drain=True)
+        close_services()
         print(f"ceo-supervisor fatal-watch-error={exc}", file=sys.stderr, flush=True)
         return 1
-    recovery_stop.set()
-    event_queue.close(drain=True)
-    observer_queue.close(drain=True)
+    close_services()
     return 0
 
 

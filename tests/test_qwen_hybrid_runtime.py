@@ -110,7 +110,7 @@ def test_guided_json_is_repaired_once_without_answer_fallback(monkeypatch):
     assert "failed the application contract" in calls[1]["messages"][1]["content"]
 
 
-def test_length_termination_fails_without_expensive_repair(monkeypatch):
+def test_length_termination_has_one_bounded_retry(monkeypatch):
     calls: list[dict] = []
 
     class Response:
@@ -141,10 +141,13 @@ def test_length_termination_fails_without_expensive_repair(monkeypatch):
     try:
         worker_llm(_binding())("system", "15% 계산", json_schema=schema)
     except HybridStructuredOutputError as exc:
-        assert "hit max_tokens" in str(exc)
+        assert "after bounded length retry" in str(exc)
+        assert exc.retryable is False
     else:
         raise AssertionError("length 종료는 실패 폐쇄되어야 한다")
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[0]["max_tokens"] == 256
+    assert calls[1]["max_tokens"] == 384
 
 
 def test_financial_semantic_mismatch_is_repaired_once(monkeypatch):

@@ -1,10 +1,10 @@
-"""Bounded, opt-in LangSmith trace retention for named HgFinance projects.
+"""Bounded, opt-in LangSmith run retention for named HgFinance projects.
 
-The worker queries only root traces in the three explicit application
-projects.  ``default`` and every unknown project are intentionally outside the
-policy.  Querying uses the SmithDB v2 adapter; deletion uses LangSmith's
-documented trace-delete endpoint because the SDK's high-level delete helpers
-are not a stable read-path contract.
+The worker queries complete trace trees in the three explicit application
+projects and deletes only whole trees. ``default`` and every unknown project
+are intentionally outside the policy. Querying uses the SmithDB v2 adapter;
+deletion uses LangSmith's documented trace-delete endpoint because the SDK's
+high-level delete helpers are not a stable read-path contract.
 
 The scheduler can perform recoverable-at-API-level trace deletion.  Each pass
 uses a small deletion budget so the provider's hourly deletion limit cannot
@@ -19,6 +19,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -90,6 +91,7 @@ class LangSmithRetentionSummary:
     scanned: int = 0
     eligible: int = 0
     deleted: int = 0
+    queued_runs: int = 0
     pending_visible: int = 0
     visible_overflow: int = 0
     skipped: int = 0
@@ -122,6 +124,7 @@ class LangSmithRetentionWorker:
         enabled: bool | None = None,
         dry_run: bool | None = None,
         max_traces: int | None = None,
+        max_runs: int | None = None,
         max_delete_per_pass: int | None = None,
         scan_window_days: int | None = None,
         pending_state_path: str | os.PathLike[str] | None = None,
@@ -141,8 +144,32 @@ class LangSmithRetentionWorker:
             if dry_run is None
             else bool(dry_run)
         )
-        self.max_traces = max_traces or _env_int(
-            "LANGSMITH_RETENTION_MAX_TRACES", 1000, minimum=1, maximum=1000
+        # ``max_traces`` remains a source-compatible constructor alias. The
+        # enforced cap is run rows, not roots: one LangSmith trace can contain
+        # a root plus many child runs and root-only retention leaks quota even
+        # when the root count is exactly 1,000.
+        configured_max_runs = max_runs if max_runs is not None else max_traces
+        if configured_max_runs is None:
+            configured_max_runs = _env_int(
+                "LANGSMITH_RETENTION_MAX_RUNS",
+                _env_int(
+                    "LANGSMITH_RETENTION_MAX_TRACES",
+                    1000,
+                    minimum=1,
+                    maximum=1000,
+                ),
+                minimum=1,
+                maximum=1000,
+            )
+        self.max_runs = max(1, min(int(configured_max_runs), 1000))
+        # Existing callers/tests read this name; keep it as an alias while
+        # making the semantics explicit in the implementation below.
+        self.max_traces = self.max_runs
+        self.query_max_runs = _env_int(
+            "LANGSMITH_RETENTION_QUERY_MAX_RUNS",
+            20000,
+            minimum=max(1000, self.max_runs * 2),
+            maximum=100000,
         )
         self.max_delete_per_pass = (
             _env_int(
@@ -202,7 +229,13 @@ class LangSmithRetentionWorker:
                 pass
         return datetime.min.replace(tzinfo=timezone.utc)
 
-    def _delete_trace_ids(self, project_id: str, trace_ids: list[str]) -> int:
+    def _delete_trace_ids(
+        self,
+        project_id: str,
+        trace_ids: list[str],
+        *,
+        on_batch_accepted: Callable[[list[str]], None] | None = None,
+    ) -> int:
         if not trace_ids:
             return 0
         deleted = 0
@@ -226,6 +259,8 @@ class LangSmithRetentionWorker:
                     with self.opener(request, timeout=20) as response:
                         response.read()
                     deleted += len(batch)
+                    if on_batch_accepted is not None:
+                        on_batch_accepted(batch)
                     break
                 except urllib.error.HTTPError as exc:
                     if exc.code == 429 and attempt < 3:
@@ -298,7 +333,9 @@ class LangSmithRetentionWorker:
 
         current = now or datetime.now(timezone.utc)
         scanned = eligible = deleted = skipped = 0
+        queued_runs = 0
         pending_visible = visible_overflow = 0
+        pass_error_code: str | None = None
         pending = self._load_pending()
         client: Any | None = None
         try:
@@ -309,44 +346,84 @@ class LangSmithRetentionWorker:
                 retention_days = self._retention_days(scope, default_days)
                 scan_start = current - timedelta(days=max(self.scan_window_days, retention_days))
                 project_id = resolve_project_id(client, project_name)
-                # Read one retention-cap window plus a bounded overflow tail.
-                # The newest max_traces roots are retained; only the oldest
-                # deletion budget is sent in this pass. This keeps cleanup
-                # below provider hourly deletion limits while converging on
-                # the configured cap across scheduled passes.
-                query_limit = min(self.max_traces * 2, 2000)
+                # Read complete trace trees, not only roots. A root-only query
+                # can report exactly 1,000 traces while their child runs keep
+                # consuming quota. The query is still bounded; if the bound is
+                # reached we fail closed and do not delete from an incomplete
+                # view of the project.
+                query_limit = self.query_max_runs
                 runs = query_runs(
                     client,
                     project_name=project_name,
                     min_start_time=scan_start,
                     max_start_time=current,
-                    is_root=True,
+                    is_root=None,
                     page_size=100,
                     max_results=query_limit,
-                    selects=["ID", "START_TIME"],
+                    selects=["ID", "TRACE_ID", "IS_ROOT", "START_TIME"],
                 )
                 scanned += len(runs)
-                # The API returns newest roots first. Sort locally as a second
-                # guard so the retention decision never depends on response
-                # ordering. Only the oldest rows beyond the per-project cap
-                # are candidates; the age setting controls the bounded scan
-                # window, not an unbounded delete.
-                ordered = sorted(runs, key=self._started_at, reverse=True)
-                current_ids = {
-                    self._run_id(run) for run in ordered if self._run_id(run)
-                }
+                if len(runs) >= query_limit:
+                    # There may be more rows beyond the page bound. Deleting
+                    # from a partial tree view could remove recent data or
+                    # leave the project above the cap unpredictably.
+                    pass_error_code = pass_error_code or "QUERY_TRUNCATED"
+                    LOG.warning(
+                        "langsmith-retention query truncated project=%s limit=%d",
+                        project_name,
+                        query_limit,
+                    )
+                    continue
+
+                trace_groups: dict[str, list[Any]] = {}
+                for run in runs:
+                    trace_id = self._run_id(run)
+                    if trace_id:
+                        trace_groups.setdefault(trace_id, []).append(run)
+                if sum(len(group) for group in trace_groups.values()) != len(runs):
+                    # A child without a trace_id cannot be safely associated
+                    # with a root, so never partially retain/delete it.
+                    pass_error_code = pass_error_code or "TRACE_ID_MISSING"
+                    LOG.warning(
+                        "langsmith-retention run missing trace_id project=%s",
+                        project_name,
+                    )
+                    continue
+
+                # The API returns newest rows first, but the retention decision
+                # is based on complete trees and is sorted locally as a second
+                # guard. The earliest member is normally the root's timestamp;
+                # it also handles sparse root metadata without moving a tree
+                # into the future.
+                ordered_groups = sorted(
+                    trace_groups.items(),
+                    key=lambda item: (
+                        min(self._started_at(run) for run in item[1]),
+                        item[0],
+                    ),
+                    reverse=True,
+                )
+                current_ids = set(trace_groups)
                 project_pending = pending.setdefault(project_id, set())
                 # LangSmith processes deletes asynchronously. Keep only IDs
                 # still visible in the bounded scan so a completed deletion
                 # leaves the pending ledger naturally.
                 project_pending.intersection_update(current_ids)
-                visible_overflow += max(0, len(current_ids) - self.max_traces)
-                excess = ordered[
-                    self.max_traces : self.max_traces + self.max_delete_per_pass
-                ]
-                candidate_ids = [
-                    self._run_id(run) for run in excess if self._run_id(run)
-                ]
+                visible_overflow += max(0, len(runs) - self.max_runs)
+
+                kept_runs = 0
+                candidate_ids: list[str] = []
+                for trace_id, members in ordered_groups:
+                    member_count = len(members)
+                    # Always retain the newest tree, even if a malformed or
+                    # unusually large single tree exceeds the cap. Deleting a
+                    # current request as a way to satisfy a quota is unsafe.
+                    if kept_runs == 0 or kept_runs + member_count <= self.max_runs:
+                        kept_runs += member_count
+                    else:
+                        candidate_ids.append(trace_id)
+                        if len(candidate_ids) >= self.max_delete_per_pass:
+                            break
                 skipped += sum(trace_id in project_pending for trace_id in candidate_ids)
                 trace_ids = [
                     trace_id
@@ -357,20 +434,31 @@ class LangSmithRetentionWorker:
                 if effective_dry_run:
                     pending_visible += len(project_pending)
                     continue
+
+                def mark_batch(batch: list[str]) -> None:
+                    nonlocal queued_runs
+                    project_pending.update(batch)
+                    queued_runs += sum(len(trace_groups[trace_id]) for trace_id in batch)
+                    # Persist after every accepted batch. A process restart or
+                    # provider timeout must not cause the same deletion batch
+                    # to be submitted again on the next pass.
+                    self._save_pending(pending)
+
                 queued = self._delete_trace_ids(
                     project_id=project_id,
                     trace_ids=trace_ids,
+                    on_batch_accepted=mark_batch,
                 )
                 deleted += queued
-                project_pending.update(trace_ids[:queued])
                 pending_visible += len(project_pending)
                 self._save_pending(pending)
             LOG.info(
-                "langsmith-retention enabled=true dry_run=%s scanned=%d eligible=%d queued=%d pending_visible=%d visible_overflow=%d skipped_pending=%d",
+                "langsmith-retention enabled=true dry_run=%s scanned_runs=%d eligible_trees=%d queued_trees=%d queued_runs=%d pending_visible=%d visible_overflow_runs=%d skipped_pending=%d",
                 str(effective_dry_run).lower(),
                 scanned,
                 eligible,
                 deleted,
+                queued_runs,
                 pending_visible,
                 visible_overflow,
                 skipped,
@@ -382,9 +470,11 @@ class LangSmithRetentionWorker:
                 scanned=scanned,
                 eligible=eligible,
                 deleted=deleted,
+                queued_runs=queued_runs,
                 pending_visible=pending_visible,
                 visible_overflow=visible_overflow,
                 skipped=skipped,
+                error_code=pass_error_code,
             )
         except Exception as exc:  # noqa: BLE001 - maintenance must not stop other retention jobs
             LOG.warning("langsmith-retention failed error=%s", type(exc).__name__)
@@ -400,6 +490,7 @@ class LangSmithRetentionWorker:
                 scanned=scanned,
                 eligible=eligible,
                 deleted=deleted,
+                queued_runs=queued_runs,
                 pending_visible=pending_visible,
                 visible_overflow=visible_overflow,
                 skipped=skipped,

@@ -67,4 +67,6 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
 COPY orchestration/contracts/worker_registry.py /app/orchestration/contracts/worker_registry.py
 COPY orchestration/contracts/worker_registry.v1.json /app/orchestration/contracts/worker_registry.v1.json
+COPY orchestration/contracts/runtime_service_registry.py /app/orchestration/contracts/runtime_service_registry.py
+COPY orchestration/contracts/runtime_service_registry.v1.json /app/orchestration/contracts/runtime_service_registry.v1.json
 CMD ["uvicorn", "app:app", "--app-dir", "api", "--host", "0.0.0.0", "--port", "8000"]

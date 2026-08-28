@@ -13,10 +13,12 @@ sys.path.insert(0, str(ACCOUNTING / "ledger"))
 sys.path.insert(0, str(ACCOUNTING / "reconciliation"))
 
 from ledger import Ledger  # noqa: E402
+import ls_paper_alignment as alignment  # noqa: E402
 from ls_paper_alignment import (  # noqa: E402
     BrokerAccountSnapshot,
     BrokerPosition,
     build_alignment_journal,
+    fetch_broker_snapshot,
 )
 
 
@@ -105,3 +107,70 @@ def test_alignment_resets_existing_position_cost_without_overwriting_journal() -
     assert positions[samsung].quantity == 6
     assert positions[samsung].average_cost == Decimal(269_027)
     assert cash == Decimal(499_000_000)
+
+
+def test_fetch_broker_snapshot_accepts_valid_rows_when_local_feed_is_drifted(monkeypatch) -> None:
+    payloads = {
+        "/ui/account/snapshot": {
+            "environment": "PAPER",
+            "source": "ls-openapi",
+            "authoritative": False,
+            "cash": "492731425",
+            "buying_power": "491585201",
+            "observed_at": "2026-08-20T03:00:00+00:00",
+            "account_no_masked": "****5601",
+            "holdings": {
+                "synced": False,
+                "drift": [{"symbol": "005930", "reason": "late_local_fill"}],
+                "projection_source": "broker-account-snapshot-cache",
+                "error": None,
+                "rows": [
+                    {"symbol": "A005930", "quantity": "6", "average_cost": "269027"}
+                ],
+            },
+        },
+    }
+
+    calls: list[str] = []
+
+    def fake_get_json(url: str, timeout: float):
+        del timeout
+        calls.append(url)
+        return payloads[url.removeprefix("http://bff:8000")]
+
+    monkeypatch.setattr(alignment, "_get_json", fake_get_json)
+
+    snapshot = fetch_broker_snapshot("http://bff:8000")
+
+    assert snapshot.positions == (
+        BrokerPosition("005930", Decimal(6), Decimal(269027)),
+    )
+    assert calls == ["http://bff:8000/ui/account/snapshot"]
+
+
+def test_fetch_broker_snapshot_rejects_unknown_local_feed_state(monkeypatch) -> None:
+    payloads = {
+        "/ui/account/snapshot": {
+            "environment": "PAPER",
+            "source": "ls-openapi",
+            "authoritative": False,
+            "holdings": {
+                "synced": None,
+                "error": None,
+                "rows": [],
+            },
+        },
+    }
+
+    def fake_get_json(url: str, timeout: float):
+        del timeout
+        return payloads[url.removeprefix("http://bff:8000")]
+
+    monkeypatch.setattr(alignment, "_get_json", fake_get_json)
+
+    try:
+        fetch_broker_snapshot("http://bff:8000")
+    except alignment.LSPaperAlignmentError as exc:
+        assert "synchronization state is unknown" in str(exc)
+    else:
+        raise AssertionError("unknown broker synchronization state must block reconciliation")

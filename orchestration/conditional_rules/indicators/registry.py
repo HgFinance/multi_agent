@@ -22,6 +22,7 @@ from .broker.ls_readonly import LSReadOnlyIndicatorResolver
 
 _ALL_TIMEFRAMES = frozenset({"1M", "5M", "15M", "1H", "1D"})
 _NUMERIC = frozenset({"PERIOD"})
+_OFFSET = "OFFSET"
 
 
 class IndicatorRegistry:
@@ -300,6 +301,16 @@ class IndicatorRegistry:
         )
 
 
+def _offset_warmup(base: int | Any) -> Any:
+    """Extend a warm-up window by the requested bar shift."""
+
+    def _warmup(parameters: Mapping[str, Any]) -> int:
+        window = base(parameters) if callable(base) else base
+        return int(window) + int(parameters.get(_OFFSET, 0) or 0)
+
+    return _warmup
+
+
 def _local(
     name: str,
     *,
@@ -310,16 +321,22 @@ def _local(
     integer_parameters: frozenset[str] = frozenset(),
     warmup_bars: int | Any = 1,
 ) -> IndicatorDefinition:
+    # OFFSET is a property of the candle series, not of any one formula, so
+    # every local indicator carries it uniformly: ``OFFSET=N`` evaluates the
+    # indicator as of N completed bars before the latest one.  Korean HTS
+    # notation always supplies this argument (usually 0), and without a
+    # declared parameter the deterministic validator rejected the whole rule.
     return IndicatorDefinition(
         name=name,
         aliases=aliases,
         category=category,
         source="LOCAL",
         outputs=outputs,
-        defaults=defaults,
-        integer_parameters=integer_parameters,
+        defaults={**defaults, _OFFSET: 0},
+        integer_parameters=integer_parameters | {_OFFSET},
+        zero_allowed_parameters=frozenset({_OFFSET}),
         supported_timeframes=_ALL_TIMEFRAMES,
-        warmup_bars=warmup_bars,
+        warmup_bars=_offset_warmup(warmup_bars),
         calculator=calculate_local_indicator,
     )
 

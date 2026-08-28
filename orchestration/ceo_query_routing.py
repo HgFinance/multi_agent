@@ -31,6 +31,8 @@ STRATEGY_WORKFLOW = "strategy-research"
 ACCOUNT_STATUS_CATEGORY = "ACCOUNT_STATUS"
 HR_E2E_CATEGORY = "HR_E2E_READONLY"
 HR_E2E_WORKFLOW = "hr-workforce-e2e"
+HR_READONLY_CATEGORY = "HR_WORKFORCE_READONLY"
+HR_READONLY_WORKFLOW = "hr-workforce-readonly"
 DISCORD_CEO_CASE_TYPE_PREFIX = "discord_ceo"
 
 CATEGORY_WORKFLOWS: dict[str, str] = {
@@ -42,6 +44,7 @@ CATEGORY_WORKFLOWS: dict[str, str] = {
     "STRATEGY_PROPOSAL": STRATEGY_WORKFLOW,
     ACCOUNT_STATUS_CATEGORY: PORTFOLIO_WORKFLOW,
     HR_E2E_CATEGORY: HR_E2E_WORKFLOW,
+    HR_READONLY_CATEGORY: HR_READONLY_WORKFLOW,
 }
 
 # Category defaults are conservative.  Free-form keyword matches may add a
@@ -66,6 +69,7 @@ CATEGORY_DEPARTMENTS: dict[str, tuple[str, ...]] = {
     # asks for market or risk analysis in the same request.
     ACCOUNT_STATUS_CATEGORY: ("accounting", "ceo"),
     HR_E2E_CATEGORY: ("hr",),
+    HR_READONLY_CATEGORY: ("hr",),
 }
 
 _QUERY_STAGE_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -152,6 +156,31 @@ _QUANT_SCOPE_RE = re.compile(
     r"(?:퀀트|quant)\s*(?:부서|팀|본부|department)",
     re.IGNORECASE,
 )
+_HR_SCOPE_RE = re.compile(
+    r"(?:hr-department|\bhr\b|인사\s*(?:부서|팀|본부)?|"
+    r"agent\s*workforce|에이전트\s*워크포스|워크포스)",
+    re.IGNORECASE,
+)
+_HR_DOMAIN_RE = re.compile(
+    r"(?:채용|고용|직원|인력|유휴|hiring|workforce|agent|에이전트|"
+    r"access\s*request|권한|프로필|profile|lifecycle|라이프사이클|"
+    r"수습|성과\s*(?:평가|조치)|scorecard|capacity|quality|품질)",
+    re.IGNORECASE,
+)
+_OTHER_DEPARTMENT_SCOPE_RE = re.compile(
+    r"(?:research|리서치|quant|퀀트|trading|트레이딩|risk|리스크|"
+    r"accounting|회계)\s*(?:부서|팀|본부|department)",
+    re.IGNORECASE,
+)
+_HR_MUTATION_RE = re.compile(
+    r"(?:부여|변경|활성화|비활성화|승인|반려|삭제|생성|프로비저닝|회수|"
+    r"grant|change|activate|deactivate|approve|reject|delete|provision|revoke)",
+    re.IGNORECASE,
+)
+_TRADING_SCOPE_RE = re.compile(
+    r"(?:트레이딩|trading)\s*(?:부서|팀|본부|department)",
+    re.IGNORECASE,
+)
 
 
 def is_read_only_hr_e2e_query(query: str) -> bool:
@@ -178,6 +207,35 @@ def is_read_only_hr_e2e_query(query: str) -> bool:
         )
     )
     return has_hr_scope and has_read_only_scope
+
+
+def is_hr_read_only_query(query: str) -> bool:
+    """Recognize ordinary HR/Workforce read requests for the HR pipeline.
+
+    This is intentionally separate from the exact E2E predicate above.  E2E
+    tasks are rewritten to the single approved helper by the dispatcher;
+    ordinary requests keep their user question and use the HR Hermes profile's
+    read-only Workforce API boundary.
+    """
+
+    text = " ".join(str(query or "").split()).casefold()
+    has_scope = bool(_HR_SCOPE_RE.search(text))
+    has_domain = bool(_HR_DOMAIN_RE.search(text))
+    if _OTHER_DEPARTMENT_SCOPE_RE.search(text):
+        return False
+    has_read_intent = bool(
+        re.search(
+            r"(?:조회|확인|검토|점검|검진|요약|현황|상태|브리핑|몇\s*명|"
+            r"read|review|check|inspect|status|summary|count)",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+    return (
+        (has_scope or has_domain)
+        and has_read_intent
+        and not _HR_MUTATION_RE.search(text)
+    )
 
 
 def _explicit_accounting_e2e_scope(normalized_query: str) -> bool:
@@ -213,9 +271,20 @@ def _query_term_matches(normalized_query: str, term: str) -> bool:
         )
     else:
         matches = re.finditer(re.escape(normalized_term), normalized_query)
-    return any(
-        not _is_negated_suffix(normalized_query[match.end() :]) for match in matches
-    )
+    for match in matches:
+        # ``가상거래`` is the safety/environment boundary used by PAPER
+        # reports, not a request for Trading execution analysis.
+        if (
+            normalized_term == "거래"
+            and normalized_query[max(0, match.start() - 2) : match.start()] == "가상"
+        ):
+            continue
+        if _is_negated_suffix(normalized_query[match.end() :]):
+            continue
+        if _is_prohibited_safety_term(normalized_query, match.start(), match.end()):
+            continue
+        return True
+    return False
 
 
 def _is_negated_suffix(suffix: str) -> bool:
@@ -229,6 +298,37 @@ def _is_negated_suffix(suffix: str) -> bool:
             suffix,
         )
     )
+
+
+def _is_prohibited_safety_term(normalized_query: str, start: int, end: int) -> bool:
+    """Ignore an action word inside a longer, explicitly prohibited clause.
+
+    A safety list such as ``실제 주문, 원장 변경은 하지 마`` can be longer
+    than the short suffix window above.  Only terms directly introduced by
+    ``실제``/``실거래`` are suppressed; a positive request such as
+    ``주문 가능성을 검토`` remains a Trading signal.
+    """
+
+    prefix = normalized_query[max(0, start - 8) : start]
+    introduced_by_safety_word = bool(
+        re.search(r"(?:실제\s*|실거래\s*[·,\s]*)$", prefix)
+    )
+    if not introduced_by_safety_word:
+        return False
+    clause_start = (
+        max(normalized_query.rfind(mark, 0, start) for mark in (".", "!", "?", "\n"))
+        + 1
+    )
+    clause_end_candidates = [
+        normalized_query.find(mark, end)
+        for mark in (".", "!", "?", "\n")
+        if normalized_query.find(mark, end) >= 0
+    ]
+    clause_end = (
+        min(clause_end_candidates) if clause_end_candidates else len(normalized_query)
+    )
+    clause = normalized_query[clause_start:clause_end]
+    return bool(re.search(r"하지\s*(?:마|말고|않)|안\s|못\s|금지|불가|없", clause))
 
 
 def _explicit_research_scope(normalized_query: str) -> bool:
@@ -261,6 +361,24 @@ def _explicit_quant_scope(normalized_query: str) -> bool:
         r"\s*(?:부서|팀|본부|department)",
         normalized_query,
         flags=re.IGNORECASE,
+    )
+    return not explicit_other_scope
+
+
+def _explicit_trading_scope(normalized_query: str) -> bool:
+    """Recognize an explicitly scoped Trading-only request."""
+
+    if not _TRADING_SCOPE_RE.search(normalized_query):
+        return False
+    explicit_other_scope = (
+        _RESEARCH_SCOPE_RE.search(normalized_query)
+        or _QUANT_SCOPE_RE.search(normalized_query)
+        or re.search(
+            r"(?:risk|리스크|위험|accounting|회계)"
+            r"\s*(?:부서|팀|본부|department)",
+            normalized_query,
+            flags=re.IGNORECASE,
+        )
     )
     return not explicit_other_scope
 
@@ -334,6 +452,21 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
             "routing_basis": "explicit_hr_e2e_scope",
             "matched_terms": {"hr": ["hr_e2e", "workforce_api", "read_only"]},
         }
+    if is_hr_read_only_query(query):
+        return {
+            "mode": "hr_readonly",
+            "category": HR_READONLY_CATEGORY,
+            "workflow": HR_READONLY_WORKFLOW,
+            "category_recognized": True,
+            "original_query": query,
+            "rewritten_query": (
+                f"{query} HR Workforce의 권위 있는 읽기 전용 조회 경로로 확인하고 "
+                "권한·상태·원장·외부 시스템을 변경하지 않고 결과를 보고한다."
+            ),
+            "requested_departments": ["hr"],
+            "routing_basis": "explicit_hr_workforce_scope",
+            "matched_terms": {"hr": ["workforce_read_only"]},
+        }
     if query_requires_clarification(query, category):
         return {
             "mode": "clarification_required",
@@ -368,8 +501,11 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
         and not account_status_terms
     )
     quant_only = not category and _explicit_quant_scope(normalized)
+    trading_only = not category and _explicit_trading_scope(normalized)
     stages: set[str] = set(
-        ("quant", "ceo")
+        ("trading", "ceo")
+        if trading_only
+        else ("quant", "ceo")
         if quant_only
         else ("research", "ceo")
         if research_only
@@ -381,7 +517,11 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
     elif explicit_accounting_e2e:
         matched_terms["accounting"] = ["명시적 회계 PAPER E2E 검증"]
     for stage, terms in _QUERY_STAGE_KEYWORDS.items():
-        if (explicit_accounting_e2e and stage != "accounting") or quant_only:
+        if (
+            (explicit_accounting_e2e and stage != "accounting")
+            or quant_only
+            or trading_only
+        ):
             continue
         hits = [term for term in terms if _query_term_matches(normalized, term)]
         if hits:
@@ -414,6 +554,8 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
             if research_only
             else "explicit_quant_scope"
             if quant_only
+            else "explicit_trading_scope"
+            if trading_only
             else "bounded_query_intent_router"
         ),
     }
@@ -442,13 +584,21 @@ _DEPARTMENT_INSTRUCTIONS: dict[str, str] = {
     ),
     "accounting": (
         "Review the accounting, liquidity, fee, NAV, or portfolio-state implications "
-        "relevant to the request using read-only evidence. Do not mutate a ledger or "
-        "confirm NAV."
+        "relevant to the request using read-only evidence. Use the deterministic "
+        "broker position_reconciliation result as the only broker reconciliation "
+        "break check: compare CSPAQ12300.BnsBaseBalQty with t0424.janqty. Do not "
+        "invent a new Accounting Engine-to-broker break by subtracting snapshots "
+        "with different as-of or settlement bases; if the provided result is MATCH "
+        "with no discrepancies or exceptions, report zero unresolved broker breaks "
+        "and state that the Engine-to-broker view was not independently reconciled. "
+        "Do not mutate a ledger or confirm NAV."
     ),
     "hr": (
-        "Perform the exact HR Workforce PAPER/read-only verification. Run the "
-        "approved helper once and inspect only the three allowed Workforce GETs; "
-        "do not place orders, invest, mutate a ledger, or change permissions."
+        "Use the authoritative HR Workforce read-only GET endpoints relevant to "
+        "the request and report missing data as missing rather than inventing it. "
+        "Do not create or transition hiring, profile, lifecycle, permission, "
+        "ledger, order, or investment records. Explicit HR E2E cards are handled "
+        "by the separately bounded approved helper at the dispatcher boundary."
     ),
 }
 
@@ -456,6 +606,7 @@ _DEPARTMENT_INSTRUCTIONS: dict[str, str] = {
 def build_deterministic_bff_plan(
     query: str,
     *,
+    previous_question_context: str | None = None,
     selected_departments: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Return a complete machine-readable plan for the BFF fast path.
@@ -467,6 +618,41 @@ def build_deterministic_bff_plan(
     """
 
     plan = build_ceo_task_plan({"query": query})
+    bounded_previous_context = " ".join(
+        str(previous_question_context or "").split()
+    )[:3200]
+    # Discord supplies the thread starter as bounded, quoted context.  Use it
+    # only when the new message is an explicit follow-up/reference; a greeting
+    # or an unrelated filler must still receive clarification instead of being
+    # silently attached to an old investment request.
+    if (
+        plan.get("mode") == "clarification_required"
+        and bounded_previous_context
+        and re.search(
+            r"(?:이어서|계속|위\s*(?:질문|내용)|앞서|그거|그\s*내용|"
+            r"이\s*(?:분석|결과)|다시|재검토|추가로|후속|더\s*자세히|"
+            r"아까|방금|같은\s*(?:내용|것)|continue|follow\s*up|that|it)",
+            str(query or ""),
+            flags=re.IGNORECASE,
+        )
+    ):
+        previous_plan = build_ceo_task_plan({"query": bounded_previous_context})
+        if (
+            previous_plan.get("mode") != "clarification_required"
+            and previous_plan.get("requested_departments")
+        ):
+            plan = {
+                **previous_plan,
+                "mode": "free_query",
+                "original_query": " ".join(str(query or "").split()),
+                "rewritten_query": (
+                    f"{previous_plan.get('rewritten_query') or bounded_previous_context} "
+                    f"후속 요청: {str(query or '').strip()}"
+                )[:4000],
+                "routing_basis": "previous_question_context",
+                "previous_question_context_used": True,
+                "previous_question_context_source": "discord_thread_starter",
+            }
     if selected_departments is None:
         selected = [
             str(department)
@@ -576,11 +762,14 @@ __all__ = [
     "DISCORD_CEO_CASE_TYPE_PREFIX",
     "HR_E2E_CATEGORY",
     "HR_E2E_WORKFLOW",
+    "HR_READONLY_CATEGORY",
+    "HR_READONLY_WORKFLOW",
     "PORTFOLIO_WORKFLOW",
     "STRATEGY_WORKFLOW",
     "RouteVerification",
     "build_ceo_task_plan",
     "build_deterministic_bff_plan",
+    "is_hr_read_only_query",
     "is_read_only_hr_e2e_query",
     "query_requires_clarification",
     "verify_primary_route",

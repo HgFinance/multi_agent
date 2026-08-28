@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -66,6 +67,11 @@ def deploy(service: str, files: list[str], timeout_seconds: int) -> None:
         raise ValueError(f"unsupported service: {service}")
     compose = _compose(files)
     _run([*compose, "config", "--quiet"])
+    # Compose readiness proves only that the replacement process is alive.  A
+    # release must also refuse the known cross-department contract regressions
+    # before it builds or replaces a live container.  Keep this mandatory and
+    # unskippable: a green healthcheck cannot override a failed contract.
+    _run([sys.executable, "-m", "pytest", "-q", "tests/contracts"])
     _run([*compose, "build", service])
 
     canary = f"hgfinance-{service}-readiness-canary-{os.getpid()}"

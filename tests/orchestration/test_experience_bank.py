@@ -111,6 +111,15 @@ class ExperienceBankTest(unittest.TestCase):
         self.assertNotIn("provider failure", lookup.planner_hint.get("lessons", []))
         self.assertNotIn("failed_failure_codes", lookup.planner_hint)
         self.assertNotIn("failed_department_sets", lookup.planner_hint)
+        self.assertEqual(lookup.failure_memory["matched_failures"], 1)
+        self.assertEqual(
+            lookup.failure_memory["failure_codes"],
+            [{"code": "PROVIDER_QUOTA", "count": 1}],
+        )
+        self.assertEqual(
+            lookup.failure_memory["failed_department_sets"],
+            [{"departments": "research", "count": 1}],
+        )
 
     def test_failed_experience_is_not_recalled_even_if_legacy_success_flag_is_wrong(self):
         connection = _Connection(

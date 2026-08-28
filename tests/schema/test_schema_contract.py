@@ -195,6 +195,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # Fund 생성 시 보수 발생주의 계정(2100/5200/5300)을 같은
                  # 트랜잭션에서 만들고, 기존 Fund도 idempotent하게 보정한다.
                  "20260818001300_fund_fee_account_provisioning.sql",
+                 # DB에 이미 적용된 외부 인증 투영 migration을 원장에도 복원해
+                 # migration sequence가 DB history와 어긋나지 않게 한다.
+                 "20260818001350_external_auth_subject_projection.sql",
                  # The imported 61-session completed-second archive is a
                  # distinct historical-search authority, never the live
                  # receipt-clock event manifest.
@@ -311,6 +314,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  "20260827000100_conditional_rule_worker_bundle_activation_grant.sql",
                  # Redis publish must not hold conditional outbox row locks.
                  "20260827000200_conditional_rule_outbox_claim_lease.sql",
+                 # t1444 current ranking is persisted as forward-only PIT
+                 # membership snapshots; raw ranking rows are not archived.
+                 "20260828000100_research_t1444_universe_collector_role.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

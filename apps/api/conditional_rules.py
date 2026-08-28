@@ -323,28 +323,46 @@ def _expiry(value: datetime | None, *, now: datetime) -> datetime:
     return expiry
 
 
+GUARD_MESSAGES = {
+    "MARKET_CLOSED_NO_ORDER": (
+        "현재 장이 열려 있지 않아 주문을 제출하지 않았습니다. "
+        "체결·원장 반영도 없습니다."
+    ),
+    "MARKET_QUOTE_STALE": (
+        "현재가가 최신 상태가 아니어서 주문을 제출하지 않았습니다."
+    ),
+    "MARKET_SESSION_UNAVAILABLE": (
+        "장 운영 상태를 확인할 수 없어 주문을 제출하지 않았습니다."
+    ),
+    "TRADING_MARKET_SESSION_CLOSED": (
+        "현재 장이 열려 있지 않아 주문을 제출하지 않았습니다. "
+        "체결·원장 반영도 없습니다."
+    ),
+    "TRADING_MARKET_SESSION_UNAVAILABLE": (
+        "장 운영 상태를 확인할 수 없어 주문을 제출하지 않았습니다."
+    ),
+    "TRADING_MARKET_NO_ASK": (
+        "매도호가가 없어(상한가 등) 시장가 매수를 체결할 수 없습니다. "
+        "주문을 제출하지 않았습니다."
+    ),
+    "TRADING_MARKET_NO_BID": (
+        "매수호가가 없어(하한가 등) 시장가 매도를 체결할 수 없습니다. "
+        "주문을 제출하지 않았습니다."
+    ),
+    "INSUFFICIENT_CASH": "현재 PAPER 현금 잔고가 부족해 주문하지 않았습니다.",
+    "INSUFFICIENT_POSITION": "현재 매도 가능 수량이 부족해 주문하지 않았습니다.",
+}
+
+
+def conditional_status_message(
+    *, last_error_code: str | None, last_guard_code: str | None
+) -> str | None:
+    """One Korean sentence for a rule outcome, shared with the order status."""
+
+    return GUARD_MESSAGES.get(last_error_code or last_guard_code or "")
+
+
 def _view(record: ConditionalRuleRecord) -> ConditionalRuleView:
-    messages = {
-        "MARKET_CLOSED_NO_ORDER": (
-            "현재 장이 열려 있지 않아 주문을 제출하지 않았습니다. "
-            "체결·원장 반영도 없습니다."
-        ),
-        "MARKET_QUOTE_STALE": (
-            "현재가가 최신 상태가 아니어서 주문을 제출하지 않았습니다."
-        ),
-        "MARKET_SESSION_UNAVAILABLE": (
-            "장 운영 상태를 확인할 수 없어 주문을 제출하지 않았습니다."
-        ),
-        "TRADING_MARKET_SESSION_CLOSED": (
-            "현재 장이 열려 있지 않아 주문을 제출하지 않았습니다. "
-            "체결·원장 반영도 없습니다."
-        ),
-        "TRADING_MARKET_SESSION_UNAVAILABLE": (
-            "장 운영 상태를 확인할 수 없어 주문을 제출하지 않았습니다."
-        ),
-        "INSUFFICIENT_CASH": "현재 PAPER 현금 잔고가 부족해 주문하지 않았습니다.",
-        "INSUFFICIENT_POSITION": "현재 매도 가능 수량이 부족해 주문하지 않았습니다.",
-    }
     return ConditionalRuleView(
         rule_id=UUID(record.rule_id),
         state=record.state,
@@ -358,7 +376,10 @@ def _view(record: ConditionalRuleRecord) -> ConditionalRuleView:
         last_guard_code=record.last_guard_code,
         last_error_code=record.last_error_code,
         directive_id=UUID(record.directive_id) if record.directive_id else None,
-        status_message=messages.get(record.last_error_code or record.last_guard_code or ""),
+        status_message=conditional_status_message(
+            last_error_code=record.last_error_code,
+            last_guard_code=record.last_guard_code,
+        ),
     )
 
 

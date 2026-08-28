@@ -136,7 +136,9 @@ class FakeNotionTransport:
             }
         }
 
-    def query_projection(self, _database_id: str, projection_key: str) -> Sequence[Mapping[str, Any]]:
+    def query_projection(
+        self, _database_id: str, projection_key: str
+    ) -> Sequence[Mapping[str, Any]]:
         return [page for page in self.pages if page["projection_key"] == projection_key]
 
     def create_page(
@@ -156,8 +158,18 @@ class LegacyNotionTransport(FakeNotionTransport):
 
     def database_schema(self, _database_id: str) -> dict[str, Any]:
         names = (
-            "브리핑명", "기준일", "상태", "구분", "전체 업무", "완료", "진행 중",
-            "승인 대기", "차단·오류", "대표 결정사항", "핵심 성과", "문제·위험",
+            "브리핑명",
+            "기준일",
+            "상태",
+            "구분",
+            "전체 업무",
+            "완료",
+            "진행 중",
+            "승인 대기",
+            "차단·오류",
+            "대표 결정사항",
+            "핵심 성과",
+            "문제·위험",
             "다음 우선순위",
         )
         properties: dict[str, Any] = {
@@ -183,8 +195,16 @@ class LegacyNotionTransport(FakeNotionTransport):
         properties: Mapping[str, Any],
         _children: Sequence[Mapping[str, Any]],
     ) -> Mapping[str, Any]:
-        title = properties.get("브리핑명") or properties.get("제목") or properties.get("title")
-        page = {"id": f"page-{len(self.pages) + 1}", "title": title, "properties": properties}
+        title = (
+            properties.get("브리핑명")
+            or properties.get("제목")
+            or properties.get("title")
+        )
+        page = {
+            "id": f"page-{len(self.pages) + 1}",
+            "title": title,
+            "properties": properties,
+        }
         self.pages.append(page)
         return page
 
@@ -344,7 +364,6 @@ class ReplayTerminalProjectionTests(unittest.TestCase):
                 notion_transport=FakeNotionTransport(),
                 env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "db"},
             )
-
 
     def test_production_action_marker_is_exact_and_not_substring_matching(self) -> None:
         from orchestration.adapters.terminal_projection_utils import action

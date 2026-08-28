@@ -268,6 +268,48 @@ def test_market_worker_failure_restarts_only_that_shard():
     assert any("소켓7" in line and "해당 소켓만 재시작" in line for line in lines)
 
 
+def test_market_worker_rebuilds_shared_capture_after_bounded_failures():
+    class Worker:
+        stats = object()
+
+        async def run(self, *, max_seconds):
+            del max_seconds
+            raise ls_realtime_service.LsRealtimeError("database connection closed")
+
+    with pytest.raises(ls_realtime_service.LsRealtimeError, match="공유 수집 경계를 재구축"):
+        ls_realtime_service.asyncio.run(
+            ls_realtime_service._run_worker_resilient(
+                Worker(),
+                max_seconds=10.0,
+                delay_seconds=0.0,
+                stop=ls_realtime_service.asyncio.Event(),
+                shard_index=2,
+                retry_backoff=0.0,
+            )
+        )
+
+
+def test_market_heartbeat_restarts_after_no_progress():
+    class Sink:
+        class Stats:
+            messages = written_ticks = written_quotes = 0
+
+        stats = Stats()
+
+    lines = []
+    with pytest.raises(ls_realtime_service.LsRealtimeError, match="무진전"):
+        ls_realtime_service.asyncio.run(
+            ls_realtime_service._heartbeat(
+                [Sink()],
+                ls_realtime_service.asyncio.Event(),
+                interval_seconds=0.01,
+                restart_after_seconds=0.03,
+                log=lines.append,
+            )
+        )
+    assert any("전체 소켓 무진전" in line for line in lines)
+
+
 def test_market_stream_disables_protocol_ping(monkeypatch):
     calls = []
     sentinel = object()

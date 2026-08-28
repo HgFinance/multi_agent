@@ -579,7 +579,29 @@ function CeoControlRoomChatSession() {
                 <div className="text-xs font-bold text-primary">PAPER 주문 상태</div>
                 <p className="mt-1 mb-0 text-xs text-on-surface">
                   {orderStatusQuery.data?.state ?? submitted.orderState ?? "INTERPRETING"}
+                  {/* 요청 상태는 활성화 워크플로의 결말일 뿐이다. 조건주문은
+                      규칙이 따로 실패할 수 있어 요청만 보면 성공으로 읽힌다. */}
+                  {orderStatusQuery.data?.conditional_rules?.length
+                    ? " (조건주문 접수 결과)"
+                    : null}
                 </p>
+                {orderStatusQuery.data?.conditional_rules?.map((rule) => (
+                  <p
+                    key={rule.rule_id}
+                    className={`mt-1 mb-0 text-[11px] ${
+                      rule.state === "FAILED" || rule.state === "EXPIRED"
+                        ? "text-error"
+                        : "text-on-surface"
+                    }`}
+                  >
+                    조건규칙 {rule.state}
+                    {rule.status_message
+                      ? ` — ${rule.status_message}`
+                      : rule.last_error_code
+                        ? ` — ${rule.last_error_code}`
+                        : ""}
+                  </p>
+                ))}
                 {orderStatusQuery.data?.clarification_code ? (
                   <p className="mt-1 mb-0 text-[11px] text-error">
                     확인 필요: {orderStatusQuery.data.clarification_code}

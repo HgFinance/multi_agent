@@ -147,9 +147,26 @@ rather than inventing a share count.
 ```
 
 For a Bollinger upper band use `name=BOLLINGER`, `output=UPPER`, and
-`parameters={"PERIOD":20,"STDDEV":2}`. For an explicit conditional limit
+`parameters={"PERIOD":20,"STDDEV":2}`. 중심선/중간선 is `output=MIDDLE` and
+하단선 is `output=LOWER`. For an explicit conditional limit
 order, set `action.order_type=LIMIT` and copy the exact stated price to
 `action.limit_price`; otherwise use `MARKET` and omit `limit_price`.
+
+Korean HTS notation lists indicator arguments positionally:
+`볼린저밴드(종가,2,0,20)` is price source 종가, `STDDEV=2`, `OFFSET=0`,
+`PERIOD=20`. Map each argument onto the parameter it names and never invent a
+key — the task body lists every indicator as `NAME(PARAMETER=default,...)`,
+and an undeclared key is rejected as `UNSUPPORTED_INDICATOR_PARAMETER`.
+`OFFSET` is the bar shift back from the latest completed bar and is `0` unless
+the user says otherwise. Local indicators read the 종가/CLOSE series, so a 종가
+price-source argument is the default and adds no parameter; any other price
+source returns `candidate=null` with
+`clarification_reason=UNSUPPORTED_INDICATOR_PRICE_SOURCE`.
+
+터치/닿으면 against a band or line means the completed bar spans it: build a
+`LOGICAL AND` of `MARKET LOW LTE <line>` and `MARKET HIGH GTE <line>` on
+`BAR_CLOSE`. A `COMPARISON EQ` against a computed band would essentially never
+trigger and is not a touch.
 
 An explicit `3분봉` plus `N선` or `N일선` means SMA with
 `parameters={"PERIOD":N}` before the trusted 3M-to-5M compatibility fallback;

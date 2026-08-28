@@ -34,6 +34,7 @@ COPY collectors/collector_scheduler.py \
      collectors/market_breadth_collector.py \
      collectors/derivatives_collector.py \
      collectors/chart_backfill_collector.py \
+     collectors/market_cap_universe_collector.py \
      collectors/label_snapshot_collector.py \
      collectors/volatility_index_collector.py \
      collectors/style_index_collector.py \
@@ -52,6 +53,7 @@ COPY collectors/collector_scheduler.py \
      collectors/symbol_universe.py \
      collectors/market_observations.py \
      ./collectors/
+COPY autonomous/ls_market_data.py ./autonomous/ls_market_data.py
 # 거래제한 수집기는 이 결정론 모듈의 제한 사유/TR 정의와 pagination 함수만
 # 재사용한다. 전체 agents/ 실행면을 이미지에 되살리지 않고 정확히 한 파일만
 # allowlist에 포함한다.
@@ -60,6 +62,10 @@ COPY agents/sector_regime_analyst.py ./agents/sector_regime_analyst.py
 COPY contracts ./contracts
 COPY repository ./repository
 COPY api ./api
+# market_api installs the repository's existing Tool Gateway at import time.
+# Package the canonical profile config with the API so the gateway never
+# silently falls back to NOT_INSTALLED in the standalone market-api image.
+COPY hermes ./hermes
 # evidence/ 는 research-api /evidence/stories 가 story_cluster(결정론 군집)를
 # import 하기 위해 필요하다 - 표준 라이브러리만 써서 의존성은 늘지 않는다
 COPY evidence ./evidence

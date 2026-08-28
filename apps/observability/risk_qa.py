@@ -8,7 +8,7 @@ enabled only with explicit environment variables.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from functools import wraps
 from statistics import median
@@ -55,6 +55,7 @@ class RuntimeTelemetry:
         self._fallback_count = 0
         self._fallback_by_stage: dict[str, int] = {}
         self._circuit_breakers: dict[str, str] = {}
+        self._external_activities: list[dict[str, Any]] = []
         self._tracer = self._build_tracer()
         self._duration = _prom_metric(
             "histogram",
@@ -88,17 +89,23 @@ class RuntimeTelemetry:
 
             endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
             provider = TracerProvider(
-                resource=Resource.create({"service.name": f"{self.department}-department"})
+                resource=Resource.create(
+                    {"service.name": f"{self.department}-department"}
+                )
             )
             if endpoint:
-                provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+                provider.add_span_processor(
+                    BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
+                )
             trace.set_tracer_provider(provider)
             return trace.get_tracer(f"risk-qa.{self.department}")
         except Exception:  # noqa: BLE001 - telemetry setup must never change a safe decision
             return None
 
     @contextmanager
-    def span(self, name: str, attributes: dict[str, Any] | None = None) -> Iterator[Any]:
+    def span(
+        self, name: str, attributes: dict[str, Any] | None = None
+    ) -> Iterator[Any]:
         """Create a trace span when enabled; otherwise yield a no-op context."""
         if self._tracer is None:
             with nullcontext(None) as span:
@@ -120,7 +127,12 @@ class RuntimeTelemetry:
             yield None
 
     def record_pipeline(
-        self, *, stage: str, outcome: str, duration_seconds: float, fallback_count: int = 0
+        self,
+        *,
+        stage: str,
+        outcome: str,
+        duration_seconds: float,
+        fallback_count: int = 0,
     ) -> None:
         with self._lock:
             self._pipeline_samples.append(max(0.0, duration_seconds))
@@ -128,9 +140,13 @@ class RuntimeTelemetry:
             self._pipeline_count += 1
             self._fallback_count += max(0, fallback_count)
             if fallback_count:
-                self._fallback_by_stage[stage] = self._fallback_by_stage.get(stage, 0) + fallback_count
+                self._fallback_by_stage[stage] = (
+                    self._fallback_by_stage.get(stage, 0) + fallback_count
+                )
         if self._duration is not None:
-            self._duration.labels(self.department, stage, outcome).observe(duration_seconds)
+            self._duration.labels(self.department, stage, outcome).observe(
+                duration_seconds
+            )
         if fallback_count and self._fallbacks is not None:
             self._fallbacks.labels(self.department, stage).inc(fallback_count)
 
@@ -145,6 +161,31 @@ class RuntimeTelemetry:
                 {"CLOSED": 0, "HALF_OPEN": 1, "OPEN": 2}[normalized]
             )
 
+    def record_external_activity(self, activity: Mapping[str, Any]) -> bool:
+        """Record one bounded external execution receipt idempotently.
+
+        This is an observation sink only.  Callers must provide an already
+        redacted, schema-validated receipt; the sink keeps the latest 1,000
+        receipts and never changes a domain decision.
+        """
+
+        event_id = str(activity.get("event_id") or "").strip()
+        if not event_id:
+            return False
+        receipt = {
+            str(key): value
+            for key, value in activity.items()
+            if isinstance(value, (str, int, float, bool)) or value is None
+        }
+        with self._lock:
+            for index, existing in enumerate(self._external_activities):
+                if existing.get("event_id") == event_id:
+                    self._external_activities[index] = receipt
+                    return True
+            self._external_activities.append(receipt)
+            self._external_activities = self._external_activities[-1000:]
+        return True
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             samples = sorted(self._pipeline_samples)
@@ -152,6 +193,7 @@ class RuntimeTelemetry:
             fallback_count = self._fallback_count
             fallback_by_stage = dict(self._fallback_by_stage)
             breakers = dict(self._circuit_breakers)
+            external_activities = list(self._external_activities)
         if not samples:
             p50 = p99 = 0.0
         else:
@@ -166,6 +208,10 @@ class RuntimeTelemetry:
             "p99_seconds": p99,
             "fallback_by_stage": fallback_by_stage,
             "circuit_breakers": breakers,
+            "hermes_activity_count": len(external_activities),
+            "latest_hermes_activity": external_activities[-1]
+            if external_activities
+            else None,
         }
 
     def prometheus_text(self) -> bytes:
@@ -184,12 +230,18 @@ def observe_pipeline(telemetry: RuntimeTelemetry, stage: str) -> Callable:
             outcome = "ERROR"
             fallback_count = 0
             try:
-                with telemetry.span(f"{telemetry.department}.{stage}", {"stage": stage}):
+                with telemetry.span(
+                    f"{telemetry.department}.{stage}", {"stage": stage}
+                ):
                     result = function(*args, **kwargs)
                 if isinstance(result, dict):
                     fallback_count = len(result.get("fallbacks") or [])
-                    outcome = "ESCALATE" if result.get("escalate") else str(
-                        result.get("verdict") or result.get("decision") or "UNKNOWN"
+                    outcome = (
+                        "ESCALATE"
+                        if result.get("escalate")
+                        else str(
+                            result.get("verdict") or result.get("decision") or "UNKNOWN"
+                        )
                     )
                 return result
             finally:

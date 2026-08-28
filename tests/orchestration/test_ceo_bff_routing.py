@@ -32,6 +32,31 @@ def test_bff_route_is_serialized_for_the_existing_supervisor_materializer() -> N
     assert "delegation_instruction.qa-department=" not in body
 
 
+def test_discord_follow_up_uses_previous_question_context_for_routing() -> None:
+    plan = build_deterministic_bff_plan(
+        "이어서",
+        previous_question_context="삼성전자 시장 위험을 분석해줘",
+    )
+
+    assert plan["mode"] == "free_query"
+    assert plan["routing_basis"] == "previous_question_context"
+    assert plan["previous_question_context_used"] is True
+    assert plan["selected_primary_profiles"] == (
+        "research-department",
+        "risk-management",
+    )
+
+
+def test_unrelated_filler_does_not_attach_to_previous_question() -> None:
+    plan = build_deterministic_bff_plan(
+        "안녕",
+        previous_question_context="삼성전자 시장 위험을 분석해줘",
+    )
+
+    assert plan["mode"] == "clarification_required"
+    assert plan["requested_departments"] == []
+
+
 def test_hr_e2e_query_routes_only_to_workforce_profile() -> None:
     plan = build_deterministic_bff_plan(
         "HR E2E 검증: PAPER/read-only로 Workforce API GET 3건만 실행하고 "
@@ -42,6 +67,31 @@ def test_hr_e2e_query_routes_only_to_workforce_profile() -> None:
     assert plan["category"] == "HR_E2E_READONLY"
     assert plan["selected_primary_profiles"] == ("hr-department",)
     assert tuple(plan["requested_departments"]) == ("hr",)
+
+
+def test_ordinary_hr_read_queries_route_only_to_workforce_profile() -> None:
+    queries = (
+        "HR 부서에서 Worker 유휴 상태와 비용 누락을 읽기 전용으로 점검해줘",
+        "HR 부서의 Hiring Request와 Profile 상태를 조회해줘",
+        "HR Access Request와 agent lifecycle 상태를 확인해줘",
+        "HR 부서의 Queue SLA 품질 Scorecard를 읽기 전용으로 요약해줘",
+    )
+
+    for query in queries:
+        plan = build_deterministic_bff_plan(query)
+        assert plan["mode"] == "hr_readonly"
+        assert plan["routing_basis"] == "explicit_hr_workforce_scope"
+        assert plan["selected_primary_profiles"] == ("hr-department",)
+        assert plan["requested_departments"] == ["hr"]
+
+
+def test_hr_mutation_request_does_not_enter_read_only_workforce_lane() -> None:
+    plan = build_deterministic_bff_plan(
+        "HR에서 Agent 권한을 부여하고 Profile을 ACTIVE로 변경해줘"
+    )
+
+    assert plan["mode"] == "clarification_required"
+    assert plan["requested_departments"] == []
 
 
 def test_explicit_research_scope_ignores_prohibited_order_wording() -> None:
@@ -120,6 +170,17 @@ def test_quant_scope_keeps_data_quality_terms_on_the_quant_pipeline() -> None:
     assert plan["selected_primary_profiles"] == ("quant-backtest-department",)
 
 
+def test_explicit_trading_scope_does_not_fan_out_to_research_or_risk() -> None:
+    plan = build_deterministic_bff_plan(
+        "Trading 부서에서 삼성전자 PAPER 주문 가능성과 파라미터를 "
+        "읽기 전용으로 검증해줘. 실제 주문은 하지 마."
+    )
+
+    assert plan["routing_basis"] == "explicit_trading_scope"
+    assert plan["requested_departments"] == ["trading", "ceo"]
+    assert plan["selected_primary_profiles"] == ("trading-department",)
+
+
 def test_bff_route_can_be_scoped_to_one_authorized_department() -> None:
     plan = build_deterministic_bff_plan(
         "원장과 현금 대사 상태를 PAPER 읽기 전용으로 검토해줘",
@@ -160,6 +221,19 @@ def test_explicit_accounting_e2e_scope_ignores_prohibited_trade_wording() -> Non
     assert plan["category"] == "ACCOUNT_STATUS"
     assert plan["routing_basis"] == "accounting_account_status_intent"
     assert plan["selected_primary_profiles"] == ("accounting-portfolio-department",)
+    assert "trading" not in plan["matched_terms"]
+
+
+def test_account_status_safety_list_does_not_route_to_trading() -> None:
+    plan = build_deterministic_bff_plan(
+        "현재 계좌 현황, 현금, 순자산, 포지션 수량 대사와 증권사 조회 상태를 "
+        "읽기 전용으로 확인해줘. 실제 주문, 원장 변경, 공식 순자산 확정은 하지 마."
+    )
+
+    assert plan["category"] == "ACCOUNT_STATUS"
+    assert plan["selected_primary_profiles"] == (
+        "accounting-portfolio-department",
+    )
     assert "trading" not in plan["matched_terms"]
 
 

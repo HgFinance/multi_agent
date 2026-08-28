@@ -18,12 +18,12 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
-from typing import Mapping
 from urllib.parse import quote
 
 from orchestration.primary_task_idempotency import REQUEST_USER_INPUT_SUFFIX
-
 
 ROOT_COLUMN = "workflow_root_task_id"
 ROOT_INDEX_NAME = "idx_tasks_workflow_root_task_id"
@@ -129,28 +129,22 @@ class SQLiteRootScopedIndex:
                 )
                 conn.commit()
             except RootScopedIndexUnavailable:
-                try:
+                with suppress(OSError, sqlite3.Error):
                     if conn is not None:
                         conn.rollback()
-                except Exception:
-                    pass
                 raise
             except (OSError, sqlite3.Error) as exc:
-                try:
+                with suppress(OSError, sqlite3.Error):
                     if conn is not None:
                         conn.rollback()
-                except Exception:
-                    pass
                 raise RootScopedIndexUnavailable(
                     f"cannot prepare root index for {self.db_path}: "
                     f"{type(exc).__name__}"
                 ) from exc
             finally:
-                try:
+                with suppress(OSError, sqlite3.Error):
                     if conn is not None:
                         conn.close()
-                except Exception:
-                    pass
             self._prepared = True
 
     def task_ids(
@@ -178,15 +172,12 @@ class SQLiteRootScopedIndex:
             return tuple(str(row[0]) for row in rows if row[0])
         except (OSError, sqlite3.Error) as exc:
             raise RootScopedIndexUnavailable(
-                f"root index query failed for {self.db_path}: "
-                f"{type(exc).__name__}"
+                f"root index query failed for {self.db_path}: {type(exc).__name__}"
             ) from exc
         finally:
-            try:
+            with suppress(OSError, sqlite3.Error):
                 if conn is not None:
                     conn.close()
-            except Exception:
-                pass
 
     def root_id_for_task(self, task_id: str) -> str | None:
         """Return a scoped root candidate for one task, or ``None``.
@@ -217,15 +208,12 @@ class SQLiteRootScopedIndex:
             return root
         except (OSError, sqlite3.Error) as exc:
             raise RootScopedIndexUnavailable(
-                f"root candidate lookup failed for {self.db_path}: "
-                f"{type(exc).__name__}"
+                f"root candidate lookup failed for {self.db_path}: {type(exc).__name__}"
             ) from exc
         finally:
-            try:
+            with suppress(OSError, sqlite3.Error):
                 if conn is not None:
                     conn.close()
-            except Exception:
-                pass
 
     def recovery_candidate_rows(
         self, *, include_historical: bool = True
@@ -246,10 +234,7 @@ class SQLiteRootScopedIndex:
             conn = sqlite3.connect(db_uri, uri=True, timeout=1.0)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=1000")
-            columns = {
-                str(row[1])
-                for row in conn.execute("PRAGMA table_xinfo(tasks)")
-            }
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_xinfo(tasks)")}
             tables = {
                 str(row[0])
                 for row in conn.execute(
@@ -317,6 +302,43 @@ class SQLiteRootScopedIndex:
                 if ROOT_COLUMN in columns
                 else "0"
             )
+            post_response_qa_pending_expression = (
+                "CASE WHEN EXISTS ("
+                "SELECT 1 FROM task_comments AS pending_qa "
+                "WHERE pending_qa.task_id = tasks.id "
+                "AND instr(coalesce(pending_qa.body, ''), "
+                "'hgfinance.post-response-qa.v1') > 0 "
+                "AND instr(coalesce(pending_qa.body, ''), 'state=pending') > 0 "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM task_comments AS scheduled_qa "
+                "WHERE scheduled_qa.task_id = tasks.id "
+                "AND instr(coalesce(scheduled_qa.body, ''), "
+                "'hgfinance.post-response-qa.v1') > 0 "
+                "AND instr(coalesce(scheduled_qa.body, ''), 'state=scheduled') > 0"
+                ")"
+                ") THEN 1 ELSE 0 END"
+                if "task_comments" in tables
+                else "0"
+            )
+            qa_projection_pending_expression = (
+                "CASE WHEN EXISTS ("
+                "SELECT 1 FROM task_comments AS pending_projection "
+                "WHERE pending_projection.task_id = tasks.id "
+                "AND instr(coalesce(pending_projection.body, ''), "
+                "'hgfinance.post-response-qa.v1') > 0 "
+                "AND instr(coalesce(pending_projection.body, ''), "
+                "'state=projection_pending') > 0"
+                ") AND NOT EXISTS ("
+                "SELECT 1 FROM task_comments AS projected_projection "
+                "WHERE projected_projection.task_id = tasks.id "
+                "AND instr(coalesce(projected_projection.body, ''), "
+                "'hgfinance.post-response-qa.v1') > 0 "
+                "AND instr(coalesce(projected_projection.body, ''), "
+                "'state=projected') > 0"
+                ") THEN 1 ELSE 0 END"
+                if "task_comments" in tables
+                else "0"
+            )
             selection_comment_expression = (
                 "CASE WHEN EXISTS ("
                 "SELECT 1 FROM task_comments AS selection_comment "
@@ -344,16 +366,18 @@ class SQLiteRootScopedIndex:
                 recent_filter = (
                     "AND (lower(status) IN ('ready', 'running') OR ("
                     "lower(status) IN ('done', 'completed', 'archived') AND "
-                    f"coalesce({completed_at_expression}, created_at) >= ?)) "
+                    f"coalesce({completed_at_expression}, created_at) >= ?) OR "
+                    f"{post_response_qa_pending_expression} = 1 OR "
+                    f"{qa_projection_pending_expression} = 1) "
                 )
             else:
                 recent_filter = ""
             if "idempotency_key" in columns:
-                control_key_clause = (
-                    "AND control.idempotency_key = tasks.id || ? "
-                )
+                control_key_clause = "AND control.idempotency_key = tasks.id || ? "
                 query_parameters += (REQUEST_USER_INPUT_SUFFIX,)
-            line_body = "char(10) || replace(coalesce(body, ''), char(13), '') || char(10)"
+            line_body = (
+                "char(10) || replace(coalesce(body, ''), char(13), '') || char(10)"
+            )
             line_root_marker = (
                 f"instr({line_body}, char(10) || 'workflow_role=root' || char(10)) > 0"
             )
@@ -363,9 +387,7 @@ class SQLiteRootScopedIndex:
                 "char(10) || 'root_task_role=scope_and_planning' || char(10)"
                 ") > 0"
             )
-            line_synthesis_marker = (
-                f"instr({line_body}, char(10) || 'workflow_role=synthesis' || char(10)) > 0"
-            )
+            line_synthesis_marker = f"instr({line_body}, char(10) || 'workflow_role=synthesis' || char(10)) > 0"
             synthesis_child_marker = (
                 "instr(char(10) || replace(coalesce(s.body, ''), char(13), '') "
                 "|| char(10), char(10) || 'workflow_role=synthesis' || char(10)) > 0"
@@ -400,10 +422,16 @@ class SQLiteRootScopedIndex:
                 f"{analysis_child_expression} AS has_analysis_child, "
                 f"{terminal_primary_expression} AS has_terminal_primary, "
                 f"{synthesis_expression} AS has_synthesis, "
+                f"{post_response_qa_pending_expression} AS "
+                "has_post_response_qa_pending, "
+                f"{qa_projection_pending_expression} AS "
+                "has_qa_projection_pending, "
                 f"{selection_comment_expression} AS has_selection_comment "
                 "FROM tasks "
                 "WHERE body IS NOT NULL AND ("
                 f"{root_candidate_clause} OR (NOT ? AND {line_synthesis_marker})"
+                f" OR ({post_response_qa_pending_expression} = 1)"
+                f" OR ({qa_projection_pending_expression} = 1)"
                 f"){recent_filter}AND NOT EXISTS ("
                 "SELECT 1 FROM tasks AS control "
                 "WHERE control.workflow_root_task_id = tasks.id "
@@ -429,6 +457,10 @@ class SQLiteRootScopedIndex:
                     "has_analysis_child": bool(row["has_analysis_child"]),
                     "has_terminal_primary": bool(row["has_terminal_primary"]),
                     "has_synthesis": bool(row["has_synthesis"]),
+                    "has_post_response_qa_pending": bool(
+                        row["has_post_response_qa_pending"]
+                    ),
+                    "has_qa_projection_pending": bool(row["has_qa_projection_pending"]),
                     "has_selection_comment": bool(row["has_selection_comment"]),
                 }
                 for row in rows
@@ -440,11 +472,9 @@ class SQLiteRootScopedIndex:
                 f"{type(exc).__name__}"
             ) from exc
         finally:
-            try:
+            with suppress(OSError, sqlite3.Error):
                 if conn is not None:
                     conn.close()
-            except Exception:
-                pass
 
 
 __all__ = [

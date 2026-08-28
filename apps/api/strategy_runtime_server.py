@@ -17,8 +17,16 @@
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
+import os
+import time
+from uuid import uuid4
 from typing import Literal
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -45,9 +53,30 @@ app = FastAPI(
 )
 
 
+def _paper_order_token(deployment_id: str) -> str | None:
+    secret = os.getenv("STRATEGY_PAPER_ORDER_TOKEN", "").strip()
+    if len(secret) < 32:
+        return None
+    return hmac.new(secret.encode(), deployment_id.encode(), hashlib.sha256).hexdigest()
+
+
+def _paper_order_request_authorized(request: Request) -> bool:
+    prefix = "/deployments/"
+    suffix = "/orders"
+    path = request.url.path
+    if not (path.startswith(prefix) and path.endswith(suffix)):
+        return False
+    deployment_id = path[len(prefix) : -len(suffix)]
+    expected = _paper_order_token(deployment_id)
+    supplied = request.headers.get("authorization", "")
+    return bool(expected) and hmac.compare_digest(supplied, f"Bearer {expected}")
+
+
 @app.middleware("http")
 async def require_internal_service_auth(request: Request, call_next):
     if request.url.path != "/health":
+        if _paper_order_request_authorized(request):
+            return await call_next(request)
         if not runtime_service_token_configured():
             return JSONResponse(
                 status_code=503,
@@ -118,6 +147,81 @@ def deployment_status(deployment_id: str) -> dict:
 
 class PaperPowerRequest(BaseModel):
     action: Literal["start", "stop"]
+
+
+class StrategyPaperOrderRequest(BaseModel):
+    """Child-to-sidecar request; the sidecar supplies the Trading proof."""
+
+    deployment_id: str
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    quantity: str
+    signal_key: str
+
+
+def _b64(value: dict[str, object]) -> str:
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _trading_service_token() -> str:
+    secret = os.getenv("TRADING_INTERNAL_SERVICE_AUTH_SECRET", "").strip()
+    issuer = os.getenv("TRADING_INTERNAL_SERVICE_AUTH_ISSUER", "").strip()
+    audience = os.getenv("TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE", "").strip()
+    if len(secret) < 32 or not issuer or not audience:
+        raise HTTPException(status_code=503, detail="strategy_paper_internal_auth_unconfigured")
+    issued_at = time.time()
+    header = _b64({"alg": "HS256", "typ": "JWT"})
+    payload = _b64(
+        {
+            "iss": issuer,
+            "aud": audience,
+            "sub": "strategy-runtime-control",
+            "department": "trading-department",
+            "service": "strategy-runtime-control",
+            "scopes": ["trading.strategy-paper.execute"],
+            "jti": f"strategy-paper-{uuid4()}",
+            "iat": issued_at,
+            "nbf": issued_at,
+            "exp": issued_at + 60,
+        }
+    )
+    signature = hmac.new(secret.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest()
+    return f"Bearer {header}.{payload}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
+
+
+@app.post("/deployments/{deployment_id}/orders", status_code=202)
+def strategy_paper_order(deployment_id: str, body: StrategyPaperOrderRequest) -> dict:
+    """Relay a deployment-bound signal to Trading's PAPER-only order route."""
+
+    if body.deployment_id != deployment_id:
+        raise HTTPException(status_code=409, detail="strategy_paper_deployment_mismatch")
+    container = strategy_runtime.container_status(
+        strategy_runtime._deployment_container_name(deployment_id)
+    )
+    if not container.get("running"):
+        raise HTTPException(status_code=409, detail="strategy_paper_runtime_not_running")
+    trading_url = os.getenv("STRATEGY_PAPER_TRADING_API_URL", "http://trading-api:8000").rstrip("/")
+    try:
+        response = httpx.post(
+            f"{trading_url}/trading/v1/internal/strategy-paper/orders",
+            json=body.model_dump(mode="json"),
+            headers={"Authorization": _trading_service_token()},
+            timeout=8.0,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="strategy_paper_trading_api_unreachable") from exc
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {"error_code": "TRADING_INVALID_RESPONSE", "message": "Trading API returned non-JSON"}
+    if response.status_code >= 400:
+        if isinstance(payload, dict):
+            raise HTTPException(status_code=response.status_code, detail=payload)
+        raise HTTPException(status_code=response.status_code, detail="strategy_paper_order_rejected")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="strategy_paper_trading_response_invalid")
+    return payload
 
 
 @app.post("/deployments/{deployment_id}/power")

@@ -678,8 +678,8 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
                   </label>
                   <p className="text-xs text-on-surface-variant mt-2">
                     {locked
-                      ? "대화가 끝나면 이 칸을 직접 수정할 수 있습니다."
-                      : "구체적인 종목이나 기간은 AI 어시스턴트가 다음 질문으로 확인합니다."}
+                      ? "대화가 끝나면 이 칸을 직접 수정할 수 있습니다"
+                      : "구체적인 종목이나 기간은 AI 어시스턴트가 다음 질문으로 확인합니다"}
                   </p>
                 </div>
 

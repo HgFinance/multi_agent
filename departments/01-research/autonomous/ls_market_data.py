@@ -23,7 +23,9 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import sys
+import time
 from typing import Any, Mapping
 
 
@@ -32,7 +34,7 @@ COLLECTORS = HERE.parent / "collectors"
 if str(COLLECTORS) not in sys.path:
     sys.path.insert(0, str(COLLECTORS))
 
-from ls_client import LsEnvironment, LsRestClient  # noqa: E402  (local transport boundary)
+from ls_client import LsApiError, LsEnvironment, LsRestClient  # noqa: E402  (local transport boundary)
 
 
 CHART_PATH = "/stock/chart"
@@ -46,6 +48,8 @@ PAGE_SIZE = 500
 MAX_INTRADAY_WINDOW_DAYS = 90
 RATE_LIMIT_PER_SECOND = 1.0
 DEFAULT_MAX_PAGES = 200
+DEFAULT_TRANSIENT_RETRIES = 3
+DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 ALLOWED_TR_CODES = frozenset({
     "t1665", "t8410", "t8411", "t8412", "t8451", "t8452", "t8453",
     "t1441", "t1444", "t1452", "t1463", "t1466", "t1481", "t1482",
@@ -199,9 +203,10 @@ class RankingReceipt:
     pages: int
     row_count: int
     data_sha256: str
+    requested_rows: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "source": "ls-openapi",
             "path": "/stock/high-item",
             "tr_code": self.tr_code,
@@ -211,6 +216,9 @@ class RankingReceipt:
             "data_sha256": self.data_sha256,
             "raw_data_persisted": False,
         }
+        if self.requested_rows is not None:
+            result["requested_rows"] = self.requested_rows
+        return result
 
 
 @dataclass(frozen=True)
@@ -258,7 +266,14 @@ class ThemeBatch:
 class OnDemandMarketDataClient:
     """Allow-listed, read-only LS market-data client for one Hermes turn."""
 
-    def __init__(self, client: Any | None = None, *, max_pages: int = DEFAULT_MAX_PAGES) -> None:
+    def __init__(
+        self,
+        client: Any | None = None,
+        *,
+        max_pages: int = DEFAULT_MAX_PAGES,
+        transient_retries: int | None = None,
+        retry_backoff_seconds: float | None = None,
+    ) -> None:
         if client is None:
             if os.environ.get("LS_DATA_ACCESS_MODE", "readonly").strip().lower() != "readonly":
                 raise RuntimeError("Strategy Hermes LS access must be readonly")
@@ -277,7 +292,92 @@ class OnDemandMarketDataClient:
         else:
             self._client = client
         self.max_pages = _positive_int(max_pages, "max_pages", maximum=1000)
+        configured_retries = transient_retries
+        if configured_retries is None:
+            try:
+                configured_retries = int(
+                    os.getenv("LS_TRANSIENT_RETRIES", str(DEFAULT_TRANSIENT_RETRIES))
+                )
+            except (TypeError, ValueError):
+                configured_retries = DEFAULT_TRANSIENT_RETRIES
+        self.transient_retries = _positive_int(
+            configured_retries, "transient_retries", maximum=5
+        )
+        configured_backoff = retry_backoff_seconds
+        if configured_backoff is None:
+            try:
+                configured_backoff = float(
+                    os.getenv(
+                        "LS_TRANSIENT_RETRY_BACKOFF_SECONDS",
+                        str(DEFAULT_RETRY_BACKOFF_SECONDS),
+                    )
+                )
+            except (TypeError, ValueError):
+                configured_backoff = DEFAULT_RETRY_BACKOFF_SECONDS
+        try:
+            self.retry_backoff_seconds = float(configured_backoff)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("retry_backoff_seconds must be a non-negative number") from exc
+        if self.retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must be a non-negative number")
         self.last_receipt: DataReceipt | None = None
+
+    @staticmethod
+    def _is_transient_error(exc: BaseException) -> bool:
+        """Return whether an LS transport failure is safe to retry.
+
+        Application/contract errors (bad blocks, unsupported TRs, malformed
+        responses) must fail closed. Only socket timeouts, connection
+        failures, rate limiting, and explicitly transient gateway statuses
+        are retried.
+        """
+
+        if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)):
+            return True
+        if not isinstance(exc, LsApiError):
+            return False
+        message = str(exc).lower()
+        transient_fragments = (
+            "연결 실패",
+            "timed out",
+            "timeout",
+            "connection reset",
+            "temporarily unavailable",
+            "igw00201",
+            "http 408",
+            "http 425",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+        )
+        # LS uses HTTP 500 both for temporary gateway failures and malformed
+        # request blocks. Never retry the deterministic contract errors.
+        if any(
+            fragment in message
+            for fragment in (
+                "igw40011",
+                "data type",
+                "invalid request",
+                "unsupported",
+            )
+        ):
+            return False
+        return any(fragment in message for fragment in transient_fragments)
+
+    def _call_tr_with_retry(self, **kwargs: Any):
+        """Call the read-only transport with bounded transient recovery."""
+
+        for attempt in range(self.transient_retries + 1):
+            try:
+                return self._client.call_tr(**kwargs)
+            except (LsApiError, OSError, TimeoutError) as exc:
+                if not self._is_transient_error(exc) or attempt >= self.transient_retries:
+                    raise
+                delay = self.retry_backoff_seconds * (2**attempt)
+                if delay:
+                    time.sleep(delay)
 
     def fetch_chart(
         self,
@@ -411,6 +511,7 @@ class OnDemandMarketDataClient:
         request_block: Mapping[str, Any],
         *,
         as_of: str | date | None = None,
+        max_rows: int | None = None,
     ) -> RankingBatch:
         """Fetch one allow-listed LS market-ranking snapshot on demand.
 
@@ -418,7 +519,11 @@ class OnDemandMarketDataClient:
         for the selected ranking TR.  Keeping it explicit avoids silently
         choosing a market, exclusion set, or session.  ``idx`` is managed by
         this adapter for continuation pages.  No raw ranking rows are written
-        to a persistent research or market-data store.
+        to a persistent research or market-data store.  When ``max_rows`` is
+        supplied, the adapter stops after the first page that contains enough
+        rows and returns only that prefix. This is the required path for
+        top-N universe requests; it avoids walking the provider's entire
+        ranking continuation chain.
         """
 
         code = str(tr_code or "").strip().lower()
@@ -426,6 +531,9 @@ class OnDemandMarketDataClient:
             raise ValueError(f"ranking TR code is not allow-listed: {tr_code}")
         if not isinstance(request_block, Mapping):
             raise ValueError("request_block must be a mapping")
+        row_limit = None if max_rows is None else _positive_int(
+            max_rows, "max_rows", maximum=10000
+        )
         block_name = f"{code}InBlock"
         request = dict(request_block)
         request["idx"] = 0
@@ -438,7 +546,7 @@ class OnDemandMarketDataClient:
         pages = 0
         for _ in range(self.max_pages):
             pages += 1
-            response, headers = self._client.call_tr(
+            response, headers = self._call_tr_with_retry(
                 path="/stock/high-item",
                 tr_cd=code,
                 in_block={block_name: dict(request)},
@@ -455,6 +563,9 @@ class OnDemandMarketDataClient:
                 if identity not in seen_rows:
                     seen_rows.add(identity)
                     rows.append(row)
+            if row_limit is not None and len(rows) >= row_limit:
+                rows = rows[:row_limit]
+                break
             out_block = _out_block(response, code)
             try:
                 next_idx = int(out_block.get("idx") or 0)
@@ -478,6 +589,7 @@ class OnDemandMarketDataClient:
             pages=pages,
             row_count=len(rows),
             data_sha256=_canonical_hash(rows),
+            requested_rows=row_limit,
         )
         return RankingBatch(tuple(rows), receipt)
 
@@ -517,7 +629,7 @@ class OnDemandMarketDataClient:
         summary: Mapping[str, Any] = {}
         for _ in range(self.max_pages):
             pages += 1
-            response, headers = self._client.call_tr(
+            response, headers = self._call_tr_with_retry(
                 path=THEME_PATH,
                 tr_cd=code,
                 in_block={block_name: dict(request)},
@@ -637,7 +749,7 @@ class OnDemandMarketDataClient:
                 block["cts_date"] = cts_date
             if has_time and tr_code != "t1665":
                 block["cts_time"] = cts_time
-            response, headers = self._client.call_tr(
+            response, headers = self._call_tr_with_retry(
                 path=CHART_PATH,
                 tr_cd=tr_code,
                 in_block={f"{tr_code}InBlock": block},

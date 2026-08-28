@@ -138,14 +138,22 @@ def _get_json(url: str, timeout: float) -> dict[str, Any]:
 def fetch_broker_snapshot(base_url: str, *, timeout: float = 20.0) -> BrokerAccountSnapshot:
     root = base_url.rstrip("/")
     account = _get_json(root + "/ui/account/snapshot", timeout)
-    live = _get_json(root + "/ui/portfolio/live", timeout)
-    if account.get("environment") != "PAPER" or live.get("environment") != "PAPER":
+    if account.get("environment") != "PAPER":
         raise LSPaperAlignmentError("broker projection is not LS PAPER")
     if account.get("source") != "ls-openapi" or account.get("authoritative") is not False:
         raise LSPaperAlignmentError("broker account projection provenance is invalid")
-    holdings = live.get("holdings")
-    if not isinstance(holdings, dict) or not holdings.get("synced") or holdings.get("error"):
-        raise LSPaperAlignmentError("broker holdings are not synchronized")
+    # The BFF account snapshot is the single broker aggregation/cache boundary.
+    # Do not call /ui/portfolio/live here: that route also loads order history
+    # and can issue a second, independently cached broker request.
+    holdings = account.get("holdings")
+    if not isinstance(holdings, dict) or holdings.get("error"):
+        raise LSPaperAlignmentError("broker holdings are unavailable")
+    # `synced` describes whether the realtime feed's local event projection
+    # agrees with this broker snapshot.  It is not a validity flag for the
+    # broker snapshot itself: a drifted local projection must be repaired by
+    # reconciliation, not treated as a reason to block reconciliation.
+    if holdings.get("synced") is None:
+        raise LSPaperAlignmentError("broker holdings synchronization state is unknown")
     rows = holdings.get("rows")
     if not isinstance(rows, list):
         raise LSPaperAlignmentError("broker holdings rows are invalid")

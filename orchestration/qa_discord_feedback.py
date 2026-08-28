@@ -48,6 +48,7 @@ _ACTIONABLE_FINDINGS = frozenset(
         "STRUCTURED_EVAL_SCORE_LOW",
         "SEMANTIC_QA_FAILED",
         "SEMANTIC_QA_SCORE_LOW",
+        "SEMANTIC_QA_RELEVANCE_LOW",
         "REDACTION_MARKER_MISSING",
     }
 )
@@ -195,6 +196,7 @@ _FINDING_LABELS = {
     "LATENCY_ABOVE_THRESHOLD": "처리 지연 기준 초과",
     "SEMANTIC_QA_FAILED": "결과 의미 검증 실패",
     "SEMANTIC_QA_SCORE_LOW": "결과 의미 검증 점수 미달",
+    "SEMANTIC_QA_RELEVANCE_LOW": "질문 관련성 점수 미달",
     "STRUCTURED_EVAL_SCORE_LOW": "구조화 평가 점수 미달",
     "WORKER_OR_WORKFLOW_DEGRADED": "부서 또는 업무 흐름 성능 저하",
     "PRIVACY_PAYLOAD_PRESENT": "민감 원문 포함 감지",

@@ -818,6 +818,29 @@ class ForwardToIngressTests(unittest.TestCase):
         with patch.dict("os.environ", env), patch("urllib.request.urlopen", conflict):
             self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))
 
+    def test_domain_conflict_is_recorded_as_failure_not_duplicate(self) -> None:
+        import io
+        import json
+        import urllib.error
+
+        def conflict(request, timeout=None):
+            del request, timeout
+            body = json.dumps(
+                {"detail": "strategy_deployment_signature_not_supported"}
+            ).encode("utf-8")
+            raise urllib.error.HTTPError(
+                "u", 409, "conflict", {}, io.BytesIO(body)
+            )
+
+        env = self._env()
+        message = self._message()
+        with patch.dict("os.environ", env), patch("urllib.request.urlopen", conflict):
+            self.assertTrue(gateway_patch._forward_to_ingress(message, None))
+
+        self.assertEqual(
+            getattr(message, gateway_patch._INGRESS_FAILURE_ATTRIBUTE), "http_409"
+        )
+
 
 class AsyncForwardToIngressTests(unittest.IsolatedAsyncioTestCase):
     class _Author:

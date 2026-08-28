@@ -373,6 +373,104 @@ def test_publish_metric_defaults_to_metrics_project(
     assert client.create_run.call_args.kwargs["project_name"] == "HgFinance-Metrics"
 
 
+def test_publish_metric_aggregates_before_network_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+    monkeypatch.setenv("LANGSMITH_METRIC_AGGREGATION_WINDOW_SECONDS", "300")
+    # Aggregation must represent all local events even when one-run traces are
+    # sampled out; sampling before reduction would bias the window statistics.
+    monkeypatch.setenv("LANGSMITH_METRIC_SAMPLE_RATE", "0")
+
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+    observability._METRIC_AGGREGATES.clear()
+
+    try:
+        assert publish_metric(
+            {
+                "worker_id": "worker-a",
+                "stage": "risk",
+                "model_name": "qwen",
+                "status": "COMPLETED",
+                "latency_ms": 100,
+                "prompt_tokens": 20,
+                "completion_tokens": 5,
+                "max_tokens": 256,
+            },
+            trace_id="trace-a",
+            aggregate=True,
+        )
+        assert publish_metric(
+            {
+                "worker_id": "worker-b",
+                "stage": "risk",
+                "model_name": "qwen",
+                "status": "FAILED",
+                "error_count": 1,
+                "latency_ms": 200,
+                "prompt_tokens": 30,
+                "completion_tokens": 7,
+                "max_tokens": 256,
+            },
+            trace_id="trace-b",
+            aggregate=True,
+        )
+        client.create_run.assert_not_called()
+
+        assert observability._flush_metric_aggregates(force=True) == 1
+        kwargs = client.create_run.call_args.kwargs
+        metadata = kwargs["extra"]["metadata"]
+        assert metadata["metric_count"] == 2
+        assert metadata["worker_count"] == 2
+        assert metadata["error_count"] == 1
+        assert metadata["failed_count"] == 1
+        assert metadata["error_rate"] == 0.5
+        assert metadata["prompt_tokens"] == 50
+        assert metadata["completion_tokens"] == 12
+        assert metadata["max_tokens"] == 256
+        assert metadata["p95_latency_ms"] == 200
+        assert kwargs["project_name"] == "HgFinance-Metrics"
+    finally:
+        observability._METRIC_AGGREGATES.clear()
+
+
+def test_metric_aggregate_waits_through_langsmith_quota_pause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+    observability._METRIC_AGGREGATES.clear()
+    monkeypatch.setattr(observability, "langsmith_enabled", lambda: False)
+
+    try:
+        assert publish_metric(
+            {
+                "worker_id": "worker-quota-paused",
+                "stage": "risk",
+                "model_name": "qwen",
+                "status": "COMPLETED",
+                "latency_ms": 100,
+            },
+            aggregate=True,
+        )
+        assert observability._flush_metric_aggregates(force=True) == 0
+        assert len(observability._METRIC_AGGREGATES) == 1
+        monkeypatch.setattr(observability, "langsmith_enabled", lambda: True)
+        assert observability._flush_metric_aggregates(force=True) == 1
+        client.create_run.assert_called_once()
+    finally:
+        observability._METRIC_AGGREGATES.clear()
+
+
 def test_publish_metric_can_confirm_quota_rejection_before_reporting_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -458,6 +556,27 @@ def test_publish_root_trace_sends_empty_payload_with_correlation_metadata(
     assert metadata["source"] == "discord"
     assert "api_key" not in metadata
     assert "prompt" not in metadata
+
+
+def test_publish_root_trace_accepts_stable_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+
+    assert publish_root_trace(
+        request_id="root-retry",
+        root_id="root-retry",
+        run_id="00000000-0000-0000-0000-000000000001",
+    )
+    assert client.create_run.call_args.kwargs["id"] == (
+        "00000000-0000-0000-0000-000000000001"
+    )
 
 
 def test_publish_completed_root_trace_includes_redacted_semantic_qa(
@@ -637,7 +756,7 @@ def test_close_root_trace_prefers_explicit_start_run_id(
         status="completed",
     )
     assert client.update_run.call_args.kwargs["run_id"] == "run-from-start"
-    assert client.flush.call_count == 2
+    client.flush.assert_not_called()
 
 
 def test_close_root_trace_omits_mismatched_legacy_dotted_order(
@@ -761,7 +880,7 @@ def test_close_root_trace_recovers_legacy_root_id_from_context(
         client.update_run.call_args.kwargs["run_id"]
         == "01a03c8a-c170-72f1-ae24-b603a16f7dd6"
     )
-    assert client.flush.call_count == 2
+    client.flush.assert_not_called()
 
 
 def test_redacted_trace_is_noop_when_langsmith_setup_fails(

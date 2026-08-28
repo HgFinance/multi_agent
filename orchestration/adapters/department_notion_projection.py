@@ -17,6 +17,7 @@ import re
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from departments.notion_markdown import markdown_to_notion_blocks
@@ -388,6 +389,12 @@ def _task_title(task: Mapping[str, Any], department: str) -> str:
         raw = raw.removeprefix("HR:").strip() or "Agent Workforce 검토 결과"
     elif department == "risk":
         raw = _humanize_risk_result(raw)
+    elif department == "accounting":
+        completed = iso_timestamp(
+            task.get("completed_at") or task.get("updated_at") or task.get("created_at")
+        )
+        suffix = f" · {completed[:19].replace('T', ' ')}" if completed else ""
+        return f"회계·포트폴리오 검토 결과{suffix}"[:1900]
 
     if department == "trading":
         completed = iso_timestamp(
@@ -1489,6 +1496,278 @@ def _accounting_body_markdown(
         ]
     )
     return "\n".join(parts)
+
+
+_ACCOUNTING_CONTEXT_CONTRACT = "hgfinance.accounting-advisory-portfolio.v1"
+
+
+def _accounting_context_from_task(
+    task: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """Read the deterministic advisory context already attached to the task.
+
+    Accounting Hermes receives this bounded JSON from the supervisor.  The
+    Notion projection must use that source for numeric columns; extracting
+    amounts from an LLM-written report would make the manager view another
+    unofficial accounting source.
+    """
+
+    for candidate in (
+        metadata.get("accounting_advisory_context"),
+        metadata.get("accounting_snapshot"),
+        metadata.get("structured_summary"),
+    ):
+        if isinstance(candidate, Mapping) and (
+            candidate.get("contract") == _ACCOUNTING_CONTEXT_CONTRACT
+            or candidate.get("schema_version") == "accounting.broker-evidence.v1"
+        ):
+            return candidate
+
+    body = str(task.get("body") or "")
+    marker = f'"contract":"{_ACCOUNTING_CONTEXT_CONTRACT}"'
+    decoder = json.JSONDecoder()
+    offset = 0
+    while True:
+        marker_index = body.find(marker, offset)
+        if marker_index < 0:
+            break
+        start = body.rfind("{", 0, marker_index + 1)
+        if start >= 0:
+            try:
+                candidate, _ = decoder.raw_decode(body[start:])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                candidate = None
+            if isinstance(candidate, Mapping) and (
+                candidate.get("contract") == _ACCOUNTING_CONTEXT_CONTRACT
+            ):
+                return candidate
+        offset = marker_index + len(marker)
+    return {}
+
+
+def _accounting_projection_values(
+    task: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Normalize deterministic accounting facts for manager-facing columns."""
+
+    context = _accounting_context_from_task(task, metadata)
+    structured = metadata.get("structured_summary")
+    structured = structured if isinstance(structured, Mapping) else {}
+
+    def first(*names: str) -> Any:
+        for source in (context, structured, metadata):
+            for name in names:
+                value = source.get(name) if isinstance(source, Mapping) else None
+                if value not in (None, "", [], {}):
+                    return value
+        return None
+
+    broker = context.get("broker_evidence")
+    broker = broker if isinstance(broker, Mapping) else {}
+    reconciliation = broker.get("position_reconciliation")
+    reconciliation = (
+        reconciliation if isinstance(reconciliation, Mapping) else {}
+    )
+    discrepancies = reconciliation.get("discrepancies")
+    discrepancies = (
+        [item for item in discrepancies if isinstance(item, Mapping)]
+        if isinstance(discrepancies, Sequence)
+        and not isinstance(discrepancies, (str, bytes, bytearray))
+        else []
+    )
+    exceptions = broker.get("exceptions")
+    exceptions = (
+        [item for item in exceptions if isinstance(item, Mapping)]
+        if isinstance(exceptions, Sequence)
+        and not isinstance(exceptions, (str, bytes, bytearray))
+        else []
+    )
+    # Expected PAPER/no-activity outcomes are evidence, not open breaks.
+    real_exceptions = [item for item in exceptions if item.get("expected") is not True]
+    break_rows = [*discrepancies, *real_exceptions]
+    material_breaks = [
+        item
+        for item in break_rows
+        if str(item.get("severity") or "").strip().lower()
+        in {"material", "high", "critical"}
+    ]
+
+    def decimal_value(value: Any) -> Decimal | None:
+        if value in (None, ""):
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+
+    nav = first("nav")
+    cash = first("cash")
+    securities = first("securities_value", "securities")
+    nav_decimal = decimal_value(nav)
+    cash_decimal = decimal_value(cash)
+    securities_decimal = decimal_value(securities)
+    nav_gap = None
+    if nav_decimal is not None and cash_decimal is not None and securities_decimal is not None:
+        nav_gap = nav_decimal - cash_decimal - securities_decimal
+
+    quality = str(first("quality_status", "status") or "").strip().upper()
+    authoritative = bool(first("authoritative"))
+    reconciliation_status = str(
+        reconciliation.get("status") or ""
+    ).strip().upper()
+    return {
+        "context_available": bool(context),
+        "as_of": first("as_of"),
+        "quality": quality,
+        "authoritative": authoritative,
+        "nav": nav,
+        "cash": cash,
+        "securities": securities,
+        "realized_pnl": first("realized_pnl"),
+        "unrealized_pnl": first("unrealized_pnl"),
+        "fees": first("fees"),
+        "taxes": first("taxes"),
+        "nav_gap": nav_gap,
+        "reconciliation_status": reconciliation_status,
+        "break_count": len(break_rows) if broker else None,
+        "material_break_count": len(material_breaks) if broker else None,
+    }
+
+
+def _accounting_display_amount(value: Any) -> str:
+    if value in (None, ""):
+        return "확인 불가"
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return str(value)
+    if amount == amount.to_integral_value():
+        return f"{int(amount):,}"
+    return f"{amount:,.4f}".rstrip("0").rstrip(".")
+
+
+def _accounting_column_summary(
+    task: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> str:
+    """Compact summary for the Notion table column; detail stays in the body."""
+
+    values = _accounting_projection_values(task, metadata)
+    if not values["context_available"]:
+        return "회계·증권사 조회 자료 확인 불가 · 공식 여부 확인 불가"
+    quality = {"OK": "정상", "PASS": "정상", "WARN": "주의"}.get(
+        values["quality"], "확인 필요"
+    )
+    reconciliation = {
+        "MATCH": "정상",
+        "OK": "정상",
+        "BREAK": "차이 확인",
+    }.get(values["reconciliation_status"], "확인 필요")
+    parts = [
+        f"자료 상태: {quality}",
+        f"순자산 {_accounting_display_amount(values['nav'])}원",
+        f"현금 {_accounting_display_amount(values['cash'])}원",
+        f"유가증권 평가액 {_accounting_display_amount(values['securities'])}원",
+        f"포지션 대사: {reconciliation} ({values['break_count'] or 0}건)",
+        "공식 여부: 공식 확정 자료 아님"
+        if not values["authoritative"]
+        else "공식 여부: 공식 확정 자료",
+    ]
+    return " · ".join(parts)
+
+
+def _accounting_projection_properties(
+    properties_schema: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    *,
+    task: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fill the existing Accounting table columns without adding a reporter."""
+
+    values = _accounting_projection_values(task, metadata)
+    props: dict[str, Any] = {}
+
+    def set_text(value: Any, *names: str) -> None:
+        for name in names:
+            rendered = _schema_rich_text(properties_schema, name, value)
+            if rendered is not None:
+                props[name] = rendered
+                return
+
+    def set_number(value: Any, *names: str) -> None:
+        if value is None:
+            return
+        for name in names:
+            spec = properties_schema.get(name)
+            if not isinstance(spec, Mapping) or spec.get("type") != "number":
+                continue
+            try:
+                props[name] = {"number": float(value)}
+            except (TypeError, ValueError):
+                pass
+            return
+
+    status = values["reconciliation_status"]
+    reconciliation_text = {
+        "MATCH": "포지션 대사: 정상 (매매기준 보유수량과 체결기준 잔고수량 비교)",
+        "OK": "포지션 대사: 정상",
+        "BREAK": (
+            f"포지션 대사: 차이 {values['break_count'] or 0}건 "
+            "(매매기준 보유수량과 체결기준 잔고수량 비교)"
+        ),
+    }.get(status, "포지션 대사: 확인 필요")
+    if not values["context_available"]:
+        reconciliation_text = "포지션 대사: 증권사 조회 자료 확인 불가"
+
+    decision = "BLOCKED" if (values["break_count"] or 0) else "PRELIMINARY"
+    decision_property = _schema_select(properties_schema, "판정", decision)
+    if decision_property is not None:
+        props["판정"] = decision_property
+    official_property = _schema_checkbox(
+        properties_schema, "공식 여부", values["authoritative"]
+    )
+    if official_property is not None:
+        props["공식 여부"] = official_property
+    if values["as_of"] and "회계일" in properties_schema:
+        date_value = _date(values["as_of"])
+        if date_value is not None:
+            props["회계일"] = date_value
+
+    set_text(
+        _accounting_display_amount(values["nav"]) + "원"
+        if values["nav"] not in (None, "")
+        else "확인 불가",
+        "순자산",
+        "NAV",
+    )
+    for value, names in (
+        (values["cash"], ("현금",)),
+        (values["securities"], ("증권평가액",)),
+        (values["unrealized_pnl"], ("미실현손익",)),
+    ):
+        set_text(
+            _accounting_display_amount(value) + "원" if value not in (None, "") else "확인 불가",
+            *names,
+        )
+    set_text(reconciliation_text, "대사 결과")
+    set_text(reconciliation_text, "Projection 대조")
+    set_number(values["break_count"], "Break 건수")
+    set_number(values["material_break_count"], "Material Break")
+    if values["nav_gap"] is not None:
+        set_text(
+            "현금과 유가증권 평가액을 순자산과 비교한 차이: "
+            f"{_accounting_display_amount(values['nav_gap'])}원",
+            "NAV 항등식",
+        )
+
+    block_reasons: list[str] = []
+    if not values["context_available"]:
+        block_reasons.append("회계·증권사 조회 자료 확인 불가")
+    if not values["authoritative"]:
+        block_reasons.append("공식 순자산 확정 전")
+    if values["break_count"]:
+        block_reasons.append(f"대사 차이 {values['break_count']}건 확인")
+    set_text("; ".join(block_reasons) or "추가 차단 사유 없음", "차단 사유")
+    return props
 
 
 def _humanize_accounting_result(value: str) -> str:
@@ -3904,6 +4183,15 @@ class DepartmentNotionProjection:
                 )
             )
 
+        if department == "accounting":
+            props.update(
+                _accounting_projection_properties(
+                    properties_schema,
+                    metadata,
+                    task=task,
+                )
+            )
+
         if department == "research":
             props.update(
                 _research_projection_properties(
@@ -3983,6 +4271,8 @@ class DepartmentNotionProjection:
                         "\n\n", 1
                     )[0]
                 )
+            elif department == "accounting":
+                narrative_value = _accounting_column_summary(task, metadata)
             else:
                 narrative_value = manager_result_text
             props[narrative_property] = _rich_text(narrative_value)

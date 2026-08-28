@@ -113,6 +113,28 @@ def test_ready_fails_closed_without_exposing_database_details(monkeypatch):
     }
 
 
+def test_freshness_probe_returns_only_bounded_tick_quote_evidence(monkeypatch):
+    rows = [
+        {"domain": "ticks", "rows": 1, "last_event": "tick-time"},
+        {"domain": "quotes", "rows": 1, "last_event": "quote-time"},
+    ]
+    captured = {}
+    monkeypatch.setattr(
+        market_api,
+        "_query",
+        lambda statement, params: (
+            captured.update({"statement": " ".join(statement.split()), "params": params})
+            or rows
+        ),
+    )
+
+    result = market_api.health_freshness()
+
+    assert result["domains"] == rows
+    assert "count(*)" not in captured["statement"].lower()
+    assert "order by event_time desc limit 1" in captured["statement"].lower()
+
+
 class _Cursor:
     def __init__(self, connection):
         self.connection = connection

@@ -116,15 +116,22 @@ def test_strategy_hermes_runs_directly_with_codex_high_and_no_plan_delegate(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_run(command: list[str], **kwargs: object) -> object:
+    class FakeProcess:
+        pid = 1234
+        returncode = 0
+
+        def communicate(self, **_kwargs: object) -> tuple[str, str]:
+            return "ok", ""
+
+    def fake_popen(command: list[str], **kwargs: object) -> object:
         captured["command"] = command
         captured["env"] = kwargs["env"]
         temporary_root = Path(kwargs["env"]["STRATEGY_MARKET_DATA_DIR"])
         temporary_root.mkdir(parents=True, exist_ok=True)
         (temporary_root / "raw.json").write_text("temporary", encoding="utf-8")
-        return type("Completed", (), {"stdout": "ok", "stderr": "", "returncode": 0})()
+        return FakeProcess()
 
-    monkeypatch.setattr(hermes_agent.subprocess, "run", fake_run)
+    monkeypatch.setattr(hermes_agent.subprocess, "Popen", fake_popen)
     agent = hermes_agent.StrategyHermesAgent(repo_root=tmp_path, lab_root=tmp_path / "lab")
 
     run = agent.run({"plan_id": "ignored-compatibility-input"})
@@ -149,6 +156,44 @@ def test_strategy_hermes_runs_directly_with_codex_high_and_no_plan_delegate(
         "t1441", "t1444", "t1452", "t1463", "t1466", "t1481", "t1482",
         "t1489", "t1492",
     ]
+
+
+def test_strategy_hermes_timeout_terminates_the_entire_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    killed: list[tuple[int, int]] = []
+
+    class TimeoutProcess:
+        pid = 4321
+        returncode = -15
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def communicate(self, **_kwargs: object) -> tuple[str, str]:
+            self.calls += 1
+            if self.calls == 1:
+                raise hermes_agent.subprocess.TimeoutExpired(
+                    cmd=["hermes"], timeout=30, output=b"partial", stderr=b""
+                )
+            return "tail", ""
+
+    process = TimeoutProcess()
+    monkeypatch.setattr(hermes_agent.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        hermes_agent.os,
+        "killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    agent = hermes_agent.StrategyHermesAgent(
+        repo_root=tmp_path, lab_root=tmp_path / "lab", timeout_seconds=30
+    )
+    run = agent.run()
+
+    assert run.status == "TIMED_OUT"
+    assert killed == [(4321, hermes_agent.signal.SIGTERM)]
+    assert "partialtail" in Path(run.output_path).read_text(encoding="utf-8")
 
 
 def test_artifact_validator_accepts_hermes_compact_plan_shapes(tmp_path: Path) -> None:

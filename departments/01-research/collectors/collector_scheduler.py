@@ -110,6 +110,12 @@ JOBS: tuple[Job, ...] = (
     # VKOSPI/style이 오늘 거래일을 fail-closed 판정하기 전에 갱신한다.
     Job("calendar-observed", ("collectors/calendar_collector.py", "--collect"),
         daily_at=time(16, 0)),
+    # t1444는 현재 시총 순위만 제공하므로 매 거래일 관측 시점의 top-100을
+    # 불변 universe version으로 쌓는다. 과거 날짜로 소급하거나 오늘 응답을
+    # 옛날 PIT 유니버스로 가장하지 않는다.
+    Job("market-cap-universe",
+        ("collectors/market_cap_universe_collector.py", "--collect"),
+        daily_at=time(16, 20)),
     # 일별 시장 라벨 스냅샷. 가격·breadth에서 계산한 레짐만 기록한다.
     Job("label-snapshot", ("collectors/label_snapshot_collector.py", "--collect"),
         daily_at=time(16, 30)),
@@ -136,6 +142,7 @@ MARKET_DATA_JOB_NAMES = frozenset(
         "vkospi",
         "style-index",
         "calendar-observed",
+        "market-cap-universe",
         "data-steward",
         "market-archive",
         "retention",

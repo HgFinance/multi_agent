@@ -24,6 +24,7 @@ from artifact_validator import sync_agent_artifacts
 from autonomous_research_ingress import ResearchIntake
 from hermes_agent import StrategyHermesAgent
 from lab import ResearchLab, ResearchLabError
+from models import ExperimentResult
 
 DEFAULT_LAB_ROOT = Path(os.getenv("AUTONOMOUS_RESEARCH_LAB_ROOT", "/var/lib/autonomous-research"))
 DEFAULT_REPO_ROOT = Path(os.getenv("AUTONOMOUS_RESEARCH_REPO_ROOT", str(HERE.parents[3])))
@@ -165,19 +166,29 @@ def _run_lab(args: argparse.Namespace, lab_path: Path) -> dict[str, Any]:
     if (lab_path / "candidate.json").exists():
         return {"lab_id": lab_path.name, "status": "CANDIDATE", "cycle": state.get("cycle", 0)}
     existing_results = lab.results()
+    retry_blocked = bool(getattr(args, "retry_blocked", False))
     if existing_results and existing_results[-1].status == "BLOCKED":
         # A result can have been authored by Hermes before a supervisor
         # restart.  Finish the mechanical ingest before waiting for new data;
         # do not spend another expensive model turn on the same blocked plan.
-        decisions = sync_agent_artifacts(lab)
-        lab.update_state(last_action="AWAITING_NEW_DATA")
-        return {
-            "lab_id": lab_path.name,
-            "status": "AWAITING_NEW_DATA",
-            "cycle": state.get("cycle", 0),
-            "last_result": existing_results[-1].plan_id,
-            "decisions": decisions,
-        }
+        # An operator-requested retry is the narrow exception for a transient
+        # live market-data timeout; schema/contract failures remain terminal.
+        if not (retry_blocked and _is_retryable_market_data_block(existing_results[-1])):
+            decisions = sync_agent_artifacts(lab)
+            lab.update_state(last_action="AWAITING_NEW_DATA")
+            return {
+                "lab_id": lab_path.name,
+                "status": "AWAITING_NEW_DATA",
+                "cycle": state.get("cycle", 0),
+                "last_result": existing_results[-1].plan_id,
+                "decisions": decisions,
+            }
+        # An operator-requested retry is meaningful for transient sources such
+        # as LS t1444.  The old guard ignored --retry-blocked here and merely
+        # returned AWAITING_NEW_DATA forever, so a recovered provider could
+        # never be tested without creating a new lab. Hermes still owns the
+        # next plan and all prior blocked artifacts remain append-only history.
+        lab.update_state(last_action="RETRY_BLOCKED_REQUESTED")
     if existing_results and existing_results[-1].status == "COMPLETED":
         # A completed result is durable evidence, not a polling trigger.  The
         # previous loop would start Hermes again on every supervisor cycle
@@ -209,6 +220,12 @@ def _run_lab(args: argparse.Namespace, lab_path: Path) -> dict[str, Any]:
         "duration_seconds": run.duration_seconds,
     })
     decisions = sync_agent_artifacts(lab)
+    # A process timeout can happen after Hermes has preregistered a plan but
+    # before it writes a result.  Keep the lab auditable and stop the service
+    # loop from replaying the same expensive request forever.  This result is
+    # deliberately BLOCKED/FAILED evidence, never a fabricated zero metric.
+    if run.status != "COMPLETED" and not any(lab.results_dir.glob("*.json")):
+        lab.record_result(_agent_failure_result(lab, run))
     lab.update_state(cycle=cycle, last_action="HERMES_COMPLETED" if run.status == "COMPLETED" else "HERMES_FAILED")
     if run.status != "COMPLETED":
         raise ResearchLabError(run.error or "Strategy Hermes did not complete")
@@ -250,6 +267,73 @@ def _is_strategy_hermes_lab(lab_path: Path) -> bool:
         marker.touch()
         return True
     return False
+
+
+def _agent_failure_result(lab: ResearchLab, run: object) -> ExperimentResult:
+    """Create a valid terminal result when the agent leaves no result file."""
+
+    state = lab.state()
+    plan_id = str(
+        getattr(run, "plan_id", None)
+        or state.get("active_plan_id")
+        or f"agent-run-{getattr(run, 'run_id', 'unknown')}"
+    )
+    plan = next((item for item in lab.plans() if item.get("plan_id") == plan_id), {})
+    run_status = str(getattr(run, "status", "FAILED") or "FAILED").upper()
+    status = "BLOCKED" if run_status == "TIMED_OUT" else "FAILED"
+    error = str(getattr(run, "error", None) or f"Hermes returned {run_status}")
+    return ExperimentResult(
+        plan_id=plan_id,
+        status=status,
+        cost_included=False,
+        oos_evaluated=False,
+        leakage_detected=False,
+        robustness={
+            "agent_run_completed": False,
+            "result_contract_written": True,
+            "point_in_time_availability_checked": False,
+            "forward_or_paper_observation_checked": False,
+        },
+        metrics={
+            "agent_duration_seconds": float(getattr(run, "duration_seconds", 0.0) or 0.0),
+            "measured_strategy_metrics_available": False,
+        },
+        artifacts=tuple(
+            item
+            for item in (
+                str(getattr(run, "output_path", "") or ""),
+                str(getattr(run, "usage_path", "") or ""),
+            )
+            if item
+        ),
+        failure_modes=(
+            "The Hermes process ended without a valid experiment result artifact.",
+            "No strategy performance metric was inferred from the incomplete run.",
+        ),
+        limitations=(
+            "This terminal result records an operational failure only; it is not a candidate.",
+            "The registered plan remains unmeasured and requires a new request for another attempt.",
+        ),
+        preregistration_hash=(str(plan.get("preregistration_hash") or "").strip() or None),
+        failure_reason=f"{status}: {error}; no valid result artifact was recorded",
+    )
+
+
+def _is_retryable_market_data_block(result: object) -> bool:
+    """Allow explicit recovery only for a bounded, external data timeout."""
+
+    reason = str(getattr(result, "failure_reason", "") or "").casefold()
+    if not reason:
+        return False
+    return (
+        ("timeout" in reason or "timed out" in reason)
+        and (
+            "market-data" in reason
+            or "market data" in reason
+            or "ranking" in reason
+            or "t1444" in reason
+        )
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

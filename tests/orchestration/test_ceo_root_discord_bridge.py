@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from orchestration.adapters.ceo_supervisor import CeoSupervisorService
 
@@ -219,6 +219,123 @@ class CeoRootDiscordBridgeTest(unittest.TestCase):
             kwargs = close.call_args.kwargs
             self.assertEqual(kwargs["department"], "hr-department")
             self.assertEqual(kwargs["task_id"], "t_hr_primary")
+
+    def test_root_trace_close_records_full_workflow_latency(self):
+        with tempfile.TemporaryDirectory() as home:
+            service = self.service(home, DeliverySpy())
+            root = {
+                "id": "root-e2e-latency",
+                "status": "done",
+                "created_at": 1_000,
+                "body": root_body("langsmith_trace_context=trace-root\n"),
+            }
+            terminal = {
+                "id": "t-synthesis",
+                "status": "done",
+                "completed_at": 1_012,
+                "final_answer": "완료된 답변",
+            }
+
+            with patch(
+                "orchestration.llm_observability.close_root_trace",
+                return_value=True,
+            ) as close:
+                self.assertTrue(
+                    service._close_root_trace(
+                        root_id="root-e2e-latency",
+                        root_payload=root,
+                        terminal_payload=terminal,
+                        status="completed",
+                    )
+                )
+
+            metadata = close.call_args.kwargs["terminal_metadata"]
+            self.assertEqual(metadata["latency_ms"], 12_000)
+            self.assertEqual(metadata["latency_scope"], "end_to_end")
+            self.assertEqual(
+                metadata["observation_point"], "ceo-response-delivered"
+            )
+
+    def test_failed_root_trace_close_is_queued_for_same_run_retry(self):
+        with tempfile.TemporaryDirectory() as home:
+            service = self.service(home, DeliverySpy())
+            service.client.environment.update(
+                {
+                    "HGFINANCE_LANGSMITH_PUBLISH_ENABLED": "true",
+                    "LANGSMITH_API_KEY": "key-not-printed",
+                }
+            )
+            root = {
+                "id": "root-retry",
+                "status": "done",
+                "created_at": 1_000,
+                "body": root_body("langsmith_trace_context=trace-root\n"),
+            }
+            terminal = {
+                "id": "t-synthesis-retry",
+                "status": "done",
+                "completed_at": 1_012,
+                "final_answer": "완료된 답변",
+            }
+
+            with patch(
+                "orchestration.llm_observability.close_root_trace",
+                return_value=False,
+            ):
+                self.assertFalse(
+                    service._close_root_trace(
+                        root_id="root-retry",
+                        root_payload=root,
+                        terminal_payload=terminal,
+                        task_id=terminal["id"],
+                        status="completed",
+                    )
+                )
+
+            pending = service._pending_langsmith_root_closures["root-retry"]
+            self.assertEqual(pending["task_id"], terminal["id"])
+            self.assertEqual(pending["attempts"], 1)
+
+    def test_pending_root_trace_retry_reuses_terminal_task_without_replaying_delivery(self):
+        with tempfile.TemporaryDirectory() as home:
+            service = self.service(home, DeliverySpy())
+            root = {
+                "id": "root-retry-lane",
+                "status": "done",
+                "created_at": 1_000,
+                "body": root_body("langsmith_trace_context=trace-root\n"),
+            }
+            terminal = {
+                "id": "t-synthesis-retry-lane",
+                "status": "done",
+                "completed_at": 1_012,
+                "final_answer": "완료된 답변",
+            }
+            service.client.environment.update(
+                {
+                    "HGFINANCE_LANGSMITH_PUBLISH_ENABLED": "true",
+                    "LANGSMITH_API_KEY": "key-not-printed",
+                }
+            )
+            service._pending_langsmith_root_closures[root["id"]] = {
+                "task_id": terminal["id"],
+                "attempts": 1,
+                "next_attempt_at": 0,
+            }
+            service.client.show = Mock(side_effect=[root, terminal])
+
+            with patch.object(service, "_close_root_trace", return_value=True) as close:
+                self.assertEqual(service._retry_pending_langsmith_root_closures(), 1)
+
+            close.assert_called_once_with(
+                root_id=root["id"],
+                root_payload=root,
+                terminal_payload=terminal,
+                task_id=terminal["id"],
+                status="completed",
+                error_class=None,
+            )
+            self.assertNotIn(root["id"], service._pending_langsmith_root_closures)
 
 
 class CeoRootFastPathTest(unittest.TestCase):

@@ -248,9 +248,38 @@ class TimescaleMarketRepository(MarketDataRepository):
         # 바꾸면 잘못된 형식이 DB까지 내려간다.
         register_uuid()
 
+        self._dsn = dsn
+        self._psycopg2 = psycopg2
         self._execute_values = guarded_execute_values
-        self._conn = psycopg2.connect(dsn)
-        self._conn.autocommit = False
+        self._conn = self._connect()
+
+    def _connect(self):
+        """Open one transactional market connection.
+
+        The realtime collector deliberately shares this repository between its
+        websocket shards.  Keeping connection setup here gives the writer one
+        recovery boundary without creating a second database implementation.
+        """
+        conn = self._psycopg2.connect(self._dsn)
+        conn.autocommit = False
+        return conn
+
+    def _reconnect(self) -> None:
+        """Replace a connection known to be unusable.
+
+        A dropped PostgreSQL socket cannot be repaired with rollback.  Closing
+        it first also releases the stale client-side handle before a new
+        backend is opened.
+        """
+        try:
+            self._conn.close()
+        except Exception:  # noqa: BLE001 - the connection is already broken
+            pass
+        self._conn = self._connect()
+
+    def _is_connection_error(self, exc: Exception) -> bool:
+        """Return whether retrying the idempotent write on a new socket is safe."""
+        return isinstance(exc, (self._psycopg2.InterfaceError, self._psycopg2.OperationalError))
 
     # market.market_ticks 의 Column 순서. contracts.to_row() 의 key 와 일치해야 한다.
     _TICK_COLUMNS = (
@@ -298,23 +327,31 @@ class TimescaleMarketRepository(MarketDataRepository):
         # transaction 에 갇혀 이후 모든 문장이 InFailedSqlTransaction 으로 죽는다 -
         # 한 번의 일시적 실패가 그 소켓의 남은 세션 전체를 못 쓰게 만들었다
         # (2026-08-02 수정). 예외는 그대로 올린다 - 삼키면 유실이 조용해진다.
-        try:
-            with self._conn.cursor() as cur:
-                # fetch=True 가 필수다. execute_values 는 page_size 단위로 INSERT 를 여러
-                # 문장으로 쪼개는데, 그냥 cur.fetchall() 을 하면 **마지막 문장의 RETURNING
-                # 만** 잡힌다. 500건 이하 배치에서는 맞아 보이다가 그 이상에서 조용히
-                # 어긋난다(실측: 4293건 넣고 293건으로 셌다). 그러면 없는 중복이
-                # 보고되어 DQ 경보가 잘못 뜬다.
-                returned = self._execute_values(cur, sql, values, page_size=500, fetch=True)
-                inserted = len(returned)
-            self._conn.commit()
-        except Exception:
+        for attempt in range(2):
             try:
-                self._conn.rollback()
-            except Exception:  # noqa: BLE001, S110 - 커넥션이 이미 죽었으면 rollback 도 실패한다
-                pass
-            raise
-        return WriteResult(len(rows), inserted, len(rows) - inserted)
+                with self._conn.cursor() as cur:
+                    # fetch=True 가 필수다. execute_values 는 page_size 단위로 INSERT 를 여러
+                    # 문장으로 쪼개는데, 그냥 cur.fetchall() 을 하면 **마지막 문장의 RETURNING
+                    # 만** 잡힌다. 500건 이하 배치에서는 맞아 보이다가 그 이상에서 조용히
+                    # 어긋난다(실측: 4293건 넣고 293건으로 셌다). 그러면 없는 중복이
+                    # 보고되어 DQ 경보가 잘못 뜬다.
+                    returned = self._execute_values(cur, sql, values, page_size=500, fetch=True)
+                    inserted = len(returned)
+                self._conn.commit()
+                return WriteResult(len(rows), inserted, len(rows) - inserted)
+            except Exception as exc:
+                try:
+                    self._conn.rollback()
+                except Exception:  # noqa: BLE001, S110 - 커넥션이 이미 죽었으면 rollback 도 실패한다
+                    pass
+                if attempt == 0 and self._is_connection_error(exc):
+                    # The row identity is protected by the primary key and the
+                    # statement is ON CONFLICT DO NOTHING.  If the server
+                    # committed immediately before the socket died, retrying
+                    # is therefore safe and reports those rows as duplicates.
+                    self._reconnect()
+                    continue
+                raise
 
     def write_ticks(self, ticks: list[MarketTick]) -> WriteResult:
         return self._insert("market.market_ticks", self._TICK_COLUMNS, [t.to_row() for t in ticks])

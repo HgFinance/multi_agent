@@ -10,8 +10,8 @@ import time
 from orchestration.adapters.ceo_supervisor import HermesKanbanClient
 from orchestration.ceo_workflow_scope import build_root_body, build_scoped_task_body
 from orchestration.kanban_root_index import (
-    SQLiteRootScopedIndex,
     RootScopedIndexUnavailable,
+    SQLiteRootScopedIndex,
 )
 
 ROOT = "t_aaaaaaaa"
@@ -85,7 +85,9 @@ def _runner(payloads: dict[str, dict[str, object]], calls: list[tuple[str, ...]]
         command = tuple(args)
         calls.append(command)
         if command[1:3] == ("kanban", "list"):
-            return subprocess.CompletedProcess(args, 0, json.dumps(list(payloads.values())), "")
+            return subprocess.CompletedProcess(
+                args, 0, json.dumps(list(payloads.values())), ""
+            )
         task_id = command[3]
         return subprocess.CompletedProcess(
             args,
@@ -135,15 +137,20 @@ def test_sqlite_index_is_generated_and_uses_btree(tmp_path) -> None:
         RISK,
         ARCHIVED,
     )
-    plan = sqlite3.connect(path).execute(
-        "EXPLAIN QUERY PLAN SELECT id FROM tasks "
-        "WHERE workflow_root_task_id = ?",
-        (ROOT,),
-    ).fetchall()
+    plan = (
+        sqlite3.connect(path)
+        .execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM tasks WHERE workflow_root_task_id = ?",
+            (ROOT,),
+        )
+        .fetchall()
+    )
     assert any("USING INDEX idx_tasks_workflow_root_task_id" in row[-1] for row in plan)
 
 
-def test_sqlite_index_resolves_scoped_child_root_without_hydrating_state(tmp_path) -> None:
+def test_sqlite_index_resolves_scoped_child_root_without_hydrating_state(
+    tmp_path,
+) -> None:
     path = tmp_path / "kanban.db"
     _make_board(path)
 
@@ -246,9 +253,11 @@ def test_recovery_marker_search_does_not_match_embedded_qa_prose(tmp_path) -> No
         "INSERT INTO tasks(id, body, status, created_at) VALUES (?, ?, ?, ?)",
         (
             "t_qa_embedded",
-            "workflow_root_task_id=t_root\n"
-            "workflow_role=qa\n"
-            "Audit text contains workflow_role=synthesis but it is not a marker line.",
+            (
+                "workflow_root_task_id=t_root\n"
+                "workflow_role=qa\n"
+                "Audit text contains workflow_role=synthesis but it is not a marker line."
+            ),
             "running",
             int(time.time()),
         ),
@@ -284,6 +293,89 @@ def test_recovery_candidate_rows_mark_selection_comments(tmp_path) -> None:
     ).recovery_candidate_rows()
 
     assert rows[0]["has_selection_comment"] is True
+
+
+def test_steady_state_recovery_keeps_pending_post_response_qa(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    _make_board(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE task_comments ("
+        "id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, body TEXT NOT NULL"
+        ")"
+    )
+    synthesis_id = "t_synthesis_pending"
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at) VALUES (?, ?, ?, ?)",
+        (
+            synthesis_id,
+            build_scoped_task_body("synthesis", ROOT, role="synthesis"),
+            "done",
+            int(time.time()) - 600,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO task_comments(id, task_id, body) VALUES (?, ?, ?)",
+        (
+            1,
+            synthesis_id,
+            (
+                "hgfinance.post-response-qa.v1 root_task_id="
+                f"{ROOT} response_task_id={synthesis_id} state=pending"
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    rows = SQLiteRootScopedIndex(
+        {"HERMES_KANBAN_DB": str(path)}
+    ).recovery_candidate_rows(include_historical=False)
+
+    pending = next(row for row in rows if row["id"] == synthesis_id)
+    assert pending["has_post_response_qa_pending"] is True
+
+
+def test_steady_state_recovery_keeps_pending_qa_projection(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    _make_board(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE task_comments ("
+        "id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, body TEXT NOT NULL"
+        ")"
+    )
+    qa_id = "t_qa_projection_pending"
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at) VALUES (?, ?, ?, ?)",
+        (
+            qa_id,
+            build_scoped_task_body("qa", ROOT, role="qa"),
+            "done",
+            int(time.time()) - 600,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO task_comments(id, task_id, body) VALUES (?, ?, ?)",
+        (
+            1,
+            qa_id,
+            (
+                "hgfinance.post-response-qa.v1 root_task_id="
+                f"{ROOT} response_task_id=t_synthesis state=projection_pending "
+                f"qa_task_id={qa_id}"
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    rows = SQLiteRootScopedIndex(
+        {"HERMES_KANBAN_DB": str(path)}
+    ).recovery_candidate_rows(include_historical=False)
+
+    pending = next(row for row in rows if row["id"] == qa_id)
+    assert pending["has_qa_projection_pending"] is True
 
 
 def test_recovery_candidates_mark_only_roots_with_active_primary(tmp_path) -> None:
@@ -407,7 +499,9 @@ def test_indexed_snapshot_omits_full_board_list_and_shows_every_candidate() -> N
         root_index=index,  # type: ignore[arg-type]
     )
 
-    root, children, root_payload = client.authoritative_workflow_snapshot(ROOT, RESEARCH)
+    root, children, root_payload = client.authoritative_workflow_snapshot(
+        ROOT, RESEARCH
+    )
 
     assert root == ROOT
     assert root_payload["id"] == ROOT
@@ -495,7 +589,9 @@ def test_index_failure_falls_back_to_full_board_and_keeps_authoritative_ids() ->
         root_index=index,  # type: ignore[arg-type]
     )
 
-    _root, children, _root_payload = client.authoritative_workflow_snapshot(ROOT, RESEARCH)
+    _root, children, _root_payload = client.authoritative_workflow_snapshot(
+        ROOT, RESEARCH
+    )
 
     assert {child["id"] for child in children} == {RESEARCH, RISK}
     assert sum(command[1:3] == ("kanban", "list") for command in calls) == 1
@@ -529,7 +625,9 @@ def test_legacy_task_uses_full_board_fallback() -> None:
         root_index=index,  # type: ignore[arg-type]
     )
 
-    _root, children, _root_payload = client.authoritative_workflow_snapshot(ROOT, RESEARCH)
+    _root, children, _root_payload = client.authoritative_workflow_snapshot(
+        ROOT, RESEARCH
+    )
 
     assert {child["id"] for child in children} == {RESEARCH, RISK}
     assert index.calls == []
@@ -548,7 +646,9 @@ def test_malformed_root_correlation_uses_full_board_fallback() -> None:
         root_index=index,  # type: ignore[arg-type]
     )
 
-    _root, children, _root_payload = client.authoritative_workflow_snapshot(ROOT, RESEARCH)
+    _root, children, _root_payload = client.authoritative_workflow_snapshot(
+        ROOT, RESEARCH
+    )
 
     # The full-board path does not silently attach a child that declares a
     # different root; the valid sibling remains discoverable.
@@ -568,7 +668,9 @@ def test_inconsistent_candidate_set_falls_back_without_trusting_index() -> None:
         root_index=index,  # type: ignore[arg-type]
     )
 
-    _root, children, _root_payload = client.authoritative_workflow_snapshot(ROOT, RESEARCH)
+    _root, children, _root_payload = client.authoritative_workflow_snapshot(
+        ROOT, RESEARCH
+    )
 
     assert {child["id"] for child in children} == {RESEARCH, RISK}
     assert client.retrieval_metrics_snapshot()["full_board_list_count"] == 1

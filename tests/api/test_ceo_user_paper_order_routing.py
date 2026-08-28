@@ -695,3 +695,23 @@ def test_production_without_hermes_runtime_fails_before_admission(
     access.assert_not_called()
     repository.assert_not_called()
     create.assert_not_called()
+
+
+def test_indicator_prompt_names_every_parameter_the_validator_accepts() -> None:
+    """The interpreter used to receive indicator names only.
+
+    Without the parameter vocabulary it had to guess spellings, and Korean HTS
+    notation such as "bollingerband(종가,2,0,20)" turned that guess into
+    UNSUPPORTED_INDICATOR_PARAMETER on 2026-08-28.  The catalog is built from
+    the registry, so a new indicator cannot silently miss the prompt.
+    """
+
+    from orchestration.conditional_rules import list_supported_indicators
+
+    catalog = ceo._conditional_rule_indicator_catalog_prompt()
+    assert "BOLLINGER(PERIOD=20,STDDEV=2,OFFSET=0)->UPPER|MIDDLE|LOWER" in catalog
+    assert "BROKER_SEARCH_MATCH(SEARCH_ID=required)->VALUE" in catalog
+    for item in list_supported_indicators():
+        assert f"{item['name']}(" in catalog, item["name"]
+        for parameter in {*item["defaults"], *item["required_parameters"]}:
+            assert parameter in catalog, (item["name"], parameter)

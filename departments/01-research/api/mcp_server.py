@@ -105,6 +105,7 @@ ACTIVE_MARKET_COLLECTOR_JOB_NAMES = frozenset({
     "vkospi",
     "style-index",
     "calendar-observed",
+    "market-cap-universe",
     "label-snapshot",
     "chart-daily-universe",
 })
@@ -391,10 +392,23 @@ def build_app(server, *, token: str | None):
                                  "detail": "6자리 종목코드가 필요하다"},
                                 status_code=400)
         import anyio
+        from functools import partial
+        include_price = request.query_params.get("include_price", "true").casefold() not in {
+            "0", "false", "no",
+        }
+        include_company = request.query_params.get("include_company", "true").casefold() not in {
+            "0", "false", "no",
+        }
 
         try:
             evidence = await anyio.to_thread.run_sync(
-                gather_holdings_evidence, symbol)
+                partial(
+                    gather_holdings_evidence,
+                    symbol,
+                    include_price=include_price,
+                    include_company=include_company,
+                )
+            )
         except Exception as exc:  # noqa: BLE001 - 경계에서 사유를 남긴다
             return JSONResponse(
                 {"error": "evidence_failed",
@@ -1019,7 +1033,9 @@ def _on_demand_evidence_id(tool: str, citation: str, item: int,
 
 
 def gather_holdings_evidence(symbol: str, *, get=None, search_news=None,
-                             search_disclosures=None) -> dict:
+                             search_disclosures=None,
+                             include_price: bool = True,
+                             include_company: bool = True) -> dict:
     """보유 질문용 근거를 요청 시점 소스에서 모은다. 소스별 독립·정직 보고.
 
     뉴스는 최신 10건, 공시는 최근 7일을 직접 조회한다. 각 응답의 비영속 citation
@@ -1034,7 +1050,7 @@ def gather_holdings_evidence(symbol: str, *, get=None, search_news=None,
     # 주입한 경우에는 이미 독립적인 소스 계약을 받은 것이므로, 부가적인
     # corpCode.xml 요청으로 그 계약을 지연시키거나 외부 네트워크를 다시
     # 호출하지 않는다.
-    if search_disclosures is None:
+    if include_company and search_disclosures is None:
         try:
             from external_sources import _resolve as _resolve_corp
 
@@ -1111,6 +1127,12 @@ def gather_holdings_evidence(symbol: str, *, get=None, search_news=None,
         sources["disclosures"] = {"status": "FAILED",
                                   "mode": "ON_DEMAND_MCP",
                                   "reason": f"{type(e).__name__}: {e}"}
+
+    if not include_price:
+        # The request-time news projection does not consume price data.  Do
+        # not run the two market reads below merely because the richer
+        # holdings endpoint can also serve price context.
+        return out
 
     # ── 가격 레벨 ────────────────────────────────────────────────────
     # 목표가·손절가는 **숫자**라서 LLM 이 지어내면 근거를 검증할 수 없다.

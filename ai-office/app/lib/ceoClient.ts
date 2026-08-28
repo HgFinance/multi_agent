@@ -135,6 +135,21 @@ export type PaperOrderWorkflowStatus = {
     error_code: string | null;
     error_message: string | null;
   } | null;
+  /**
+   * 조건주문은 *활성화* 워크플로가 끝나면 요청이 COMPLETED가 되지만, 그때 만든
+   * 규칙은 몇 분 뒤 집행 단계에서 directive 없이 실패할 수 있다. 요청 상태만
+   * 보면 성공으로 읽히므로(2026-08-28) 규칙 결말을 함께 싣는다.
+   */
+  conditional_rules:
+    | {
+        rule_id: string;
+        state: string;
+        last_execution_state: string | null;
+        last_guard_code: string | null;
+        last_error_code: string | null;
+        status_message: string | null;
+      }[]
+    | null;
 };
 
 /** Kanban status와 분리한 사용자 관점의 카드 결말. */

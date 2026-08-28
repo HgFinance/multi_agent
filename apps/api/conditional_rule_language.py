@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 from orchestration.conditional_rules import ConditionalRuleSpec, ExpressionType, list_supported_indicators
+from orchestration.user_order_language import RELATIVE_DELAY_SUFFIX
 
 
 _EXPLICIT_POSITION_PERCENT = re.compile(
@@ -43,7 +44,7 @@ _CONDITIONAL_TRIGGER = re.compile(
 )
 _RELATIVE_TIME_TRIGGER = re.compile(
     r"(?<![\w,])(?:[1-9]\d*|[일이삼사오육칠팔구십한두세네열스물서른마흔쉰예순일흔여든아흔\s]+)"
-    r"\s*(?:초|분|시간)\s*뒤(?:에)?(?!\w)"
+    rf"\s*(?:초|분|시간)\s*{RELATIVE_DELAY_SUFFIX}(?!\w)"
 )
 # A wall-clock instant is as much a trigger as a price or an indicator, but
 # only the relative form ("4분 뒤") used to be recognized.  "15:15 되면 매수"

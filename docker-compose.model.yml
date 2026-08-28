@@ -126,6 +126,12 @@ services:
   # 공용 Worker 소스 마운트는 기본 compose에 있다. 그래야 이 오버레이가 없는
   # 로컬 Ollama 경로도 독립 회의론자 Worker를 똑같이 실행할 수 있다.
   research-mcp:
+    # The MCP bridge must not silently start on its Ollama fallback while the
+    # production Worker model plane is still loading.  Waiting for vLLM keeps
+    # model routing and token usage measurement on the same runtime contract.
+    depends_on:
+      vllm:
+        condition: service_healthy
     environment:
       <<: *worker-model-environment
 

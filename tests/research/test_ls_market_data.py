@@ -23,6 +23,18 @@ class FakeLsClient:
         return self.pages.pop(0)
 
 
+class FlakyRankingClient:
+    def __init__(self, response: tuple[dict, dict]) -> None:
+        self.response = response
+        self.calls: list[dict] = []
+
+    def call_tr(self, **kwargs: object):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            raise TimeoutError("timed out")
+        return self.response
+
+
 def _page(tr: str, rows: list[dict], *, more: str = "N", cursor: str = "", key: str = ""):
     return (
         {f"{tr}OutBlock": {"cts_date": cursor}, f"{tr}OutBlock1": rows},
@@ -146,6 +158,43 @@ def test_ranking_fetch_supports_market_cap_and_idx_continuation() -> None:
     assert fake.calls[1]["tr_cont"] == "Y"
     assert fake.calls[1]["tr_cont_key"] == "next-1"
     assert fake.calls[1]["in_block"] == {"t1444InBlock": {"upcode": "001", "idx": 7}}
+
+
+def test_ranking_top_n_stops_before_following_unneeded_continuation() -> None:
+    first_page = _ranking_page(
+        "t1444",
+        [{"shcode": f"{index:06d}", "total": 1000 - index} for index in range(20)],
+        more="Y",
+        idx=20,
+        key="next-page",
+    )
+    fake = FakeLsClient([first_page])
+
+    batch = OnDemandMarketDataClient(fake, max_pages=1).fetch_ranking(
+        "t1444", {"upcode": "001", "idx": 0}, as_of="20260828", max_rows=10
+    )
+
+    assert len(batch.rows) == 10
+    assert batch.receipt.row_count == 10
+    assert batch.receipt.requested_rows == 10
+    assert batch.receipt.as_dict()["requested_rows"] == 10
+    assert len(fake.calls) == 1
+
+
+def test_ranking_retries_transient_timeout_but_keeps_the_request_bounded() -> None:
+    response = _ranking_page(
+        "t1444", [{"shcode": "005930", "total": 500}], more="N"
+    )
+    fake = FlakyRankingClient(response)
+
+    batch = OnDemandMarketDataClient(
+        fake, transient_retries=1, retry_backoff_seconds=0
+    ).fetch_ranking(
+        "t1444", {"upcode": "001", "idx": 0}, as_of="20260828", max_rows=1
+    )
+
+    assert len(batch.rows) == 1
+    assert len(fake.calls) == 2
 
 
 def test_all_requested_ranking_trs_are_allow_listed() -> None:

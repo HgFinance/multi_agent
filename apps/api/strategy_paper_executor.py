@@ -1,15 +1,13 @@
 """Allowlisted PAPER strategy runtime for approved research Bundles.
 
 This process is intentionally a small deterministic signal worker, not Hermes
-and not a broker adapter. It reads one immutable SMA 5/20/60 Bundle, obtains
-1-minute consolidated candles from market-api, aggregates complete 3-minute
-bars, and records entry/take-profit signals. No broker credential, Docker
-socket, or Trading service proof is present in this container.
-
-The explicit ``signal_only`` state is important: a running container is not
-reported as an automatic-order system until the separate Trading-owned
-StrategySignal -> OrderIntent -> Risk -> OMS adapter has been connected and
-verified.
+and not a broker adapter. It reads one immutable SMA 5/20/60 Bundle, tail-polls
+raw trade and quote rows from read-only TimescaleDB, aggregates finalized
+3-minute bars, and records entry/take-profit signals. When the Bundle enables
+PAPER execution, it sends the signal through the private runtime-control
+order boundary; the child still receives no broker credential or Docker
+socket. The Trading API owns the PAPER account, quote/session, cash/position,
+idempotency, and LS PAPER adapter checks.
 """
 
 from __future__ import annotations
@@ -23,12 +21,12 @@ import math
 import os
 import signal
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import Request, HTTPError, urlopen
 
 
 def _poll_seconds() -> float:
@@ -59,6 +57,10 @@ def _decimal(value: Any) -> Decimal | None:
 
 
 def _timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return None
+        return value.astimezone(timezone.utc)
     if not isinstance(value, str):
         return None
     try:
@@ -92,8 +94,18 @@ def _read_bundle(path: Path, expected_hash: str) -> dict[str, Any]:
     if bundle.get("mode") != "PAPER":
         raise RuntimeError("strategy runtime is PAPER only")
     execution = bundle.get("execution")
-    if not isinstance(execution, dict) or execution.get("orders_enabled") is not False:
-        raise RuntimeError("strategy bundle must be signal-only")
+    if not isinstance(execution, dict):
+        raise RuntimeError("strategy bundle execution metadata is required")
+    orders_enabled = execution.get("orders_enabled")
+    signal_only = execution.get("signal_only")
+    if not isinstance(orders_enabled, bool) or signal_only is not (not orders_enabled):
+        raise RuntimeError("strategy bundle execution mode is inconsistent")
+    if orders_enabled:
+        quantity = _decimal(execution.get("order_quantity"))
+        if quantity is None or quantity != quantity.to_integral_value() or quantity <= 0:
+            raise RuntimeError("strategy bundle order_quantity must be a positive integer")
+        if not isinstance(execution.get("trading_route"), str) or not execution["trading_route"].strip():
+            raise RuntimeError("strategy bundle PAPER trading route is required")
     strategy = bundle.get("strategy")
     if not isinstance(strategy, dict) or strategy.get("kind") != "SMA_ALIGNMENT":
         raise RuntimeError("unsupported strategy bundle kind")
@@ -110,6 +122,58 @@ def _read_bundle(path: Path, expected_hash: str) -> dict[str, Any]:
     return bundle
 
 
+class PaperOrderGateway:
+    """Submit one idempotent signal to the private runtime-control boundary."""
+
+    def __init__(self, *, control_url: str, token: str, timeout_seconds: float = 5.0) -> None:
+        if not control_url.strip() or not token.strip():
+            raise RuntimeError("PAPER order gateway is not configured")
+        self.control_url = control_url.rstrip("/")
+        self.token = token.strip()
+        self.timeout_seconds = max(1.0, min(float(timeout_seconds), 15.0))
+
+    def submit(
+        self,
+        *,
+        deployment_id: str,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        signal_key: str,
+    ) -> dict[str, Any]:
+        url = f"{self.control_url}/deployments/{quote(deployment_id, safe='')}/orders"
+        payload = {
+            "deployment_id": deployment_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": str(quantity),
+            "signal_key": signal_key,
+        }
+        request = Request(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.token}",
+                "User-Agent": "strategy-paper-runtime/v2",
+            },
+        )
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(f"PAPER order gateway HTTP {response.status}")
+                body = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise RuntimeError(f"PAPER order gateway HTTP {exc.code}") from exc
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError(f"PAPER order gateway unavailable: {type(exc).__name__}") from exc
+        if not isinstance(body, dict) or not isinstance(body.get("directive"), dict):
+            raise RuntimeError("PAPER order gateway returned an invalid directive")
+        return body
+
+
 def _fetch_1m(market_api: str, symbol: str, limit: int = 220) -> list[dict[str, Any]]:
     url = f"{market_api.rstrip('/')}/bars/{quote(symbol, safe='')}?interval=1M&source=consolidated&limit={limit}"
     request = Request(url, method="GET", headers={"Accept": "application/json", "User-Agent": "strategy-paper-runtime/v1"})
@@ -120,6 +184,25 @@ def _fetch_1m(market_api: str, symbol: str, limit: int = 220) -> list[dict[str, 
     if not isinstance(body, list):
         raise TypeError("market-api bars response is not a list")
     return [row for row in body if isinstance(row, dict)]
+
+
+def _fetch_instrument_id(market_api: str, symbol: str) -> str:
+    """Resolve the canonical UUID once; live market rows use instrument_id."""
+
+    url = f"{market_api.rstrip('/')}/instrument/{quote(symbol, safe='')}"
+    request = Request(
+        url,
+        method="GET",
+        headers={"Accept": "application/json", "User-Agent": "strategy-paper-runtime/v1"},
+    )
+    with urlopen(request, timeout=5) as response:
+        if response.status != 200:
+            raise RuntimeError(f"market-api instrument HTTP {response.status}")
+        body = json.loads(response.read().decode("utf-8"))
+    instrument_id = body.get("instrument_id") if isinstance(body, dict) else None
+    if not isinstance(instrument_id, str) or len(instrument_id) != 36:
+        raise RuntimeError("market-api returned an invalid instrument_id")
+    return instrument_id
 
 
 def _aggregate_3m(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -167,7 +250,55 @@ def _aggregate_3m(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _aggregate_tick_rows_3m(
+    rows: list[dict[str, Any]], *, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    """Build finalized 3-minute OHLCV bars directly from raw trade rows.
+
+    Unlike 1-minute chart rows, a valid tick stream does not need a trade in
+    every minute.  A bucket with at least one valid trade is a real market
+    observation; empty buckets stay absent and are never forward-filled.
+    """
+
+    boundary = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    buckets: dict[int, list[tuple[datetime, Decimal, Decimal]]] = {}
+    for row in rows:
+        stamp = _timestamp(row.get("event_time"))
+        price = _decimal(row.get("price"))
+        if stamp is None or price is None:
+            continue
+        key = int(stamp.timestamp()) // 180
+        bucket_end = datetime.fromtimestamp((key + 1) * 180, timezone.utc)
+        if bucket_end > boundary:
+            continue
+        try:
+            quantity = Decimal(str(row.get("quantity", "0")))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if not quantity.is_finite() or quantity < 0:
+            continue
+        buckets.setdefault(key, []).append((stamp, price, quantity))
+
+    result: list[dict[str, Any]] = []
+    for key, bucket in sorted(buckets.items()):
+        bucket.sort(key=lambda item: item[0])
+        prices = [item[1] for item in bucket]
+        result.append(
+            {
+                "bucket_time": datetime.fromtimestamp(key * 180, timezone.utc).isoformat(),
+                "open": str(prices[0]),
+                "high": str(max(prices)),
+                "low": str(min(prices)),
+                "close": str(prices[-1]),
+                "volume": str(sum((item[2] for item in bucket), Decimal(0))),
+                "trade_count": len(bucket),
+            }
+        )
+    return result
+
+
 def _has_contiguous_bars(bars: list[dict[str, Any]], count: int = 60) -> bool:
+    """Retained strict helper for callers that need wall-clock continuity."""
     if len(bars) < count:
         return False
     stamps = [_timestamp(row.get("bucket_time")) for row in bars[-count:]]
@@ -179,15 +310,169 @@ def _has_contiguous_bars(bars: list[dict[str, Any]], count: int = 60) -> bool:
     )
 
 
+def _has_sufficient_bars(bars: list[dict[str, Any]], count: int = 60) -> bool:
+    """Return whether enough valid completed bars exist for the SMA window.
+
+    A market-data provider may omit no-trade minutes and a Korean session is
+    separated by an overnight boundary.  Requiring every observed 3-minute
+    bar to be exactly 180 seconds after the previous one would therefore
+    reject otherwise valid session data.  `_aggregate_3m` already enforces
+    that each individual bar contains three distinct, consecutive finalized
+    1-minute rows; the SMA window only needs `count` such observations.
+    """
+    if len(bars) < count:
+        return False
+    return all(_timestamp(row.get("bucket_time")) is not None for row in bars[-count:])
+
+
+class TimescaleMarketFeed:
+    """Read-only tail feed for one PAPER strategy's raw ticks and quotes.
+
+    The feed keeps a small in-memory watermark and re-reads a three-minute
+    overlap on every poll so late rows are not lost.  Raw rows are persisted
+    by ``ls-realtime``; this process only reads them and derives finalized
+    3-minute observations locally.
+    """
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        market_api: str,
+        # One full trading day plus the current session gives the 60-bar SMA
+        # warm-up room even when the raw feed has no overnight trades.
+        lookback_hours: int = 24,
+        statement_timeout_ms: int = 3_000,
+        batch_limit: int = 200_000,
+    ) -> None:
+        if not dsn.strip():
+            raise RuntimeError("STRATEGY_PAPER_TIMESCALE_DATABASE_URL is required")
+        import psycopg2
+
+        self._psycopg2 = psycopg2
+        self._dsn = dsn
+        self._market_api = market_api
+        self._lookback = timedelta(hours=max(1, min(int(lookback_hours), 24)))
+        self._statement_timeout_ms = max(500, min(int(statement_timeout_ms), 10_000))
+        self._batch_limit = max(1_000, min(int(batch_limit), 500_000))
+        self._connection = None
+        self._instrument_ids: dict[str, str] = {}
+        self._watermarks: dict[str, datetime] = {}
+        self._ticks: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def close(self) -> None:
+        if self._connection is not None:
+            try:
+                self._connection.close()
+            finally:
+                self._connection = None
+
+    def _conn(self):
+        if self._connection is None or self._connection.closed:
+            self._connection = self._psycopg2.connect(self._dsn, connect_timeout=3)
+        return self._connection
+
+    def _instrument_id(self, symbol: str) -> str:
+        instrument_id = self._instrument_ids.get(symbol)
+        if instrument_id is None:
+            instrument_id = _fetch_instrument_id(self._market_api, symbol)
+            self._instrument_ids[symbol] = instrument_id
+        return instrument_id
+
+    def read(self, symbol: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        instrument_id = self._instrument_id(symbol)
+        now = datetime.now(timezone.utc)
+        watermark = self._watermarks.get(symbol)
+        since = (watermark - timedelta(seconds=180)) if watermark else now - self._lookback
+        connection = self._conn()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("set transaction read only")
+                cursor.execute(
+                    "select set_config('statement_timeout', %s, true)",
+                    (f"{self._statement_timeout_ms}ms",),
+                )
+                cursor.execute(
+                    """
+                    select event_time, price, quantity, observed_at, source_event_id
+                      from market.market_ticks
+                     where instrument_id = %s
+                       and event_time >= %s
+                     order by event_time desc, source_event_id desc nulls last
+                     limit %s
+                    """,
+                    (instrument_id, since, self._batch_limit),
+                )
+                # Bound the query at the live edge. An ascending LIMIT would
+                # return only the oldest portion of a busy 24-hour window and
+                # silently hide the newest bars once the batch is full.
+                tick_rows = list(reversed(cursor.fetchall()))
+                columns = [item[0] for item in cursor.description]
+                cursor.execute(
+                    """
+                    select event_time, observed_at, best_bid, best_ask,
+                           mid_price, spread
+                      from market.market_quotes
+                     where instrument_id = %s
+                     order by event_time desc, received_at desc
+                     limit 1
+                    """,
+                    (instrument_id,),
+                )
+                quote_row = cursor.fetchone()
+                quote_columns = [item[0] for item in cursor.description]
+            connection.rollback()
+        except Exception as exc:
+            try:
+                connection.rollback()
+            except Exception:  # noqa: BLE001 - connection may be broken
+                pass
+            self.close()
+            raise RuntimeError(f"Timescale market read failed: {type(exc).__name__}") from exc
+
+        rows = [dict(zip(columns, row)) for row in tick_rows]
+        tick_store = self._ticks.setdefault(symbol, {})
+        for row in rows:
+            event_id = str(row.get("source_event_id") or "")
+            if event_id:
+                tick_store[event_id] = row
+            stamp = _timestamp(row.get("event_time"))
+            if stamp is not None and stamp > self._watermarks.get(symbol, since):
+                self._watermarks[symbol] = stamp
+        cutoff = now - self._lookback
+        self._ticks[symbol] = {
+            event_id: row
+            for event_id, row in tick_store.items()
+            if (_timestamp(row.get("event_time")) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff
+        }
+        bars = _aggregate_tick_rows_3m(list(self._ticks[symbol].values()), now=now)
+        quote = dict(zip(quote_columns, quote_row)) if quote_row else None
+        return bars, quote
+
+
 def _sma(values: list[Decimal], length: int) -> Decimal:
     return sum(values[-length:], Decimal(0)) / Decimal(length)
 
 
 class PaperSignalRuntime:
-    def __init__(self, bundle: dict[str, Any], *, state_dir: Path, market_api: str) -> None:
+    def __init__(
+        self,
+        bundle: dict[str, Any],
+        *,
+        state_dir: Path,
+        market_api: str,
+        market_feed: TimescaleMarketFeed | None = None,
+        order_gateway: PaperOrderGateway | None = None,
+    ) -> None:
         self.bundle = bundle
         self.state_dir = state_dir
         self.market_api = market_api
+        self.market_feed = market_feed
+        execution = bundle.get("execution") if isinstance(bundle.get("execution"), dict) else {}
+        self.orders_enabled = bool(execution.get("orders_enabled"))
+        self.order_gateway = order_gateway
+        if self.orders_enabled and self.order_gateway is None:
+            raise RuntimeError("PAPER order gateway is required when orders_enabled=true")
         self.deployment_id = str(bundle["deployment_id"])
         self.state_path = state_dir / f"{self.deployment_id}.json"
         self.signal_path = state_dir / f"{self.deployment_id}.signals.jsonl"
@@ -196,8 +481,8 @@ class PaperSignalRuntime:
             "schema": "strategy-paper-runtime-state.v1",
             "deployment_id": self.deployment_id,
             "status": "STARTING",
-            "execution_status": "SIGNAL_ONLY",
-            "orders_enabled": False,
+            "execution_status": "PAPER_ORDERING" if self.orders_enabled else "SIGNAL_ONLY",
+            "orders_enabled": self.orders_enabled,
             "symbols": list(bundle["symbols"]),
             "last_poll_at": None,
             "last_bar_by_symbol": {},
@@ -205,6 +490,12 @@ class PaperSignalRuntime:
             "signals_by_symbol": {},
             "positions_simulated": {},
             "errors": [],
+            "data_source": (
+                "TIMESCALE_RAW_TICKS_QUOTES"
+                if market_feed is not None
+                else "MARKET_API_1M_COMPATIBILITY"
+            ),
+            "last_quote_by_symbol": {},
         }
         self.state = default_state
         if self.state_path.exists():
@@ -218,6 +509,24 @@ class PaperSignalRuntime:
                 and existing.get("deployment_id") == self.deployment_id
             ):
                 self.state = existing
+        prior_orders_enabled = self.state.get("orders_enabled")
+        if self.orders_enabled and prior_orders_enabled is False:
+            # A legacy SIGNAL_ONLY run never owned a broker position. Do not
+            # carry its simulated position/watermark into the first real
+            # PAPER-order run; the immutable signal files remain as audit
+            # evidence and are ignored by _restore_signal_state below.
+            self.state["last_bar_by_symbol"] = {}
+            self.state["positions_simulated"] = {}
+        self.state["data_source"] = (
+            "TIMESCALE_RAW_TICKS_QUOTES"
+            if market_feed is not None
+            else str(self.state.get("data_source") or "MARKET_API_1M_COMPATIBILITY")
+        )
+        self.state["orders_enabled"] = self.orders_enabled
+        self.state["execution_status"] = (
+            "PAPER_ORDERING" if self.orders_enabled else "SIGNAL_ONLY"
+        )
+        self.state.setdefault("last_quote_by_symbol", {})
         self._restore_signal_state()
         _write_json(self.state_path, self.state)
 
@@ -250,6 +559,10 @@ class PaperSignalRuntime:
                 or event.get("deployment_id") != self.deployment_id
             ):
                 continue
+            if self.orders_enabled:
+                order = event.get("order")
+                if not isinstance(order, dict) or not order.get("directive_id"):
+                    continue
             symbol = str(event.get("symbol") or "")
             action = event.get("action")
             price = _decimal(event.get("price"))
@@ -298,10 +611,30 @@ class PaperSignalRuntime:
             "price": str(price),
             "bar_time": bar["bucket_time"],
             "reason": reason,
-            "execution_status": "SIGNAL_ONLY",
+            "execution_status": "PAPER_ORDERING" if self.orders_enabled else "SIGNAL_ONLY",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         event["signal_key"] = self._signal_key(event)
+        # The gateway is idempotent on this deterministic signal key. Submit
+        # before writing the local event so a process crash cannot leave an
+        # apparent signal whose order was never admitted. A retry after a
+        # successful broker crossing resolves to the same durable directive.
+        if self.orders_enabled:
+            assert self.order_gateway is not None
+            order = self.order_gateway.submit(
+                deployment_id=self.deployment_id,
+                symbol=symbol,
+                side=action,
+                quantity=Decimal(str(self.bundle["execution"]["order_quantity"])),
+                signal_key=event["signal_key"],
+            )
+            directive = order.get("directive")
+            event["order"] = {
+                "execution_status": order.get("execution_status"),
+                "directive_id": directive.get("directive_id") if isinstance(directive, dict) else None,
+                "state": directive.get("state") if isinstance(directive, dict) else None,
+                "legs": directive.get("legs") if isinstance(directive, dict) else [],
+            }
         self.signal_path.parent.mkdir(parents=True, exist_ok=True)
         with self.signal_lock_path.open("a+", encoding="utf-8") as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
@@ -339,8 +672,23 @@ class PaperSignalRuntime:
         self.state["last_poll_at"] = datetime.now(timezone.utc).isoformat()
         any_data = False
         for symbol in self.bundle["symbols"]:
-            bars = _aggregate_3m(_fetch_1m(self.market_api, symbol))
-            if not _has_contiguous_bars(bars, 60):
+            if self.market_feed is not None:
+                bars, quote = self.market_feed.read(symbol)
+                if quote is not None:
+                    quote_state = {
+                        key: (
+                            value.isoformat()
+                            if isinstance(value, datetime)
+                            else str(value) if isinstance(value, Decimal) else value
+                        )
+                        for key, value in quote.items()
+                    }
+                    quote_by_symbol = self.state.setdefault("last_quote_by_symbol", {})
+                    if isinstance(quote_by_symbol, dict):
+                        quote_by_symbol[symbol] = quote_state
+            else:
+                bars = _aggregate_3m(_fetch_1m(self.market_api, symbol))
+            if not _has_sufficient_bars(bars, 60):
                 continue
             any_data = True
             bar = bars[-1]
@@ -404,12 +752,40 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     bundle = _read_bundle(args.bundle, args.expected_hash)
-    runtime = PaperSignalRuntime(
-        bundle,
-        state_dir=Path(os.getenv("STRATEGY_PAPER_RUNTIME_STATE_DIR", "/var/lib/strategy-runtime")),
-        market_api=os.getenv("MARKET_API_URL", "http://market-api:8036"),
+    market_api = os.getenv("MARKET_API_URL", "http://market-api:8036")
+    dsn = os.getenv("STRATEGY_PAPER_TIMESCALE_DATABASE_URL", "").strip()
+    if not dsn:
+        raise RuntimeError("STRATEGY_PAPER_TIMESCALE_DATABASE_URL is required")
+    feed = TimescaleMarketFeed(
+        dsn,
+        market_api=market_api,
+        lookback_hours=int(os.getenv("STRATEGY_PAPER_TICK_LOOKBACK_HOURS", "24")),
+        statement_timeout_ms=int(
+            os.getenv("STRATEGY_PAPER_MARKET_STATEMENT_TIMEOUT_MS", "3000")
+        ),
     )
-    runtime.run(once=args.once)
+    execution = bundle.get("execution") if isinstance(bundle.get("execution"), dict) else {}
+    order_gateway = None
+    if execution.get("orders_enabled") is True:
+        order_gateway = PaperOrderGateway(
+            control_url=os.getenv(
+                "STRATEGY_PAPER_ORDER_CONTROL_URL",
+                "http://strategy-runtime-control:8000",
+            ),
+            token=os.getenv("STRATEGY_PAPER_DEPLOYMENT_ORDER_TOKEN", ""),
+            timeout_seconds=float(os.getenv("STRATEGY_PAPER_ORDER_TIMEOUT_SECONDS", "5")),
+        )
+    try:
+        runtime = PaperSignalRuntime(
+            bundle,
+            state_dir=Path(os.getenv("STRATEGY_PAPER_RUNTIME_STATE_DIR", "/var/lib/strategy-runtime")),
+            market_api=market_api,
+            market_feed=feed,
+            order_gateway=order_gateway,
+        )
+        runtime.run(once=args.once)
+    finally:
+        feed.close()
 
 
 if __name__ == "__main__":

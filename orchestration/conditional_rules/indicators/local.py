@@ -47,6 +47,24 @@ def _mean(values: list[Decimal]) -> Decimal:
     return sum(values, ZERO) / Decimal(len(values))
 
 
+def _offset(parameters: IndicatorParameters) -> int:
+    """Read the bar shift shared by every local indicator.
+
+    ``OFFSET=0`` is the latest completed bar and ``OFFSET=N`` steps N completed
+    bars back, which is what the offset argument of Korean HTS notation such as
+    ``bollingerband(종가,2,0,20)`` means.
+    """
+
+    raw = parameters.get("OFFSET", 0)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise _fail("INVALID_INDICATOR_PARAMETER", "OFFSET is invalid") from exc
+    if value < 0:
+        raise _fail("INVALID_INDICATOR_PARAMETER", "OFFSET must not be negative")
+    return value
+
+
 def _period(parameters: IndicatorParameters, key: str = "PERIOD") -> int:
     try:
         value = int(parameters[key])
@@ -378,6 +396,14 @@ def calculate_local_indicator(
     """Calculate a canonical local indicator and expose only its declared output."""
 
     values = _final_candles(candles)
+    offset = _offset(parameters)
+    if offset:
+        if len(values) <= offset:
+            raise _fail(
+                "INSUFFICIENT_HISTORY",
+                f"OFFSET={offset} requires more than {offset} completed bars",
+            )
+        values = values[: len(values) - offset]
     closes = [item.close for item in values]
     if name == "SMA":
         period = _period(parameters)

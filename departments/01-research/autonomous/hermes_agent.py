@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import signal
 import tempfile
 import subprocess
 import time
@@ -74,7 +75,10 @@ class StrategyHermesAgent:
             )
             Path(environment["LS_TOKEN_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
             try:
-                completed = subprocess.run(
+                # Hermes may create experiment subprocesses.  Give the run a
+                # private process group so a timeout cannot leave a backtest
+                # orphaned after the parent Hermes process is reaped.
+                process = subprocess.Popen(
                     [
                         self.binary,
                         "--in",
@@ -94,32 +98,49 @@ class StrategyHermesAgent:
                     ],
                     cwd=self.lab_root,
                     env=environment,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=self.timeout_seconds,
-                    check=False,
+                    start_new_session=True,
                 )
             except FileNotFoundError:
                 error = f"Hermes binary not found: {self.binary}"
                 output_path.write_text(error + "\n", encoding="utf-8")
                 return AgentRun(run_id, None, "FAILED", None, str(output_path), error, time.monotonic() - started, str(usage_path))
+
+            try:
+                stdout, stderr = process.communicate(timeout=self.timeout_seconds)
             except subprocess.TimeoutExpired as exc:
-                output = (exc.stdout or "") + (exc.stderr or "")
+                output = _process_output_text(exc.stdout) + _process_output_text(exc.stderr)
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    trailing_stdout, trailing_stderr = process.communicate(timeout=5)
+                except subprocess.TimeoutExpired as trailing:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    trailing_stdout, trailing_stderr = process.communicate()
+                    output += _process_output_text(trailing.stdout) + _process_output_text(trailing.stderr)
+                output += _process_output_text(trailing_stdout) + _process_output_text(trailing_stderr)
                 output_path.write_text(output + "\nagent timeout\n", encoding="utf-8")
                 return AgentRun(run_id, None, "TIMED_OUT", None, str(output_path), "Hermes timed out", time.monotonic() - started, str(usage_path))
 
-        output = (completed.stdout or "") + (completed.stderr or "")
+        output = _process_output_text(stdout) + _process_output_text(stderr)
         output_path.write_text(output, encoding="utf-8")
-        status = "COMPLETED" if completed.returncode == 0 else "FAILED"
+        status = "COMPLETED" if process.returncode == 0 else "FAILED"
         return AgentRun(
             run_id,
             None,
             status,
-            completed.returncode,
+            process.returncode,
             str(output_path),
-            None if completed.returncode == 0 else "Hermes returned a non-zero exit code",
+            None if process.returncode == 0 else "Hermes returned a non-zero exit code",
             time.monotonic() - started,
             str(usage_path),
         )
@@ -139,7 +160,15 @@ For market data, use only the repository module
 read-only allow-list for LS chart/investor/ranking TRs t1665, t8410, t8411,
 t8412, t8451, t8452, t8453, t1441, t1444, t1452, t1463, t1466, t1481, t1482,
 t1489 and t1492. Query only the symbols/date range or ranking snapshot needed
-for the current experiment. Prefer the returned rows in memory; if a dataframe library needs a
+for the current experiment. For a top-N universe, call
+``fetch_ranking(..., max_rows=N)`` so the adapter stops after enough rows are
+returned; never walk the provider's full continuation chain when the plan only
+needs N names. The adapter performs bounded retries for transient transport
+failures (up to the configured transport retry budget, normally three
+attempts); application/field-type errors are not retried. Do not bypass it
+with a different client or turn a timeout into an empty/zero dataset. If the
+bounded retry budget is exhausted, write a concrete BLOCKED result with the
+TR, request scope, and failure reason. Prefer the returned rows in memory; if a dataframe library needs a
 file, use its temporary-data helper and write only below $STRATEGY_MARKET_DATA_DIR.
 Never read or write quant-data, the legacy discovery cache, market/research
 databases, collector backfill tables, or any other persistent raw-data path.
@@ -154,6 +183,7 @@ Read these files first:
 {self.lab_root}/KNOWLEDGE.md
 {self.lab_root}/FAILURE_MEMORY.md
 {self.lab_root}/EXPERIMENT_LOG.md
+{self.repo_root}/departments/01-research/autonomous/STRATEGY_HERMES_DEPLOYMENT.md
 
 You own the complete research turn. Inspect the objective and prior lineage, then:
 1. Form competing hypotheses with explicit mechanisms and falsifiers, recording each as JSON under {self.lab_root}/hypotheses.
@@ -162,7 +192,24 @@ You own the complete research turn. Inspect the objective and prior lineage, the
 4. Run the actual experiment. For intraday chart TRs, `t8452` has a documented maximum of 500 rows per request; use the adapter's continuation and bounded-window behavior, inspect every receipt's requested versus first/last returned date, include the most recent returned bar when the user did not specify an end date, and never treat an empty or truncated historical window as zero performance. Include point-in-time data boundaries, delayed execution, fees/slippage/turnover, out-of-sample evaluation, parameter sensitivity, time/regime/asset slices, and adversarial failure analysis. Missing evidence is unknown, never zero.
 5. Write {self.lab_root}/results/<plan_id>.json with plan_id, preregistration_hash, status (COMPLETED, FAILED, or BLOCKED), cost_included, oos_evaluated, leakage_detected, named boolean robustness checks, metrics (JSON key exactly `metrics`; do not use `measured_metrics`), artifacts, failure_modes, limitations, and failure_reason when required.
 
+6. If the evidence supports a candidate, write the candidate artifact and the
+   deployment metadata described in STRATEGY_HERMES_DEPLOYMENT.md. Do not
+   start Docker, call a broker, write an OrderIntent, or claim that a strategy
+   is deployed. The BFF and private runtime-control sidecar own the immutable
+   PAPER handoff after a human approval. The runtime reads raw LS trade and
+   quote rows from TimescaleDB and remains SIGNAL_ONLY.
+
 Continue from existing state rather than deleting or rewriting lineage. Keep one focused research turn, leave a reproducible artifact trail, and stop only after writing the result or a concrete BLOCKED/FAILED artifact. A candidate is evidence-gated only; it never authorizes an order or deployment."""
+
+
+def _process_output_text(value: object) -> str:
+    """Normalize subprocess output, including bytes from TimeoutExpired."""
+
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 # Compatibility name for existing tests and callers. New runtime wiring uses

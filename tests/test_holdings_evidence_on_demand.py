@@ -126,3 +126,32 @@ def test_holdings_sources_fail_independently_and_merged_prompt_stays_bounded() -
     assert mcp._EVIDENCE_CHAR_BUDGET >= len(json.dumps(
         merged, ensure_ascii=False, sort_keys=True, default=str))
     assert merged["news"]["source_status"]["news"]["status"] == "FAILED"
+
+
+def test_news_only_holdings_evidence_skips_market_reads() -> None:
+    mcp = _load_mcp_server()
+    calls: list[str] = []
+
+    def market_get(url: str):
+        calls.append(url)
+        raise AssertionError("news-only evidence must not read market data")
+
+    evidence = mcp.gather_holdings_evidence(
+        "005930",
+        get=market_get,
+        search_news=lambda **_kwargs: {
+            "citation": "news-only",
+            "items": [{"title": "headline"}],
+        },
+        search_disclosures=lambda **_kwargs: {
+            "citation": "disclosure-only",
+            "items": [],
+        },
+        include_price=False,
+    )
+
+    assert calls == []
+    assert evidence["sources"]["news"]["status"] == "OK"
+    assert evidence["sources"]["disclosures"]["status"] == "OK"
+    assert "price_levels" not in evidence
+    assert "price_context" not in evidence

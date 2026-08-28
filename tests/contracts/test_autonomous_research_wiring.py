@@ -118,7 +118,9 @@ def test_strategy_runtime_has_readonly_research_input_and_state_volume() -> None
     source = (ROOT / "apps/api/strategy_runtime.py").read_text(encoding="utf-8")
     assert "strategy_paper_executor" in source
     executor = (ROOT / "apps/api/strategy_paper_executor.py").read_text(encoding="utf-8")
-    assert '"orders_enabled": False' in executor
+    assert '"orders_enabled"' in executor
+    assert "PAPER_ORDERING" in executor
+    assert "STRATEGY_PAPER_DEPLOYMENT_ORDER_TOKEN" in executor
 
 
 def test_model_overlay_evolution_workers_use_non_factory_runtime() -> None:
@@ -128,6 +130,15 @@ def test_model_overlay_evolution_workers_use_non_factory_runtime() -> None:
         assert service["image"] == "hedgefund-operations-runtime:latest"
         assert service["build"]["dockerfile"] == "Dockerfile.operations-runtime"
         assert "Dockerfile.factory" not in str(service)
+
+
+def test_model_overlay_research_mcp_waits_for_the_shared_vllm_plane() -> None:
+    overlay = yaml.safe_load((ROOT / "docker-compose.model.yml").read_text(encoding="utf-8"))
+    service = overlay["services"]["research-mcp"]
+
+    assert service["depends_on"]["vllm"]["condition"] == "service_healthy"
+    assert service["environment"]["WORKER_MODEL_BASE_URL"] == "${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}"
+    assert service["environment"]["WORKER_MODEL_EXECUTION_CONTEXT"] == "container"
 
 
 def test_research_images_do_not_ship_retired_factory_sources() -> None:

@@ -32,6 +32,10 @@ EXPECTED_MARKET_JOBS = {
     "vkospi": ("collectors/volatility_index_collector.py", "--collect"),
     "style-index": ("collectors/style_index_collector.py", "--collect"),
     "calendar-observed": ("collectors/calendar_collector.py", "--collect"),
+    "market-cap-universe": (
+        "collectors/market_cap_universe_collector.py",
+        "--collect",
+    ),
     "label-snapshot": ("collectors/label_snapshot_collector.py", "--collect"),
     "chart-daily-universe": (
         "collectors/chart_backfill_collector.py",

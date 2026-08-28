@@ -90,6 +90,55 @@ def test_notifier_posts_one_bounded_report_and_is_idempotent(tmp_path: Path, mon
     assert "주문 생성: 없음" in posts[0][1]
 
 
+def test_notifier_posts_a_new_final_after_a_retry_result_is_decided(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "research"
+    lab = _lab(root)
+    _write(tmp_path / "state" / "sent.json", {"initialized_at": "2026-01-01T00:00:00+00:00", "sent": {}})
+    monkeypatch.setenv("STRATEGY_DISCORD_REPORT_ENABLED", "true")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN_CEO", "token")
+    monkeypatch.setenv("DISCORD_CEO_CHANNEL_ID", "channel-1")
+    posts: list[str] = []
+    monkeypatch.setattr(
+        notifier,
+        "_post_to_discord",
+        lambda _token, _correlation, content: posts.append(content) or True,
+    )
+    worker = notifier.StrategyReportNotifier(root, tmp_path / "state")
+
+    assert worker.run_once()["posted"] == 1
+    _write(
+        lab / "results" / "plan-1.json",
+        {
+            "plan_id": "plan-1",
+            "status": "BLOCKED",
+            "failure_reason": "LS t1444 timed out",
+        },
+    )
+    _write(
+        lab / "results" / "plan-2.json",
+        {
+            "plan_id": "plan-2",
+            "status": "COMPLETED",
+            "metrics": {"5/20": {"out_of_sample": {"trade_count": 3}}},
+        },
+    )
+    with (lab / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {"event_type": "DECISION", "payload": {"plan_id": "plan-2", "decision": "PIVOT"}}
+            )
+            + "\n"
+        )
+
+    assert worker.run_once()["posted"] == 1
+    assert len(posts) == 2
+    assert "상태: COMPLETED · 최종판정: PIVOT" in posts[1]
+    assert "이력상 BLOCKED 1건" in posts[1]
+    assert "주요 사유: LS t1444 timed out" not in posts[1]
+
+
 def test_notifier_baselines_old_results_without_posting(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "research"
     _lab(root)

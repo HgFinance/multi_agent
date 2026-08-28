@@ -1,0 +1,12 @@
+{
+  "schema_version": "hgfinance.runtime-service-registry.v1",
+  "services": [
+    {
+      "department": "trading",
+      "service_id": "trading-directive-worker",
+      "worker_id": "desk-runner",
+      "kind": "deterministic",
+      "trigger": "always"
+    }
+  ]
+}

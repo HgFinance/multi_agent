@@ -424,13 +424,13 @@ export default function AgentLogsView() {
       <section className="flex justify-between items-start gap-gutter flex-wrap">
         <div className="min-w-0">
           <p className="text-label-md font-label-md text-on-surface-variant uppercase">
-            Backend Read Model · 8 Departments
+            AGENT ACTIVITY · 8 Departments
           </p>
           <h1 className="text-headline-lg font-headline-lg text-primary font-bold tracking-tight mt-2">
-            Agent Logs
+            부서별 에이전트의 움직임을 실시간으로 확인하세요
           </h1>
           <p className="text-body-sm font-body-sm text-on-surface-variant mt-2 max-w-3xl">
-            BFF snapshot과 수신된 runtime event를 기준으로 부서 Registry와 최근 로그를 표시합니다.
+            BFF snapshot과 수신된 runtime event를 기준으로 각 부서의 상태와 에이전트의 최근 작업 로그를 표시합니다.
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">

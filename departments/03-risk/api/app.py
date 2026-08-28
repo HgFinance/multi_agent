@@ -352,6 +352,26 @@ class ComplianceCheckRequest(BaseModel):
     as_of: str
 
 
+class HermesTerminalActivityRequest(BaseModel):
+    """Redacted, non-binding receipt from the existing Hermes workflow."""
+
+    schema_version: str = Field(
+        default="risk.hermes-terminal-activity.v1",
+        max_length=80,
+        pattern="^risk\\.hermes-terminal-activity\\.v1$",
+    )
+    event_id: str = Field(min_length=1, max_length=240)
+    task_id: str = Field(min_length=1, max_length=240)
+    root_id: str = Field(min_length=1, max_length=240)
+    request_id: str | None = Field(default=None, max_length=240)
+    status: str = Field(pattern="^(completed|blocked|failed)$")
+    duration_ms: int = Field(ge=0, le=7_200_000)
+    discord_status: str = Field(default="not_attempted", max_length=40)
+    discord_channel_id: str | None = Field(default=None, max_length=120)
+    discord_thread_id: str | None = Field(default=None, max_length=120)
+    discord_message_id: str | None = Field(default=None, max_length=120)
+
+
 class MandateAssessmentResponse(BaseModel):
     schema_version: str
     mandate_id: str
@@ -762,9 +782,7 @@ def assess_mandate_for_risk_head(mandate_id: str, body: RiskMandateAssessmentReq
                 report = employees.get(worker_id) or {}
                 worker_status = str(report.get("status") or "UNKNOWN")
                 repository.record_run_event(
-                    idempotency_key=(
-                        f"{run_id}:AgentOutput:{worker_id}:{output_hash}"
-                    ),
+                    idempotency_key=(f"{run_id}:AgentOutput:{worker_id}:{output_hash}"),
                     run_id=run_id,
                     trace_id=trace_id,
                     employee_profile=worker_id,
@@ -833,10 +851,7 @@ def mandate_presets():
         "schema_version": "risk.mandate-presets.v1",
         "preset_version": PRESET_VERSION,
         "status": "ACTIVE",
-        "presets": [
-            preset.as_dict()
-            for _key, preset in sorted(RISK_PRESETS.items())
-        ],
+        "presets": [preset.as_dict() for _key, preset in sorted(RISK_PRESETS.items())],
     }
 
 
@@ -945,9 +960,7 @@ def activate_limits_from_mandate(body: ActivatedMandateCompilationIn):
             "trade_risk_budget_pct": preset.trade_risk_budget_max_pct,
             "allowed_instrument_ids": allowed_ids or None,
             "allowed_asset_classes": universe.get("allowed_asset_classes"),
-            "forbidden_asset_classes": universe.get(
-                "forbidden_asset_classes", []
-            ),
+            "forbidden_asset_classes": universe.get("forbidden_asset_classes", []),
             "preferred_sectors": universe.get("preferred_sectors", []),
             "excluded_sectors": universe.get("excluded_sectors", []),
         },
@@ -1084,6 +1097,19 @@ def rag_observability():
     }
 
 
+@app.post("/risk/v1/observability/hermes", status_code=202)
+def record_hermes_terminal_activity(body: HermesTerminalActivityRequest):
+    """Accept a Risk Hermes terminal receipt without granting any authority."""
+
+    activity = body.model_dump(mode="json")
+    RISK_TELEMETRY.record_external_activity(activity)
+    return {
+        "status": "RECORDED",
+        "event_id": body.event_id,
+        "observability_scope": "risk-hermes-terminal-receipt",
+    }
+
+
 # ── Health 계약 ───────────────────────────────────────────────────────────────
 # 전 부서 공통 규격이다(통합계획 8.1). 2026-08-12 이전에는 리스크·QA 에만 이 두
 # 경로가 없어서, compose healthcheck 가 부서마다 다른 도메인 경로를 찔렀고
@@ -1112,7 +1138,11 @@ def health_ready() -> dict:
     if not dsn_configured:
         # DB 없이 도는 것은 이 서비스의 **정상 모드**가 아니다. 다만 계약·오프라인
         # 테스트가 이 상태로 앱을 띄우므로 200 으로 두되 상태를 숨기지 않는다.
-        return {"status": "degraded", "service": "risk-api", "canonical_db": "NOT_CONFIGURED"}
+        return {
+            "status": "degraded",
+            "service": "risk-api",
+            "canonical_db": "NOT_CONFIGURED",
+        }
     try:
         repository = _risk_decision_repository()
     except RiskDecisionPersistenceError as exc:
@@ -1130,13 +1160,17 @@ def health_ready() -> dict:
 @app.get("/risk/v1/observability/runtime")
 def runtime_observability():
     snapshot = RISK_TELEMETRY.snapshot()
-    # This endpoint owns deterministic Risk API telemetry only. Hermes
-    # execution is observed at the Kanban/LangSmith boundary so this response
-    # must not present a stale API-only counter as end-to-end coverage.
-    snapshot["observability_scope"] = "risk-api-deterministic-pipeline"
-    snapshot["hermes_included"] = False
+    # The deterministic pipeline and Hermes are separate execution owners.
+    # Hermes is included only when its redacted terminal receipt reached this
+    # API; LangSmith is an optional observer and is not required for this.
+    hermes_count = int(snapshot.get("hermes_activity_count", 0) or 0)
+    snapshot["observability_scope"] = (
+        "risk-api-deterministic-pipeline+hermes-terminal-receipts"
+    )
+    snapshot["hermes_included"] = hermes_count > 0
     snapshot["hermes_observability_source"] = (
-        "Kanban task_runs + LangSmith hgfinance.risk.worker"
+        "CEO supervisor -> POST /risk/v1/observability/hermes; "
+        "model timing remains in the Hermes agent log"
     )
     snapshot["aggregation_status"] = "PARTIAL"
     snapshot["process_pipeline_count"] = snapshot["pipeline_count"]

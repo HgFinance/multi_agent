@@ -52,6 +52,7 @@ from orchestration.ceo_workflow_scope import (
     UserPaperOrderScope,
     build_root_body,
     build_scoped_task_body,
+    extract_scope_references,
     infer_workflow_mode,
     primary_idempotency_key,
     selected_primary_profiles_from_body,
@@ -168,6 +169,22 @@ def test_answer_contract_accepts_bounded_unavailable_retrieval_attempt() -> None
     assert grade.has_evidence is True
     assert grade.has_as_of is True
     assert grade.trustworthy is True
+
+
+def test_scope_parser_does_not_promote_same_line_qa_receipt_ids_to_roots() -> None:
+    payload = {
+        "body": (
+            "workflow_root_task_id=t_aaaaaaaa\n"
+            "hgfinance.post-response-qa.v1 root_task_id=t_aaaaaaaa "
+            "response_task_id=t_bbbbbbbb qa_task_id=t_cccccccc "
+            "state=projection_pending"
+        )
+    }
+
+    references = extract_scope_references(payload)
+
+    assert references.root_ids == ("t_aaaaaaaa",)
+    assert references.task_ids == ("t_cccccccc",)
 
 
 def test_answer_contract_rejects_incomplete_retrieval_attempt() -> None:
@@ -2609,10 +2626,7 @@ def test_ceo_synthesis_receives_owned_self_review_guardrails() -> None:
         "root",
         assignee="ceo-agent",
         title="CEO final synthesis",
-        body=(
-            "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE\n"
-            "workflow_plane=response"
-        ),
+        body=("hgfinance.ceo-supervisor.v1 action=SYNTHESIZE\nworkflow_plane=response"),
         parent_task_ids=("research",),
     )
 
@@ -2823,6 +2837,83 @@ class PostResponseQaAuditTest(unittest.TestCase):
         self.assertIn("CEO가 받은 연구 결과", qa["body"])
         self.assertIn(synthesis_body.replace("\n", "\\n"), qa["body"])
         self.assertIn("CEO 최종 응답", qa["body"])
+
+    def test_response_lane_returns_before_post_response_observers(self) -> None:
+        timeline: list[str] = []
+
+        class DeliverySpy:
+            def deliver(self, **_kwargs):
+                timeline.append("deliver")
+                return "sent"
+
+            def deliver_to_existing_thread(self, **_kwargs):
+                timeline.append("deliver")
+                return "sent"
+
+        class OrderingClient(FakeClient):
+            def create_task(self, **kwargs):
+                timeline.append(f"create:{kwargs['assignee']}")
+                return super().create_task(**kwargs)
+
+        root_id = "root-response-lane"
+        root = {
+            "id": root_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "body": build_root_body("삼성전자 분석", "req-response-lane"),
+        }
+        synthesis = {
+            "id": "response-lane-synthesis",
+            "assignee": "ceo-agent",
+            "status": "done",
+            "result": "CEO 최종 응답",
+            "final_answer": "CEO 최종 응답",
+            "body": (
+                f"workflow_root_task_id={root_id}\n"
+                "workflow_role=synthesis\n"
+                "workflow_mode=analysis\n"
+                "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
+            ),
+        }
+        client = OrderingClient()
+        service = CeoSupervisorService(client, discord_delivery=DeliverySpy())
+
+        status = service._project_terminal_task(
+            root_task_id=root_id,
+            task_id=synthesis["id"],
+            task_payloads=(root, synthesis),
+            event={"event_id": "response-lane", "kind": "completed"},
+            response_only=True,
+        )
+
+        self.assertEqual(status, "sent")
+        self.assertEqual(timeline, ["deliver"])
+        self.assertTrue(
+            any(
+                "hgfinance.post-response-qa.v1" in comment["body"]
+                and "state=pending" in comment["body"]
+                for comment in client.comments
+            )
+        )
+
+        service._project_terminal_task(
+            root_task_id=root_id,
+            task_id=synthesis["id"],
+            task_payloads=(root, synthesis),
+            event={"event_id": "response-lane", "kind": "completed"},
+            skip_response_delivery=True,
+            response_delivery_status=status,
+        )
+
+        self.assertEqual(timeline, ["deliver", "create:qa-department"])
+        self.assertTrue(
+            any(
+                "hgfinance.post-response-qa.v1" in comment["body"]
+                and "state=scheduled" in comment["body"]
+                and "qa_task_id=" in comment["body"]
+                for comment in client.comments
+            )
+        )
 
     def test_qa_receives_root_backed_trading_evidence_without_new_task(self) -> None:
         root_id = "root-trading-evidence"
@@ -3816,7 +3907,10 @@ class SupervisorWakeupTest(unittest.TestCase):
                         "id": "synthesis-done",
                         "assignee": "ceo-agent",
                         "status": "done",
-                        "completed_at": int(time.time()),
+                        # A durable pending marker must recover even after
+                        # the short terminal-event race window has elapsed.
+                        "completed_at": int(time.time()) - 600,
+                        "has_post_response_qa_pending": True,
                         "body": self.payloads[0]["body"],
                     },
                 )
@@ -3831,7 +3925,7 @@ class SupervisorWakeupTest(unittest.TestCase):
                     }
                 if task_id == "synthesis-done":
                     payload = dict(self.payloads[0])
-                    payload["completed_at"] = int(time.time())
+                    payload["completed_at"] = int(time.time()) - 600
                     return payload
                 return super().show(task_id)
 
@@ -3861,6 +3955,10 @@ class SupervisorWakeupTest(unittest.TestCase):
             seen[0]["event_id"],
             "reconcile-synthesis:synthesis-done:done",
         )
+        # A fresh recovery event id must not replay the same completed
+        # transition on the next poll.
+        self.assertEqual(service.reconcile_completed_syntheses(), ())
+        self.assertEqual(len(seen), 1)
 
     def test_completed_synthesis_reconciliation_ignores_non_synthesis_tasks(
         self,
@@ -3880,6 +3978,57 @@ class SupervisorWakeupTest(unittest.TestCase):
         service = CeoSupervisorService(client)
 
         self.assertEqual(service.reconcile_completed_syntheses(), ())
+
+    def test_completed_qa_reconciliation_replays_pending_projection(self) -> None:
+        root_id = "t_12345678"
+        qa_id = "t_abcdef12"
+        qa_body = (
+            f"workflow_root_task_id={root_id}\n"
+            "workflow_role=qa\n"
+            "qa_phase=post_response\n"
+            "workflow_mode=analysis"
+        )
+
+        class PendingQaClient(FakeClient):
+            def list_tasks(self):
+                return (
+                    {
+                        "id": qa_id,
+                        "status": "done",
+                        "completed_at": int(time.time()) - 600,
+                        "has_qa_projection_pending": True,
+                        "body": qa_body,
+                    },
+                )
+
+            def show(self, task_id: str):
+                if task_id == qa_id:
+                    return {
+                        "id": qa_id,
+                        "assignee": "qa-department",
+                        "status": "done",
+                        "body": qa_body,
+                    }
+                return super().show(task_id)
+
+        client = PendingQaClient()
+        service = CeoSupervisorService(client)
+        seen: list[dict[str, object]] = []
+        service.handle_terminal_event = lambda event: seen.append(dict(event))
+
+        recovered = service.reconcile_completed_syntheses()
+
+        self.assertEqual(recovered, (qa_id,))
+        self.assertEqual(
+            seen,
+            [
+                {
+                    "event_id": f"reconcile-synthesis:{qa_id}:done",
+                    "task_id": qa_id,
+                    "kind": "completed",
+                }
+            ],
+        )
 
     def test_thread_backed_synthesis_delivers_only_to_request_thread(self) -> None:
         timeline = []
@@ -4955,6 +5104,15 @@ class SupervisorWakeupTest(unittest.TestCase):
                     "id": "t_bbbbbbbb",
                     "body": build_scoped_task_body("research", root, role="primary"),
                     "parents": [],
+                    "comments": [
+                        {
+                            "body": (
+                                "hgfinance.post-response-qa.v1 root_task_id="
+                                "t_aaaaaaaa response_task_id=t_bbbbbbbb "
+                                "state=pending"
+                            )
+                        }
+                    ],
                 }
             ],
         )
@@ -5351,6 +5509,12 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
         )
         self.assertIn("retrieval_attempt", quant_body)
         self.assertIn("Do not call delegate_task", quant_body)
+        self.assertIn(
+            "If the instrument is present but the strategy specification", quant_body
+        )
+        self.assertIn(
+            "Only block when the requested instrument or target is absent", quant_body
+        )
 
     def test_materializes_hr_for_workforce_improvement_analysis(self) -> None:
         body = (

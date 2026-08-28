@@ -50,6 +50,7 @@ def configured_workflow_timeout_seconds() -> int:
         configured = DEFAULT_WORKFLOW_TIMEOUT_SECONDS
     return max(60, min(configured, 86_400))
 
+
 _NON_EXECUTION_QUESTION_RE = re.compile(
     r"\?|(?:할까|할까요|해도\s*돼|해도\s*될까|"
     r"사도\s*돼|팔아도\s*돼|가능(?:해|할까|한가)|어때|될까)"
@@ -148,15 +149,17 @@ def previous_question_context_from_body(body: str) -> str:
         end = len(text)
     return text[start:end].strip()
 
+
 # These aliases make the CEO planner's durable selection machine-readable.
 # They do not choose departments; the planner remains the source of truth.
 _PRIMARY_PROFILE_ALIASES = {
-    "research-liaison": (
-        "research-liaison", "research reference desk", "리서치 조회"
-    ),
+    "research-liaison": ("research-liaison", "research reference desk", "리서치 조회"),
     "research-department": ("research-department", "research", "리서치", "연구"),
     "quant-backtest-department": (
-        "quant-backtest-department", "quant", "backtest", "퀀트"
+        "quant-backtest-department",
+        "quant",
+        "backtest",
+        "퀀트",
     ),
     "quant-liaison": ("quant-liaison", "quant reference desk", "퀀트 조회"),
     "trading-department": ("trading-department", "trading", "트레이딩"),
@@ -332,9 +335,7 @@ def selected_primary_profiles_from_task(
     if isinstance(comments, Sequence) and not isinstance(comments, (str, bytes)):
         for comment in comments:
             comment_body = (
-                comment.get("body")
-                if isinstance(comment, Mapping)
-                else comment
+                comment.get("body") if isinstance(comment, Mapping) else comment
             )
             parsed = selected_primary_profiles_from_body(str(comment_body or ""))
             if parsed:
@@ -343,6 +344,7 @@ def selected_primary_profiles_from_task(
     # Compatibility only for roots whose producer persisted the selection
     # solely in the old prose sentence.
     return selected_primary_profiles_from_body(body)
+
 
 # Mandate 스냅샷 블록. root body에 **한 번만** 박히고, 부서는 이 body를
 # `kanban show <root_task_id>`로 직접 읽는다.
@@ -433,9 +435,7 @@ def user_paper_order_scope_from_body(body: str) -> UserPaperOrderScope | None:
         return None
     values = {
         "order_request_id": read_marker(text, "order_request_id"),
-        "raw_instruction_sha256": read_marker(
-            text, "raw_instruction_sha256"
-        ).lower(),
+        "raw_instruction_sha256": read_marker(text, "raw_instruction_sha256").lower(),
         "fund_id": read_marker(text, "fund_id"),
         "book_id": read_marker(text, "book_id"),
         "mode": read_marker(text, "order_mode"),
@@ -641,9 +641,15 @@ def infer_workflow_mode(query: str) -> str:
     if _NON_EXECUTION_QUESTION_RE.search(text):
         return "analysis"
     non_binding_phrases = (
-        "do not place", "don't place", "do not execute", "don't execute",
-        "실제 주문이나 집행은 하지", "주문이나 집행은 하지",
-        "주문하지 말", "집행하지 말", "실행하지 말",
+        "do not place",
+        "don't place",
+        "do not execute",
+        "don't execute",
+        "실제 주문이나 집행은 하지",
+        "주문이나 집행은 하지",
+        "주문하지 말",
+        "집행하지 말",
+        "실행하지 말",
     )
     explicit_non_execution = re.search(
         r"(?:주문(?:\s*제출)?|매매|집행|실행|원장\s*변경|설정\s*변경|"
@@ -656,11 +662,30 @@ def infer_workflow_mode(query: str) -> str:
     if any(phrase in text for phrase in non_binding_phrases) or explicit_non_execution:
         return "analysis"
     binding_terms = (
-        "place order", "send order", "execute order", "broker", "buy ",
-        "sell ", "주문", "매수", "매도", "집행", "배분 변경", "리밸런싱",
-        "rebalance", "change nav", "nav 변경", "ledger post", "원장 반영",
-        "promote to production", "production promotion", "프로덕션 승격",
-        "deploy strategy", "전략 배포", "실제 거래", "실행해",
+        "place order",
+        "send order",
+        "execute order",
+        "broker",
+        "buy ",
+        "sell ",
+        "주문",
+        "매수",
+        "매도",
+        "집행",
+        "배분 변경",
+        "리밸런싱",
+        "rebalance",
+        "change nav",
+        "nav 변경",
+        "ledger post",
+        "원장 반영",
+        "promote to production",
+        "production promotion",
+        "프로덕션 승격",
+        "deploy strategy",
+        "전략 배포",
+        "실제 거래",
+        "실행해",
     )
     return "binding" if any(term in text for term in binding_terms) else "analysis"
 
@@ -782,7 +807,9 @@ def build_root_body(
         validate_canonical_profile(str(profile).strip()): str(instruction).strip()
         for profile, instruction in (delegation_instructions or {}).items()
     }
-    if bool(selected_profiles) != bool(instructions) or set(selected_profiles) != set(instructions):
+    if bool(selected_profiles) != bool(instructions) or set(selected_profiles) != set(
+        instructions
+    ):
         raise ValueError(
             "selected_primary_profiles and delegation_instructions must match"
         )
@@ -807,9 +834,7 @@ def build_root_body(
             raise ValueError("producer must be a single token")
         routing_lines += f"producer={normalized_producer}\n"
     if selected_profiles:
-        routing_lines += (
-            f"{PRIMARY_SELECTION_FIELD}={','.join(selected_profiles)}\n"
-        )
+        routing_lines += f"{PRIMARY_SELECTION_FIELD}={','.join(selected_profiles)}\n"
         for profile in selected_profiles:
             routing_lines += (
                 f"delegation_instruction.{profile}={instructions[profile]}\n"
@@ -831,16 +856,16 @@ def build_root_body(
     normalized_source = str(source or "").strip()
     source_line = (
         f"source={normalized_source}\n"
-        if normalized_source and not any(
-            char.isspace() or char == "=" for char in normalized_source
-        )
+        if normalized_source
+        and not any(char.isspace() or char == "=" for char in normalized_source)
         else ""
     )
     paper_order_block = (
         build_user_paper_order_scope(
             user_paper_order_scope,
             include_primary_selection=user_paper_order_include_primary_selection,
-        ) + "\n"
+        )
+        + "\n"
         if user_paper_order_scope is not None
         else ""
     )
@@ -903,13 +928,13 @@ def build_root_body(
             ("advisory_book_id", advisory_book_id),
         ):
             normalized = str(value or "").strip()
-            if normalized and not any(char.isspace() or char == "=" for char in normalized):
+            if normalized and not any(
+                char.isspace() or char == "=" for char in normalized
+            ):
                 advisory_lines += f"{marker}={normalized}\n"
     experience_lines = _experience_hint_section(experience_hint)
     feedback_lines = _approved_feedback_section(approved_feedback_hint)
-    self_improvement_lines = _ceo_self_improvement_section(
-        ceo_self_improvement_hint
-    )
+    self_improvement_lines = _ceo_self_improvement_section(ceo_self_improvement_hint)
     accounting_section = (
         _accounting_snapshot_section(
             advisory_fund_id,
@@ -1020,10 +1045,14 @@ def _approved_feedback_section(
             {
                 "department": str(item.get("department") or "")[:64],
                 "decision": str(item.get("decision") or "")[:64],
-                "finding_codes": [str(value)[:64] for value in item.get("finding_codes", [])[:8]]
+                "finding_codes": [
+                    str(value)[:64] for value in item.get("finding_codes", [])[:8]
+                ]
                 if isinstance(item.get("finding_codes"), list)
                 else [],
-                "summaries": [str(value)[:180] for value in item.get("summaries", [])[:4]]
+                "summaries": [
+                    str(value)[:180] for value in item.get("summaries", [])[:4]
+                ]
                 if isinstance(item.get("summaries"), list)
                 else [],
             }
@@ -1058,6 +1087,7 @@ def _ceo_self_improvement_section(
         from orchestration.d5_improvement_pipeline import (
             bounded_ceo_self_improvement_hint,
         )
+
         bounded = bounded_ceo_self_improvement_hint(hint)
     except Exception:  # noqa: BLE001 - this is advisory prompt decoration.
         return ""
@@ -1191,9 +1221,7 @@ def _accounting_snapshot_section(
                 fetch_risk_advisory_context,
             )
 
-            block = fetch_risk_advisory_context(
-                f"advisory_book_id={advisory_book_id}"
-            )
+            block = fetch_risk_advisory_context(f"advisory_book_id={advisory_book_id}")
     except Exception:  # noqa: BLE001 - optional exact-book enrichment.
         block = None
     try:
@@ -1265,7 +1293,9 @@ def build_scoped_task_body(
         raise ValueError("root_task_id must not be empty")
     role = str(role).strip().casefold()
     if role not in WORKFLOW_ROLES:
-        raise ValueError("workflow task role must be primary, qa, synthesis, or control")
+        raise ValueError(
+            "workflow task role must be primary, qa, synthesis, or control"
+        )
     if workflow_mode not in WORKFLOW_MODES:
         raise ValueError("workflow_mode must be analysis or binding")
 
@@ -1327,19 +1357,25 @@ def _task_ids(value: Any) -> tuple[str, ...]:
 def _labelled_ids(text: str, labels: frozenset[str]) -> tuple[str, ...]:
     """Read IDs from a human-readable comment only when it names a field."""
 
-    ids: list[str] = []
-    for label in labels:
-        match = re.search(
-            # A labelled field in a human-readable comment ends at a
-            # statement delimiter.  Do not let workflow_root_task_id consume
-            # later prose such as "Primary child created: t_xxx" on the same
-            # line and accidentally promote that child ID into root_ids.
-            rf"\b{re.escape(label)}\s*[:=]\s*([^;\n]+)", text,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            ids.extend(_TASK_ID_RE.findall(match.group(1)))
-    return _ordered_unique(ids)
+    if not labels:
+        return ()
+
+    # A labelled field may share a line with other fields, for example the
+    # post-response QA receipt ``root_task_id=... response_task_id=...``.
+    # Capture only the first task ID belonging to each exact label.  Scanning
+    # the remainder of the line lets a root field consume response/QA IDs and
+    # makes a valid scoped child look like a legacy task.
+    label_pattern = "|".join(
+        re.escape(label) for label in sorted(labels, key=len, reverse=True)
+    )
+    task_pattern = _TASK_ID_RE.pattern
+    matches = re.finditer(
+        rf"(?<![\w.])(?:{label_pattern})\s*[:=]\s*['\"`\[\(\s]*"
+        rf"({task_pattern})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return _ordered_unique(match.group(1) for match in matches)
 
 
 def extract_scope_references(payload: Mapping[str, Any]) -> WorkflowScopeReferences:
@@ -1357,7 +1393,9 @@ def extract_scope_references(payload: Mapping[str, Any]) -> WorkflowScopeReferen
         if isinstance(value, Mapping):
             for child_key, child_value in value.items():
                 visit(child_value, str(child_key).casefold())
-        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        elif isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
             for item in value:
                 visit(item, key)
         elif isinstance(value, str) and key in {"body", "text", "comment"}:
@@ -1411,7 +1449,14 @@ def validate_workflow_scope(
         )
 
     for payload in descendants:
-        task_refs = extract_scope_references(payload)
+        # Child comments are audit/projection annotations, not authoritative
+        # workflow metadata.  Exclude them just like root comments; otherwise
+        # a one-line delivery marker such as ``root_task_id=<root>
+        # response_task_id=<response>`` is parsed as a second root.
+        task_scope_payload = {
+            key: value for key, value in payload.items() if key != "comments"
+        }
+        task_refs = extract_scope_references(task_scope_payload)
         wrong_task_roots = set(task_refs.root_ids) - {root_task_id}
         if wrong_task_roots:
             task_id = payload.get("id") or payload.get("task_id") or "unknown"
@@ -1455,13 +1500,13 @@ __all__ = [
     "WorkflowScopeReferences",
     "WorkflowScopeViolation",
     "approved_feedback_section_from_root",
-    "ceo_self_improvement_section_from_root",
     "build_mandate_reference_line",
     "build_mandate_snapshot_block",
     "build_root_body",
     "build_root_comment",
     "build_scoped_task_body",
     "build_user_paper_order_scope",
+    "ceo_self_improvement_section_from_root",
     "extract_scope_references",
     "infer_workflow_mode",
     "is_user_query_body",

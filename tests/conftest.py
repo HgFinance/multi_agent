@@ -29,7 +29,7 @@ os.environ["LANGFUSE_TRACING"] = "false"
 
 
 @pytest.fixture(autouse=True)
-def disable_external_langsmith_tracing(monkeypatch: pytest.MonkeyPatch) -> None:
+def disable_external_langsmith_tracing(monkeypatch: pytest.MonkeyPatch):
     """Keep pytest runs out of the production ``First`` project.
 
     Tests that exercise observability explicitly opt in with their own
@@ -38,3 +38,16 @@ def disable_external_langsmith_tracing(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    # The application publisher has its own explicit switch. Keep it off for
+    # ordinary tests too, even when an imported app module has already loaded
+    # the repository .env; observability tests opt in explicitly.
+    monkeypatch.setenv("HGFINANCE_LANGSMITH_PUBLISH_ENABLED", "false")
+    import orchestration.llm_observability as observability
+
+    # Production keeps this latch process-global to avoid hammering an
+    # exhausted tenant. Tests must clear it between mocked quota scenarios.
+    with observability._LANGSMITH_QUOTA_LOCK:
+        observability._LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
+    yield
+    with observability._LANGSMITH_QUOTA_LOCK:
+        observability._LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0

@@ -370,12 +370,20 @@ def test_every_active_database_consumer_is_overridden_by_aws_overlay() -> None:
             "CONDITIONAL_RULE_DATABASE_URL",
         ),
     }
+    market_only = {
+        "strategy-runtime-control": "STRATEGY_PAPER_TIMESCALE_DATABASE_URL",
+    }
     for service_name in consumers:
         environment = overlay_services[service_name].get("environment") or {}
         if service_name in dedicated_only:
             assert "DATABASE_URL" not in environment, service_name
             for key in dedicated_only[service_name]:
                 assert "timescaledb:5432" in environment[key], (service_name, key)
+            continue
+        if service_name in market_only:
+            key = market_only[service_name]
+            assert "DATABASE_URL" not in environment, service_name
+            assert environment[key].endswith("/market"), (service_name, key)
             continue
         assert "DATABASE_URL" in environment, service_name
         assert "timescaledb:5432" in environment["DATABASE_URL"], service_name

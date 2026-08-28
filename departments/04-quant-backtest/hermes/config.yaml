@@ -66,6 +66,8 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
+    skip_preflight: true
+    keepalive_interval: 60
   # Valuation is a read-only LS projection. The credential remains isolated in
   # ls-mcp; this profile receives tools, never broker credentials.
   ls-securities:
@@ -73,6 +75,8 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
+    skip_preflight: true
+    keepalive_interval: 60
 
 # ── Hermes 내장 도구 경계 ──────────────────────────────────────────────────
 # Quant Hermes는 부서 오케스트레이션과 읽기 전용 MCP 결과의 종합만 담당한다.

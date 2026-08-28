@@ -63,6 +63,7 @@ DEFAULT_OLLAMA_TIMEOUT = 8.0
 DEFAULT_STRUCTURED_MAX_TOKENS = 256
 DEFAULT_TEXT_MAX_TOKENS = 768
 DEFAULT_REPAIR_MAX_TOKENS = 192
+DEFAULT_LENGTH_RETRY_MAX_TOKENS = 384
 DEFAULT_STOP_SEQUENCES = ("<|im_end|>", "<|endoftext|>")
 
 WorkerLLM = Callable[..., str]
@@ -70,6 +71,14 @@ WorkerLLM = Callable[..., str]
 
 class HybridStructuredOutputError(RuntimeError):
     """The bounded guided-JSON repair still violated the output contract."""
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        # A deterministic max-token failure is not helped by repeating the
+        # same prompt. The gateway gets one bounded budget increase; if that
+        # also ends at the limit, the shared Worker runtime must stop rather
+        # than spend two more identical generations.
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -264,8 +273,22 @@ class _UsageView:
 
     def __init__(self, usage: Mapping | None):
         u = usage or {}
-        self.prompt_tokens = u.get("prompt_tokens")
-        self.completion_tokens = u.get("completion_tokens")
+        self.prompt_tokens = next(
+            (
+                u.get(name)
+                for name in ("prompt_tokens", "input_tokens", "prompt_eval_count")
+                if u.get(name) is not None
+            ),
+            None,
+        )
+        self.completion_tokens = next(
+            (
+                u.get(name)
+                for name in ("completion_tokens", "output_tokens", "eval_count")
+                if u.get(name) is not None
+            ),
+            None,
+        )
 
 
 def worker_llm(binding: ModelBinding) -> WorkerLLM:
@@ -347,14 +370,52 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
                 return json.loads(response.read())
 
         try:
+            finish_reason = ""
+            repaired_finish = ""
+            record_max_tokens = int(payload["max_tokens"])
             out = request(payload)
             choice = out["choices"][0]
             finish_reason = str(choice.get("finish_reason") or "").lower()
             content = str(choice["message"]["content"] or "")
             if finish_reason == "length":
-                raise HybridStructuredOutputError(
-                    "model output hit max_tokens; no repair retry was attempted"
+                if json_schema is None:
+                    raise HybridStructuredOutputError(
+                        "model output hit max_tokens",
+                        retryable=False,
+                    )
+                if int(payload["max_tokens"]) >= 2048:
+                    raise HybridStructuredOutputError(
+                        "model output hit maximum bounded max_tokens",
+                        retryable=False,
+                    )
+                # This path is reached only for a length-terminated response.
+                # Normal requests keep their existing budget and latency. A
+                # single bounded retry is cheaper than the old runtime-level
+                # behaviour, which repeated the deterministic 256-token call
+                # up to three times without changing the request.
+                length_retry_payload = dict(payload)
+                length_retry_limit = _bounded_int(
+                    (binding.hybrid_config or {}).get("length_retry_max_tokens"),
+                    DEFAULT_LENGTH_RETRY_MAX_TOKENS,
+                    int(payload["max_tokens"]) + 1,
+                    2048,
                 )
+                length_retry_payload["max_tokens"] = max(
+                    int(payload["max_tokens"]) + 1,
+                    length_retry_limit,
+                )
+                record_max_tokens = int(length_retry_payload["max_tokens"])
+                out = request(length_retry_payload)
+                retry_choice = out["choices"][0]
+                repaired_finish = str(
+                    retry_choice.get("finish_reason") or ""
+                ).lower()
+                content = str(retry_choice["message"]["content"] or "")
+                if repaired_finish == "length":
+                    raise HybridStructuredOutputError(
+                        "model output hit max_tokens after bounded length retry",
+                        retryable=False,
+                    )
             # vLLM guided decoding handles syntax.  This second boundary catches
             # schema/finite-number drift and gives the model one repair turn.
             # It never calculates or supplies a replacement domain answer.
@@ -418,11 +479,18 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
                         )
         except Exception:
             _record_llm_call(
-                latency_ms=int((time.perf_counter() - started) * 1000), error=True)
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                error=True,
+                finish_reason=finish_reason or repaired_finish,
+                max_tokens=record_max_tokens,
+            )
             raise
         _record_llm_call(
             usage=_UsageView(out.get("usage")),
-            latency_ms=int((time.perf_counter() - started) * 1000))
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            finish_reason=finish_reason or repaired_finish,
+            max_tokens=record_max_tokens,
+        )
         return content
 
     call._json_schema_capable = True  # type: ignore[attr-defined]

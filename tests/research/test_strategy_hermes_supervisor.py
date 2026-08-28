@@ -13,6 +13,7 @@ if str(AUTONOMOUS_DIR) not in sys.path:
 
 import strategy_hermes_supervisor as supervisor
 from autonomous_research_ingress import ResearchIntake
+from models import ExperimentPlan, ExperimentResult
 
 
 def _args(root: Path, *, retry_blocked: bool = False) -> Namespace:
@@ -69,6 +70,122 @@ def test_blocked_retry_requires_an_explicit_operator_flag(tmp_path: Path, monkey
     report = supervisor.run_once(_args(root, retry_blocked=True))
 
     assert report["labs"] == [{"lab_id": "research-02", "status": "RETRIED"}]
+
+
+def test_only_market_data_timeout_is_eligible_for_explicit_retry() -> None:
+    blocked = SimpleNamespace(
+        failure_reason=(
+            "BLOCKED: the allow-listed LS market-data ranking call to t1444 "
+            "timed out without returning rows"
+        )
+    )
+    schema_error = SimpleNamespace(
+        failure_reason="ValueError: artifacts must be a sequence of strings"
+    )
+
+    assert supervisor._is_retryable_market_data_block(blocked) is True
+    assert supervisor._is_retryable_market_data_block(schema_error) is False
+
+
+def test_timed_out_agent_has_a_terminal_blocked_result_shape(tmp_path: Path) -> None:
+    root = tmp_path / "research"
+    intake = ResearchIntake(root)
+    intake.submit(
+        {
+            "request_id": "research-timeout",
+            "goal": "Record an interrupted experiment",
+            "source": "web",
+        }
+    )
+    lab_path = intake.materialize("research-timeout", repo_root=tmp_path)
+    lab = supervisor.ResearchLab(lab_path)
+    lab.record_plan(
+        ExperimentPlan(
+            plan_id="plan-timeout",
+            hypothesis_id="hyp-timeout",
+            objective="Record interruption",
+            method="No measurement",
+            data_requirements=("none",),
+            splits=("none",),
+            cost_model="none",
+            seed=1,
+            signature={"test": "timeout"},
+            preregistration_hash="hash-timeout",
+        )
+    )
+    lab.update_state(active_plan_id="plan-timeout")
+
+    result = supervisor._agent_failure_result(
+        lab,
+        SimpleNamespace(
+            run_id="hermes-timeout",
+            plan_id=None,
+            status="TIMED_OUT",
+            output_path=str(lab_path / "agent-runs/hermes-timeout.txt"),
+            usage_path=None,
+            error="Hermes timed out",
+            duration_seconds=30.0,
+        ),
+    )
+
+    result.validate()
+    assert result.plan_id == "plan-timeout"
+    assert result.status == "BLOCKED"
+    assert result.preregistration_hash == "hash-timeout"
+    assert result.metrics["measured_strategy_metrics_available"] is False
+
+
+def test_retry_flag_reopens_a_lab_with_a_persisted_blocked_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "research"
+    intake = ResearchIntake(root)
+    intake.submit(
+        {
+            "request_id": "research-blocked-result",
+            "goal": "Retry a transient market-data failure",
+            "source": "web",
+        }
+    )
+    lab_path = intake.materialize("research-blocked-result", repo_root=tmp_path)
+    supervisor.ResearchLab(lab_path).record_result(
+        ExperimentResult(
+            plan_id="plan-t1444",
+            status="BLOCKED",
+            cost_included=False,
+            oos_evaluated=False,
+            leakage_detected=False,
+            robustness={"transport": False},
+            failure_reason=(
+                "BLOCKED: the allow-listed LS market-data ranking call to t1444 "
+                "timed out without returning rows"
+            ),
+        )
+    )
+    (lab_path / supervisor.MANAGED_MARKER).touch()
+
+    class _RetryAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self):
+            return SimpleNamespace(
+                run_id="retry-run",
+                plan_id=None,
+                status="COMPLETED",
+                returncode=0,
+                output_path=str(lab_path / "agent-runs" / "retry-run.txt"),
+                usage_path=None,
+                error=None,
+                duration_seconds=0.0,
+            )
+
+    monkeypatch.setattr(supervisor, "StrategyHermesAgent", _RetryAgent)
+    monkeypatch.setattr(supervisor, "sync_agent_artifacts", lambda _lab: [])
+
+    report = supervisor._run_lab(_args(root, retry_blocked=True), lab_path)
+
+    assert report["status"] == "CYCLE_COMPLETED"
 
 
 def test_completed_lab_is_not_replayed_on_the_next_supervisor_cycle(

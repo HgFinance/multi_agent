@@ -112,6 +112,7 @@ services:
     depends_on: *control-dependency
     environment:
       <<: *control-environment
+      STRATEGY_OPERATIONAL_DATA_GATE_ENABLED: ${STRATEGY_OPERATIONAL_DATA_GATE_ENABLED:-true}
       CONTROL_DATABASE_URL: *control-database-url
       MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-active}
       MEMOHARNESS_D5_DATABASE_URL: *control-database-url
@@ -286,6 +287,19 @@ services:
   market-api:
     environment: *control-and-market-environment
 
+  # The strategy control sidecar reads raw PAPER ticks/quotes from the market
+  # database. Keep this override explicit so AWS never inherits a generic
+  # control DATABASE_URL for a market-only child runtime.
+  strategy-runtime-control:
+    depends_on: *control-dependency
+    environment:
+      STRATEGY_PAPER_TIMESCALE_DATABASE_URL: *market-database-url
+      STRATEGY_PAPER_ORDER_TOKEN: ${STRATEGY_PAPER_ORDER_TOKEN:?A separate 32-byte strategy PAPER order token is required}
+      STRATEGY_PAPER_TRADING_API_URL: http://trading-api:8000
+      TRADING_INTERNAL_SERVICE_AUTH_SECRET: ${TRADING_INTERNAL_SERVICE_AUTH_SECRET:?A separate 32-byte internal Trading auth secret is required}
+      TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
+      TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
+
   research-api:
     depends_on: *control-dependency
     environment: *control-environment
@@ -414,6 +428,9 @@ services:
       LS_MAC_ADDRESS: ${LS_MAC_ADDRESS:?LS MAC address is required}
       LS_OAUTH_SCOPE: ${LS_OAUTH_SCOPE:-oob}
       LS_PAPER_ORDER_TIMEOUT_SECONDS: ${LS_PAPER_ORDER_TIMEOUT_SECONDS:-8}
+      STRATEGY_PAPER_USER_ID: ${STRATEGY_PAPER_USER_ID:?PAPER strategy user UUID is required}
+      STRATEGY_PAPER_FUND_ID: ${STRATEGY_PAPER_FUND_ID:?PAPER strategy fund UUID is required}
+      STRATEGY_PAPER_BOOK_ID: ${STRATEGY_PAPER_BOOK_ID:?PAPER strategy book UUID is required}
 
   trading-directive-worker:
     depends_on:

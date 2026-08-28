@@ -42,7 +42,7 @@ services:
       TRADING_OMS_DATABASE_URL: *trading-oms-database-url
       APP_ENV: ${APP_ENV:-development}
       TRADING_EXECUTION_MODE: PAPER
-      TRADING_BROKER_ADAPTER: paper
+      TRADING_BROKER_ADAPTER: ${TRADING_BROKER_ADAPTER:-paper}
       TRADING_DIRECTIVE_REPOSITORY: postgres
       TRADING_DATABASE_ROLE: ${TRADING_DATABASE_ROLE:-svc_trading_api}
       TRADING_AUTH_MODE: ${TRADING_AUTH_MODE:-service}
@@ -59,7 +59,24 @@ services:
       # before Trading reads L1. Keep a bounded cushion while still rejecting
       # genuinely stale market data.
       TRADING_MARKET_QUOTE_MAX_AGE_SECONDS: ${TRADING_MARKET_QUOTE_MAX_AGE_SECONDS:-30}
+      # Read-only t1101 quote fallback for admission.  The TSDB projection only
+      # covers the bounded realtime subscription basket and goes stale whenever
+      # the collector stalls, which failed triggered conditional rules with
+      # TRADING_MARKET_QUOTE_STALE (2026-08-28).  Order routing stays on
+      # TRADING_BROKER_ADAPTER; only the quote read moves.
+      TRADING_MARKET_QUOTE_LS_FALLBACK: ${TRADING_MARKET_QUOTE_LS_FALLBACK:-true}
+      LS_ENV: PAPER
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_MAC_ADDRESS: ${LS_MAC_ADDRESS:-}
+      LS_OAUTH_SCOPE: ${LS_OAUTH_SCOPE:-oob}
       LS_TOKEN_CACHE_DIR: /var/lib/ls-token-cache
+      LS_ACCOUNT_NO_PAPER: ${LS_ACCOUNT_NO_PAPER:-}
+      LS_ACCOUNT_PWD_PAPER: ${LS_ACCOUNT_PWD_PAPER:-}
+      STRATEGY_PAPER_USER_ID: ${STRATEGY_PAPER_USER_ID:-00000000-0000-4000-8000-00000000cec0}
+      STRATEGY_PAPER_FUND_ID: ${STRATEGY_PAPER_FUND_ID:-3838f7d6-0c7c-4e54-85f3-316a451e7eeb}
+      STRATEGY_PAPER_BOOK_ID: ${STRATEGY_PAPER_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
     volumes:
       - ls_token_cache:/var/lib/ls-token-cache
     ports:
@@ -88,12 +105,27 @@ services:
       DATABASE_URL: *trading-database-url
       APP_ENV: ${APP_ENV:-development}
       TRADING_EXECUTION_MODE: PAPER
-      TRADING_BROKER_ADAPTER: paper
+      TRADING_BROKER_ADAPTER: ${TRADING_BROKER_ADAPTER:-paper}
       TRADING_DIRECTIVE_REPOSITORY: postgres
       TRADING_DATABASE_ROLE: ${TRADING_DATABASE_ROLE:-svc_trading_api}
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
       TRADING_DIRECTIVE_WORKER_POLL_SECONDS: ${TRADING_DIRECTIVE_WORKER_POLL_SECONDS:-1.0}
       TRADING_DIRECTIVE_WORKER_BATCH_SIZE: ${TRADING_DIRECTIVE_WORKER_BATCH_SIZE:-100}
+      # Read-only t1101 quote fallback for admission.  The TSDB projection only
+      # covers the bounded realtime subscription basket and goes stale whenever
+      # the collector stalls, which failed triggered conditional rules with
+      # TRADING_MARKET_QUOTE_STALE (2026-08-28).  Order routing stays on
+      # TRADING_BROKER_ADAPTER; only the quote read moves.
+      TRADING_MARKET_QUOTE_LS_FALLBACK: ${TRADING_MARKET_QUOTE_LS_FALLBACK:-true}
+      LS_ENV: PAPER
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_MAC_ADDRESS: ${LS_MAC_ADDRESS:-}
+      LS_OAUTH_SCOPE: ${LS_OAUTH_SCOPE:-oob}
+      LS_TOKEN_CACHE_DIR: /var/lib/ls-token-cache
+    volumes:
+      - ls_token_cache:/var/lib/ls-token-cache
     healthcheck:
       test: ["CMD", "python", "-m", "directives.worker", "--healthcheck"]
       interval: 15s

@@ -26,6 +26,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
+from uuid import NAMESPACE_URL, uuid5
 
 from orchestration.accounting_advisory_context import fetch_accounting_advisory_context
 from orchestration.adapters.department_notion_projection import (
@@ -91,7 +92,10 @@ from orchestration.d5_improvement_pipeline import (
     d5_feedback_ledger_from_env,
     record_verified_d5_candidates,
 )
-from orchestration.discord_delivery import DiscordFinalDelivery
+from orchestration.discord_delivery import (
+    DiscordFinalDelivery,
+    correlation_from_tasks,
+)
 from orchestration.discord_idempotency import DiscordIdempotencyStore
 from orchestration.experience_bank import (
     ExperienceBank,
@@ -116,7 +120,10 @@ from orchestration.qa_contract import (
     split_planner_selection,
 )
 from orchestration.risk_advisory_context import fetch_risk_advisory_context
-from orchestration.risk_observability import risk_span
+from orchestration.risk_observability import (
+    record_risk_hermes_terminal_activity,
+    risk_span,
+)
 from orchestration.risk_plan_projection import format_position_risk_plan
 from orchestration.semantic_qa import evaluate_prompt_answer
 from orchestration.workforce_advisory_context import fetch_workforce_advisory_context
@@ -126,6 +133,7 @@ logger = logging.getLogger(__name__)
 _CLI_LANE: ContextVar[str] = ContextVar("ceo_cli_lane", default="unknown")
 _LANGSMITH_DIRECT_ROOT_MARKER = "hgfinance.langsmith-direct-root.v1"
 _HR_RESPONSE_DELIVERY_MARKER = "hgfinance.hr-response-delivery.v1"
+_POST_RESPONSE_QA_MARKER = "hgfinance.post-response-qa.v1"
 
 
 def _record_full_board_fallback(*, lane: str, reason: str, root_id: str = "") -> None:
@@ -5812,6 +5820,18 @@ _TERMINAL_RESULT_CONTRACT_GUIDANCE = (
     "- If required evidence is missing, use kanban_block with kind=needs_input "
     "or finish with an explicit fail-closed answer in result."
 )
+_RISK_TERMINAL_EXECUTION_GUIDANCE = (
+    "Risk terminal execution guardrails (read-only advisory):\n"
+    "- Read this task and its workflow root once; do not repeat kanban_show "
+    "after the scoped context is available.\n"
+    "- Do not call an order or typed Risk decision endpoint without the "
+    "required OrderIntent and RiskContext.\n"
+    "- Once the evidence is sufficient, call kanban_complete exactly once "
+    "with the complete result and final_answer; do not emit a text-only "
+    "conclusion before the terminal tool call.\n"
+    "- Do not use terminal/Python for incidental calculations; if a required "
+    "source is unavailable, state the limitation and fail closed."
+)
 _QUANT_ANALYSIS_EXECUTION_GUIDANCE = (
     "Quant bounded evidence contract:\n"
     "- This primary task owns the terminal handoff. Do not call delegate_task, "
@@ -5825,6 +5845,11 @@ _QUANT_ANALYSIS_EXECUTION_GUIDANCE = (
     "- If the source is unavailable or incomplete, set status=UNAVAILABLE, do "
     "not calculate or invent return/volatility/Sharpe/MDD, and conclude HOLD "
     "or NOT_VERIFIABLE.\n"
+    "- If the instrument is present but the strategy specification, requested "
+    "window, or evidence is incomplete, do not block the task for input; finish "
+    "with the bounded fail-closed result, state what is missing, and keep HOLD "
+    "or NOT_VERIFIABLE. Only block when the requested instrument or target is "
+    "absent.\n"
     "- Put the complete Korean user-facing answer and the retrieval_attempt "
     "record in result. Keep summary short; never leave the answer only in "
     "summary or metadata."
@@ -6106,6 +6131,8 @@ def _initial_primary_materialization_decisions(
             or profile == canonical_profile_for_department("risk")
         ):
             guidance_parts.append(_TERMINAL_RESULT_CONTRACT_GUIDANCE)
+        if profile == canonical_profile_for_department("risk"):
+            guidance_parts.append(_RISK_TERMINAL_EXECUTION_GUIDANCE)
         execution_guidance = "\n\n".join(guidance_parts)
         if profile == canonical_profile_for_department("quant") and analysis_mode in {
             "fast_advisory",
@@ -8149,6 +8176,42 @@ def _task_timestamp_ms(task: Mapping[str, Any], field: str) -> int:
     return value * 1000 if value > 0 else 0
 
 
+def _workflow_end_to_end_latency_ms(
+    root_payload: Mapping[str, Any],
+    terminal_payload: Mapping[str, Any] | None = None,
+) -> int:
+    """Return the existing CEO workflow's bounded end-to-end duration.
+
+    Kanban timestamps are epoch seconds.  Reuse the persisted root and
+    terminal timestamps so the root trace gets the full workflow envelope
+    without introducing another clock or request-path observer.  A missing
+    terminal timestamp is only possible during recovery; in that case the
+    close boundary is the best available terminal observation.
+    """
+
+    terminal = terminal_payload or {}
+
+    def _timestamp(payload: Mapping[str, Any], *fields: str) -> float:
+        for field in fields:
+            try:
+                value = float(payload.get(field) or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0:
+                return value
+        return 0.0
+
+    started = _timestamp(root_payload, "created_at", "started_at")
+    ended = _timestamp(
+        terminal,
+        "completed_at",
+        "finished_at",
+    ) or _timestamp(root_payload, "completed_at", "finished_at")
+    if not ended:
+        ended = time.time()
+    return max(0, int((ended - started) * 1000)) if started else 0
+
+
 def _elapsed_ms(started_at_ms: int, completed_at_ms: int) -> int:
     if started_at_ms <= 0 or completed_at_ms < started_at_ms:
         return -1
@@ -8362,15 +8425,215 @@ class CeoSupervisorService:
         self._parent_locks_lock = threading.Lock()
         self._closed_root_traces: set[str] = set()
         self._closed_root_traces_lock = threading.Lock()
+        # A quota/network rejection must not permanently lose the terminal
+        # patch.  Recovery retries the same root run, never creates a second
+        # trace.  Keep only IDs/timestamps here; answers and task bodies stay
+        # in the durable Kanban store.
+        self._pending_langsmith_root_closures: dict[str, dict[str, Any]] = {}
+        self._pending_langsmith_root_closures_lock = threading.Lock()
         # The HR single-primary fast path delivers before the non-binding
         # Notion observer runs. Keep that bounded delivery receipt in memory so
         # the later observer can schedule QA with the actual Discord and
         # LangSmith outcomes, not a prediction made before observation.
         self._hr_response_delivery: dict[str, dict[str, Any]] = {}
         self._hr_response_delivery_lock = threading.Lock()
+        # Synthesis responses are delivered inline before the slow observer
+        # lane is queued. Keep only successful receipts so the observer can
+        # reuse the exact status without issuing a duplicate Discord call.
+        self._terminal_response_delivery: dict[tuple[str, str], str] = {}
+        self._terminal_response_delivery_lock = threading.Lock()
         self._d5_recorded_roots: set[str] = set()
         self._d5_recording_roots: set[str] = set()
         self._d5_record_lock = threading.Lock()
+
+    def _remember_terminal_response_delivery(
+        self,
+        *,
+        root_task_id: str,
+        task_id: str,
+        status: str | None,
+    ) -> None:
+        """Remember a confirmed response for the following observer pass."""
+
+        normalized = str(status or "").strip().casefold()
+        if normalized not in {"sent", "deduped", "not_applicable"}:
+            return
+        key = (str(root_task_id), str(task_id))
+        with self._terminal_response_delivery_lock:
+            self._terminal_response_delivery[key] = normalized
+            # Terminal transitions are already bounded by the event ledger;
+            # cap this auxiliary receipt cache as a second line of defence
+            # after long-lived supervisor operation.
+            while len(self._terminal_response_delivery) > 512:
+                self._terminal_response_delivery.pop(
+                    next(iter(self._terminal_response_delivery))
+                )
+
+    def _terminal_response_delivery_for(
+        self,
+        *,
+        root_task_id: str,
+        task_id: str,
+    ) -> str | None:
+        with self._terminal_response_delivery_lock:
+            return self._terminal_response_delivery.get(
+                (str(root_task_id), str(task_id))
+            )
+
+    def _langsmith_publisher_configured(self) -> bool:
+        environment = getattr(self.client, "environment", os.environ)
+        enabled_values = (
+            environment.get("HGFINANCE_LANGSMITH_PUBLISH_ENABLED"),
+            environment.get("LANGSMITH_TRACING"),
+        )
+        enabled = any(
+            str(value or "").strip().casefold() in {"1", "true", "yes", "on"}
+            for value in enabled_values
+        )
+        return enabled and bool(str(environment.get("LANGSMITH_API_KEY") or "").strip())
+
+    def _schedule_langsmith_root_retry(
+        self,
+        *,
+        root_id: str,
+        task_id: str | None,
+    ) -> None:
+        """Retry one existing root update from the recovery lane only."""
+
+        if not self._langsmith_publisher_configured():
+            return
+        root_key = str(root_id or "").strip()
+        if not root_key:
+            return
+        now = time.monotonic()
+        with self._pending_langsmith_root_closures_lock:
+            pending = self._pending_langsmith_root_closures.get(root_key)
+            # The response lane and the observer lane can both see the same
+            # failed close. Do not advance the backoff twice for that event.
+            if pending is not None and float(pending.get("next_attempt_at") or 0) > now:
+                return
+            attempts = int(pending.get("attempts") or 0) + 1 if pending else 1
+            delay = min(300.0, 30.0 * (2 ** min(attempts - 1, 3)))
+            self._pending_langsmith_root_closures[root_key] = {
+                "task_id": str(task_id or root_key),
+                "attempts": attempts,
+                "next_attempt_at": now + delay,
+            }
+        logger.info(
+            "langsmith-root-close-retry-scheduled root=%s task=%s delay_s=%d",
+            root_key,
+            str(task_id or root_key),
+            int(delay),
+        )
+
+    def _clear_langsmith_root_retry(self, root_id: str) -> None:
+        with self._pending_langsmith_root_closures_lock:
+            self._pending_langsmith_root_closures.pop(str(root_id or ""), None)
+
+    def _retry_pending_langsmith_root_closures(self) -> int:
+        """Retry failed root patches without replaying synthesis/Discord work."""
+
+        show = getattr(self.client, "show", None)
+        if not callable(show):
+            return 0
+        now = time.monotonic()
+        with self._pending_langsmith_root_closures_lock:
+            pending = tuple(
+                (root_id, dict(item))
+                for root_id, item in self._pending_langsmith_root_closures.items()
+                if float(item.get("next_attempt_at") or 0) <= now
+            )
+        retried = 0
+        for root_id, item in pending:
+            task_id = str(item.get("task_id") or root_id)
+            try:
+                with self._parent_lock(root_id):
+                    root_payload = show(root_id)
+                    terminal_payload = (
+                        root_payload if task_id == root_id else show(task_id)
+                    )
+                    raw_status = str(
+                        terminal_payload.get("status")
+                        or terminal_payload.get("outcome")
+                        or "completed"
+                    ).casefold()
+                    if raw_status not in {
+                        "done",
+                        "completed",
+                        "archived",
+                        "blocked",
+                        "failed",
+                        "gave_up",
+                        "crashed",
+                        "timed_out",
+                    }:
+                        self._clear_langsmith_root_retry(root_id)
+                        continue
+                    terminal_status = (
+                        "blocked"
+                        if raw_status in {"blocked", "gave_up", "failed", "crashed", "timed_out"}
+                        else "completed"
+                    )
+                    closed = self._close_root_trace(
+                        root_id=root_id,
+                        root_payload=root_payload,
+                        terminal_payload=terminal_payload,
+                        task_id=task_id,
+                        status=terminal_status,
+                        error_class=(
+                            raw_status
+                            if raw_status
+                            in {"gave_up", "failed", "crashed", "timed_out"}
+                            else None
+                        ),
+                    )
+                if closed:
+                    self._clear_langsmith_root_retry(root_id)
+                    retried += 1
+                    logger.info(
+                        "langsmith-root-close-retried root=%s task=%s",
+                        root_id,
+                        task_id,
+                    )
+            except Exception as exc:  # noqa: BLE001 - recovery remains fail-open.
+                self._schedule_langsmith_root_retry(root_id=root_id, task_id=task_id)
+                logger.warning(
+                    "langsmith-root-close-retry-failed root=%s task=%s error=%s",
+                    root_id,
+                    task_id,
+                    type(exc).__name__,
+                )
+        return retried
+
+    def _mark_post_response_qa(
+        self,
+        *,
+        root_task_id: str,
+        response_task_id: str,
+        state: str,
+        qa_task_id: str | None = None,
+    ) -> None:
+        """Persist the response-to-QA handoff as a retryable lifecycle marker."""
+
+        comment_task = getattr(self.client, "comment_task", None)
+        if not callable(comment_task):
+            return
+        marker = (
+            f"{_POST_RESPONSE_QA_MARKER} root_task_id={root_task_id} "
+            f"response_task_id={response_task_id} state={state}"
+        )
+        if qa_task_id:
+            marker += f" qa_task_id={qa_task_id}"
+        try:
+            comment_task(response_task_id, marker)
+        except Exception as exc:  # noqa: BLE001 - QA remains non-binding.
+            logger.warning(
+                "post-response-qa-marker-failed root=%s response=%s state=%s error=%s",
+                root_task_id,
+                response_task_id,
+                state,
+                type(exc).__name__,
+            )
 
     def _record_discord_experience_after_qa(
         self,
@@ -8632,7 +8895,10 @@ class CeoSupervisorService:
                     or root_payload.get("completed_at")
                     or time.time()
                 )
-                latency_ms = max(0, int((ended - started) * 1000)) if started else 0
+                latency_ms = _workflow_end_to_end_latency_ms(
+                    root_payload,
+                    answer_payload,
+                )
                 started_at = (
                     datetime.fromtimestamp(started, tz=timezone.utc)
                     if started
@@ -8668,8 +8934,15 @@ class CeoSupervisorService:
                     semantic_qa=semantic_qa.as_metadata(),
                     started_at=started_at,
                     ended_at=ended_at,
+                    run_id=str(
+                        uuid5(
+                            NAMESPACE_URL,
+                            f"hgfinance:ceo-direct-root:{root_id}",
+                        )
+                    ),
                 )
                 if published:
+                    self._clear_langsmith_root_retry(root_id)
                     with self._closed_root_traces_lock:
                         self._closed_root_traces.add(root_id)
                     try:
@@ -8682,12 +8955,21 @@ class CeoSupervisorService:
                             "langsmith-direct-root-marker-failed root=%s",
                             root_id,
                         )
+                if not published:
+                    self._schedule_langsmith_root_retry(
+                        root_id=root_id,
+                        task_id=resolved_task_id,
+                    )
                 return published
             except Exception as exc:  # noqa: BLE001 - observability is fail-open.
                 logger.warning(
                     "langsmith-direct-root-observation-failed root=%s error=%s",
                     root_id,
                     type(exc).__name__,
+                )
+                self._schedule_langsmith_root_retry(
+                    root_id=root_id,
+                    task_id=task_id or root_id,
                 )
                 return False
         # Evaluate the user-facing answer while it is still inside the
@@ -8728,6 +9010,12 @@ class CeoSupervisorService:
                     "terminal_reason": error_class or "completed",
                     "terminal_task_id": task_id or root_id,
                     "terminal_department": department or "ceo-workflow",
+                    "latency_ms": _workflow_end_to_end_latency_ms(
+                        root_payload,
+                        answer_payload,
+                    ),
+                    "latency_scope": "end_to_end",
+                    "observation_point": "ceo-response-delivered",
                 },
                 semantic_qa=semantic_qa.as_metadata(),
                 output_summary=redacted_content_summary(answer, kind="ceo_response"),
@@ -8740,12 +9028,17 @@ class CeoSupervisorService:
             )
             return False
         if not closed:
+            self._schedule_langsmith_root_retry(
+                root_id=root_id,
+                task_id=task_id or root_id,
+            )
             logger.warning(
                 "langsmith-root-close-unconfirmed root=%s status=%s",
                 root_id,
                 status,
             )
         if closed:
+            self._clear_langsmith_root_retry(root_id)
             with self._closed_root_traces_lock:
                 self._closed_root_traces.add(root_id)
         return closed
@@ -9323,6 +9616,19 @@ class CeoSupervisorService:
             delivery_status or "completed",
             len(primary_handoffs),
         )
+        self._mark_post_response_qa(
+            root_task_id=root_task_id,
+            response_task_id=response_id,
+            state="scheduled",
+            qa_task_id=created_id or None,
+        )
+        if created_id:
+            self._mark_post_response_qa(
+                root_task_id=root_task_id,
+                response_task_id=created_id,
+                state="projection_pending",
+                qa_task_id=created_id,
+            )
         return created_id or None
 
     def _project_terminal_task(
@@ -9332,10 +9638,21 @@ class CeoSupervisorService:
         task_id: str,
         task_payloads: Sequence[Mapping[str, Any]],
         event: Mapping[str, Any],
+        response_only: bool = False,
+        skip_response_delivery: bool = False,
+        response_delivery_status: str | None = None,
     ) -> str | None:
-        """Run a terminal observer without changing the supervisor decision."""
+        """Project one terminal task without changing the supervisor decision.
 
-        delivery_status: str | None = None
+        ``response_only`` is the low-latency response lane. It renders and
+        delivers a CEO synthesis, closes the root trace when possible, and
+        returns before QA/Notion projections are created. The normal observer
+        lane runs afterwards with ``skip_response_delivery`` so the same
+        response is not sent twice. This keeps post-response QA non-binding
+        without making the CEO response wait behind the observer queue.
+        """
+
+        delivery_status: str | None = response_delivery_status
         root_payload = next(
             (
                 payload
@@ -9742,7 +10059,11 @@ class CeoSupervisorService:
                     task_id,
                     persisted,
                 )
-        if response_synthesis and discord_delivery_required:
+        if (
+            response_synthesis
+            and discord_delivery_required
+            and not skip_response_delivery
+        ):
             content = _text(
                 synthesized.final_answer
                 or synthesized.result
@@ -9870,6 +10191,21 @@ class CeoSupervisorService:
                     else delivery_error
                 ),
             )
+            if response_only:
+                self._mark_post_response_qa(
+                    root_task_id=root_task_id,
+                    response_task_id=task_id,
+                    state="pending",
+                )
+                logger.info(
+                    "ceo-response-delivered-before-observers root=%s task=%s "
+                    "discord_status=%s langsmith_closed=%s",
+                    root_task_id,
+                    task_id,
+                    delivery_status or "unconfirmed",
+                    str(bool(langsmith_closed)).lower(),
+                )
+                return delivery_status
             response_confirmed = terminal_status not in {
                 "blocked",
                 "gave_up",
@@ -10347,6 +10683,18 @@ class CeoSupervisorService:
                         workflow_tasks=task_payloads,
                         projection_result=projection_result,
                     )
+                    if isinstance(projection_result, Mapping) and str(
+                        projection_result.get("status") or ""
+                    ).casefold() in {
+                        "persisted",
+                        "duplicate",
+                    }:
+                        self._mark_post_response_qa(
+                            root_task_id=root_task_id,
+                            response_task_id=task_id,
+                            state="projected",
+                            qa_task_id=task_id,
+                        )
             except Exception as exc:
                 logger.exception(
                     "terminal projection observer failed",
@@ -12011,6 +12359,60 @@ class CeoSupervisorService:
             return "failed"
 
         if (
+            child.profile == canonical_profile_for_department("risk")
+            and logical_kind != "started"
+        ):
+            correlation = correlation_from_tasks(delivery_task, root_payload)
+            terminal_status = (
+                "blocked"
+                if kind == "blocked"
+                else "failed"
+                if kind == "failed"
+                else "completed"
+            )
+            try:
+                receipt_recorded = record_risk_hermes_terminal_activity(
+                    event_id=f"risk-hermes-terminal:{child.task_id}:{terminal_status}",
+                    task_id=child.task_id,
+                    root_id=root_task_id,
+                    request_id=correlation.request_id or "",
+                    status=terminal_status,
+                    started_ms=_task_timestamp_ms(task_payload, "started_at"),
+                    ended_ms=(
+                        _task_timestamp_ms(task_payload, "completed_at")
+                        or int(time.time() * 1000)
+                    ),
+                    discord_status=status or "not_attempted",
+                    discord_channel_id=correlation.channel_id,
+                    discord_thread_id=correlation.thread_id,
+                    discord_message_id=correlation.message_id,
+                    environment=delivery_environment,
+                )
+            except Exception as exc:  # noqa: BLE001 - observer is fail-open.
+                receipt_recorded = False
+                logger.warning(
+                    "risk-hermes-terminal-receipt-failed root=%s task=%s error=%s",
+                    root_task_id,
+                    child.task_id,
+                    type(exc).__name__,
+                )
+            logger.info(
+                "risk-discord-correlation root=%s task=%s profile=%s "
+                "request_id=%s guild_id=%s channel_id=%s thread_id=%s "
+                "message_id=%s discord_status=%s risk_api_receipt=%s",
+                root_task_id,
+                child.task_id,
+                child.profile,
+                correlation.request_id or "",
+                correlation.guild_id or "",
+                correlation.channel_id or "",
+                correlation.thread_id or "",
+                correlation.message_id or "",
+                status or "",
+                receipt_recorded,
+            )
+
+        if (
             risk_plan is not None
             and risk_plan.get("risk_plan_id")
             and status not in {None, "failed"}
@@ -12347,16 +12749,18 @@ class CeoSupervisorService:
 
         return tuple(materialized)
 
-    def reconcile_existing_workflows(self) -> tuple[SupervisorDecision, ...]:
+    def reconcile_existing_workflows(
+        self, *, include_historical: bool = True
+    ) -> tuple[SupervisorDecision, ...]:
         """Reconcile terminal roots whose watch event was missed.
 
         The supervisor is normally event-driven, but a restart cannot replay
-        terminal events that happened before ``kanban watch`` subscribed. This
-        reconciliation is intentionally age-independent: a root with a missed
-        synthesis event can be hours old and still require one final response.
-        Candidate discovery remains cheap and root-local; authoritative
-        ``show``/``workflow`` reads and idempotent action guards remain the
-        final authority.
+        terminal events that happened before ``kanban watch`` subscribed.
+        Historical reconciliation remains available to explicit callers, but
+        the live startup lane passes ``include_historical=False`` so an old
+        backlog cannot delay current CEO responses. Candidate discovery
+        remains cheap and root-local; authoritative ``show``/``workflow``
+        reads and idempotent action guards remain the final authority.
         """
 
         list_tasks = getattr(self.client, "list_tasks", None)
@@ -12369,7 +12773,9 @@ class CeoSupervisorService:
         if callable(recovery_candidates):
             try:
                 try:
-                    candidate_rows = recovery_candidates(include_historical=True)
+                    candidate_rows = recovery_candidates(
+                        include_historical=include_historical
+                    )
                 except TypeError:
                     # Older embedders expose the discovery callback without
                     # the optional historical flag.
@@ -12393,6 +12799,12 @@ class CeoSupervisorService:
             completed_at = int(row.get("completed_at") or 0)
             created_at = int(row.get("created_at") or 0)
             recovery_timestamp = completed_at or created_at
+            if (
+                not include_historical
+                and status in {"done", "completed", "archived"}
+                and recovery_timestamp < int(time.time()) - 120
+            ):
+                continue
             if (
                 not task_id
                 or status not in {"done", "completed", "archived"}
@@ -12632,6 +13044,8 @@ class CeoSupervisorService:
         if not callable(list_tasks) or not callable(show):
             return ()
 
+        self._retry_pending_langsmith_root_closures()
+
         import time
 
         now = int(time.time())
@@ -12662,21 +13076,28 @@ class CeoSupervisorService:
             if status not in {"done", "completed", "archived"}:
                 continue
 
-            if completed_at <= 0 or now - completed_at > done_recovery_window_seconds:
+            pending_post_response_qa = bool(
+                row.get("has_post_response_qa_pending")
+                or row.get("has_qa_projection_pending")
+            )
+            if completed_at <= 0 or (
+                not pending_post_response_qa
+                and now - completed_at > done_recovery_window_seconds
+            ):
                 continue
 
             body = str(row.get("body") or "")
             role = terminal_workflow_role(row) or ""
 
-            if role != "synthesis":
-                continue
+            if role == "synthesis":
+                action = terminal_action(row) or terminal_action({"body": body}) or ""
 
-            action = terminal_action(row) or terminal_action({"body": body}) or ""
-
-            if action != "SYNTHESIZE" and not _is_direct_ceo_response_synthesis(
-                role=role,
-                body=body,
-            ):
+                if action != "SYNTHESIZE" and not _is_direct_ceo_response_synthesis(
+                    role=role,
+                    body=body,
+                ):
+                    continue
+            elif role != "qa" or not bool(row.get("has_qa_projection_pending")):
                 continue
 
             if not extract_scope_references(row).root_ids:
@@ -12689,10 +13110,14 @@ class CeoSupervisorService:
         # Newest first so a fresh user request is never starved by older work.
         for _completed_at, task_id in sorted(candidates, reverse=True):
             event_id = f"reconcile-synthesis:{task_id}:done"
+            transition_key = f"{task_id}:completed"
 
             # Avoid repeating the same reconciliation every polling cycle.
             with self._seen_events_lock:
-                if event_id in self._seen_events:
+                if (
+                    event_id in self._seen_events
+                    or transition_key in self._seen_terminal_transitions
+                ):
                     continue
 
             try:
@@ -12713,18 +13138,15 @@ class CeoSupervisorService:
             action = terminal_action(payload) or terminal_action({"body": body}) or ""
             roots = extract_scope_references(payload).root_ids
 
-            if (
-                status not in {"done", "completed", "archived"}
-                or role != "synthesis"
-                or not roots
-                or (
-                    action != "SYNTHESIZE"
-                    and not _is_direct_ceo_response_synthesis(
-                        role=role,
-                        body=body,
-                    )
-                )
-            ):
+            if status not in {"done", "completed", "archived"} or not roots:
+                continue
+            if role == "synthesis":
+                if action != "SYNTHESIZE" and not _is_direct_ceo_response_synthesis(
+                    role=role,
+                    body=body,
+                ):
+                    continue
+            elif role != "qa":
                 continue
 
             self.handle_terminal_event(
@@ -13625,11 +14047,17 @@ class CeoSupervisorService:
                         nonlocal observer_started_ms, observer_completed_ms
                         observer_started_ms = time.time_ns() // 1_000_000
                         try:
+                            response_receipt = self._terminal_response_delivery_for(
+                                root_task_id=root_id,
+                                task_id=task_id,
+                            )
                             terminal_projection_status = self._project_terminal_task(
                                 root_task_id=root_id,
                                 task_id=task_id,
                                 task_payloads=(root_payload, *payloads),
                                 event=event,
+                                skip_response_delivery=response_receipt is not None,
+                                response_delivery_status=response_receipt,
                             )
                             if (
                                 terminal_role == "synthesis"
@@ -13677,6 +14105,24 @@ class CeoSupervisorService:
                                     else ()
                                 ),
                             )
+                        except Exception:
+                            # The observer queue is fail-open, but a callback
+                            # failure must remain recoverable.  Release the
+                            # in-memory terminal dedupe so the durable pending
+                            # QA marker can be replayed on the next recovery
+                            # cycle instead of leaving a delivered response
+                            # with no audit task forever.
+                            with self._seen_events_lock:
+                                self._seen_events.discard(event_key)
+                                self._seen_terminal_transitions.discard(transition_key)
+                            logger.exception(
+                                "terminal observer callback failed root=%s task=%s "
+                                "event=%s",
+                                root_id,
+                                task_id,
+                                event_key,
+                            )
+                            raise
                         finally:
                             observer_completed_ms = time.time_ns() // 1_000_000
                             logger.info(
@@ -14294,6 +14740,36 @@ class CeoSupervisorService:
             # Discord/Notion latency can therefore no longer serialize sibling
             # terminal events for the same workflow root.
             if deferred_terminal_observer is not None:
+                # A CEO synthesis is the user-facing response boundary. Do
+                # this small response-only pass before queueing the slow
+                # observer lane, so an old QA/Notion backlog cannot delay the
+                # visible CEO answer. The queued observer reuses the
+                # confirmed receipt and schedules QA only after this returns.
+                if locals().get("terminal_role") == "synthesis":
+                    try:
+                        response_status = self._project_terminal_task(
+                            root_task_id=root_id,
+                            task_id=task_id,
+                            task_payloads=(root_payload, *payloads),
+                            event=event,
+                            response_only=True,
+                        )
+                        self._remember_terminal_response_delivery(
+                            root_task_id=root_id,
+                            task_id=task_id,
+                            status=response_status,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - observer remains fail-open.
+                        # The full observer retains the existing delivery path
+                        # and can retry a transient Discord failure.
+                        logger.warning(
+                            "ceo-response-first-delivery-failed root=%s task=%s "
+                            "event=%s error=%s",
+                            root_id,
+                            task_id,
+                            event_key,
+                            type(exc).__name__,
+                        )
                 submitted = False
                 if self._terminal_observer_submit is not None:
                     try:
@@ -14565,6 +15041,13 @@ class CeoSupervisorService:
                 # boundary. This also covers replan and deferred-primary
                 # paths that do not pass through initial materialization.
                 task_body = f"{task_body}\n\n{_TERMINAL_RESULT_CONTRACT_GUIDANCE}"
+            if (
+                role == "primary"
+                and decision.assignee == canonical_profile_for_department("risk")
+                and "Risk terminal execution guardrails (read-only advisory):"
+                not in task_body
+            ):
+                task_body = f"{task_body}\n\n{_RISK_TERMINAL_EXECUTION_GUIDANCE}"
             created = self.client.create_task(
                 title=decision.title,
                 body=build_scoped_task_body(

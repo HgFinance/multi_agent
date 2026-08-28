@@ -38,7 +38,12 @@ name: hedgefund
 x-langsmith-redaction: &langsmith-redaction
   LANGSMITH_HIDE_INPUTS: "true"
   LANGSMITH_HIDE_OUTPUTS: "true"
+  # Keep SDK callbacks off; explicit application-owned publishers use the
+  # separate switch below and emit only bounded operational envelopes.
+  LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+  HGFINANCE_LANGSMITH_PUBLISH_ENABLED: ${HGFINANCE_LANGSMITH_PUBLISH_ENABLED:-false}
   LANGSMITH_TRACE_SAMPLE_RATE: ${LANGSMITH_TRACE_SAMPLE_RATE:-0.05}
+  LANGSMITH_METRIC_AGGREGATION_WINDOW_SECONDS: ${LANGSMITH_METRIC_AGGREGATION_WINDOW_SECONDS:-300}
   LANGCHAIN_TRACING_SAMPLING_RATE: ${LANGCHAIN_TRACING_SAMPLING_RATE:-0.05}
   LANGSMITH_TRACE_SLOW_MS: ${LANGSMITH_TRACE_SLOW_MS:-45000}
   LANGSMITH_RESEARCH_TRACE_MODE: ${LANGSMITH_RESEARCH_TRACE_MODE:-off}
@@ -267,9 +272,15 @@ services:
       # Shared opaque service proof; never expose this to the browser or child
       # PAPER containers. Empty keeps the control boundary fail-closed.
       STRATEGY_RUNTIME_SERVICE_TOKEN: ${STRATEGY_RUNTIME_SERVICE_TOKEN:-}
+      # Completed strategy results remain non-operational until the canonical
+      # market tick/quote and accounting NAV checks both pass. AWS enables it
+      # explicitly in its release overlay.
+      STRATEGY_OPERATIONAL_DATA_GATE_ENABLED: ${STRATEGY_OPERATIONAL_DATA_GATE_ENABLED:-false}
       # PIVOT/REVIEW_REQUIRED 예외 PAPER 배포를 승인할 최상위 사람 ID.
       # 비워두면 예외 경로는 fail-closed이며, 로컬 호환 기본값은 QA 승인자 목록이다.
       STRATEGY_TOP_LEVEL_APPROVER_USER_IDS: ${STRATEGY_TOP_LEVEL_APPROVER_USER_IDS:-${QA_DISCORD_APPROVER_USER_IDS:-}}
+      STRATEGY_PAPER_ORDERS_ENABLED: ${STRATEGY_PAPER_ORDERS_ENABLED:-true}
+      STRATEGY_PAPER_ORDER_QUANTITY: ${STRATEGY_PAPER_ORDER_QUANTITY:-1}
       KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
       KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
       # Discord 연동(2026-08-18). 셋 다 비어 있으면 관련 기능만 조용히 꺼지고
@@ -848,6 +859,11 @@ services:
       start_period: 30s
 
   # ── 상주형 LS 실시간 시세 수집 (재일님 지시 2026-07-31: 호가·체결도 Docker 로) ──
+  # 운영 고정: 이 서비스는 필수 Market Data Plane 이므로 임의로 stop/disable/remove/
+  # scale-to-zero 하지 않는다. 장애 시에도 먼저 로그·health·DB freshness를 확인하고,
+  # 소유자 승인 아래 controlled recovery만 수행한다. 이 서비스를 끄면
+  # market.market_ticks/market.market_quotes 적재가 멈추고 Strategy·Risk·Accounting의
+  # stale-data fail-closed가 연쇄 작동한다.
   # 컨테이너는 24시간, 소켓은 세션 창(동시호가 35분 전~마감 +10분)에서만 연다.
   # 구독은 뉴스와 같은 바스켓(코스피200+코스닥150 = 700구독)을 소켓 4개로 샤딩
   # (재일님 지시 "바스켓 종목만 구독" - 대규모 동시 구독은 krx-tick-collector 실증).
@@ -896,6 +912,9 @@ services:
       LS_INCLUDE_ACTIVE_CONDITIONAL_SYMBOLS: "true"
       LS_SYMBOL_REFRESH_SECONDS: ${LS_SYMBOL_REFRESH_SECONDS:-15}
       # 장중 두 권위 스트림이 이 시간보다 오래 멈추면 컨테이너를 unhealthy로 표시한다.
+      # The capture loop also rebuilds its shared boundary after this period
+      # with no messages, so a quiet broken socket cannot live forever.
+      LS_NO_PROGRESS_RESTART_SECONDS: ${LS_NO_PROGRESS_RESTART_SECONDS:-300}
       LS_HEALTH_MAX_DATA_AGE_SECONDS: ${LS_HEALTH_MAX_DATA_AGE_SECONDS:-180}
 
     volumes:
@@ -944,6 +963,7 @@ services:
 
     environment:
       DATABASE_URL: ${REFERENCE_DATABASE_URL:-postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/control}
+      RESEARCH_COLLECTOR_DATABASE_ROLE: svc_research_collector
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       # Breadth(t1511/t8424)와 관측 Calendar(t8410)가 LS REST 를 쓴다
       LS_ENV: ${LS_ENV:-LIVE}
@@ -1327,6 +1347,9 @@ services:
       LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_REQUEST_TIMEOUT_SECONDS: ${LS_REQUEST_TIMEOUT_SECONDS:-30}
+      LS_TRANSIENT_RETRIES: ${LS_TRANSIENT_RETRIES:-3}
+      LS_TRANSIENT_RETRY_BACKOFF_SECONDS: ${LS_TRANSIENT_RETRY_BACKOFF_SECONDS:-1}
       # 종목명 해석은 DART corp 색인 재사용(external_sources._resolve)
       OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
       MCP_LS_DAILY_CAP: ${MCP_LS_DAILY_CAP:-2000}
@@ -1526,6 +1549,9 @@ services:
       LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_REQUEST_TIMEOUT_SECONDS: ${LS_REQUEST_TIMEOUT_SECONDS:-30}
+      LS_TRANSIENT_RETRIES: ${LS_TRANSIENT_RETRIES:-3}
+      LS_TRANSIENT_RETRY_BACKOFF_SECONDS: ${LS_TRANSIENT_RETRY_BACKOFF_SECONDS:-1}
       LS_DATA_ACCESS_MODE: readonly
       LS_ALLOWED_TR_CODES: t1665,t8410,t8411,t8412,t8451,t8452,t8453,t1441,t1444,t1452,t1463,t1466,t1481,t1482,t1489,t1492
       STRATEGY_MARKET_DATA_PARENT: /tmp/strategy-market-data
@@ -2473,8 +2499,8 @@ services:
       NOTION_RETENTION_MAX_ARCHIVES: ${NOTION_RETENTION_MAX_ARCHIVES:-100}
       NOTION_RETENTION_INTERVAL_SECONDS: ${NOTION_RETENTION_INTERVAL_SECONDS:-86400}
       # LangSmith cleanup is named-project-only; default is intentionally never
-      # queried. Deletion is bounded to the newest 1,000 roots per named
-      # project and automatically defers when LangSmith's hourly limit is hit.
+      # queried. Retention caps complete run rows at 1,000 per named project;
+      # whole trace trees are deleted and hourly provider limits are respected.
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
@@ -2490,6 +2516,8 @@ services:
       LANGSMITH_RETENTION_EVALS_DAYS: ${LANGSMITH_RETENTION_EVALS_DAYS:-30}
       LANGSMITH_RETENTION_SCAN_WINDOW_DAYS: ${LANGSMITH_RETENTION_SCAN_WINDOW_DAYS:-400}
       LANGSMITH_RETENTION_MAX_TRACES: ${LANGSMITH_RETENTION_MAX_TRACES:-1000}
+      LANGSMITH_RETENTION_MAX_RUNS: ${LANGSMITH_RETENTION_MAX_RUNS:-1000}
+      LANGSMITH_RETENTION_QUERY_MAX_RUNS: ${LANGSMITH_RETENTION_QUERY_MAX_RUNS:-20000}
       LANGSMITH_RETENTION_DELETE_PER_PASS: ${LANGSMITH_RETENTION_DELETE_PER_PASS:-100}
       LANGSMITH_RETENTION_PENDING_PATH: ${LANGSMITH_RETENTION_PENDING_PATH:-/opt/data/shared-kanban/langsmith-retention-pending.json}
       # Retry on the next provider quota window without repeatedly hammering
@@ -2631,6 +2659,22 @@ services:
       STRATEGY_RUNTIME_STATE_VOLUME: ${STRATEGY_RUNTIME_STATE_VOLUME:-hedgefund_strategy_runtime_data}
       STRATEGY_RUNTIME_STATE_ROOT: /var/lib/strategy-runtime
       STRATEGY_RUNTIME_SERVICE_TOKEN: ${STRATEGY_RUNTIME_SERVICE_TOKEN:-}
+      # The child gets its own endpoint on the private Compose network so the
+      # service DNS aliases for timescaledb and market-api are available after
+      # every restart. It does not share the control container namespace.
+      STRATEGY_PAPER_NETWORK: ${STRATEGY_PAPER_NETWORK:-hedgefund_default}
+      # The child PAPER runtime reads raw ticks/quotes directly from Timescale.
+      # Use a dedicated SELECT-only login in production; the local fallback
+      # keeps the existing developer bootstrap usable until that login is
+      # provisioned with STRATEGY_PAPER_DB_PASSWORD.
+      STRATEGY_PAPER_TIMESCALE_DATABASE_URL: ${STRATEGY_PAPER_TIMESCALE_DATABASE_URL:-postgresql://strategy_paper_reader:${STRATEGY_PAPER_DB_PASSWORD:-${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}}@timescaledb:5432/market}
+      STRATEGY_PAPER_TICK_LOOKBACK_HOURS: ${STRATEGY_PAPER_TICK_LOOKBACK_HOURS:-24}
+      STRATEGY_PAPER_MARKET_STATEMENT_TIMEOUT_MS: ${STRATEGY_PAPER_MARKET_STATEMENT_TIMEOUT_MS:-3000}
+      STRATEGY_PAPER_ORDER_TOKEN: ${STRATEGY_PAPER_ORDER_TOKEN:?A separate 32-byte strategy PAPER order token is required}
+      STRATEGY_PAPER_TRADING_API_URL: ${STRATEGY_PAPER_TRADING_API_URL:-http://trading-api:8000}
+      TRADING_INTERNAL_SERVICE_AUTH_SECRET: ${TRADING_INTERNAL_SERVICE_AUTH_SECRET:?A separate 32-byte internal Trading auth secret is required}
+      TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
+      TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # 읽기 전용 - 이 서비스는 원장·팩 파일을 읽기만 한다. 쓰기는 컨테이너

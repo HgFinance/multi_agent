@@ -1362,11 +1362,75 @@ def test_accounting_projection_uses_accounting_database_and_manager_labels():
 
     assert result.status == "created"
     assert transport.created[0][0] == "accounting-db"
+    assert transport.created[0][1]["제목"]["title"][0]["text"]["content"].startswith(
+        "회계·포트폴리오 검토 결과"
+    )
     rendered = str(transport.created[0][2])
     assert "회계·포트폴리오 검토 결과" in rendered
     assert "주요 수치와 확인 사항" in rendered
     assert "Terminal Metadata" not in rendered
     assert "workflow_root_task_id" not in rendered
+
+
+def test_accounting_projection_populates_existing_manager_columns_from_evidence():
+    transport = FakeTransport(
+        {
+            "제목": {"type": "title"},
+            "판정": {"type": "select"},
+            "공식 여부": {"type": "checkbox"},
+            "회계일": {"type": "date"},
+            "현금": {"type": "rich_text"},
+            "증권평가액": {"type": "rich_text"},
+            "NAV": {"type": "rich_text"},
+            "미실현손익": {"type": "rich_text"},
+            "대사 결과": {"type": "rich_text"},
+            "NAV 항등식": {"type": "rich_text"},
+            "Projection 대조": {"type": "rich_text"},
+            "차단 사유": {"type": "rich_text"},
+            "Break 건수": {"type": "number"},
+            "Material Break": {"type": "number"},
+            "서술": {"type": "rich_text"},
+            "원본 리포트": {"type": "rich_text"},
+            "생성 시각": {"type": "date"},
+        }
+    )
+    task = _trading_task()
+    task.update(
+        {
+            "id": "t_accounting_columns",
+            "assignee": "accounting-portfolio-department",
+            "body": (
+                '{"contract":"hgfinance.accounting-advisory-portfolio.v1",'
+                '"as_of":"2026-08-27T02:23:48Z",'
+                '"quality_status":"WARN","authoritative":false,'
+                '"nav":"506468430","cash":"475759362",'
+                '"securities_value":"24893460","unrealized_pnl":"1722308",'
+                '"broker_evidence":{"position_reconciliation":'
+                '{"status":"MATCH","discrepancies":[]},'
+                '"exceptions":[{"expected":true}]}}'
+            ),
+            "result": "회계·포트폴리오 검토 결과를 작성했습니다.",
+            "completed_at": "2026-08-27T15:06:00Z",
+        }
+    )
+
+    result = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x", "NOTION_ACCOUNTING_DB": "accounting-db"},
+        transport=transport,
+    ).project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    _, props, children = transport.created[0]
+    assert props["판정"]["select"]["name"] == "PRELIMINARY"
+    assert props["공식 여부"]["checkbox"] is False
+    assert props["NAV"]["rich_text"][0]["text"]["content"] == "506,468,430원"
+    assert props["현금"]["rich_text"][0]["text"]["content"] == "475,759,362원"
+    assert props["증권평가액"]["rich_text"][0]["text"]["content"] == "24,893,460원"
+    assert props["Break 건수"]["number"] == 0.0
+    assert props["Material Break"]["number"] == 0.0
+    assert "정상" in props["대사 결과"]["rich_text"][0]["text"]["content"]
+    assert "공식 순자산 확정 전" in props["차단 사유"]["rich_text"][0]["text"]["content"]
+    assert "순자산 506,468,430원" in props["서술"]["rich_text"][0]["text"]["content"]
 
 
 def test_accounting_projection_humanizes_runtime_field_names():

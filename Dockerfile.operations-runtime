@@ -22,13 +22,20 @@ RUN set -eux; \
 
 RUN pip install --no-cache-dir \
       fastapi==0.116.1 "uvicorn[standard]==0.35.0" \
-      pydantic==2.11.7 PyYAML==6.0.2 "jsonschema>=4.10,<5"
+      pydantic==2.11.7 PyYAML==6.0.2 "jsonschema>=4.10,<5" \
+      # strategy_runtime_client is imported by the internal control server.
+      # Keep this dependency explicit: this image is intentionally separate
+      # from apps/api/Dockerfile and does not install the repository-wide
+      # requirements.txt.
+      httpx==0.28.1 psycopg2-binary==2.9.10
 
 WORKDIR /app
 
 # Retained operational entrypoints and their small, explicit dependencies.
 COPY apps/api ./apps/api
 COPY orchestration/canonical_profiles.py ./orchestration/canonical_profiles.py
+COPY orchestration/ceo_workflow_scope.py ./orchestration/ceo_workflow_scope.py
+COPY orchestration/primary_task_idempotency.py ./orchestration/primary_task_idempotency.py
 COPY scripts/evolution_skills.py ./scripts/evolution_skills.py
 COPY orchestration/evolution_skills.py ./orchestration/evolution_skills.py
 COPY orchestration/qa_discord_feedback.py ./orchestration/qa_discord_feedback.py

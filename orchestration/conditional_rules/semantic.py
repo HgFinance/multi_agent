@@ -87,7 +87,12 @@ def _indicator_parameters(node: ExpressionNode) -> dict[str, Decimal | int | str
             parsed = Decimal(str(raw))
         except Exception as exc:
             raise _error("INVALID_INDICATOR_PARAMETER", f"{key} is not numeric") from exc
-        if not parsed.is_finite() or parsed <= 0:
+        if not parsed.is_finite():
+            raise _error("INVALID_INDICATOR_PARAMETER", f"{key} must be finite")
+        if key in definition.zero_allowed_parameters:
+            if parsed < 0:
+                raise _error("INVALID_INDICATOR_PARAMETER", f"{key} must not be negative")
+        elif parsed <= 0:
             raise _error("INVALID_INDICATOR_PARAMETER", f"{key} must be positive")
         if parsed > 500:
             raise _error(

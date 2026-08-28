@@ -36,6 +36,7 @@ Snapshot을 직접 실어 보냄)만 그대로 동작한다.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import sys
@@ -43,12 +44,18 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
+
+try:
+    from psycopg2.pool import PoolError
+except ImportError:  # pragma: no cover - the API image installs psycopg2
+    class PoolError(RuntimeError):
+        """Fallback type used when the optional database driver is absent."""
 
 # 저장소 루트의 .env를 읽는다 - 이미 설정된 프로세스 환경변수는 덮어쓰지 않는다
 # (override=False 기본값). CEO Office api/app.py와 동일한 이유(2026-08-05) - 이게
@@ -715,6 +722,68 @@ def _access_assignment_dict(a: AccessAssignment) -> dict:
 app = FastAPI(title="Workforce Domain API", version="v1")
 
 
+def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Read one operational limit without allowing an unsafe configuration."""
+
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        value = default
+    return min(maximum, max(minimum, value))
+
+
+def _bounded_env_float(
+    name: str, default: float, *, minimum: float, maximum: float
+) -> float:
+    """Read one floating-point limit without failing API startup."""
+
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        value = default
+    return min(maximum, max(minimum, value))
+
+
+# Every Postgres repository owns a small pool.  The API's sync handlers can
+# otherwise start more database calls than any one repository can acquire
+# during a dashboard fan-out, which surfaces as an uncaught PoolError/500.
+# This is admission backpressure only; it does not change the repository or
+# endpoint contracts and keeps the existing four-connection pool safe.
+_WORKFORCE_MAX_IN_FLIGHT = _bounded_env_int(
+    "WORKFORCE_API_MAX_IN_FLIGHT", 4, minimum=1, maximum=16
+)
+_WORKFORCE_QUEUE_TIMEOUT_SECONDS = _bounded_env_float(
+    "WORKFORCE_API_QUEUE_TIMEOUT_SECONDS", 10.0, minimum=0.1, maximum=60.0
+)
+_WORKFORCE_REQUEST_GATE = asyncio.Semaphore(_WORKFORCE_MAX_IN_FLIGHT)
+
+
+@app.middleware("http")
+async def _workforce_request_backpressure(request: Request, call_next):
+    """Bound concurrent Workforce API calls before they reach sync handlers."""
+
+    if not request.url.path.startswith("/workforce/v1/"):
+        return await call_next(request)
+    try:
+        await asyncio.wait_for(
+            _WORKFORCE_REQUEST_GATE.acquire(),
+            timeout=_WORKFORCE_QUEUE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error_code": "workforce_api_busy",
+                "message": "Workforce API is temporarily at its bounded concurrency limit",
+                "retryable": True,
+            },
+        )
+    try:
+        return await call_next(request)
+    finally:
+        _WORKFORCE_REQUEST_GATE.release()
+
+
 # ── Health 계약 ───────────────────────────────────────────────────────────────
 # 전 부서 공통 규격이다(통합계획 8.1). governance-api 와 같은 규약 -
 # `/health` 는 프로세스 생존만, 저장소 판단은 `/health/ready` 가 한다.
@@ -906,10 +975,56 @@ def _resolve_department_id(department_code: str) -> str:
     return department_code
 
 
+def _validated_agent_id(agent_id: str) -> str:
+    """Reject malformed database UUIDs before psycopg2 can emit a 500."""
+
+    if not any(
+        repository is not None
+        for repository in (_roster_repo, _scorecard_repo, _performance_repo)
+    ):
+        # In-memory self-checks intentionally use short synthetic IDs.
+        return agent_id
+    try:
+        UUID(agent_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(
+            status_code=422,
+            detail="agent_id must be a UUID",
+        ) from None
+    return agent_id
+
+
+def _validated_optional_uuid(value: str | None, field_name: str) -> str | None:
+    """Reject malformed UUID filters before PostgreSQL can emit a 500."""
+
+    if value is None or _scorecard_repo is None:
+        # In-memory self-checks intentionally use short synthetic IDs.
+        return value
+    try:
+        UUID(value)
+    except (ValueError, AttributeError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be a UUID",
+        ) from None
+    return value
+
+
 @app.exception_handler(ValueError)
 def _on_value_error(request, exc: ValueError):
     return JSONResponse(status_code=400, content={
         "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(PoolError)
+def _on_pool_error(request: Request, exc: PoolError):
+    """Turn transient repository saturation into an explicit retryable result."""
+
+    return JSONResponse(status_code=503, content={
+        "error_code": "workforce_database_busy",
+        "message": "Workforce database capacity is temporarily exhausted",
+        "retryable": True,
     })
 
 
@@ -1092,6 +1207,7 @@ def revoke_access(assignment_id: str, body: RevokeRequestIn):
 
 @app.get("/workforce/v1/agents/{agent_id}/access")
 def get_agent_access(agent_id: str):
+    agent_id = _validated_agent_id(agent_id)
     return {"assignments": [
         _access_assignment_dict(a) for a in _access_repo.list_assignments_by_agent(agent_id)
     ]}
@@ -1178,6 +1294,7 @@ def get_roster():
 
 @app.get("/workforce/v1/agents/{agent_id}")
 def get_agent(agent_id: str):
+    agent_id = _validated_agent_id(agent_id)
     _require_roster_repo()
     agent = _roster_repo.get_agent(agent_id)
     if agent is None:
@@ -1188,6 +1305,7 @@ def get_agent(agent_id: str):
 @app.post("/workforce/v1/agents/{agent_id}/profile-versions")
 def submit_profile_version(agent_id: str, body: ProfileVersionSubmissionIn):
     """항상 새 Version을 insert한다 - 기존 Version을 수정하는 엔드포인트는 없다."""
+    agent_id = _validated_agent_id(agent_id)
     _require_roster_repo()
     submission = ProfileVersionSubmission(
         model_id=body.model_id, prompt_artifact_path=body.prompt_artifact_path,
@@ -1211,6 +1329,7 @@ def change_agent_status(agent_id: str, body: StatusChangeRequestIn):
     APPROVED CEO 결정을 가리켜야 한다(UnverifiedActivationEvidenceError -> 403).
     tool_allowlist가 비어있는 Persona도 ACTIVE로 못 간다(ToolAllowlistMissingError -> 409).
     """
+    agent_id = _validated_agent_id(agent_id)
     request = StatusChangeRequest(
         to_status=body.to_status, profile_version_id=body.profile_version_id, reason=body.reason,
         idempotency_key=body.idempotency_key, qa_eval_run_id=body.qa_eval_run_id,
@@ -1246,6 +1365,7 @@ def change_agent_status(agent_id: str, body: StatusChangeRequestIn):
 def list_agent_lifecycle_events(agent_id: str):
     """이 Agent 의 상태 전이 이력. "승인 없는 활성화 0"(HR-04 KPI)을 현재 상태가
     아니라 이벤트로 확인할 수 있게 하는 조회다."""
+    agent_id = _validated_agent_id(agent_id)
     _require_roster_repo()
     return {"lifecycle_events": _roster_repo.list_lifecycle_events(agent_id)}
 
@@ -1379,6 +1499,7 @@ def record_performance_review(agent_id: str, body: PerformanceReviewIn):
 
 @app.get("/workforce/v1/agents/{agent_id}/performance-reviews")
 def list_performance_reviews(agent_id: str):
+    agent_id = _validated_agent_id(agent_id)
     if _performance_repo is None:
         raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 평가 조회 불가")
     return {"reviews": [_review_dict(r) for r in _performance_repo.list_reviews_by_agent(agent_id)]}
@@ -1430,6 +1551,7 @@ def transition_performance_action(action_id: str, body: PerformanceActionTransit
 
 @app.get("/workforce/v1/agents/{agent_id}/performance-actions")
 def list_performance_actions(agent_id: str, status: ActionStatus | None = None):
+    agent_id = _validated_agent_id(agent_id)
     if _performance_repo is None:
         raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 조치 조회 불가")
     actions = _performance_repo.list_actions_by_agent(agent_id, status=status)
@@ -1485,6 +1607,7 @@ def close_agent_probation(probation_id: str, body: ProbationCloseIn):
 
 @app.get("/workforce/v1/agents/{agent_id}/probations")
 def list_agent_probations(agent_id: str):
+    agent_id = _validated_agent_id(agent_id)
     if _performance_repo is None:
         raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 수습 조회 불가")
     return {
@@ -1652,6 +1775,7 @@ def record_cost_snapshot(agent_id: str, body: CostSnapshotRecordIn):
 
 @app.get("/workforce/v1/agents/{agent_id}/cost-snapshots")
 def list_cost_snapshots(agent_id: str, window_start: datetime, window_end: datetime):
+    agent_id = _validated_agent_id(agent_id)
     if _scorecard_repo is None:
         raise HTTPException(
             status_code=501,
@@ -1721,6 +1845,8 @@ def get_capacity_snapshot_endpoint(
         raise HTTPException(status_code=400, detail="window_end는 window_start 이후여야 한다")
     if department_id is None and agent_id is None:
         raise HTTPException(status_code=400, detail="department_id/agent_id 중 하나는 있어야 한다")
+    department_id = _validated_optional_uuid(department_id, "department_id")
+    agent_id = _validated_optional_uuid(agent_id, "agent_id")
     if _scorecard_repo is None:
         raise HTTPException(
             status_code=501,
@@ -1932,6 +2058,7 @@ def get_budget_assessment_real(
     agent_id: str, employee_code: str, department_code: str,
     per_case_tokens: int, daily_tokens: int, window_start: datetime, window_end: datetime,
 ):
+    agent_id = _validated_agent_id(agent_id)
     if _scorecard_repo is None:
         raise HTTPException(
             status_code=501,

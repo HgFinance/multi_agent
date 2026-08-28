@@ -196,6 +196,8 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_TRADING_ORDER_API_KEY}
     enabled: true
+    skip_preflight: true
+    keepalive_interval: 60
 
 # Employee runtime v2: every listed employee is an independent LangGraph
 # Worker.  Hermes remains the department-head runtime and has no order submit

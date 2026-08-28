@@ -25,6 +25,8 @@ API Key 를 들고 직접 Crawling 하지 않는다). 수집기와 Reference Ser
 from __future__ import annotations
 
 import json
+import os
+import socket
 import sys
 import time
 import urllib.error
@@ -113,9 +115,22 @@ class LsRestClient:
     토큰을 메모리에만 둔다. 파일이나 Log 에 쓰지 않는다(가이드 8.3).
     """
 
-    def __init__(self, environment: LsEnvironment | None = None, *, timeout: int = 20) -> None:
+    def __init__(
+        self,
+        environment: LsEnvironment | None = None,
+        *,
+        timeout: int | float | None = None,
+    ) -> None:
         self._env = environment or LsEnvironment.from_env()
-        self._timeout = timeout
+        configured_timeout = timeout
+        if configured_timeout is None:
+            try:
+                configured_timeout = float(
+                    os.getenv("LS_REQUEST_TIMEOUT_SECONDS", "20")
+                )
+            except (TypeError, ValueError):
+                configured_timeout = 20.0
+        self._timeout = max(1.0, min(float(configured_timeout), 300.0))
         self._token: str | None = None
         self._token_expires_at: datetime | None = None
         self._limiters: dict[str, RateLimiter] = {}
@@ -144,7 +159,15 @@ class LsRestClient:
             body = e.read()[:400].decode("utf-8", "replace")
             # 응답 본문에 Key 가 실릴 수 있으므로 그대로 올리지 않고 요약만 남긴다.
             raise LsApiError(f"{path} HTTP {e.code}: {body}") from None
+        except (TimeoutError, socket.timeout):
+            # socket.timeout is not consistently wrapped as URLError by
+            # urllib. Normalize it so the on-demand Strategy adapter can
+            # apply its bounded transient retry policy.
+            raise LsApiError(f"{path} timeout") from None
         except urllib.error.URLError as e:
+            reason = str(e.reason).lower()
+            if isinstance(e.reason, (TimeoutError, socket.timeout)) or "timed out" in reason:
+                raise LsApiError(f"{path} timeout") from None
             raise LsApiError(f"{path} 연결 실패: {e.reason}") from None
 
     def _token_cache_path(self) -> Path:

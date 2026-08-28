@@ -113,6 +113,7 @@ class HealthLedger:
                     "eligible",
                     "deleted",
                     "queued",
+                    "queued_runs",
                     "pending_visible",
                     "visible_overflow",
                     "skipped",

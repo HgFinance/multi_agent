@@ -280,6 +280,7 @@ def default_worker_llm(
         timeout=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "8")),
     )
     started = time.perf_counter()
+    finish_reason = ""
     try:
         with redacted_current_worker_generation() as generation:
             response = client.chat.completions.create(
@@ -291,13 +292,20 @@ def default_worker_llm(
                 ],
             )
             generation.set_usage(getattr(response, "usage", None))
+        choice = response.choices[0]
+        finish_reason = str(getattr(choice, "finish_reason", "") or "").lower()
         record_llm_call(
             usage=getattr(response, "usage", None),
             latency_ms=int((time.perf_counter() - started) * 1000),
+            finish_reason=finish_reason,
         )
-        return response.choices[0].message.content or ""
+        return choice.message.content or ""
     except Exception:
-        record_llm_call(latency_ms=int((time.perf_counter() - started) * 1000), error=True)
+        record_llm_call(
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error=True,
+            finish_reason=finish_reason,
+        )
         raise
 
 

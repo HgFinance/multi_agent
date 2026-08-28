@@ -143,6 +143,84 @@ def test_retention_delete_splits_large_batches(monkeypatch) -> None:
     assert [len(json.loads(request.data)["trace_ids"]) for request in requests] == [100, 100, 5]
 
 
+def test_retention_caps_complete_run_rows_and_deletes_whole_trees(monkeypatch) -> None:
+    monkeypatch.setenv("LANGSMITH_RETENTION_SCOPES", "workflow")
+    _fake_client_module(monkeypatch)
+    monkeypatch.setattr(
+        retention,
+        "resolve_project_id",
+        lambda _client, project_name: f"id-{project_name}",
+    )
+    monkeypatch.setattr(
+        retention,
+        "query_runs",
+        lambda _client, **_kwargs: [
+            # Newest two trees fit exactly inside the four-run cap.
+            SimpleNamespace(
+                id="new-root",
+                trace_id="new-root",
+                is_root=True,
+                start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
+            ),
+            SimpleNamespace(
+                id="new-child",
+                trace_id="new-root",
+                is_root=False,
+                start_time=datetime(2026, 8, 26, 0, 0, 1, tzinfo=timezone.utc),
+            ),
+            SimpleNamespace(
+                id="middle-root",
+                trace_id="middle-root",
+                is_root=True,
+                start_time=datetime(2026, 8, 25, tzinfo=timezone.utc),
+            ),
+            SimpleNamespace(
+                id="middle-child",
+                trace_id="middle-root",
+                is_root=False,
+                start_time=datetime(2026, 8, 25, 0, 0, 1, tzinfo=timezone.utc),
+            ),
+            SimpleNamespace(
+                id="old-root",
+                trace_id="old-root",
+                is_root=True,
+                start_time=datetime(2026, 8, 24, tzinfo=timezone.utc),
+            ),
+            SimpleNamespace(
+                id="old-child-1",
+                trace_id="old-root",
+                is_root=False,
+                start_time=datetime(2026, 8, 24, 0, 0, 1, tzinfo=timezone.utc),
+            ),
+            SimpleNamespace(
+                id="old-child-2",
+                trace_id="old-root",
+                is_root=False,
+                start_time=datetime(2026, 8, 24, 0, 0, 2, tzinfo=timezone.utc),
+            ),
+        ],
+    )
+    requests = []
+    worker = LangSmithRetentionWorker(
+        api_key="key",
+        endpoint="https://example.test",
+        enabled=True,
+        dry_run=False,
+        max_runs=4,
+        max_delete_per_pass=1,
+        opener=lambda request, timeout: requests.append(request) or _Response(),
+    )
+
+    summary = worker.run_once(now=datetime(2026, 8, 26, tzinfo=timezone.utc))
+
+    assert summary.scanned == 7
+    assert summary.visible_overflow == 3
+    assert summary.eligible == 1
+    assert summary.deleted == 1
+    assert summary.queued_runs == 3
+    assert json.loads(requests[0].data)["trace_ids"] == ["old-root"]
+
+
 def test_retention_stops_retrying_hourly_delete_limit() -> None:
     def rate_limited(_request, timeout):
         raise urllib.error.HTTPError(

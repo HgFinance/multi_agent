@@ -60,6 +60,44 @@ def _decimal(value: Any, name: str, *, positive: bool) -> Decimal:
     return parsed
 
 
+def _is_absent(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        return Decimal(str(value)) <= 0
+    except (InvalidOperation, TypeError, ValueError):
+        # Malformed rather than absent; let _decimal report it as INVALID.
+        return False
+
+
+def require_two_sided_book(bid: Any, ask: Any) -> None:
+    """Name a one-sided book instead of calling the whole quote invalid.
+
+    At 상한가 there is no ask and at 하한가 there is no bid, which is a normal
+    market state a market order simply cannot cross.  Reporting it as
+    TRADING_MARKET_QUOTE_INVALID told the user their data was broken when the
+    real answer was "nobody is selling" (2026-08-28, 001210 at 10,680).  Both
+    sides missing is a genuinely empty book and stays INVALID.
+    """
+
+    bid_absent = _is_absent(bid)
+    ask_absent = _is_absent(ask)
+    if bid_absent and ask_absent:
+        return
+    if ask_absent:
+        raise MarketDataError(
+            "TRADING_MARKET_NO_ASK",
+            "order book has no ask; a market buy cannot be crossed",
+            409,
+        )
+    if bid_absent:
+        raise MarketDataError(
+            "TRADING_MARKET_NO_BID",
+            "order book has no bid; a market sell cannot be crossed",
+            409,
+        )
+
+
 def validate_quote(
     quote_value: TrustedQuote,
     instrument: InstrumentRef,
@@ -150,6 +188,7 @@ class HttpMarketDataProvider:
         level = body.get("last_quote")
         if not isinstance(level, dict):
             raise MarketDataError("TRADING_MARKET_QUOTE_UNAVAILABLE", "market API has no L1 quote")
+        require_two_sided_book(level.get("best_bid"), level.get("best_ask"))
         value = TrustedQuote(
             instrument_id=str(instrument.instrument_id),
             symbol=instrument.symbol,
@@ -166,9 +205,14 @@ class HttpMarketDataProvider:
 class LsPaperFallbackMarketDataProvider:
     """Use an authenticated read-only LS quote when the TSDB projection is stale."""
 
+    # A one-sided book is retried against REST too: the projection can simply
+    # be missing a side, and only the broker read can tell that apart from a
+    # real 상한가/하한가.  If REST agrees, the honest NO_ASK/NO_BID surfaces.
     _FALLBACK_CODES = {
         "TRADING_MARKET_QUOTE_STALE",
         "TRADING_MARKET_QUOTE_UNAVAILABLE",
+        "TRADING_MARKET_NO_ASK",
+        "TRADING_MARKET_NO_BID",
     }
 
     def __init__(
@@ -199,6 +243,23 @@ class LsPaperFallbackMarketDataProvider:
         fetch_started = self._monotonic()
         try:
             level = self.broker.get_quote(instrument.symbol)
+        except Exception as exc:
+            raise MarketDataError(
+                "TRADING_MARKET_QUOTE_UNAVAILABLE",
+                "LS PAPER REST quote fallback failed",
+            ) from exc
+        # Classify a one-sided broker book before coercion so the caller is
+        # told "nobody is selling" instead of a blanket UNAVAILABLE.
+        try:
+            require_two_sided_book(level["bid"], level["ask"])
+        except MarketDataError:
+            raise
+        except Exception as exc:
+            raise MarketDataError(
+                "TRADING_MARKET_QUOTE_UNAVAILABLE",
+                "LS PAPER REST quote fallback failed",
+            ) from exc
+        try:
             value = TrustedQuote(
                 instrument_id=str(instrument.instrument_id),
                 symbol=str(level["symbol"]),
@@ -209,6 +270,8 @@ class LsPaperFallbackMarketDataProvider:
                 ask_size=_decimal(level["ask_size"], "ask_size", positive=False),
                 source="ls-paper-rest:t1101",
             )
+        except MarketDataError:
+            raise
         except Exception as exc:
             raise MarketDataError(
                 "TRADING_MARKET_QUOTE_UNAVAILABLE",
@@ -227,12 +290,55 @@ class LsPaperFallbackMarketDataProvider:
         )
 
 
+def quote_fallback_enabled() -> bool:
+    """Allow the read-only LS quote fallback without changing order routing.
+
+    The TSDB quote projection only covers the bounded realtime subscription
+    basket, so a conditional rule on any other symbol can never satisfy the
+    freshness window at admission time.  Binding that fallback to
+    TRADING_BROKER_ADAPTER used to be the only way to enable it, but that flag
+    also moves order placement onto the LS PAPER broker - a far larger change
+    than reading one quote.  Keep the two decisions separate.
+    """
+
+    return os.environ.get(
+        "TRADING_MARKET_QUOTE_LS_FALLBACK", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def with_quote_fallback(
+    primary: MarketDataProvider,
+    *,
+    external_broker: Any,
+    broker_factory: Any,
+) -> MarketDataProvider:
+    """Wrap ``primary`` with the read-only LS quote fallback when configured.
+
+    Both the admission API and the directive worker must reach this decision
+    identically.  They did not: the API wrapped the provider while the worker
+    constructed ``HttpMarketDataProvider`` bare, so a stale projection failed a
+    triggered conditional rule with TRADING_MARKET_QUOTE_STALE even though the
+    same deployment could read a fresh t1101 quote (2026-08-28, 001210).  One
+    helper keeps the two paths from drifting again.
+    """
+
+    quote_broker = external_broker
+    if quote_broker is None and quote_fallback_enabled():
+        quote_broker = broker_factory()
+    if quote_broker is None:
+        return primary
+    return LsPaperFallbackMarketDataProvider(primary, quote_broker)
+
+
 __all__ = [
     "FixtureMarketDataProvider",
     "HttpMarketDataProvider",
     "LsPaperFallbackMarketDataProvider",
+    "quote_fallback_enabled",
+    "with_quote_fallback",
     "MarketDataError",
     "MarketDataProvider",
     "TrustedQuote",
+    "require_two_sided_book",
     "validate_quote",
 ]

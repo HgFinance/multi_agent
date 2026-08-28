@@ -326,8 +326,8 @@ class SupervisorRunnerTest(unittest.TestCase):
         candidate_rows = ({"id": "root", "status": "ready"},)
 
         class Client:
-            def recovery_candidate_rows(self):
-                calls.append(("candidate", None))
+            def recovery_candidate_rows(self, **kwargs):
+                calls.append(("candidate", kwargs))
                 return candidate_rows
 
             def list_tasks(self):
@@ -362,6 +362,7 @@ class SupervisorRunnerTest(unittest.TestCase):
             [kind for kind, _value in calls],
             ["candidate", "ready", "synthesis"],
         )
+        self.assertEqual(calls[0][1], {"include_historical": False})
         self.assertIs(calls[1][1], candidate_rows)
         self.assertIs(calls[2][1], candidate_rows)
 

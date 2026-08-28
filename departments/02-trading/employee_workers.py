@@ -138,6 +138,7 @@ def create_temporary_worker(
 # (2026-08-12 실측). 편제 문서가 "결정론 러너 5개"라고 적는 근거를 코드에서
 # 확인할 수 있어야 한다.
 RUNNER_ID = "desk-runner"
+RUNTIME_SERVICE_ID = "trading-directive-worker"
 RUNNER_ROLE = "Trading desk runner — 주문 권한 없는 결정론 경계(LLM 없음)"
 RUNNER_TOOLS: tuple[str, ...] = ()
 
@@ -172,6 +173,8 @@ def run_employee_workers(
         "llm_worker_count": 0,
         "runtime": {
             "executor": "deterministic_strategy_worker",
+            "service_id": RUNTIME_SERVICE_ID,
+            "worker_id": RUNNER_ID,
             "topology": "dynamic_parallel_fan_out_fan_in",
             "provider": "none",
             "model": "none",

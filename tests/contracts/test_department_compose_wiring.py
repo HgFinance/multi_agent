@@ -129,7 +129,11 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         service = _service_block(compose, "accounting-api")
 
         self.assertIn("ACCOUNTING_MODE: ${ACCOUNTING_MODE:-PAPER_DB}", service)
-        self.assertIn("DATABASE_URL: ${DATABASE_URL:-}", service)
+        self.assertIn("DATABASE_URL: *accounting-database-url", service)
+        self.assertIn(
+            'x-accounting-database-url: &accounting-database-url "${ACCOUNTING_DATABASE_URL:-',
+            compose,
+        )
 
     def test_accounting_hermes_uses_standard_profile_path(self) -> None:
         compose = (ROOT / "departments/05-accounting-portfolio/compose.yaml").read_text(

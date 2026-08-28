@@ -187,11 +187,19 @@
         },
         {
           "method": "GET",
+          "path": "/health/freshness"
+        },
+        {
+          "method": "GET",
           "path": "/ready"
         },
         {
           "method": "GET",
           "path": "/health/ready"
+        },
+        {
+          "method": "GET",
+          "path": "/instrument/{symbol}"
         },
         {
           "method": "GET",
@@ -293,6 +301,10 @@
         {
           "method": "GET",
           "path": "/trading/v1/user-directives/{directive_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/internal/strategy-paper/orders"
         }
       ]
     },
@@ -306,6 +318,10 @@
         {
           "method": "GET",
           "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/observability/hermes"
         },
         {
           "method": "POST",

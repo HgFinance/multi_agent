@@ -134,7 +134,12 @@ _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 def _enabled(env: Mapping[str, str]) -> bool:
     return (
-        str(env.get("LANGSMITH_TRACING", "")).casefold() in {"1", "true", "yes", "on"}
+        (
+            str(env.get("LANGSMITH_TRACING", "")).casefold()
+            in {"1", "true", "yes", "on"}
+            or str(env.get("HGFINANCE_LANGSMITH_PUBLISH_ENABLED", "")).casefold()
+            in {"1", "true", "yes", "on"}
+        )
         and bool(str(env.get("LANGSMITH_API_KEY", "")).strip())
     )
 

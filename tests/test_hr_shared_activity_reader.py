@@ -446,10 +446,10 @@ class _FakeMetricsApi:
         return type("_R", (), {"data": rows})()
 
 
-def _batch_reader(trace_api, metrics_api=None) -> LangfuseApiTraceReader:
+def _batch_reader(trace_api, metrics_api=None, observations_api=None) -> LangfuseApiTraceReader:
     reader = object.__new__(LangfuseApiTraceReader)
     reader._client = type("_C", (), {"api": type("_A", (), {
-        "trace": trace_api, "metrics": metrics_api,
+        "trace": trace_api, "metrics": metrics_api, "observations": observations_api,
     })()})()
     return reader
 
@@ -527,6 +527,43 @@ def test_batch_count_fills_zero_for_names_the_metrics_api_omits() -> None:
     assert counts == {"x": 7, "y": 0}
     assert len(metrics.queries) == 1, "이름 개수와 무관하게 요청 하나여야 한다"
     assert metrics.queries[0]["view"] == "observations"
+
+
+class _FakeObservationsApi:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def get_many(self, **kwargs):
+        import json as _json
+
+        self.calls.append(kwargs)
+        cursor = kwargs.get("cursor")
+        page = [
+            type("_Observation", (), {"name": "a"})(),
+            type("_Observation", (), {"name": "b"})(),
+        ] if not cursor else [type("_Observation", (), {"name": "a"})()]
+        assert kwargs["fields"] == "core,basic"
+        assert kwargs["limit"] == 1000
+        filters = _json.loads(kwargs["filter"])
+        assert {item["column"] for item in filters} == {"name", "type", "startTime"}
+        assert filters[0]["value"] == ["a", "b"]
+        return type("_Response", (), {
+            "data": page,
+            "meta": type("_Meta", (), {"cursor": None if cursor else "next-page"})(),
+        })()
+
+
+def test_batch_count_uses_cursor_paged_observations_api_before_metrics() -> None:
+    observations = _FakeObservationsApi()
+
+    counts = _batch_reader(None, None, observations).count_many_worker_activity(
+        event_names=("a", "b"), since=_NOW - timedelta(hours=24), until=_NOW,
+    )
+
+    assert counts == {"a": 2, "b": 1}
+    assert len(observations.calls) == 2
+    assert "cursor" not in observations.calls[0]
+    assert observations.calls[1]["cursor"] == "next-page"
 
 
 def test_prefetch_makes_two_round_trips_regardless_of_worker_count() -> None:

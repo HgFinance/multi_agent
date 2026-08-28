@@ -72,6 +72,7 @@ from contracts import (
 )
 from directive_routes import configure_directive_runtime
 from directive_routes import router as directive_router
+from strategy_paper_routes import router as strategy_paper_router
 from directives.service import DirectiveServiceError, require_paper_execution_mode
 from internal_service_auth import (
     BROKER_EVENT_POLICY,
@@ -109,6 +110,7 @@ async def _trading_lifespan(_app: FastAPI):
 app = FastAPI(title="Trading Domain API", version=API_VERSION, lifespan=_trading_lifespan)
 app.include_router(directive_router)
 app.include_router(conditional_rule_router)
+app.include_router(strategy_paper_router)
 
 # ── 저장 모드 ──────────────────────────────────────────────────────────────────
 # PAPER_DB is an explicit opt-in.  A missing/failed durable dependency never

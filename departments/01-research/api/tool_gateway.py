@@ -43,6 +43,10 @@ PERSONA_HEADER = "x-agent-persona"
 # 엔드포인트 경로 -> 필요한 scope. **매핑 없는 경로는 설정 오류다.**
 # 표기는 AGENT_EMPLOYEE_PROFILES.md 2.2절 <domain>.<resource>.<verb>.
 ENDPOINT_SCOPES: dict[str, str] = {
+    # Canonical symbol -> instrument identity is part of the market snapshot
+    # read surface; keeping it under the existing scope avoids a new, duplicate
+    # permission just for the startup lookup.
+    "/instrument": "market.snapshot.read",
     "/evidence/news": "research.evidence.news.read",
     "/evidence/disclosures": "research.evidence.disclosures.read",
     "/evidence/financials": "research.evidence.financials.read",
@@ -77,7 +81,7 @@ ENDPOINT_SCOPES: dict[str, str] = {
 # /docs/oauth2-redirect 는 FastAPI 가 자동으로 다는 라우트다. 빼먹으면
 # scope_for 가 예외를 내 **강제 모드에서 500** 이 된다(2026-08-02 자체 점검이
 # 적발). 문서 표면은 통째로 열어두는 게 맞다.
-OPEN_PATHS = ("/health", "/health/ready", "/docs", "/docs/oauth2-redirect",
+OPEN_PATHS = ("/health", "/health/freshness", "/health/ready", "/ready", "/docs", "/docs/oauth2-redirect",
               "/openapi.json", "/redoc")
 
 
@@ -263,9 +267,19 @@ def _check_real_config_covers_endpoints():
     assert not orphan_endpoints, \
         f"아무 페르소나도 못 쓰는 엔드포인트 scope: {sorted(orphan_endpoints)}"
 
-    # market.* 는 market-api 소관이라 여기서 안 지킨다 - 그 사실을 명시한다
+    # market.* 는 market-api 소관이라 여기서 안 지킨다 - 그 사실을 명시한다.
+    # web/outcomes/experiment_vocabulary/chunk 는 MCP·내부 도구 scope라 HTTP
+    # 라우트 매핑이 없다. 이를 가상 경로로 추가하면 권한이 중복 정의된다.
+    non_http_scope_prefixes = (
+        "market.",
+        "case.",
+        "research.evidence.chunk",
+        "research.web.",
+        "research.outcomes.",
+        "research.experiment_vocabulary.",
+    )
     unused = {s for s in declared - endpoint_scopes
-              if not s.startswith(("market.", "case.", "research.evidence.chunk"))}
+              if not s.startswith(non_http_scope_prefixes)}
     assert not unused, f"research-api 가 지키지 않는 research scope: {sorted(unused)}"
     print(f"  실제 config 정합         OK (페르소나 {len(allow)}, "
           f"금지 {len(forbid)})")

@@ -539,3 +539,126 @@ def test_ls_raw_payload_parser_is_inside_broker_boundary() -> None:
             observed_at=NOW,
         )
     assert raised.value.code == "INDICATOR_PROVIDER_PARTIAL_DATA"
+
+
+def test_bollinger_accepts_the_hts_offset_argument() -> None:
+    """Requested as "bollingerband(종가,2,0,20) 중심선 터치" on 2026-08-28.
+
+    Korean HTS notation is positional and always carries an offset argument.
+    The interpreter mapped it to ``OFFSET`` and the registry declared only
+    ``PERIOD``/``STDDEV``, so the whole rule died on
+    ``UNSUPPORTED_INDICATOR_PARAMETER`` before it could become ACTIVE.
+    """
+
+    definition = get_indicator_definition("BOLLINGER")
+    assert definition["defaults"]["OFFSET"] == "0"
+    spec = _rule(
+        {
+            "type": "LOGICAL",
+            "operator": "AND",
+            "children": [
+                {
+                    "type": "COMPARISON",
+                    "operator": "LTE",
+                    "left": {"type": "MARKET", "field": "LOW"},
+                    "right": _indicator(
+                        "BOLLINGER",
+                        output="MIDDLE",
+                        parameters={"PERIOD": 20, "STDDEV": "2", "OFFSET": 0},
+                    ),
+                },
+                {
+                    "type": "COMPARISON",
+                    "operator": "GTE",
+                    "left": {"type": "MARKET", "field": "HIGH"},
+                    "right": _indicator(
+                        "BOLLINGER",
+                        output="MIDDLE",
+                        parameters={"PERIOD": 20, "STDDEV": "2", "OFFSET": 0},
+                    ),
+                },
+            ],
+        }
+    )
+    assert validate_rule_spec(spec) is spec
+
+
+def test_offset_shifts_every_local_indicator_back_by_completed_bars() -> None:
+    engine = IndicatorEngine()
+    candles = _candles(30)
+    latest = engine.compute(
+        ExpressionNode.model_validate(_indicator("SMA", parameters={"PERIOD": 5})),
+        candles,
+    )
+    shifted = engine.compute(
+        ExpressionNode.model_validate(
+            _indicator("SMA", parameters={"PERIOD": 5, "OFFSET": 3})
+        ),
+        candles,
+    )
+    assert shifted == engine.compute(
+        ExpressionNode.model_validate(_indicator("SMA", parameters={"PERIOD": 5})),
+        candles[:-3],
+    )
+    assert shifted != latest
+
+
+def test_offset_extends_the_warm_up_window_it_consumes() -> None:
+    definition = DEFAULT_REGISTRY.get("BOLLINGER")
+    assert definition.required_history({"PERIOD": 20, "STDDEV": Decimal("2"), "OFFSET": 0}) == 20
+    assert definition.required_history({"PERIOD": 20, "STDDEV": Decimal("2"), "OFFSET": 5}) == 25
+    engine = IndicatorEngine()
+    with pytest.raises(EvaluationError) as raised:
+        engine.compute(
+            ExpressionNode.model_validate(
+                _indicator("SMA", parameters={"PERIOD": 5, "OFFSET": 4})
+            ),
+            _candles(6),
+        )
+    assert raised.value.code == "INSUFFICIENT_HISTORY"
+
+
+def test_offset_is_the_only_parameter_allowed_to_be_zero() -> None:
+    with pytest.raises(RuleSemanticError) as raised:
+        validate_rule_spec(
+            _rule(
+                {
+                    "type": "COMPARISON",
+                    "operator": "GT",
+                    "left": {"type": "MARKET", "field": "CLOSE"},
+                    "right": _indicator("SMA", parameters={"PERIOD": 0}),
+                }
+            )
+        )
+    assert raised.value.code == "INVALID_INDICATOR_PARAMETER"
+    with pytest.raises(RuleSemanticError) as negative:
+        validate_rule_spec(
+            _rule(
+                {
+                    "type": "COMPARISON",
+                    "operator": "GT",
+                    "left": {"type": "MARKET", "field": "CLOSE"},
+                    "right": _indicator("SMA", parameters={"PERIOD": 5, "OFFSET": -1}),
+                }
+            )
+        )
+    assert negative.value.code == "INVALID_INDICATOR_PARAMETER"
+
+
+def test_unknown_indicator_parameters_are_still_rejected() -> None:
+    with pytest.raises(RuleSemanticError) as raised:
+        validate_rule_spec(
+            _rule(
+                {
+                    "type": "COMPARISON",
+                    "operator": "GT",
+                    "left": {"type": "MARKET", "field": "CLOSE"},
+                    "right": _indicator(
+                        "BOLLINGER",
+                        output="UPPER",
+                        parameters={"PERIOD": 20, "PRICE": "종가"},
+                    ),
+                }
+            )
+        )
+    assert raised.value.code == "UNSUPPORTED_INDICATOR_PARAMETER"

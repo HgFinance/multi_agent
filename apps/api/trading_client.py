@@ -25,6 +25,8 @@ _CONFLICT_DETAILS = {
     "TRADING_MARKET_SESSION_UNAVAILABLE": "trading_market_session_closed",
     "TRADING_MARKET_QUOTE_STALE": "trading_market_quote_stale",
     "TRADING_MARKET_QUOTE_CROSSED": "trading_market_quote_invalid",
+    "TRADING_MARKET_NO_ASK": "trading_market_no_ask",
+    "TRADING_MARKET_NO_BID": "trading_market_no_bid",
     "TRADING_MARKET_QUOTE_EMPTY": "trading_market_quote_invalid",
     "TRADING_MARKET_QUOTE_BINDING_DENIED": "trading_market_quote_invalid",
     "TRADING_HIGHER_PRIORITY_ACTIVE": "trading_higher_priority_directive_active",

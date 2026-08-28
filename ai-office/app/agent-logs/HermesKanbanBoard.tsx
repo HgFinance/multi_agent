@@ -142,15 +142,9 @@ export default function HermesKanbanBoard({
             <h2 className="truncate text-title-md font-title-md text-primary">
               Hermes Agent Kanban
             </h2>
-            <p className="mt-0.5 text-xs text-on-surface-variant">
-              Hermes 작업 상태를 AI Office 형식으로 투영한 읽기 전용 보드
-            </p>
           </div>
         </div>
         <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide">
-          <span className="rounded-full border border-primary/30 bg-secondary-container px-2 py-1 text-primary">
-            READ ONLY
-          </span>
           {kanbanUrl ? (
             <a
               href={kanbanUrl}

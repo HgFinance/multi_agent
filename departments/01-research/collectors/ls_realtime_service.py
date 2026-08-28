@@ -42,6 +42,7 @@ import json
 import re
 import signal
 import sys
+import time as _time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -94,6 +95,8 @@ IDLE_RECHECK_SECONDS = 4 * 3600.0  # 휴장일에 세션 판정을 다시 하는
 DEFAULT_HEALTH_MAX_DATA_AGE_SECONDS = 180.0
 DEFAULT_SYMBOL_REFRESH_SECONDS = 15.0
 DEFAULT_ACTIVE_SYMBOL_LIMIT = 1_000
+DEFAULT_NO_PROGRESS_RESTART_SECONDS = 300.0
+ACTIVE_SYMBOL_READ_RETRIES = 3
 _TRADING_SYMBOL_RE = re.compile(r"^[0-9A-Z]{6}$")
 
 
@@ -438,21 +441,31 @@ def load_active_conditional_symbols(env: dict) -> tuple[str, ...]:
 
     import psycopg2
 
-    try:
-        connection = psycopg2.connect(dsn, connect_timeout=3)
+    last_error: Exception | None = None
+    symbols: tuple[str, ...] = ()
+    for attempt in range(ACTIVE_SYMBOL_READ_RETRIES):
         try:
-            with connection.cursor() as cursor:
-                cursor.execute("set statement_timeout = '3s'")
-                cursor.execute(
-                    "select symbol from execution.active_conditional_subscription_symbols "
-                    "order by symbol limit %s",
-                    (limit,),
-                )
-                symbols = tuple(str(row[0]).strip() for row in cursor.fetchall())
-        finally:
-            connection.close()
-    except psycopg2.Error as exc:
-        raise LsRealtimeError("활성 조건주문 구독 종목을 읽을 수 없다") from exc
+            connection = psycopg2.connect(dsn, connect_timeout=3)
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("set statement_timeout = '3s'")
+                    cursor.execute(
+                        "select symbol from execution.active_conditional_subscription_symbols "
+                        "order by symbol limit %s",
+                        (limit,),
+                    )
+                    symbols = tuple(str(row[0]).strip() for row in cursor.fetchall())
+            finally:
+                connection.close()
+            break
+        except psycopg2.Error as exc:
+            last_error = exc
+            if attempt + 1 < ACTIVE_SYMBOL_READ_RETRIES:
+                # This is a short read-only connection. A bounded retry handles
+                # a brief database failover without replacing the last valid set.
+                _time.sleep(0.25 * (2**attempt))
+    else:
+        raise LsRealtimeError("활성 조건주문 구독 종목을 읽을 수 없다") from last_error
 
     invalid = tuple(symbol for symbol in symbols if not _TRADING_SYMBOL_RE.fullmatch(symbol))
     if invalid:
@@ -489,8 +502,14 @@ async def _wait_for_symbol_change(
     return None
 
 
-async def _heartbeat(sinks, stop: asyncio.Event, *, interval_seconds: float,
-                     log=print) -> None:
+async def _heartbeat(
+    sinks,
+    stop: asyncio.Event,
+    *,
+    interval_seconds: float,
+    restart_after_seconds: float | None = None,
+    log=print,
+) -> None:
     """적재 증분을 주기적으로 로그에 찍는다. stop 이 서야 끝난다.
 
     세션 통계는 세션이 끝나야 나오므로 장중에는 로그가 조용하다 - "돌고는 있는
@@ -498,6 +517,10 @@ async def _heartbeat(sinks, stop: asyncio.Event, *, interval_seconds: float,
     신호다(수신 정지 - 재접속 경로가 못 잡은 조용한 단절).
     """
     prev_ticks = prev_quotes = prev_msgs = 0
+    loop = asyncio.get_running_loop()
+    last_progress_at = loop.time()
+    if restart_after_seconds is not None:
+        restart_after_seconds = max(float(restart_after_seconds), interval_seconds)
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
@@ -512,7 +535,19 @@ async def _heartbeat(sinks, stop: asyncio.Event, *, interval_seconds: float,
             f"적재 체결 +{ticks - prev_ticks:,} 호가 +{quotes - prev_quotes:,} | "
             f"누적 {ticks:,}+{quotes:,}"
         )
+        progressed = (msgs > prev_msgs) or (ticks > prev_ticks) or (quotes > prev_quotes)
         prev_ticks, prev_quotes, prev_msgs = ticks, quotes, msgs
+        if progressed:
+            last_progress_at = loop.time()
+        elif (
+            restart_after_seconds is not None
+            and loop.time() - last_progress_at >= restart_after_seconds
+        ):
+            log(
+                f"  ⚠ 전체 소켓 무진전 {loop.time() - last_progress_at:.0f}초 - "
+                "공유 수집 경계를 재구축한다"
+            )
+            raise LsRealtimeError("실시간 시세가 무진전 상태다")
 
 
 # ---------------------------------------------------------------------------
@@ -601,12 +636,16 @@ async def _run_worker_resilient(
     stop: asyncio.Event,
     shard_index: int,
     retry_backoff: float = SESSION_RETRY_BACKOFF,
+    max_consecutive_failures: int = 2,
     log=print,
 ):
     """한 shard의 handshake 실패가 정상 시세 socket까지 끊지 않게 격리한다."""
     loop = asyncio.get_running_loop()
     started = loop.time()
     first_attempt = True
+    consecutive_failures = 0
+    if max_consecutive_failures < 1:
+        raise ValueError("max_consecutive_failures 는 1 이상이어야 한다")
     while not stop.is_set():
         elapsed = loop.time() - started
         remaining = max_seconds - elapsed
@@ -615,11 +654,20 @@ async def _run_worker_resilient(
         try:
             if first_attempt:
                 first_attempt = False
-                return await _run_worker_after_delay(
+                result = await _run_worker_after_delay(
                     worker, max_seconds=remaining, delay_seconds=delay_seconds
                 )
-            return await worker.run(max_seconds=remaining)
+            else:
+                result = await worker.run(max_seconds=remaining)
+            consecutive_failures = 0
+            return result
         except LsRealtimeError as exc:
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                raise LsRealtimeError(
+                    f"소켓{shard_index}가 {consecutive_failures}회 연속 실패했다 - "
+                    "공유 수집 경계를 재구축한다"
+                ) from exc
             log(
                 f"  ⚠ 소켓{shard_index} 수집 오류: {exc} - "
                 f"{retry_backoff:.0f}초 후 해당 소켓만 재시작"
@@ -662,6 +710,13 @@ async def run_capture(
           f"(소켓당 최대 {SUBSCRIPTIONS_PER_SOCKET}) {mode} {ws_url}", flush=True)
 
     heartbeat_seconds = max(float(env.get("LS_HEARTBEAT_SECONDS") or 60), 5.0)
+    no_progress_restart_seconds = max(
+        float(
+            env.get("LS_NO_PROGRESS_RESTART_SECONDS")
+            or DEFAULT_NO_PROGRESS_RESTART_SECONDS
+        ),
+        heartbeat_seconds,
+    )
     connect_stagger_seconds = max(
         float(env.get("LS_WS_CONNECT_STAGGER_SECONDS") or DEFAULT_WS_CONNECT_STAGGER_SECONDS),
         0.0,
@@ -711,7 +766,12 @@ async def run_capture(
             # "실시간으로 적재되는 게 눈으로 안 보인다"). stop 에서만 끝나는 task 라
             # 아래 wait 의 pending 취소 경로가 함께 정리한다.
             hb_task = asyncio.create_task(
-                _heartbeat(sinks, stop, interval_seconds=heartbeat_seconds)
+                _heartbeat(
+                    sinks,
+                    stop,
+                    interval_seconds=heartbeat_seconds,
+                    restart_after_seconds=no_progress_restart_seconds,
+                )
             )
             # shard 장애는 _run_worker_resilient 안에서 해당 소켓만 재접속한다.
             # 한 handshake 실패로 정상 소켓까지 취소하면 전 종목 시세가 주기적으로

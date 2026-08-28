@@ -112,6 +112,10 @@ class IndicatorDefinition:
     integer_parameters: frozenset[str] = frozenset()
     string_parameters: frozenset[str] = frozenset()
     required_parameters: frozenset[str] = frozenset()
+    # Numeric parameters are positive by default.  A bar shift is the one
+    # honest exception: ``OFFSET=0`` means "the latest completed bar", which is
+    # exactly what HTS notation such as ``bollingerband(종가,2,0,20)`` states.
+    zero_allowed_parameters: frozenset[str] = frozenset()
     supported_markets: frozenset[str] = frozenset({"KRX"})
     supported_timeframes: frozenset[str] = frozenset(
         {"1M", "5M", "15M", "1H", "1D"}
@@ -148,6 +152,7 @@ class IndicatorDefinition:
             "provider": self.provider,
             "outputs": {key: value.value for key, value in self.outputs.items()},
             "defaults": {key: str(value) for key, value in self.defaults.items()},
+            "required_parameters": sorted(self.required_parameters),
             "supported_markets": sorted(self.supported_markets),
             "supported_timeframes": sorted(self.supported_timeframes),
             "warmup_bars": (

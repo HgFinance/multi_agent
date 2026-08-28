@@ -57,6 +57,16 @@ def test_langsmith_unique_trace_quota_fails_open_and_stops_retries() -> None:
         worker_observability._LANGSMITH_USAGE_LIMITED = False
 
 
+def test_explicit_publisher_can_run_with_automatic_tracing_disabled() -> None:
+    assert worker_observability._enabled(
+        {
+            "LANGSMITH_TRACING": "false",
+            "HGFINANCE_LANGSMITH_PUBLISH_ENABLED": "true",
+            "LANGSMITH_API_KEY": "test-key",
+        }
+    )
+
+
 def test_worker_trace_defaults_to_aggregate_tool_children() -> None:
     assert worker_observability._tool_trace_mode({}) == "aggregate"
     assert worker_observability._tool_trace_mode(

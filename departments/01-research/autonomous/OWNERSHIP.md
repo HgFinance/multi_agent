@@ -40,6 +40,14 @@ Web/Discord → BFF 중앙 라우터 → autonomous_research_ingress
 예산에 맞춘 제한). intake materialize와 결과 JSON 출력 순서는 직렬·정렬로 유지하고,
 한 lab의 실패 기록은 다른 lab의 실행을 막지 않습니다.
 
+배포 인계 순서와 PAPER 실행기 계약은
+[`STRATEGY_HERMES_DEPLOYMENT.md`](STRATEGY_HERMES_DEPLOYMENT.md)에 고정한다.
+Hermes는 후보·결과·데이터 경계만 남기고, 사람이 명시적으로 승인한 뒤 BFF와
+private runtime-control이 immutable Bundle과 컨테이너를 만든다. 실행기는
+TimescaleDB 원시 체결·호가를 읽고, `PAPER_ORDERING` Bundle의 조건 충족 시
+deployment-bound runtime-control 경유로 Trading의 PAPER directive를 제출한다.
+LS 브로커 키는 child에 없으며, LIVE 주문 권한은 없다.
+
 ## 보존·삭제 규칙
 
 `factory/`, `contracts/factory_contracts.py`, `pipeline/factory_bridge.py`, 과거

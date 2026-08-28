@@ -176,6 +176,42 @@ def test_live_stage_payload_does_not_invent_conditional_worker_signals():
     assert payload["incident"] == {}
 
 
+def test_request_time_evidence_is_loaded_once_per_pipeline(monkeypatch):
+    calls = {"broker": 0, "price": 0, "news": 0, "ownership": 0}
+
+    def broker():
+        calls["broker"] += 1
+        return {"status": "OK", "authoritative": False}
+
+    def price(_query):
+        calls["price"] += 1
+        return {"status": "OK", "symbol": "005930"}
+
+    def news(_query):
+        calls["news"] += 1
+        return {"status": "OK", "symbol": "005930", "headlines": []}
+
+    def ownership():
+        calls["ownership"] += 1
+        return {"status": "OK"}
+
+    monkeypatch.setenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test")
+    monkeypatch.setattr(portfolio_pipeline, "_broker_account_context", broker)
+    monkeypatch.setattr(portfolio_pipeline, "_query_price_levels", price)
+    monkeypatch.setattr(portfolio_pipeline, "_query_news_evidence", news)
+    monkeypatch.setattr(portfolio_pipeline, "_query_ownership_scan", ownership)
+
+    result = asyncio.run(
+        run_portfolio_recommendation_pipeline_async(
+            _profile(query="삼성전자 가격과 뉴스 분석"),
+            [_candidate("balanced-core")],
+        )
+    )
+
+    assert result["pipeline_status"] == "COMPLETED"
+    assert calls == {"broker": 1, "price": 1, "news": 1, "ownership": 0}
+
+
 def test_failed_research_contract_cannot_surface_as_no_action(monkeypatch):
     original_invoke = portfolio_pipeline._invoke_worker
 

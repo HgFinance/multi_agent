@@ -153,7 +153,33 @@ def test_runtime_observability_declares_hermes_scope():
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["observability_scope"] == "risk-api-deterministic-pipeline"
+    assert (
+        body["observability_scope"]
+        == "risk-api-deterministic-pipeline+hermes-terminal-receipts"
+    )
     assert body["hermes_included"] is False
     assert body["aggregation_status"] == "PARTIAL"
-    assert "LangSmith" in body["hermes_observability_source"]
+    assert "Hermes agent log" in body["hermes_observability_source"]
+
+
+def test_hermes_terminal_activity_is_recorded_without_langsmith():
+    response = client.post(
+        "/risk/v1/observability/hermes",
+        json={
+            "event_id": "risk-hermes-test-terminal-1",
+            "task_id": "t_risk_test_terminal",
+            "root_id": "t_risk_test_root",
+            "request_id": "risk-test-request-1",
+            "status": "completed",
+            "duration_ms": 1234,
+            "discord_status": "sent",
+            "discord_channel_id": "channel-1",
+            "discord_thread_id": "thread-1",
+            "discord_message_id": "message-1",
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    runtime = client.get("/risk/v1/observability/runtime").json()
+    assert runtime["hermes_included"] is True
+    assert runtime["latest_hermes_activity"]["task_id"] == "t_risk_test_terminal"

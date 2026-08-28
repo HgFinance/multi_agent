@@ -79,7 +79,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         with patch.object(
             ceo_mirror_api,
             "_ceo_query",
-            side_effect=lambda request: (
+            side_effect=lambda request, **_: (
                 calls.append(request.request_id) or {"task_id": "t_web"}
             ),
         ):
@@ -186,7 +186,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         with patch.object(
             ceo_mirror_api,
             "_ceo_query",
-            side_effect=lambda request: (
+            side_effect=lambda request, **_: (
                 calls.append(request.request_id) or {"task_id": "t_discord"}
             ),
         ):
@@ -394,7 +394,9 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(captured[0].fund_id, "fund-abc")
         self.assertEqual(captured[0].book_id, "book-abc")
 
-    def test_central_router_sends_strategy_queries_to_the_lab_for_web_and_discord(self) -> None:
+    def test_central_router_sends_strategy_queries_to_the_lab_for_web_and_discord(
+        self,
+    ) -> None:
         from apps.api.ceo import CeoAsk
 
         accepted = ceo_mirror_api.StrategyResearchAccepted(
@@ -404,7 +406,9 @@ class CeoMirrorExecutionTest(unittest.TestCase):
             status_url="/ui/strategy-research/requests/strategy-central-1",
         )
         with (
-            patch.object(ceo_mirror_api, "accept_strategy_research_query", return_value=accepted) as admit,
+            patch.object(
+                ceo_mirror_api, "accept_strategy_research_query", return_value=accepted
+            ) as admit,
             patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
         ):
             web = ceo_mirror_api.mirror_ask(
@@ -430,14 +434,62 @@ class CeoMirrorExecutionTest(unittest.TestCase):
             )
 
         self.assertEqual(web["schema_version"], "autonomous-research-request.v1")
-        self.assertEqual(discord.ceo["schema_version"], "autonomous-research-request.v1")
+        self.assertEqual(
+            discord.ceo["schema_version"], "autonomous-research-request.v1"
+        )
         self.assertEqual(admit.call_count, 2)
         self.assertEqual(ceo_query.call_count, 0)
-        self.assertTrue(admit.call_args_list[0].kwargs["request_id"].startswith("strategy-"))
-        self.assertEqual(admit.call_args_list[1].kwargs["discord_channel_id"], "channel-1")
-        self.assertEqual(admit.call_args_list[1].kwargs["discord_message_id"], "555555555555555555")
+        self.assertTrue(
+            admit.call_args_list[0].kwargs["request_id"].startswith("strategy-")
+        )
+        self.assertEqual(
+            admit.call_args_list[1].kwargs["discord_channel_id"], "channel-1"
+        )
+        self.assertEqual(
+            admit.call_args_list[1].kwargs["discord_message_id"], "555555555555555555"
+        )
 
-    def test_central_router_sends_human_strategy_deployment_to_release_boundary(self) -> None:
+    def test_explicit_quant_strategy_queries_stay_on_quant_pipeline(self) -> None:
+        from apps.api.ceo import CeoAsk
+
+        response = {"task_id": "t_quant_precedence", "status": "accepted"}
+        query = (
+            "Quant 부서에서 069500.KS 전략의 수익률·변동성·샤프·MDD를 검증하고 "
+            "주문·승격 없이 HOLD 여부를 판단해줘"
+        )
+        with (
+            patch.object(ceo_mirror_api, "_strategy_query") as strategy_query,
+            patch.object(
+                ceo_mirror_api, "_ceo_query", return_value=response
+            ) as ceo_query,
+        ):
+            web = ceo_mirror_api.mirror_ask(
+                CeoAsk(query=query, request_id="quant-precedence-web-1"),
+                x_source_message_id=None,
+                x_actor_id=None,
+                owner_id=None,
+            )
+            discord = ceo_mirror_api.mirror_ingress(
+                CanonicalIngress(
+                    query=query,
+                    request_id="discord:quant-precedence-1",
+                    source="discord",
+                    source_message_id="quant-precedence-1",
+                    actor_id="discord-user",
+                    discord_channel_id="channel-quant",
+                    discord_message_id="quant-precedence-1",
+                ),
+                _http_request(internal_discord=True),
+            )
+
+        self.assertEqual(web["task_id"], "t_quant_precedence")
+        self.assertEqual(discord.task_id, "t_quant_precedence")
+        self.assertEqual(strategy_query.call_count, 0)
+        self.assertEqual(ceo_query.call_count, 2)
+
+    def test_central_router_sends_human_strategy_deployment_to_release_boundary(
+        self,
+    ) -> None:
         from apps.api.ceo import CeoAsk
 
         accepted = ceo_mirror_api.StrategyDeploymentAccepted(
@@ -450,7 +502,11 @@ class CeoMirrorExecutionTest(unittest.TestCase):
             message="배포 요청을 릴리스 게이트에 등록했습니다.",
         )
         with (
-            patch.object(ceo_mirror_api, "request_strategy_deployment_from_text", return_value=accepted) as deploy,
+            patch.object(
+                ceo_mirror_api,
+                "request_strategy_deployment_from_text",
+                return_value=accepted,
+            ) as deploy,
             patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
         ):
             web = ceo_mirror_api.mirror_ask(
@@ -476,11 +532,15 @@ class CeoMirrorExecutionTest(unittest.TestCase):
             )
 
         self.assertEqual(web["schema_version"], "autonomous-strategy-deployment.v1")
-        self.assertEqual(discord.ceo["schema_version"], "autonomous-strategy-deployment.v1")
+        self.assertEqual(
+            discord.ceo["schema_version"], "autonomous-strategy-deployment.v1"
+        )
         self.assertEqual(deploy.call_count, 2)
         self.assertEqual(ceo_query.call_count, 0)
 
-    def test_central_router_sends_explicit_strategy_approval_to_approval_boundary(self) -> None:
+    def test_central_router_sends_explicit_strategy_approval_to_approval_boundary(
+        self,
+    ) -> None:
         from apps.api.ceo import CeoAsk
 
         accepted = ceo_mirror_api.StrategyDeploymentAccepted(
@@ -502,7 +562,9 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                 "approve_strategy_deployment_from_text",
                 return_value=accepted,
             ) as approve,
-            patch.object(ceo_mirror_api, "request_strategy_deployment_from_text") as deploy,
+            patch.object(
+                ceo_mirror_api, "request_strategy_deployment_from_text"
+            ) as deploy,
             patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
         ):
             web = ceo_mirror_api.mirror_ask(
@@ -533,7 +595,9 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(deploy.call_count, 0)
         self.assertEqual(ceo_query.call_count, 0)
 
-    def test_central_router_sends_top_level_strategy_exception_to_same_approval_boundary(self) -> None:
+    def test_central_router_sends_top_level_strategy_exception_to_same_approval_boundary(
+        self,
+    ) -> None:
         from apps.api.ceo import CeoAsk
 
         accepted = ceo_mirror_api.StrategyDeploymentAccepted(
@@ -557,7 +621,9 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                 "approve_strategy_deployment_from_text",
                 return_value=accepted,
             ) as approve,
-            patch.object(ceo_mirror_api, "request_strategy_deployment_from_text") as deploy,
+            patch.object(
+                ceo_mirror_api, "request_strategy_deployment_from_text"
+            ) as deploy,
             patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
         ):
             web = ceo_mirror_api.mirror_ask(
@@ -585,7 +651,9 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(deploy.call_count, 0)
         self.assertEqual(ceo_query.call_count, 0)
 
-    def test_central_router_sends_strategy_container_power_command_to_lifecycle_boundary(self) -> None:
+    def test_central_router_sends_strategy_container_power_command_to_lifecycle_boundary(
+        self,
+    ) -> None:
         from apps.api.ceo import CeoAsk
 
         accepted = ceo_mirror_api.StrategyDeploymentAccepted(
@@ -679,7 +747,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         ):
             actual = ceo_mirror_api._ceo_query(
                 CanonicalIngress(
-                    query="위 질문을 다시 분석해줘",
+                    query="이어서",
                     request_id="discord:context-message-1",
                     source="discord",
                     source_message_id="context-message-1",
@@ -699,6 +767,10 @@ class CeoMirrorExecutionTest(unittest.TestCase):
             "starter-message-1",
         )
         self.assertNotIn("previous_question_context", ceo_query.call_args.kwargs)
+        self.assertEqual(
+            ceo_query.call_args.kwargs["deterministic_routing_plan"]["routing_basis"],
+            "previous_question_context",
+        )
 
     def test_binding_ceo_query_does_not_emit_langsmith_root_trace(self) -> None:
         response = {

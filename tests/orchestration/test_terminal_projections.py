@@ -758,6 +758,7 @@ class TerminalProjectionTests(unittest.TestCase):
         self.assertEqual(metric["output_verdict"], "CONDITIONAL PASS")
         self.assertEqual(metric["telemetry_completeness"], "terminal-handoff")
         self.assertNotIn("findings", metric)
+        self.assertFalse(publish.call_args.kwargs["confirm_delivery"])
 
     def test_qa_terminal_uses_log_observed_tool_errors(self) -> None:
         repository = FakeAuditRepository()

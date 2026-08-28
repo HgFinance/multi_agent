@@ -1596,6 +1596,30 @@ def _mark_ingress_failed(adapter: Any, message_id: str) -> None:
         logger.error("discord-ingress ledger_fail_ack=failed message_id=%s", message_id)
 
 
+def _ingress_conflict_is_duplicate(error: Any) -> bool:
+    """Treat only the BFF's canonical identity conflicts as deduplication."""
+
+    try:
+        body = error.read()
+    except Exception:  # noqa: BLE001 - an empty error body keeps legacy behavior
+        body = b""
+    if not body:
+        # A proxy or test double may omit the body. Preserve the old
+        # at-most-once behavior for an ambiguous 409 with no domain detail.
+        return True
+    try:
+        import json
+
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return False
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if not isinstance(detail, str):
+        return False
+    normalized = detail.casefold()
+    return "already bound" in normalized or "duplicate" in normalized
+
+
 def _forward_to_ingress(message: Any, adapter: Any) -> bool:
     """사람 메시지를 `/ui/ceo/ingress`로 넘긴다. 넘겼으면 True.
 
@@ -1697,8 +1721,10 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
         except urllib.error.HTTPError as exc:
             # The BFF binds the exact Discord message ID before execution, so
             # a retry after an ambiguous transport outcome cannot create a
-            # second workflow.  409 proves an earlier attempt already won.
-            if exc.code == 409:
+            # second workflow. Only its explicit identity-conflict response
+            # proves an earlier attempt already won; domain 409s must remain
+            # visible as failures instead of being mislabeled as duplicates.
+            if exc.code == 409 and _ingress_conflict_is_duplicate(exc):
                 logger.info(
                     "discord-ingress status=duplicate message_id=%s", message_id
                 )

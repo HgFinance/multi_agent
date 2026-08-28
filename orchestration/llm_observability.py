@@ -6,6 +6,7 @@ import contextlib
 import contextvars
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -15,9 +16,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any, Literal
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 
 @dataclass
@@ -31,8 +32,10 @@ class WorkerMetric:
     retries: int = 0
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    max_tokens: int | None = None
     latency_ms: int = 0
     errors: int = 0
+    length_termination_count: int = 0
 
     def as_dict(
         self, *, status: str, attempts: int, eval_score: float | None
@@ -49,12 +52,167 @@ class WorkerMetric:
             "retries": max(attempts - 1, 0),
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
+            "max_tokens": self.max_tokens,
             "latency_ms": self.latency_ms
             or int((time.perf_counter() - self.started_at) * 1000),
             "eval_score": eval_score,
             "error_count": self.errors,
+            "length_termination_count": self.length_termination_count,
             "raw_payloads_sent": False,
         }
+
+
+@dataclass
+class _MetricAggregate:
+    """Bounded source-side metric window.
+
+    LangSmith's read-side window aggregation cannot recover the unique-trace
+    quota already spent by one run per metric.  Keep only scalar counters and a
+    bounded latency sample locally, then publish one redacted run per
+    stage/model/window.  The lock is held only while updating this object; all
+    network I/O happens on the daemon worker.
+    """
+
+    project_name: str
+    name: str
+    stage: str
+    model_name: str
+    window_start_epoch: int
+    window_seconds: int
+    count: int = 0
+    error_count: int = 0
+    non_success_count: int = 0
+    latency_count: int = 0
+    latency_sum_ms: int = 0
+    latency_min_ms: int | None = None
+    latency_max_ms: int = 0
+    latencies: list[int] = field(default_factory=list)
+    worker_ids: set[str] = field(default_factory=set)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    token_observation_count: int = 0
+    max_tokens: int = 0
+    llm_calls: int = 0
+    retries: int = 0
+    tool_calls: int = 0
+    tool_error_count: int = 0
+    length_termination_count: int = 0
+    cost_usd_sum: float = 0.0
+    cost_observation_count: int = 0
+
+    def add(self, metric: Mapping[str, Any]) -> None:
+        self.count += 1
+        worker_id = str(metric.get("worker_id") or "").strip()
+        if worker_id:
+            self.worker_ids.add(worker_id)
+        status = str(metric.get("status") or "success").strip().casefold()
+        if status not in _LANGSMITH_SUCCESS_STATUSES:
+            self.non_success_count += 1
+        self.error_count += max(0, _safe_int(metric.get("error_count")))
+        latency = max(0, _safe_int(metric.get("latency_ms")))
+        if latency:
+            self.latency_count += 1
+            self.latency_sum_ms += latency
+            self.latency_min_ms = (
+                latency
+                if self.latency_min_ms is None
+                else min(self.latency_min_ms, latency)
+            )
+            self.latency_max_ms = max(self.latency_max_ms, latency)
+            # A five-minute window normally has far fewer samples.  The cap
+            # prevents an unexpectedly busy process from growing without bound.
+            if len(self.latencies) < 2048:
+                self.latencies.append(latency)
+        prompt = _safe_int(metric.get("prompt_tokens"))
+        completion = _safe_int(metric.get("completion_tokens"))
+        if prompt or completion:
+            self.prompt_tokens += max(prompt, 0)
+            self.completion_tokens += max(completion, 0)
+            self.token_observation_count += 1
+        max_tokens = _safe_int(metric.get("max_tokens"))
+        if max_tokens > 0:
+            self.max_tokens = max(self.max_tokens, max_tokens)
+        self.llm_calls += max(0, _safe_int(metric.get("llm_calls")))
+        self.retries += max(0, _safe_int(metric.get("retries")))
+        self.tool_calls += max(0, _safe_int(metric.get("tool_calls")))
+        self.tool_error_count += max(0, _safe_int(metric.get("tool_error_count")))
+        self.length_termination_count += max(
+            0, _safe_int(metric.get("length_termination_count"))
+        )
+        try:
+            cost = float(metric.get("cost_usd"))
+        except (TypeError, ValueError):
+            cost = -1.0
+        if cost >= 0:
+            self.cost_usd_sum += cost
+            self.cost_observation_count += 1
+
+    def as_metric(self) -> dict[str, Any]:
+        ordered = sorted(self.latencies)
+        p95 = (
+            ordered[
+                min(
+                    len(ordered) - 1,
+                    max(0, int(math.ceil(len(ordered) * 0.95)) - 1),
+                )
+            ]
+            if ordered
+            else 0
+        )
+        start = datetime.fromtimestamp(self.window_start_epoch, timezone.utc)
+        end = datetime.fromtimestamp(
+            self.window_start_epoch + self.window_seconds, timezone.utc
+        )
+        metric: dict[str, Any] = {
+            "schema_version": "llm.performance.aggregate.v1",
+            "source": "source-aggregated",
+            "stage": self.stage,
+            "model_name": self.model_name,
+            "status": (
+                "degraded"
+                if self.error_count or self.non_success_count or self.tool_error_count
+                else "success"
+            ),
+            "error_count": self.error_count,
+            "failed_count": self.non_success_count,
+            "error_rate": round(self.non_success_count / self.count, 6)
+            if self.count
+            else 0.0,
+            "metric_count": self.count,
+            "worker_count": len(self.worker_ids),
+            "latency_ms": p95,
+            "p95_latency_ms": p95,
+            "latency_sum_ms": self.latency_sum_ms,
+            "latency_min_ms": self.latency_min_ms or 0,
+            "latency_max_ms": self.latency_max_ms,
+            "latency_avg_ms": (
+                round(self.latency_sum_ms / self.latency_count, 2)
+                if self.latency_count
+                else 0
+            ),
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "token_observation_count": self.token_observation_count,
+            "max_tokens": self.max_tokens or None,
+            "llm_calls": self.llm_calls,
+            "retries": self.retries,
+            "tool_calls": self.tool_calls,
+            "tool_error_count": self.tool_error_count,
+            "length_termination_count": self.length_termination_count,
+            "length_termination_rate": round(
+                self.length_termination_count / self.count, 6
+            )
+            if self.count
+            else 0.0,
+            "window_start": start.isoformat(),
+            "window_end": end.isoformat(),
+            "latency_scope": "stage_model_window",
+            "raw_payloads_sent": False,
+        }
+        if self.cost_observation_count:
+            metric["cost_usd"] = round(self.cost_usd_sum, 8)
+            metric["cost_observation_count"] = self.cost_observation_count
+        return metric
 
 
 _CURRENT_METRIC: contextvars.ContextVar[WorkerMetric | None] = contextvars.ContextVar(
@@ -82,6 +240,11 @@ _STAGE_PROFILES = {
     "accounting": "accounting-portfolio-department",
     "qa": "qa-department",
 }
+_METRIC_AGGREGATES: dict[tuple[str, str, str, str, int], _MetricAggregate] = {}
+_METRIC_AGGREGATE_LOCK = Lock()
+_METRIC_AGGREGATE_WAKE = Event()
+_METRIC_AGGREGATE_THREAD: Thread | None = None
+_METRIC_AGGREGATE_MAX_WAIT_SECONDS = 30.0
 
 
 def _root_run_id_from_trace_context(trace_context: str | None) -> str:
@@ -158,8 +321,26 @@ def end_worker_metric(
         _CURRENT_METRIC.reset(token)
 
 
+def _usage_value(usage: Any, names: tuple[str, ...]) -> Any:
+    """Read common OpenAI-compatible and native Ollama usage field names."""
+
+    for name in names:
+        if isinstance(usage, Mapping):
+            value = usage.get(name)
+        else:
+            value = getattr(usage, name, None)
+        if value is not None:
+            return value
+    return None
+
+
 def record_llm_call(
-    *, usage: Any = None, latency_ms: int = 0, error: bool = False
+    *,
+    usage: Any = None,
+    latency_ms: int = 0,
+    error: bool = False,
+    finish_reason: str | None = None,
+    max_tokens: int | None = None,
 ) -> None:
     metric = _CURRENT_METRIC.get()
     if metric is None:
@@ -167,20 +348,28 @@ def record_llm_call(
     metric.llm_calls += 1
     metric.latency_ms += max(int(latency_ms), 0)
     metric.errors += int(error)
+    if str(finish_reason or "").strip().casefold() == "length":
+        metric.length_termination_count += 1
+    if max_tokens is not None:
+        try:
+            parsed_max_tokens = int(max_tokens)
+        except (TypeError, ValueError):
+            parsed_max_tokens = 0
+        if parsed_max_tokens > 0:
+            metric.max_tokens = max(metric.max_tokens or 0, parsed_max_tokens)
     if usage is None:
         return
     for target, names in (
-        ("prompt_tokens", ("prompt_tokens", "input_tokens")),
-        ("completion_tokens", ("completion_tokens", "output_tokens")),
+        (
+            "prompt_tokens",
+            ("prompt_tokens", "input_tokens", "prompt_eval_count"),
+        ),
+        (
+            "completion_tokens",
+            ("completion_tokens", "output_tokens", "eval_count"),
+        ),
     ):
-        value = next(
-            (
-                getattr(usage, name, None)
-                for name in names
-                if getattr(usage, name, None) is not None
-            ),
-            None,
-        )
+        value = _usage_value(usage, names)
         if value is not None:
             setattr(metric, target, int(value) + int(getattr(metric, target) or 0))
 
@@ -200,6 +389,11 @@ def _langsmith_quota_paused() -> bool:
         return time.monotonic() < _LANGSMITH_QUOTA_PAUSED_UNTIL
 
 
+def _langsmith_quota_remaining_seconds() -> float:
+    with _LANGSMITH_QUOTA_LOCK:
+        return max(0.0, _LANGSMITH_QUOTA_PAUSED_UNTIL - time.monotonic())
+
+
 def _mark_langsmith_quota_pause(error: BaseException) -> None:
     """Stop hammering an exhausted LangSmith tenant until its cooldown ends."""
 
@@ -216,10 +410,33 @@ def _mark_langsmith_quota_pause(error: BaseException) -> None:
         )
 
 
-def langsmith_enabled() -> bool:
-    tracing = os.getenv("LANGSMITH_TRACING", "")
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def langsmith_tracing_enabled() -> bool:
+    """Whether LangChain/LangGraph may emit ambient callback traces."""
+
     return (
-        tracing.casefold() in {"1", "true", "yes", "on"}
+        _env_flag("LANGSMITH_TRACING")
+        and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
+        and not _langsmith_quota_paused()
+    )
+
+
+def langsmith_enabled() -> bool:
+    """Whether the application-owned, redacted publisher may send events.
+
+    Keep this separate from ``LANGSMITH_TRACING``.  Automatic callbacks are
+    intentionally disabled in production to prevent full graph-state traces,
+    while the small explicit root/metric publishers remain useful.
+    """
+
+    return (
+        (
+            _env_flag("LANGSMITH_TRACING")
+            or _env_flag("HGFINANCE_LANGSMITH_PUBLISH_ENABLED")
+        )
         and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
         and not _langsmith_quota_paused()
     )
@@ -245,6 +462,209 @@ def _safe_int(value: Any, *, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _metric_aggregation_window_seconds() -> int:
+    try:
+        return max(
+            60,
+            min(
+                int(
+                    os.getenv(
+                        "LANGSMITH_METRIC_AGGREGATION_WINDOW_SECONDS", "300"
+                    )
+                ),
+                3600,
+            ),
+        )
+    except (TypeError, ValueError):
+        return 300
+
+
+def _publish_metric_run(
+    safe: Mapping[str, Any],
+    *,
+    trace_id: str | None = None,
+    project_name: str | None = None,
+    name: str = "llm.performance.metric",
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    run_id: str | None = None,
+    parent_run_id: str | None = None,
+    confirm_delivery: bool = False,
+) -> bool:
+    """Write one already-redacted metric without applying sampling again."""
+
+    try:
+        client = _safe_langsmith_client()
+        completed_at = end_time or datetime.now(timezone.utc)
+        if start_time is not None and start_time > completed_at:
+            start_time = None
+        run_kwargs: dict[str, Any] = {
+            "name": str(name or "llm.performance.metric"),
+            "run_type": "chain",
+            "inputs": {},
+            "outputs": {},
+            "project_name": project_name or langsmith_project("metrics"),
+            "tags": [
+                "hgfinance",
+                "metric",
+                "redacted",
+                f"worker:{safe.get('worker_id', 'aggregate')}",
+            ],
+            "extra": {"metadata": dict(safe)},
+            "end_time": completed_at,
+            "hide_inputs": True,
+            "hide_outputs": True,
+        }
+        if start_time is not None:
+            run_kwargs["start_time"] = start_time
+        if run_id:
+            run_kwargs["id"] = str(run_id)
+        if parent_run_id:
+            # For a child run LangSmith needs both the parent edge and the
+            # parent's trace id. The application correlation ID stays in metadata.
+            run_kwargs["parent_run_id"] = str(parent_run_id)
+            run_kwargs["trace_id"] = str(parent_run_id)
+        client.create_run(**run_kwargs)
+        if confirm_delivery:
+            flush = getattr(client, "flush", None)
+            if callable(flush):
+                flush(timeout=3.0)
+            if not langsmith_enabled():
+                return False
+        return True
+    except Exception as exc:  # noqa: BLE001 - optional observer is fail-open.
+        _mark_langsmith_quota_pause(exc)
+        return False
+
+
+def _flush_metric_aggregates(*, force: bool = False) -> int:
+    """Publish completed local metric windows from a non-request thread."""
+
+    # Keep completed windows in the bounded map while a known quota pause is
+    # active. This avoids both futile HTTP attempts and silent data loss.
+    if not langsmith_enabled():
+        return 0
+    now = time.time()
+    ready: list[_MetricAggregate] = []
+    with _METRIC_AGGREGATE_LOCK:
+        for key, aggregate in list(_METRIC_AGGREGATES.items()):
+            deadline = aggregate.window_start_epoch + aggregate.window_seconds
+            if force or now >= deadline:
+                ready.append(_METRIC_AGGREGATES.pop(key))
+    published = 0
+    for aggregate in ready:
+        metric = aggregate.as_metric()
+        safe = _metric_metadata(metric)
+        run_id = uuid5(
+            NAMESPACE_URL,
+            "hgfinance:langsmith-metric:"
+            f"{aggregate.project_name}:{aggregate.name}:{aggregate.stage}:"
+            f"{aggregate.model_name}:{aggregate.window_start_epoch}",
+        )
+        if _publish_metric_run(
+            safe,
+            project_name=aggregate.project_name,
+            name=aggregate.name,
+            start_time=datetime.fromtimestamp(
+                aggregate.window_start_epoch, timezone.utc
+            ),
+            end_time=datetime.fromtimestamp(
+                aggregate.window_start_epoch + aggregate.window_seconds,
+                timezone.utc,
+            ),
+            run_id=str(run_id),
+        ):
+            published += 1
+        elif _langsmith_quota_paused():
+            # The window was removed before network I/O so request threads can
+            # continue writing the next window. Put this one back only for a
+            # quota pause; unrelated provider failures are fail-open and do
+            # not trigger an unbounded retry loop.
+            key = (
+                aggregate.project_name,
+                aggregate.name,
+                aggregate.stage,
+                aggregate.model_name,
+                aggregate.window_start_epoch,
+            )
+            with _METRIC_AGGREGATE_LOCK:
+                _METRIC_AGGREGATES.setdefault(key, aggregate)
+    return published
+
+
+def _metric_aggregation_loop() -> None:
+    while True:
+        _flush_metric_aggregates()
+        with _METRIC_AGGREGATE_LOCK:
+            deadlines = [
+                aggregate.window_start_epoch + aggregate.window_seconds
+                for aggregate in _METRIC_AGGREGATES.values()
+            ]
+        if deadlines:
+            next_deadline = max(0.0, min(deadlines) - time.time())
+            if next_deadline <= 0 and _langsmith_quota_paused():
+                # The window is ready but the provider is paused. Wake once
+                # after cooldown instead of spinning on a past deadline.
+                timeout = max(
+                    1.0,
+                    min(
+                        _METRIC_AGGREGATE_MAX_WAIT_SECONDS,
+                        _langsmith_quota_remaining_seconds() or 1.0,
+                    ),
+                )
+            else:
+                timeout = max(
+                    0.1,
+                    min(_METRIC_AGGREGATE_MAX_WAIT_SECONDS, next_deadline),
+                )
+        else:
+            timeout = _METRIC_AGGREGATE_MAX_WAIT_SECONDS
+        _METRIC_AGGREGATE_WAKE.wait(timeout)
+        _METRIC_AGGREGATE_WAKE.clear()
+
+
+def _ensure_metric_aggregation_thread() -> None:
+    global _METRIC_AGGREGATE_THREAD
+    with _METRIC_AGGREGATE_LOCK:
+        if _METRIC_AGGREGATE_THREAD is not None and _METRIC_AGGREGATE_THREAD.is_alive():
+            return
+        _METRIC_AGGREGATE_THREAD = Thread(
+            target=_metric_aggregation_loop,
+            name="langsmith-metric-aggregation",
+            daemon=True,
+        )
+        _METRIC_AGGREGATE_THREAD.start()
+
+
+def _aggregate_metric(
+    safe: Mapping[str, Any], *, project_name: str, name: str
+) -> bool:
+    window_seconds = _metric_aggregation_window_seconds()
+    now_epoch = int(time.time())
+    window_start = (now_epoch // window_seconds) * window_seconds
+    stage = str(safe.get("stage") or "unknown")[:96]
+    model_name = str(safe.get("model_name") or "unknown")[:160]
+    key = (project_name, name, stage, model_name, window_start)
+    with _METRIC_AGGREGATE_LOCK:
+        aggregate = _METRIC_AGGREGATES.get(key)
+        if aggregate is None:
+            aggregate = _MetricAggregate(
+                project_name=project_name,
+                name=name,
+                stage=stage,
+                model_name=model_name,
+                window_start_epoch=window_start,
+                window_seconds=window_seconds,
+            )
+            _METRIC_AGGREGATES[key] = aggregate
+        aggregate.add(safe)
+    _ensure_metric_aggregation_thread()
+    _METRIC_AGGREGATE_WAKE.set()
+    # This is deliberately "accepted into the local bounded buffer", not a
+    # claim that LangSmith has acknowledged the run. No network wait occurs.
+    return True
 
 
 def trace_should_publish(
@@ -360,6 +780,7 @@ def _metric_metadata(
         "retries",
         "prompt_tokens",
         "completion_tokens",
+        "max_tokens",
         # source: 같은 Agent 의 활동이라도 **어느 경로로 관측됐는지**가 다르다
         # (2026-08-20). bff_ask=BFF 가 직접 CLI 를 띄운 턴, kanban_card=CEO
         # 워크플로 카드가 끝난 것. 원인 추적이 안 되면 "왜 이 이벤트가 났지"에
@@ -383,6 +804,8 @@ def _metric_metadata(
         "observability_source",
         "tool_calls",
         "tool_error_count",
+        "length_termination_count",
+        "length_termination_rate",
         "tool_duration_total_ms",
         "tool_latency_available",
         "tool_timing_source",
@@ -407,6 +830,27 @@ def _metric_metadata(
         "semantic_qa_relevance",
         "semantic_qa_finding_count",
         "semantic_qa_finding_codes",
+        "metric_count",
+        "worker_count",
+        "token_observation_count",
+        "cost_observation_count",
+        "failed_count",
+        "error_rate",
+        "latency_sum_ms",
+        "latency_min_ms",
+        "latency_max_ms",
+        "latency_avg_ms",
+        "p95_latency_ms",
+        "window_start",
+        "window_end",
+        "cost_usd",
+        "cost_status",
+        "cost_source",
+        "hallucination_verdict",
+        "hallucination_score",
+        "harmfulness_verdict",
+        "harmfulness_score",
+        "relevance_score",
     }
     result = {key: metric[key] for key in allowed if key in metric}
     if trace_id:
@@ -568,6 +1012,10 @@ def _safe_langsmith_client() -> Any:
     from langsmith import Client
 
     return Client(
+        # The SDK otherwise performs a background GET /info before it can
+        # drain its first batch. The application uses the stable default
+        # batch contract and does not need server-tuned fields here.
+        info={},
         hide_inputs=True,
         hide_outputs=True,
         hide_metadata=False,
@@ -590,6 +1038,9 @@ def _structured_langsmith_client() -> Any:
     from langsmith import Client
 
     return Client(
+        # Root lifecycle writes use the same stable default batch contract;
+        # avoid a per-process /info discovery request on the observer path.
+        info={},
         hide_inputs=False,
         hide_outputs=False,
         hide_metadata=False,
@@ -611,7 +1062,7 @@ def redacted_trace(
 ) -> Iterator[None]:
     """Make every nested LangChain/LangGraph run redacted for this pipeline."""
 
-    if not langsmith_enabled():
+    if not langsmith_tracing_enabled():
         yield
         return
     if not trace_should_publish(identity=trace_id, status="success"):
@@ -672,22 +1123,37 @@ def publish_metric(
     run_id: str | None = None,
     parent_run_id: str | None = None,
     confirm_delivery: bool = False,
+    aggregate: bool = False,
     force: bool = False,
 ) -> bool:
-    """Send one empty-payload performance metric to the metrics project.
+    """Send one redacted performance metric to LangSmith.
 
-    This is the legacy single-event metric producer.  Only its destination is
-    separated from the workflow trace project; no second metric/run is made.
-    New feedback evaluation aggregates these events in bounded windows rather
-    than creating one QA artifact per event. ``project_name`` is retained for
-    the compatibility root publisher below.  The bounded terminal projection
-    may request a synchronous queue flush with ``confirm_delivery`` so a
-    tenant quota rejection is not reported as published.
+    ``aggregate=True`` is used by high-frequency metric producers. It keeps a
+    stage/model/window counter locally and returns immediately; the background
+    publisher sends one run when the window closes. Root lifecycle and terminal
+    projections stay single-run and can still request delivery confirmation.
     """
 
-    if not langsmith_enabled():
+    # A local aggregate is still useful while LangSmith is in its quota
+    # cooldown: it performs no network I/O and can be published once the
+    # cooldown expires. One-run traces must remain fail-closed here so they do
+    # not instantiate clients or enqueue work while the tenant is paused.
+    if aggregate:
+        if not (
+            (_env_flag("LANGSMITH_TRACING")
+             or _env_flag("HGFINANCE_LANGSMITH_PUBLISH_ENABLED"))
+            and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
+        ):
+            return False
+    elif not langsmith_enabled():
         return False
-    if not trace_should_publish(
+    # Source-side aggregation is already the quota-control boundary: every
+    # accepted event is reduced to bounded scalar state and no network write
+    # occurs here. Applying the 5% publish sampler before aggregation would
+    # silently turn latency/token/error metrics into a biased sample. Keep the
+    # sampler for one-run publishers, but aggregate all locally observable
+    # events.
+    if not aggregate and not trace_should_publish(
         identity=str(trace_id or metric.get("trace_id") or metric.get("worker_id") or ""),
         status=str(metric.get("status") or "success"),
         error_count=_safe_int(metric.get("error_count")),
@@ -701,61 +1167,32 @@ def publish_metric(
         force=force,
     ):
         return False
-    try:
-        client = _safe_langsmith_client()
-        safe = _metric_metadata(metric, trace_id=trace_id)
-        safe.update(
-            {
-                key: value
-                for key, value in trace_correlation_metadata(
-                    safe, trace_id=trace_id
-                ).items()
-                if not safe.get(key)
-            }
-        )
-        completed_at = end_time or datetime.now(timezone.utc)
-        if start_time is not None and start_time > completed_at:
-            # A malformed clock/timestamp must not make the optional observer
-            # reject an otherwise useful terminal metric.
-            start_time = None
-        run_kwargs: dict[str, Any] = {
-            "name": str(name or "llm.performance.metric"),
-            "run_type": "chain",
-            "inputs": {},
-            "outputs": {},
-            "project_name": project_name or langsmith_project("metrics"),
-            "tags": [
-                "hgfinance",
-                "metric",
-                "redacted",
-                f"worker:{metric.get('worker_id', 'unknown')}",
-            ],
-            "extra": {"metadata": safe},
-            "end_time": completed_at,
-            "hide_inputs": True,
-            "hide_outputs": True,
+    safe = _metric_metadata(metric, trace_id=trace_id)
+    safe.update(
+        {
+            key: value
+            for key, value in trace_correlation_metadata(safe, trace_id=trace_id).items()
+            if not safe.get(key)
         }
-        if start_time is not None:
-            run_kwargs["start_time"] = start_time
-        if run_id:
-            run_kwargs["id"] = str(run_id)
-        if parent_run_id:
-            # For a child run LangSmith needs both the parent edge and the
-            # parent's trace id.  ``trace_id`` above remains the stable
-            # application correlation field in metadata.
-            run_kwargs["parent_run_id"] = str(parent_run_id)
-            run_kwargs["trace_id"] = str(parent_run_id)
-        client.create_run(**run_kwargs)
-        if confirm_delivery:
-            flush = getattr(client, "flush", None)
-            if callable(flush):
-                flush(timeout=3.0)
-            if not langsmith_enabled():
-                return False
-        return True
-    except Exception as exc:  # noqa: BLE001 - optional metric publishing is fail-open.
-        _mark_langsmith_quota_pause(exc)
-        return False
+    )
+    resolved_project = project_name or langsmith_project("metrics")
+    if aggregate and not confirm_delivery and not run_id and not parent_run_id:
+        return _aggregate_metric(
+            safe,
+            project_name=resolved_project,
+            name=str(name or "llm.performance.metric"),
+        )
+    return _publish_metric_run(
+        safe,
+        trace_id=trace_id,
+        project_name=resolved_project,
+        name=name,
+        start_time=start_time,
+        end_time=end_time,
+        run_id=run_id,
+        parent_run_id=parent_run_id,
+        confirm_delivery=confirm_delivery,
+    )
 
 
 def publish_root_trace(
@@ -772,6 +1209,7 @@ def publish_root_trace(
     semantic_qa: Mapping[str, Any] | None = None,
     started_at: datetime | None = None,
     ended_at: datetime | None = None,
+    run_id: str | None = None,
 ) -> bool:
     """Publish one legacy redacted user-query observation.
 
@@ -836,6 +1274,7 @@ def publish_root_trace(
         project_name=langsmith_project("workflow"),
         start_time=started_at,
         end_time=ended_at,
+        run_id=run_id,
         force=True,
     )
 
@@ -950,14 +1389,6 @@ def close_root_trace(
             # update that run directly instead of creating a new child
             # placeholder through RunTree.from_headers().
             resolved_run_id = _root_run_id_from_trace_context(trace_context)
-        if resolved_run_id:
-            # ``RunTree.post`` may use the SDK background batcher. An
-            # immediate system answer can otherwise update the run before the
-            # ingress POST is flushed, and that delayed POST restores the old
-            # ``accepted`` metadata over the terminal QA result.
-            flush = getattr(client, "flush", None)
-            if callable(flush):
-                flush()
         if not resolved_run_id:
             run = RunTree.from_headers(
                 {"langsmith-trace": str(trace_context)},
@@ -1055,12 +1486,9 @@ def close_root_trace(
             update_kwargs["trace_id"] = resolved_run_id
             update_kwargs["dotted_order"] = dotted_order
         client.update_run(**update_kwargs)
-        # The post-response QA task queries this run immediately.  Flush the
-        # terminal patch as well as the initial POST so QA cannot observe the
-        # stale ingress ``accepted`` metadata during the handoff window.
-        flush = getattr(client, "flush", None)
-        if callable(flush):
-            flush()
+        # ``create_run``/``update_run`` both enqueue into the same SDK queue.
+        # Queue order preserves POST -> PATCH, so no request-path flush is
+        # needed; the SDK worker and its shutdown hook drain the queue.
         return True
     except Exception as exc:  # noqa: BLE001 - root finalization is fail-open.
         # The live path and restart reconciliation can both reach the same
@@ -1421,6 +1849,7 @@ def publish_worker_activity(
             "model_name",
             "prompt_tokens",
             "completion_tokens",
+            "max_tokens",
             "retries",
         )
         if measured.get(key) not in (None, "")

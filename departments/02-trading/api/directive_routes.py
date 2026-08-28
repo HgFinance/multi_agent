@@ -11,7 +11,7 @@ from directives.contracts import UserDirectiveRequest
 from directives.market_data import (
     FixtureMarketDataProvider,
     HttpMarketDataProvider,
-    LsPaperFallbackMarketDataProvider,
+    with_quote_fallback,
 )
 from directives.repository import InMemoryDirectiveRepository, PostgresDirectiveRepository
 from directives.service import DirectiveServiceError, UserDirectiveService, require_paper_execution_mode
@@ -25,20 +25,17 @@ def _production() -> bool:
     return os.environ.get("APP_ENV", "").strip().lower() in {"prod", "production"}
 
 
-def _quote_fallback_enabled() -> bool:
-    """Allow the read-only LS quote fallback without changing order routing.
+def _quote_broker_factory() -> LSPaperBroker:
+    """Fail startup rather than silently degrading to the projection-only path."""
 
-    The TSDB quote projection only covers the bounded realtime subscription
-    basket, so a conditional rule on any other symbol can never satisfy the
-    freshness window at admission time.  Binding that fallback to
-    TRADING_BROKER_ADAPTER used to be the only way to enable it, but that flag
-    also moves order placement onto the LS PAPER broker - a far larger change
-    than reading one quote.  Keep the two decisions separate.
-    """
-
-    return os.environ.get(
-        "TRADING_MARKET_QUOTE_LS_FALLBACK", ""
-    ).strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        return LSPaperBroker.from_env()
+    except LSPaperBrokerError as exc:
+        raise DirectiveServiceError(
+            "TRADING_MARKET_QUOTE_FALLBACK_UNAVAILABLE",
+            f"LS PAPER quote fallback is enabled but unavailable: {exc}",
+            503,
+        ) from exc
 
 
 def configure_directive_runtime() -> UserDirectiveService:
@@ -90,18 +87,11 @@ def configure_directive_runtime() -> UserDirectiveService:
     # read-only t1101 read and is chosen independently.  Explicit configuration
     # that cannot be honored fails startup rather than silently degrading back
     # to the projection-only path.
-    quote_broker = external_broker
-    if quote_broker is None and _quote_fallback_enabled():
-        try:
-            quote_broker = LSPaperBroker.from_env()
-        except LSPaperBrokerError as exc:
-            raise DirectiveServiceError(
-                "TRADING_MARKET_QUOTE_FALLBACK_UNAVAILABLE",
-                f"LS PAPER quote fallback is enabled but unavailable: {exc}",
-                503,
-            ) from exc
-    if quote_broker is not None:
-        market_data = LsPaperFallbackMarketDataProvider(market_data, quote_broker)
+    market_data = with_quote_fallback(
+        market_data,
+        external_broker=external_broker,
+        broker_factory=_quote_broker_factory,
+    )
     _service = UserDirectiveService(
         repository,
         market_data,

@@ -129,6 +129,15 @@ def _correlation_from_synthesis(
     )
 
 
+def correlation_from_tasks(
+    source_task: Mapping[str, Any],
+    root_task: Mapping[str, Any] | None = None,
+) -> DiscordCorrelation:
+    """Resolve the same child/root correlation used by Discord delivery."""
+
+    return _correlation_from_synthesis(source_task, root_task)
+
+
 def _message_id_from_request_id(request_id: str | None) -> str | None:
     if not request_id:
         return None
@@ -1274,5 +1283,6 @@ __all__ = [
     "DiscordCorrelation",
     "DiscordFinalDelivery",
     "correlation_from_task",
+    "correlation_from_tasks",
     "humanize_user_facing_text",
 ]

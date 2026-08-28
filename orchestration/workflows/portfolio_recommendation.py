@@ -330,6 +330,7 @@ class PortfolioPipelineState(TypedDict, total=False):
     task_plan: dict[str, Any]
     portfolio_candidates: list[dict[str, Any]]
     data_context: dict[str, Any]
+    request_evidence: dict[str, Any]
     suitability: dict[str, Any]
     suitability_context: dict[str, Any]
     risk_gate: dict[str, Any]
@@ -491,7 +492,14 @@ def _query_news_evidence(query: str) -> dict[str, Any]:
         return {"status": "NOT_CONFIGURED", "symbol": symbol, "company": name,
                 "reason": "RESEARCH_MCP_URL 미설정 - 뉴스·공시 조회면이 배선되지 않았다"}
     token = os.environ.get("MCP_RESEARCH_API_KEY", "").strip()
-    req = urllib.request.Request(f"{base}/evidence/holdings/{symbol}")
+    # Price levels are fetched by ``_query_price_levels`` below.  The richer
+    # holdings endpoint can also calculate bars/price context, but requesting
+    # that projection here would duplicate the same market reads and add them
+    # to the news latency path.
+    req = urllib.request.Request(
+        f"{base}/evidence/holdings/{symbol}"
+        "?include_price=false&include_company=false"
+    )
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
@@ -751,16 +759,29 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
     # ▶ 가격 근거. 없으면 Worker 가 목표가를 스스로 지어낸다. 서버가 일봉에서
     #   결정론으로 낸 값을 실어 **설명만** 하게 한다.
     _q = _user_query(state)
-    price_levels = (_query_price_levels(_q) if _q
-                    else {"status": "NO_QUERY", "reason": "자유 질의가 아니다"})
-    news_evidence = (_query_news_evidence(_q) if _q
-                     else {"status": "NO_QUERY", "reason": "자유 질의가 아니다"})
-    # 종목이 특정되지 않았는데 질의가 있으면 "무엇을 살까" 를 묻는 것이다.
-    # 그 답은 시장 전체 지분공시에서 뽑은 **관측된 매집**이다.
-    ownership_scan = (_query_ownership_scan()
-                      if _q and price_levels.get("status") == "NO_SYMBOL"
-                      else {"status": "NOT_REQUESTED",
-                            "reason": "종목이 특정된 질의다"})
+    request_evidence = state.get("request_evidence")
+    if isinstance(request_evidence, Mapping):
+        # The graph prepares request-time evidence once before the first
+        # department route.  Every later stage consumes the same immutable
+        # snapshot instead of repeating the same network reads.
+        price_levels = dict(request_evidence.get("price_levels") or {})
+        news_evidence = dict(request_evidence.get("news_evidence") or {})
+        ownership_scan = dict(request_evidence.get("ownership_scan") or {})
+        broker_account = dict(request_evidence.get("broker_account") or {})
+    else:
+        # Keep this direct-call fallback for legacy/unit callers that construct
+        # a state without running the graph preparation node.
+        price_levels = (_query_price_levels(_q) if _q
+                        else {"status": "NO_QUERY", "reason": "자유 질의가 아니다"})
+        news_evidence = (_query_news_evidence(_q) if _q
+                         else {"status": "NO_QUERY", "reason": "자유 질의가 아니다"})
+        # 종목이 특정되지 않았는데 질의가 있으면 "무엇을 살까" 를 묻는 것이다.
+        # 그 답은 시장 전체 지분공시에서 뽑은 **관측된 매집**이다.
+        ownership_scan = (_query_ownership_scan()
+                          if _q and price_levels.get("status") == "NO_SYMBOL"
+                          else {"status": "NOT_REQUESTED",
+                                "reason": "종목이 특정된 질의다"})
+        broker_account = _broker_account_context()
 
     context: dict[str, Any] = {
         "trace_id": state.get("trace_id", ""),
@@ -809,7 +830,7 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
         "portfolio_state": {
             "status": accounting_context.get("status", default_status),
             "candidates": state.get("portfolio_candidates", []),
-            "broker_account": _broker_account_context(),
+            "broker_account": broker_account,
             # ▶ holdings-analyst-worker 의 input_fields 는
             #   (holding_question, portfolio_state, news) 뿐이다. 최상단에
             #   실으면 **워커에게 영원히 안 보인다** - MCP 경로에서 같은
@@ -1122,6 +1143,7 @@ async def _invoke_worker(
         publish_metric(
             {**performance, **correlation},
             trace_id=correlation.get("trace_id", ""),
+            aggregate=True,
         )
         # LangSmith 와 이중 계측(2026-08-10, HR 유휴 Agent 관측용). 이 한 지점이
         # research/quant/trading/risk/qa/accounting 6개 투자본부의 모든 Worker 실행을
@@ -1171,6 +1193,7 @@ async def _invoke_worker(
         publish_metric(
             {**performance, **correlation},
             trace_id=correlation.get("trace_id", ""),
+            aggregate=True,
         )
         # LangSmith 와 이중 계측(2026-08-10, HR 유휴 Agent 관측용). 이 한 지점이
         # research/quant/trading/risk/qa/accounting 6개 투자본부의 모든 Worker 실행을
@@ -1285,6 +1308,58 @@ def build_portfolio_recommendation_graph(
         return {
             "suitability": result.model_dump(mode="json"),
             "suitability_context": context,
+        }
+
+    async def prepare_request_evidence(
+        state: PortfolioPipelineState,
+    ) -> dict[str, Any]:
+        """Load request-time evidence once, without blocking the event loop.
+
+        ``_stage_payload`` is requested by every department route and again for
+        the CEO input.  Previously each call repeated the same broker, price,
+        news, and (when applicable) ownership reads.  The reads are independent
+        except for the ownership-scan decision, so perform the independent
+        reads concurrently and retain one request-scoped snapshot in graph
+        state.  The existing synchronous fallback in ``_stage_payload`` keeps
+        direct/unit callers compatible.
+        """
+
+        query = _user_query(state)
+        broker_future = asyncio.to_thread(_broker_account_context)
+        if query:
+            price_future = asyncio.to_thread(_query_price_levels, query)
+            news_future = asyncio.to_thread(_query_news_evidence, query)
+        else:
+            price_future = None
+            news_future = None
+
+        if query and price_future is not None and news_future is not None:
+            broker_account, price_levels, news_evidence = await asyncio.gather(
+                broker_future,
+                price_future,
+                news_future,
+            )
+        else:
+            broker_account = await broker_future
+            price_levels = {"status": "NO_QUERY", "reason": "자유 질의가 아니다"}
+            news_evidence = {"status": "NO_QUERY", "reason": "자유 질의가 아니다"}
+
+        if query and price_levels.get("status") == "NO_SYMBOL":
+            ownership_scan = await asyncio.to_thread(_query_ownership_scan)
+        else:
+            ownership_scan = {
+                "status": "NOT_REQUESTED",
+                "reason": "종목이 특정된 질의다",
+            }
+
+        return {
+            "request_evidence": {
+                "query": query,
+                "broker_account": broker_account,
+                "price_levels": price_levels,
+                "news_evidence": news_evidence,
+                "ownership_scan": ownership_scan,
+            }
         }
 
     def upstream_contracts_safe(state: PortfolioPipelineState, stages: Sequence[str]) -> bool:
@@ -1790,6 +1865,7 @@ def build_portfolio_recommendation_graph(
         }
 
     graph.add_node("validate_profile", validate_profile)
+    graph.add_node("prepare_request_evidence", prepare_request_evidence)
     graph.add_node("risk_precheck", risk_precheck)
     graph.add_node("finalize", finalize)
 
@@ -1798,6 +1874,7 @@ def build_portfolio_recommendation_graph(
         graph.add_node(f"{stage}_fan_in", fan_in_node(stage))
 
     graph.add_edge(START, "validate_profile")
+    graph.add_edge("validate_profile", "prepare_request_evidence")
 
     # Explicit fan-out/fan-in barriers preserve the department sequence.
     graph.add_node("research_fanout", lambda state: {})
@@ -1807,7 +1884,7 @@ def build_portfolio_recommendation_graph(
     graph.add_node("accounting_fanout", lambda state: {})
     graph.add_node("ceo_fanout", lambda state: {})
 
-    graph.add_edge("validate_profile", "research_fanout")
+    graph.add_edge("prepare_request_evidence", "research_fanout")
     graph.add_conditional_edges("research_fanout", route_stage("research"))
     graph.add_edge("research_worker", "research_fan_in")
     # quant 는 research 바로 다음이다 - 백테스트 입력(가격·유니버스·피처)이 리서치

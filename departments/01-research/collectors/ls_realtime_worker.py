@@ -612,7 +612,7 @@ def _check_sink_time_flush():
     from uuid import NAMESPACE_URL, uuid5
 
     ev = normalize("S3_", _sample_tick_payload(),
-                   received_at=datetime(2026, 7, 31, 1, 30, tzinfo=timezone.utc),
+                   received_at=datetime.now(timezone.utc),
                    resolve_instrument=lambda s: uuid5(NAMESPACE_URL, f"ls://KOSPI/{s}"))
     sink.add(ev)
     assert repo.calls == 0

@@ -67,6 +67,10 @@ class ExperienceLookup:
     error_code: str | None = None
     lookup_ms: int = 0
     hint_build_ms: int = 0
+    # Failure memory is deliberately separate from planner_hint.  It may help
+    # the deterministic boundary avoid a recently failing route, but it must
+    # never be copied into an LLM planner prompt as an instruction.
+    failure_memory: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +163,58 @@ def bounded_planner_hint(
         bounded["current_departments"] = [
             str(item)[:48] for item in current[:12]
         ]
+    return bounded or None
+
+
+def bounded_failure_memory_hint(
+    failure_memory: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return a payload-free, deterministic failure-memory envelope.
+
+    Failure history is useful for routing recovery, but a failed route is not
+    permission to invent a new route.  Keep only structured codes and bounded
+    department-set counts so this helper can be used before task creation
+    without exposing prompts, answers, or free-form lessons.
+    """
+
+    if not isinstance(failure_memory, Mapping):
+        return None
+    bounded: dict[str, Any] = {}
+    source = _bounded_text(failure_memory.get("source"), 64)
+    if source:
+        bounded["source"] = source
+    try:
+        matched = max(0, min(int(failure_memory.get("matched_failures", 0)), 20))
+    except (TypeError, ValueError):
+        matched = 0
+    if matched:
+        bounded["matched_failures"] = matched
+    for key in ("failure_codes", "failed_department_sets"):
+        values = failure_memory.get(key)
+        if not isinstance(values, list):
+            continue
+        safe_values: list[dict[str, Any]] = []
+        for item in values[:6]:
+            if not isinstance(item, Mapping):
+                continue
+            if key == "failure_codes":
+                code = _safe_code(item.get("code"))
+                if not code:
+                    continue
+                value: dict[str, Any] = {"code": code}
+            else:
+                departments = _bounded_text(item.get("departments"), 160)
+                if not departments:
+                    continue
+                value = {"departments": departments}
+            try:
+                count = max(1, min(int(item.get("count", 1)), 20))
+            except (TypeError, ValueError):
+                count = 1
+            value["count"] = count
+            safe_values.append(value)
+        if safe_values:
+            bounded[key] = safe_values
     return bounded or None
 
 
@@ -320,6 +376,11 @@ def build_discord_experience_record(
     success = normalized_status in _SUCCESS_TERMINAL_STATUSES
     if not success:
         failure_codes.append(_safe_code(f"ROOT_{normalized_status or 'FAILED'}"))
+    if _body_marker(root_body, "routing_basis").casefold() == "insufficient_query_intent":
+        # A clarification is a terminal, safe outcome, but it is still a
+        # useful failure-memory signal: the next similar turn should consult
+        # context/memory before attempting department fan-out.
+        failure_codes.append("CLARIFICATION_REQUIRED")
     verified = qa_decision is not None
     verification = None
     if verified:
@@ -497,6 +558,7 @@ class ExperienceBank:
             records = [self._row_to_record(row) for row in rows]
             hint_started = monotonic()
             hint = self._build_hint(records, primary_departments)
+            failure_memory = self._build_failure_memory(records)
             hint_build_ms = _elapsed_ms(hint_started)
             elapsed = _elapsed_ms(started)
             LOGGER.info(
@@ -518,6 +580,7 @@ class ExperienceBank:
                 None,
                 lookup_ms,
                 hint_build_ms,
+                failure_memory=failure_memory,
             )
         except Exception as exc:  # noqa: BLE001 - D5 is advisory; D4 must continue.
             return self._lookup_failure(
@@ -707,6 +770,44 @@ class ExperienceBank:
             hint["current_departments"] = sorted(requested)
         return hint
 
+    @staticmethod
+    def _build_failure_memory(
+        records: Sequence[ExperienceRecord],
+    ) -> dict[str, Any] | None:
+        """Aggregate only structured failure identities for recovery routing."""
+
+        failures = [
+            record
+            for record in records
+            if not record.success or bool(record.failure_codes)
+        ]
+        if not failures:
+            return None
+        failure_codes: Counter[str] = Counter()
+        department_sets: Counter[str] = Counter()
+        for record in failures:
+            for code in record.failure_codes:
+                safe_code = _safe_code(code)
+                if safe_code:
+                    failure_codes[safe_code] += 1
+            if record.primary_departments:
+                department_sets["+".join(_safe_departments(record.primary_departments))] += 1
+        result: dict[str, Any] = {
+            "source": "memo_harness_d5_failure_memory",
+            "matched_failures": len(failures),
+        }
+        if failure_codes:
+            result["failure_codes"] = [
+                {"code": code, "count": count}
+                for code, count in failure_codes.most_common(6)
+            ]
+        if department_sets:
+            result["failed_department_sets"] = [
+                {"departments": departments, "count": count}
+                for departments, count in department_sets.most_common(6)
+            ]
+        return result
+
 
 def _elapsed_ms(started: float) -> int:
     return max(0, int((monotonic() - started) * 1000))
@@ -719,6 +820,7 @@ __all__ = [
     "ExperienceLookup",
     "ExperienceRecord",
     "ExperienceWrite",
+    "bounded_failure_memory_hint",
     "bounded_planner_hint",
     "build_discord_experience_record",
     "build_experience_record",

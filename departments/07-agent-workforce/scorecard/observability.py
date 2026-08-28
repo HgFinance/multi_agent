@@ -124,6 +124,19 @@ except ModuleNotFoundError as _exc:
 else:
     _WORKER_REGISTRY_IMPORT_ERROR = None
 
+try:
+    from orchestration.contracts.runtime_service_registry import (
+        RuntimeServiceRegistryError,
+        load_runtime_service_registry,
+    )
+except ModuleNotFoundError as _exc:
+    load_runtime_service_registry = None  # type: ignore[assignment]
+    _RUNTIME_SERVICE_REGISTRY_IMPORT_ERROR: str | None = f"{type(_exc).__name__}:{_exc}"
+    class RuntimeServiceRegistryError(RuntimeError):
+        """Fallback type used when the common runtime registry is not packaged."""
+else:
+    _RUNTIME_SERVICE_REGISTRY_IMPORT_ERROR = None
+
 
 
 # Worker Registry department key -> portfolio_recommendation event stage value.
@@ -322,6 +335,8 @@ DEFAULT_ACTIVITY_PAGE_LIMIT = LANGFUSE_MAX_PAGE_LIMIT
 # 표본이 되지만 total_items 는 서버 meta 에서 오므로 건수는 계속 정확하다 -
 # 잘린 것을 "그만큼만 있었다"로 바꾸지 않는 것이 요점이다.
 MAX_ACTIVITY_PAGES = 20
+LANGFUSE_OBSERVATIONS_PAGE_LIMIT = 1_000
+MAX_OBSERVATIONS_PAGES = 20
 
 
 @dataclass(frozen=True)
@@ -621,6 +636,62 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
         names = tuple(dict.fromkeys(event_names))
         if not names:
             return {}
+        observations_api = getattr(getattr(self._client, "api", None), "observations", None)
+        observations_get_many = getattr(observations_api, "get_many", None)
+        if callable(observations_get_many):
+            # Langfuse recommends the v2 observations endpoint for high-volume
+            # reads. It is cursor-paginated and avoids the separately
+            # rate-limited Metrics endpoint that was producing 429s for HR.
+            filters = json.dumps([
+                {
+                    "column": "name",
+                    "operator": "any of",
+                    "value": list(names),
+                    "type": "stringOptions",
+                },
+                {
+                    "column": "type",
+                    "operator": "=",
+                    "value": "EVENT",
+                    "type": "string",
+                },
+                {
+                    "column": "startTime",
+                    "operator": ">=",
+                    "value": since.isoformat(),
+                    "type": "datetime",
+                },
+                {
+                    "column": "startTime",
+                    "operator": "<",
+                    "value": (until or datetime.now(timezone.utc)).isoformat(),
+                    "type": "datetime",
+                },
+            ])
+            counts = dict.fromkeys(names, 0)
+            cursor: str | None = None
+            for _ in range(MAX_OBSERVATIONS_PAGES):
+                kwargs: dict[str, Any] = {
+                    "fields": "core,basic",
+                    "limit": LANGFUSE_OBSERVATIONS_PAGE_LIMIT,
+                    "filter": filters,
+                }
+                if cursor:
+                    kwargs["cursor"] = cursor
+                try:
+                    response = _bounded_langfuse_call(observations_get_many, **kwargs)
+                except Exception as exc:
+                    raise LangfuseQueryError(_query_failure_reason(exc)) from exc
+                for item in (getattr(response, "data", None) or []):
+                    name = getattr(item, "name", None)
+                    if name in counts:
+                        counts[name] += 1
+                next_cursor = getattr(getattr(response, "meta", None), "cursor", None)
+                if not next_cursor or next_cursor == cursor:
+                    return counts
+                cursor = str(next_cursor)
+            raise LangfuseQueryError("langfuse_observations_count_truncated")
+
         query = {
             "view": "observations",
             "dimensions": [{"field": "name"}],
@@ -1877,6 +1948,9 @@ class WorkforceObservability:
     # 이 호출이 Langfuse 에 실제로 낸 논리 질의 수. 관측 자체를 관측한다 - 중복
     # 제거가 조용히 풀리면(예: 창이 어긋나 캐시 키가 갈라지면) 이 값이 먼저 는다.
     langfuse_queries: int
+    # LLM Worker Registry와 분리된 deterministic services. In particular this
+    # makes Trading's always-on desk runner visible without inventing token cost.
+    runtime_services: tuple[dict[str, str], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -1888,6 +1962,7 @@ class WorkforceObservability:
             "worker_usage": [r.as_dict() for r in self.worker_usage],
             "trigger_rates": [r.as_dict() for r in self.trigger_rates],
             "langfuse_queries": self.langfuse_queries,
+            "runtime_services": [dict(item) for item in self.runtime_services],
         }
         if self.head_profiles_unavailable:
             payload["head_profiles_unavailable"] = self.head_profiles_unavailable
@@ -1923,6 +1998,27 @@ def collect_workforce_observability(
     since = now - timedelta(hours=lookback_hours)
 
     reader, reader_unavailable_reason = _resolve_reader(reader)
+
+    runtime_services: tuple[dict[str, str], ...] = ()
+    if load_runtime_service_registry is not None:
+        try:
+            runtime_registry = load_runtime_service_registry(repo_root)
+        except RuntimeServiceRegistryError:
+            # The LLM registry remains the hard dependency for HR metrics. A
+            # missing optional projection must not turn measured LLM data into
+            # UNAVAILABLE; the image contract test catches missing packaging.
+            runtime_services = ()
+        else:
+            runtime_services = tuple(
+                {
+                    "department": item.department,
+                    "service_id": item.service_id,
+                    "worker_id": item.worker_id,
+                    "kind": item.kind,
+                    "trigger": item.trigger,
+                }
+                for item in runtime_registry
+            )
 
     # 창이 같아야 캐시 키가 같다. 그래서 now 를 여기서 한 번 고정해 네 집계에
     # 그대로 넘긴다 - 각자 datetime.now() 를 부르게 두면 since 가 미세하게 어긋나
@@ -1980,6 +2076,7 @@ def collect_workforce_observability(
         trigger_rates=tuple(trigger_rates),
         head_profiles_unavailable=head_profiles_unavailable,
         langfuse_queries=shared.queries if isinstance(shared, WindowedActivityReader) else 0,
+        runtime_services=runtime_services,
     )
 
 

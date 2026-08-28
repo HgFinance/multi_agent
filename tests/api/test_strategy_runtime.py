@@ -19,6 +19,31 @@ def test_dynamic_paper_name_is_strictly_derived_from_deployment_id() -> None:
         strategy_runtime._deployment_container_name("strategy-paper-arbitrary")
 
 
+def test_container_status_keeps_live_container_id_for_tracking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = '{"Running":true,"Status":"running","StartedAt":"now"}'
+
+    monkeypatch.setattr(
+        strategy_runtime,
+        "_docker",
+        lambda *args: subprocess.CompletedProcess(
+            ["docker", *args], 0, state + "|container-123\n", ""
+        ),
+    )
+
+    assert strategy_runtime.container_status("strategy-paper-test") == {
+        "found": True,
+        "container_id": "container-123",
+        "running": True,
+        "status": "running",
+        "started_at": "now",
+        "finished_at": None,
+        "exit_code": None,
+        "restarting": False,
+    }
+
+
 def test_paper_power_controls_only_the_derived_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -74,6 +99,12 @@ def test_paper_remove_is_idempotent_and_does_not_remove_state_volume(
 def test_deploy_builds_a_restricted_signal_only_child(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(strategy_runtime, "STRATEGY_CONTAINER_CONTROL_ENABLED", True)
     monkeypatch.setattr(strategy_runtime, "STRATEGY_PAPER_IMAGE", "fixed-paper-image:test")
+    monkeypatch.setattr(strategy_runtime, "STRATEGY_PAPER_NETWORK", "hedgefund_default")
+    monkeypatch.setattr(
+        strategy_runtime,
+        "STRATEGY_PAPER_TIMESCALE_DATABASE_URL",
+        "postgresql://reader:password@timescaledb:5432/market",
+    )
     calls: list[tuple[str, ...]] = []
     started = False
 
@@ -107,8 +138,9 @@ def test_deploy_builds_a_restricted_signal_only_child(monkeypatch: pytest.Monkey
     assert "--read-only" in run
     assert "--cap-drop" in run and "ALL" in run
     assert "--network" in run
-    assert "container:hedgefund-strategy-runtime-control" in run
+    assert "hedgefund_default" in run
     assert "--mount" in run
+    assert "STRATEGY_PAPER_TIMESCALE_DATABASE_URL=postgresql://reader:password@timescaledb:5432/market" in run
     assert not any("docker.sock" in arg for arg in run)
     assert "--expected-hash" in run and "a" * 64 in run
 

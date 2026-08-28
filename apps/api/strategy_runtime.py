@@ -29,6 +29,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
 import re
 import subprocess
@@ -54,13 +56,20 @@ STRATEGY_CONTAINER_CONTROL_ENABLED = os.getenv(
 # Dynamic release is still an allowlisted operation. The sidecar may launch
 # only the fixed PAPER executor image, on its own compose network, with the
 # research volume read-only. It never accepts an image, command, host path, or
-# broker credential from a browser request.
+# broker credential from a browser request. The child receives only the
+# dedicated SELECT-only Timescale DSN configured on this private sidecar.
 STRATEGY_PAPER_IMAGE = os.getenv(
     "STRATEGY_PAPER_IMAGE", "hedgefund-operations-runtime:latest"
 )
+STRATEGY_PAPER_TIMESCALE_DATABASE_URL = os.getenv(
+    "STRATEGY_PAPER_TIMESCALE_DATABASE_URL", ""
+).strip()
 STRATEGY_RUNTIME_CONTROL_NAME = os.getenv(
     "STRATEGY_RUNTIME_CONTROL_NAME", "hedgefund-strategy-runtime-control"
 )
+STRATEGY_PAPER_NETWORK = os.getenv(
+    "STRATEGY_PAPER_NETWORK", "hedgefund_default"
+).strip()
 STRATEGY_LAB_VOLUME = os.getenv(
     "STRATEGY_LAB_VOLUME", "hedgefund_autonomous_research_lab"
 )
@@ -70,6 +79,10 @@ STRATEGY_RUNTIME_STATE_VOLUME = os.getenv(
 STRATEGY_RUNTIME_STATE_ROOT = Path(
     os.getenv("STRATEGY_RUNTIME_STATE_ROOT", "/var/lib/strategy-runtime")
 )
+STRATEGY_PAPER_ORDER_TOKEN = os.getenv("STRATEGY_PAPER_ORDER_TOKEN", "").strip()
+STRATEGY_PAPER_TRADING_API_URL = os.getenv(
+    "STRATEGY_PAPER_TRADING_API_URL", "http://trading-api:8000"
+).strip().rstrip("/")
 _DEPLOYMENT_ID_RE = re.compile(r"^deployment-[0-9a-f]{24}$")
 
 # `docker stop`의 기본 유예시간이 10초다(SIGTERM 후 안 죽으면 SIGKILL). 이보다
@@ -100,15 +113,38 @@ def _read_runtime_state(deployment_id: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _bundle_orders_enabled(bundle_path: str) -> bool:
+    """Read only server-created execution metadata, never caller code."""
+
+    try:
+        bundle = json.loads(Path(bundle_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    execution = bundle.get("execution") if isinstance(bundle, dict) else None
+    return isinstance(execution, dict) and execution.get("orders_enabled") is True
+
+
+def _deployment_order_token(deployment_id: str) -> str:
+    if len(STRATEGY_PAPER_ORDER_TOKEN) < 32:
+        raise StrategyRuntimeError("PAPER 전략 주문 게이트 토큰이 설정되지 않았습니다.")
+    return hmac.new(
+        STRATEGY_PAPER_ORDER_TOKEN.encode("utf-8"),
+        deployment_id.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def deploy_paper_bundle(
     *, deployment_id: str, request_id: str, bundle_path: str, bundle_hash: str | None
 ) -> dict[str, Any]:
-    """Launch one immutable, signal-only PAPER strategy container.
+    """Launch one immutable PAPER strategy container.
 
     The caller supplies only a path previously written by the BFF. This sidecar
     revalidates the path and content hash, then constructs every Docker option
     itself. The resulting container has no Docker socket, broker key, or write
-    access to the research lab.
+    access to the research lab. When the server-created Bundle enables PAPER
+    orders, the child receives only a deployment-bound token for the
+    runtime-control order endpoint.
     """
 
     if not STRATEGY_CONTAINER_CONTROL_ENABLED:
@@ -120,6 +156,10 @@ def deploy_paper_bundle(
     if not bundle_hash or not re.fullmatch(r"[0-9a-f]{64}", bundle_hash):
         raise StrategyRuntimeError("배포 Bundle hash가 없습니다.")
     container_name = _deployment_container_name(deployment_id)
+    orders_enabled = _bundle_orders_enabled(bundle_path)
+    execution_status = "PAPER_ORDERING" if orders_enabled else "SIGNAL_ONLY"
+    if orders_enabled:
+        _deployment_order_token(deployment_id)
 
     existing = container_status(container_name)
     if existing.get("found"):
@@ -130,7 +170,7 @@ def deploy_paper_bundle(
             "container_id": existing.get("container_id"),
             "runtime_status": "RUNNING" if existing.get("running") else "STOPPED",
             "container": existing,
-            "execution_status": "SIGNAL_ONLY",
+            "execution_status": execution_status,
         }
 
     image = _docker("image", "inspect", STRATEGY_PAPER_IMAGE)
@@ -141,6 +181,14 @@ def deploy_paper_bundle(
     control = container_status(STRATEGY_RUNTIME_CONTROL_NAME)
     if not control.get("found"):
         raise StrategyRuntimeError("strategy-runtime-control 컨테이너가 없습니다.")
+    if not STRATEGY_PAPER_TIMESCALE_DATABASE_URL:
+        raise StrategyRuntimeError(
+            "전략 PAPER Timescale 읽기 전용 연결이 설정되지 않았습니다."
+        )
+    if not STRATEGY_PAPER_NETWORK or STRATEGY_PAPER_NETWORK.startswith("container:"):
+        raise StrategyRuntimeError(
+            "전략 PAPER 전용 Compose 네트워크가 올바르게 설정되지 않았습니다."
+        )
 
     args = [
         "run",
@@ -156,7 +204,7 @@ def deploy_paper_bundle(
         "--label",
         f"com.hgfinance.request-id={request_id}",
         "--network",
-        f"container:{STRATEGY_RUNTIME_CONTROL_NAME}",
+        STRATEGY_PAPER_NETWORK,
         "--read-only",
         "--cap-drop",
         "ALL",
@@ -177,9 +225,23 @@ def deploy_paper_bundle(
         "--env",
         "MARKET_API_URL=http://market-api:8036",
         "--env",
+        f"STRATEGY_PAPER_TIMESCALE_DATABASE_URL={STRATEGY_PAPER_TIMESCALE_DATABASE_URL}",
+        "--env",
         f"STRATEGY_PAPER_RUNTIME_STATE_DIR=/var/lib/strategy-runtime",
         "--env",
         f"STRATEGY_DEPLOYMENT_ID={deployment_id}",
+    ]
+    if orders_enabled:
+        args.extend(
+            [
+                "--env",
+                f"STRATEGY_PAPER_ORDER_CONTROL_URL=http://{STRATEGY_RUNTIME_CONTROL_NAME}:8000",
+                "--env",
+                f"STRATEGY_PAPER_DEPLOYMENT_ORDER_TOKEN={_deployment_order_token(deployment_id)}",
+            ]
+        )
+    args.extend(
+        [
         STRATEGY_PAPER_IMAGE,
         "python",
         "-m",
@@ -188,7 +250,8 @@ def deploy_paper_bundle(
         bundle_path,
         "--expected-hash",
         bundle_hash,
-    ]
+        ]
+    )
     result = _docker(*args)
     if result.returncode != 0:
         raise StrategyRuntimeError((result.stderr or "docker run 실패").strip())
@@ -201,7 +264,7 @@ def deploy_paper_bundle(
         "container_id": status.get("container_id"),
         "runtime_status": "RUNNING" if status.get("running") else "STARTED",
         "container": status,
-        "execution_status": "SIGNAL_ONLY",
+        "execution_status": execution_status,
     }
 
 
@@ -220,12 +283,15 @@ def power_paper_deployment(*, deployment_id: str, action: PowerAction) -> dict[s
     if result.returncode != 0:
         raise StrategyRuntimeError((result.stderr or f"docker {action} 실패").strip())
     after = container_status(container_name)
+    runtime_state = _read_runtime_state(deployment_id) or {}
     return {
         "deployment_id": deployment_id,
         "container_name": container_name,
         "container": after,
         "runtime_status": "RUNNING" if action == "start" else "STOPPED",
-        "execution_status": "SIGNAL_ONLY",
+        "execution_status": str(
+            runtime_state.get("execution_status") or "SIGNAL_ONLY"
+        ),
     }
 
 
@@ -251,12 +317,15 @@ def remove_paper_deployment(*, deployment_id: str) -> dict[str, Any]:
 def paper_deployment_snapshot(deployment_id: str) -> dict[str, Any]:
     container_name = _deployment_container_name(deployment_id)
     container = container_status(container_name)
+    runtime = _read_runtime_state(deployment_id)
     return {
         "deployment_id": deployment_id,
         "container_name": container_name,
         "container": container,
-        "runtime": _read_runtime_state(deployment_id),
-        "execution_status": "SIGNAL_ONLY",
+        "runtime": runtime,
+        "execution_status": str(
+            (runtime or {}).get("execution_status") or "SIGNAL_ONLY"
+        ),
     }
 
 
@@ -276,8 +345,8 @@ def _docker(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def container_status(name: str = STRATEGY_CONTAINER_NAME) -> dict[str, Any]:
-    """`docker inspect`로 현재 상태만 읽는다. 쓰기 없음."""
-    result = _docker("inspect", "--format", "{{json .State}}", name)
+    """`docker inspect`로 현재 상태와 ID만 읽는다. 쓰기 없음."""
+    result = _docker("inspect", "--format", "{{json .State}}|{{.Id}}", name)
     if result.returncode != 0:
         # "No such object"는 컨테이너가 아예 없다는 뜻이다 - 아직 한 번도 안
         # 띄웠거나 이름이 바뀐 것이다. 오류를 "꺼짐"으로 위장하지 않는다.
@@ -286,9 +355,17 @@ def container_status(name: str = STRATEGY_CONTAINER_NAME) -> dict[str, Any]:
             "running": False,
             "detail": (result.stderr or "").strip() or "컨테이너를 찾을 수 없습니다.",
         }
-    state = json.loads(result.stdout)
+    state_text, separator, container_id = result.stdout.partition("|")
+    if not separator:
+        # Keep compatibility with older/test transports that returned only
+        # the state object while treating a real inspect response without an
+        # ID as an observable metadata defect.
+        state_text = result.stdout
+        container_id = ""
+    state = json.loads(state_text)
     return {
         "found": True,
+        "container_id": container_id.strip() or None,
         "running": bool(state.get("Running")),
         "status": state.get("Status"),
         "started_at": state.get("StartedAt"),

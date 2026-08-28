@@ -15,9 +15,12 @@ import logging
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -161,6 +164,10 @@ class StrategyDeploymentAccepted(BaseModel):
     container_id: str | None = None
     runtime_detail: dict[str, Any] = Field(default_factory=dict)
     backtest_summary: dict[str, Any] = Field(default_factory=dict)
+    operational_data_gate_status: Literal[
+        "PASS", "BLOCKED", "BYPASSED_NON_PRODUCTION", "NOT_APPLICABLE"
+    ] = "NOT_APPLICABLE"
+    operational_data_gate: dict[str, Any] = Field(default_factory=dict)
     message: str
 
 
@@ -199,6 +206,110 @@ class StrategyDeploymentRemoveAsk(BaseModel):
 
 def _owner(actor: str | None) -> str:
     return str(actor or "anonymous").strip() or "anonymous"
+
+
+def _strategy_operational_gate_enabled() -> bool:
+    configured = os.getenv("STRATEGY_OPERATIONAL_DATA_GATE_ENABLED")
+    if configured is not None:
+        return configured.strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("APP_ENV", "").strip().lower() in {"production", "prod"}
+
+
+def _gate_json(url: str) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=3.0) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("response_not_object")
+    return payload
+
+
+def _gate_timestamp(value: Any, *, field: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field}_missing")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field}_timezone_missing")
+    return parsed.astimezone(timezone.utc)
+
+
+def _gate_seconds(name: str, default: float, minimum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+def _strategy_operational_data_gate() -> dict[str, Any]:
+    """Check the data boundary before a research result becomes operational."""
+
+    if not _strategy_operational_gate_enabled():
+        return {
+            "status": "BYPASSED_NON_PRODUCTION",
+            "reason": "strategy_operational_data_gate_disabled_outside_production",
+        }
+
+    now = datetime.now(timezone.utc)
+    max_market_age = _gate_seconds("STRATEGY_MARKET_MAX_AGE_SECONDS", 180.0, 30.0)
+    max_nav_age = _gate_seconds("STRATEGY_NAV_MAX_AGE_SECONDS", 3600.0, 60.0)
+    evidence: dict[str, Any] = {
+        "status": "BLOCKED",
+        "checked_at": now.isoformat(),
+        "market": {"status": "NOT_CHECKED"},
+        "nav": {"status": "NOT_CHECKED"},
+    }
+    try:
+        market_base = os.getenv("MARKET_API_URL", "http://market-api:8036").rstrip("/")
+        market = _gate_json(f"{market_base}/health/freshness")
+        domains = {
+            str(row.get("domain")): row
+            for row in (market.get("domains") or [])
+            if isinstance(row, dict)
+        }
+        streams: dict[str, Any] = {}
+        for stream in ("ticks", "quotes"):
+            row = domains.get(stream)
+            if not isinstance(row, dict) or int(row.get("rows") or 0) <= 0:
+                raise ValueError(f"market_{stream}_missing")
+            last_event = _gate_timestamp(row.get("last_event"), field=f"market_{stream}")
+            age = (now - last_event).total_seconds()
+            if age < 0 or age > max_market_age:
+                raise ValueError(f"market_{stream}_stale:{age:.1f}s")
+            streams[stream] = {"last_event": last_event.isoformat(), "age_seconds": age}
+        evidence["market"] = {"status": "PASS", "streams": streams}
+
+        book_id = os.getenv(
+            "ACCOUNTING_ADVISORY_BOOK_ID",
+            "07d913de-9a5b-4cf5-b893-31a625445761",
+        ).strip()
+        accounting_base = os.getenv("ACCOUNTING_API_URL", "http://accounting-api:8000").rstrip("/")
+        accounting = _gate_json(
+            f"{accounting_base}/accounting/v1/ledgers/{book_id}/advisory-snapshot"
+        )
+        portfolio = accounting.get("portfolio")
+        if not isinstance(portfolio, dict) or portfolio.get("nav") in (None, ""):
+            raise ValueError("nav_missing")
+        if str(portfolio.get("quality_status") or "").upper() != "PASS":
+            raise ValueError(
+                f"nav_quality_not_pass:{portfolio.get('quality_status') or 'missing'}"
+            )
+        nav_as_of = _gate_timestamp(portfolio.get("as_of"), field="nav_as_of")
+        nav_age = (now - nav_as_of).total_seconds()
+        if nav_age < 0 or nav_age > max_nav_age:
+            raise ValueError(f"nav_stale:{nav_age:.1f}s")
+        evidence["nav"] = {
+            "status": "PASS",
+            "as_of": nav_as_of.isoformat(),
+            "age_seconds": nav_age,
+            "quality_status": portfolio.get("quality_status"),
+        }
+    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError) as exc:
+        evidence["reason"] = f"strategy_operational_data_gate:{type(exc).__name__}:{exc}"
+        return evidence
+
+    evidence["status"] = "PASS"
+    return evidence
 
 
 def _configured_user_ids(env_name: str) -> set[str]:
@@ -358,7 +469,29 @@ def _strategy_signature_metadata(plan: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _strategy_paper_orders_enabled() -> bool:
+    """Read the deployment-plane PAPER switch; LIVE remains impossible here."""
+
+    return os.getenv("STRATEGY_PAPER_ORDERS_ENABLED", "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _strategy_paper_order_quantity() -> str:
+    """Return a bounded integer quantity for the server-created Bundle."""
+
+    value = os.getenv("STRATEGY_PAPER_ORDER_QUANTITY", "1").strip()
+    if not re.fullmatch(r"[1-9]\d{0,8}", value):
+        raise HTTPException(status_code=503, detail="strategy_paper_order_quantity_invalid")
+    return value
+
+
 def _deployment_response(record: dict[str, Any]) -> StrategyDeploymentAccepted:
+    gate = record.get("operational_data_gate")
+    gate = gate if isinstance(gate, dict) else {}
     return StrategyDeploymentAccepted(
         request_id=str(record["request_id"]),
         deployment_id=str(record["deployment_id"]),
@@ -386,6 +519,8 @@ def _deployment_response(record: dict[str, Any]) -> StrategyDeploymentAccepted:
             if isinstance(record.get("backtest_summary"), dict)
             else {}
         ),
+        operational_data_gate_status=str(gate.get("status") or "NOT_APPLICABLE"),
+        operational_data_gate=gate,
         message=str(record.get("message") or ""),
     )
 
@@ -489,6 +624,16 @@ def _strategy_bundle_from_record(
     if record.get("requested_by") != owner_id and not allow_human_override:
         raise HTTPException(status_code=403, detail="strategy_research_request_forbidden")
 
+    # Re-check at the release boundary. A request may sit in
+    # AWAITING_APPROVAL while realtime data or NAV becomes stale; human
+    # approval cannot waive this data-integrity condition.
+    gate = _strategy_operational_data_gate()
+    if gate.get("status") not in {"PASS", "BYPASSED_NON_PRODUCTION"}:
+        raise HTTPException(
+            status_code=409,
+            detail="strategy_deployment_operational_data_gate_blocked",
+        )
+
     request_id = str(record["request_id"])
     status = _research_status(intake, request_id)
     research_status = str(status.get("status") or "").upper()
@@ -525,6 +670,8 @@ def _strategy_bundle_from_record(
     ):
         raise HTTPException(status_code=409, detail="strategy_deployment_candidate_changed")
 
+    orders_enabled = _strategy_paper_orders_enabled()
+    order_quantity = _strategy_paper_order_quantity()
     bundle = {
         "schema": "autonomous-strategy-paper-bundle.v1",
         "bundle_version": "sma-alignment-3m-v1",
@@ -543,6 +690,14 @@ def _strategy_bundle_from_record(
         "source_plan_id": record.get("plan_id"),
         "symbols": list(record.get("symbols") or []),
         "mode": "PAPER",
+        "market_data": {
+            "source": "TIMESCALE_RAW_TICKS_QUOTES",
+            "trade_table": "market.market_ticks",
+            "quote_table": "market.market_quotes",
+            "bar_timeframe": "3M",
+            "aggregation": "finalized_3m_from_trade_ticks",
+            "quote_role": "latest_quote_for_observation_only",
+        },
         "strategy": {
             "kind": "SMA_ALIGNMENT",
             "timeframe": "3M",
@@ -554,13 +709,17 @@ def _strategy_bundle_from_record(
             "entry_execution": "NEXT_BAR_OPEN",
             "exit_execution": "NEXT_BAR_OPEN",
         },
-        # This runtime deliberately produces auditable PAPER signals only. It
-        # has no broker credential and cannot submit an order by itself.
         "execution": {
-            "orders_enabled": False,
-            "signal_only": True,
-            "trading_route": "StrategySignal -> Trading/Risk/OMS (not wired by this bundle)",
+            "orders_enabled": orders_enabled,
+            "signal_only": not orders_enabled,
+            "order_quantity": order_quantity,
+            "trading_route": (
+                "strategy-runtime-control -> Trading PAPER directive -> LS PAPER"
+                if orders_enabled
+                else "signal-record-only"
+            ),
         },
+        "operational_data_gate": gate,
     }
     bundle_dir = intake.lab_path(request_id) / "deployments" / "bundles"
     bundle_path = bundle_dir / f"{record['deployment_id']}.json"
@@ -583,6 +742,118 @@ def _start_strategy_paper_container(record: dict[str, Any], *, bundle_path: Path
         },
     )
     return payload if isinstance(payload, dict) else {}
+
+
+def _rearm_active_paper_orders(
+    *,
+    intake: ResearchIntake,
+    record: dict[str, Any],
+    owner_id: str,
+    reason: str,
+) -> StrategyDeploymentAccepted:
+    """Upgrade a legacy active signal bundle to the real PAPER order route.
+
+    This is intentionally reachable only through the same explicit human
+    approval endpoint. It preserves the deployment id and research hashes,
+    replaces the old signal-only execution metadata, and recreates the child
+    so the old process cannot continue with stale behavior.
+    """
+
+    bundle_path = Path(str(record.get("bundle_path") or ""))
+    try:
+        bundle = intake._read_json(bundle_path)
+    except (OSError, ValueError):
+        raise HTTPException(status_code=409, detail="strategy_deployment_bundle_missing")
+    if not isinstance(bundle, dict) or bundle.get("mode") != "PAPER":
+        raise HTTPException(status_code=409, detail="strategy_deployment_paper_only")
+    execution = bundle.get("execution")
+    if not isinstance(execution, dict):
+        raise HTTPException(status_code=409, detail="strategy_deployment_execution_metadata_missing")
+    if execution.get("orders_enabled") is True:
+        return _deployment_response(record)
+
+    order_quantity = _strategy_paper_order_quantity()
+    upgraded = dict(bundle)
+    upgraded["execution"] = {
+        **execution,
+        "orders_enabled": True,
+        "signal_only": False,
+        "order_quantity": order_quantity,
+        "trading_route": "strategy-runtime-control -> Trading PAPER directive -> LS PAPER",
+    }
+    with intake._locked():
+        intake._write_json(bundle_path, upgraded, mode=0o644)
+    bundle_hash = _file_hash(bundle_path)
+    if bundle_hash is None:
+        raise HTTPException(status_code=409, detail="strategy_deployment_bundle_hash_unavailable")
+
+    deploying = dict(record)
+    deploying.update(
+        {
+            "status": "DEPLOYING",
+            "bundle_hash": bundle_hash,
+            "runtime_status": "STARTING",
+            "execution_status": "PAPER_ORDERING",
+            "approval_reason": reason,
+            "message": "기존 SIGNAL_ONLY 전략을 명시적 사람 승인으로 PAPER 주문 실행 모드로 전환합니다.",
+        }
+    )
+    with intake._locked():
+        intake._write_json(
+            intake.lab_path(str(record["request_id"]))
+            / "deployments"
+            / f"{record['deployment_id']}.json",
+            deploying,
+            mode=0o644,
+        )
+    try:
+        _strategy_runtime_command(
+            path=f"/deployments/{record['deployment_id']}/remove",
+            payload={},
+        )
+        runtime = _start_strategy_paper_container(deploying, bundle_path=bundle_path)
+    except HTTPException as exc:
+        failed = dict(deploying)
+        failed.update(
+            {
+                "status": "FAILED",
+                "runtime_status": "START_FAILED",
+                "message": f"PAPER 주문 실행 컨테이너 전환에 실패했습니다: {exc.detail}",
+            }
+        )
+        with intake._locked():
+            intake._write_json(
+                intake.lab_path(str(record["request_id"]))
+                / "deployments"
+                / f"{record['deployment_id']}.json",
+                failed,
+                mode=0o644,
+            )
+        return _deployment_response(failed)
+
+    active = dict(deploying)
+    active.update(
+        {
+            "status": "ACTIVE",
+            "runtime_status": str(runtime.get("runtime_status") or "RUNNING"),
+            "container_name": runtime.get("container_name"),
+            "container_id": runtime.get("container_id"),
+            "execution_status": "PAPER_ORDERING",
+            "message": (
+                "PAPER 주문 실행 모드가 활성화되었습니다. 조건 충족 시 "
+                "Trading API를 통해 현재 PAPER 계좌로 모의주문을 제출합니다."
+            ),
+        }
+    )
+    with intake._locked():
+        intake._write_json(
+            intake.lab_path(str(record["request_id"]))
+            / "deployments"
+            / f"{record['deployment_id']}.json",
+            active,
+            mode=0o644,
+        )
+    return _deployment_response(active)
 
 
 def _strategy_runtime_command(
@@ -893,6 +1164,11 @@ def request_strategy_deployment(
     missing_symbols = [symbol for symbol in symbols if not isinstance(by_symbol, dict) or symbol not in by_symbol]
     current_status = str(status.get("status") or "UNKNOWN").upper()
     decision = _latest_lab_decision(intake, request_id)
+    operational_data_gate = (
+        _strategy_operational_data_gate()
+        if latest is not None and result_status == "COMPLETED"
+        else {"status": "NOT_APPLICABLE"}
+    )
 
     deployment_status: Literal[
         "AWAITING_APPROVAL", "REQUESTED", "REVIEW_REQUIRED", "BLOCKED",
@@ -913,6 +1189,12 @@ def request_strategy_deployment(
             "사람의 배포 요청은 기록했지만 후보 아티팩트·QA·Risk 릴리스 게이트가 아직 없어 "
             "활성화하지 않았습니다. 백테스트 요약을 확인하고 별도 승인을 기다립니다."
         )
+    elif operational_data_gate.get("status") not in {"PASS", "BYPASSED_NON_PRODUCTION"}:
+        deployment_status = "BLOCKED"
+        message = (
+            "실시간 tick/quote 또는 Accounting NAV가 정상 상태가 아니어서 전략 결과를 "
+            "운영 의사결정에 사용할 수 없습니다. 데이터 복구 후 다시 요청해야 합니다."
+        )
     else:
         deployment_status = "AWAITING_APPROVAL"
         message = (
@@ -920,6 +1202,7 @@ def request_strategy_deployment(
             "사람이 명시적으로 승인해야 PAPER 컨테이너가 생성됩니다."
         )
 
+    orders_enabled = _strategy_paper_orders_enabled()
     summary = _backtest_summary(result, symbols=symbols, decision=decision)
     record = {
         "schema": "autonomous-strategy-deployment.v1",
@@ -947,15 +1230,23 @@ def request_strategy_deployment(
         "runtime_status": "NOT_STARTED",
         "execution_status": "NOT_STARTED",
         "backtest_summary": summary,
+        "operational_data_gate": operational_data_gate,
         # Only server-built, non-code runtime metadata crosses the handoff.
         "runtime_config": {
             "executor": "strategy-paper-runtime",
-            "activation": "qa-risk-release-gate-required",
-            "orders_enabled": False,
+            "activation": (
+                "paper-order-gateway-enabled"
+                if _strategy_paper_orders_enabled()
+                else "signal-only"
+            ),
+            "orders_enabled": orders_enabled,
             "mode": request.mode.upper(),
             "symbols": symbols,
+            "market_data_source": "TIMESCALE_RAW_TICKS_QUOTES",
+            "market_data_aggregation": "finalized_3m_from_trade_ticks",
             "plan_id": plan_id,
             "signature": _strategy_signature_metadata(plan),
+            "operational_data_gate": operational_data_gate,
         },
         "message": f"{message}\n\n{_backtest_summary_text(summary)}",
     }
@@ -1077,6 +1368,24 @@ def approve_strategy_deployment(
     if record.get("requested_by") != owner_id and not request.override_review_required:
         raise HTTPException(status_code=403, detail="strategy_research_request_forbidden")
     if str(record.get("status") or "").upper() == "ACTIVE":
+        bundle_path = Path(str(record.get("bundle_path") or ""))
+        try:
+            active_bundle = intake._read_json(bundle_path)
+        except (OSError, ValueError):
+            active_bundle = {}
+        active_execution = active_bundle.get("execution") if isinstance(active_bundle, dict) else {}
+        if (
+            request.confirm
+            and _strategy_paper_orders_enabled()
+            and isinstance(active_execution, dict)
+            and active_execution.get("orders_enabled") is not True
+        ):
+            return _rearm_active_paper_orders(
+                intake=intake,
+                record=record,
+                owner_id=owner_id,
+                reason=request.reason,
+            )
         return _deployment_response(record)
 
     _bundle, bundle_path = _strategy_bundle_from_record(
@@ -1122,7 +1431,11 @@ def approve_strategy_deployment(
             "bundle_path": str(bundle_path),
             "bundle_hash": bundle_hash,
             "runtime_status": "STARTING",
-            "execution_status": "SIGNAL_ONLY",
+            "execution_status": (
+                "PAPER_ORDERING"
+                if approved.get("runtime_config", {}).get("orders_enabled")
+                else "SIGNAL_ONLY"
+            ),
             "message": (
                 (
                     "최상위 사람의 예외 승인을 확인했습니다. PIVOT/REVIEW_REQUIRED "
@@ -1131,7 +1444,12 @@ def approve_strategy_deployment(
                 if request.override_review_required
                 else "사람 승인을 확인했습니다. immutable PAPER Bundle을 만들고 "
             )
-            + "전용 전략 컨테이너를 시작합니다. 주문은 아직 생성하지 않습니다.",
+                + (
+                    "전용 전략 컨테이너를 시작합니다. PAPER 조건 충족 시 Trading API를 통해 "
+                    "모의주문을 제출합니다."
+                    if _strategy_paper_orders_enabled()
+                    else "전용 전략 컨테이너를 시작합니다. 주문은 아직 생성하지 않습니다."
+                ),
         }
     )
     with intake._locked():
@@ -1159,10 +1477,15 @@ def approve_strategy_deployment(
             "runtime_status": str(runtime.get("runtime_status") or "RUNNING"),
             "container_name": runtime.get("container_name"),
             "container_id": runtime.get("container_id"),
-            "execution_status": "SIGNAL_ONLY",
+            "execution_status": (
+                "PAPER_ORDERING"
+                if runtime.get("execution_status") == "PAPER_ORDERING"
+                else "SIGNAL_ONLY"
+            ),
             "message": (
-                "PAPER 전략 컨테이너가 실행 중입니다. 현재 Bundle은 신호 생성 전용이며, "
-                "Trading/Risk/OMS 주문 연결은 별도 검증 전까지 비활성입니다."
+                "PAPER 전략 컨테이너가 실행 중이며, 조건 충족 시 Trading API의 PAPER 주문 경계를 호출합니다."
+                if runtime.get("execution_status") == "PAPER_ORDERING"
+                else "PAPER 전략 컨테이너가 실행 중입니다. 현재 Bundle은 신호 생성 전용입니다."
             ),
         }
     )

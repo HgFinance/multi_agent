@@ -29,6 +29,33 @@
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
 
+## LangSmith SmithDB 조회 마이그레이션
+
+Risk의 LangSmith 조회 기준은 `orchestration/langsmith_queries.py`의 SmithDB
+v2 경계다. 프로젝트 조회는 `client.runs.query` 또는
+`POST /api/v2/runs/query`를 사용한다.
+
+단일 실행 기록이나 trace를 점검할 때의 API 기준은 다음과 같다.
+
+- 단일 run: `GET /api/v2/runs/{run_id}` — `project_id`는 필수이며 필요한
+  `selects`를 명시한다.
+- trace의 전체 실행: `GET /api/v2/traces/{trace_id}/runs`
+- UI 링크: `GET /api/v2/runs/{run_id}/url` — `project_id`와 `trace_id`를 함께
+  전달한다.
+- Python SDK: `client.runs.retrieve()`와 `client.runs.get_url()`
+
+다음 조회 경로는 2027-01-31 제거 예정이므로 사용하지 않는다.
+
+- `GET /api/v1/runs/{run_id}`
+- `client.read_run()`, `client.list_runs()`, `client.get_run_url()`
+
+`GET /api/v1/runs/delete`는 조회가 아니라 trace 삭제·보존 기간 정리용 별도
+경로이므로 이 조회 마이그레이션의 대상이 아니다.
+
+상세 기준은 [SmithDB run 조회 마이그레이션](https://docs.langchain.com/langsmith/smithdb-sdk-migration-runs),
+[LangSmith endpoint deprecation 정책](https://docs.langchain.com/langsmith/endpoint-deprecation),
+[데이터 삭제·보존 문서](https://docs.langchain.com/langsmith/data-purging-compliance)를 따른다.
+
 ## Worker Registry 수와 실제 실행 수
 
 - **LLM은 `compliance-policy-worker` 하나뿐**이고 나머지는 결정론 `risk-runner` 하나로 합쳐졌다

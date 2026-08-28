@@ -148,6 +148,7 @@ def default_worker_llm(system: str, prompt: str, *,
         timeout=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "8")),
     )
     started = time.perf_counter()
+    finish_reason = ""
     try:
         kwargs: dict[str, Any] = {
             "model": model_name(),
@@ -163,13 +164,20 @@ def default_worker_llm(system: str, prompt: str, *,
         with redacted_current_worker_generation() as generation:
             response = client.chat.completions.create(**kwargs)
             generation.set_usage(getattr(response, "usage", None))
+        choice = response.choices[0]
+        finish_reason = str(getattr(choice, "finish_reason", "") or "").lower()
         record_llm_call(
             usage=getattr(response, "usage", None),
             latency_ms=int((time.perf_counter() - started) * 1000),
+            finish_reason=finish_reason,
         )
-        return str(response.choices[0].message.content or "")
+        return str(choice.message.content or "")
     except Exception:
-        record_llm_call(latency_ms=int((time.perf_counter() - started) * 1000), error=True)
+        record_llm_call(
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error=True,
+            finish_reason=finish_reason,
+        )
         raise
 
 
@@ -524,6 +532,11 @@ def build_independent_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: Work
                 )
             except Exception as exc:  # noqa: BLE001 - employee boundary is fail-closed.
                 errors.append(type(exc).__name__)
+                # Gateway length failures already had one bounded budget
+                # retry. Repeating a deterministic max-token request up to
+                # max_attempts only increases latency and cannot add evidence.
+                if getattr(exc, "retryable", True) is False:
+                    break
         return {
             "output": {"worker_id": spec.worker_id, "summary": "worker_llm_unavailable_or_invalid", "confidence": 0.0, "evidence_refs": [], "escalate": True, "schema_valid": False},
             "status": "DEGRADED",

@@ -152,6 +152,7 @@ from orchestration.compound_paper_orders import (
 )
 from orchestration.experience_bank import (
     ExperienceBank,
+    bounded_failure_memory_hint,
     discord_experience_case_type,
 )
 from orchestration.qa_contract import (
@@ -823,13 +824,17 @@ def _clarification_required_response(
     discord_guild_id: str | None,
     discord_thread_id: str | None,
     routing_plan: Mapping[str, object],
+    failure_memory: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Record an input clarification without creating executable children."""
 
-    answer = (
-        "요청 대상이나 원하는 작업이 불명확합니다. 종목·계좌·전략 등 대상과 "
-        "분석, 조회, 위험 검토 같은 목적을 함께 적어 주세요."
-    )
+    bounded_failure_memory = bounded_failure_memory_hint(failure_memory)
+    answer = "요청 대상이나 원하는 작업이 불명확합니다. 종목·계좌·전략 등 대상과 분석, 조회, 위험 검토 같은 목적을 함께 적어 주세요."
+    if bounded_failure_memory:
+        answer += (
+            " 유사 요청의 이전 실패 기록도 확인했지만, 현재 대상이 없어 임의로 "
+            "부서를 재호출하지 않고 추가 입력을 기다립니다."
+        )
     body = build_root_body(
         req.query,
         req.request_id,
@@ -860,11 +865,31 @@ def _clarification_required_response(
             status_code=503, detail="ceo_clarification_task_unavailable"
         )
     task_id = str(task["task_id"])
-    if not hermes_boundary.comment_root_scope(
+    scope_recorded = hermes_boundary.comment_root_scope(
         task_id=task_id, request_id=req.request_id
-    ):
-        raise HTTPException(
-            status_code=503, detail="ceo_clarification_scope_unavailable"
+    )
+    if not scope_recorded:
+        # A clarification root has no executable children and therefore does
+        # not need a scope comment to be safely dispatched.  The old behavior
+        # leaked this non-critical projection failure as HTTP 503 even though
+        # the durable root already carried block_reason=clarification_required.
+        logger.warning(
+            "ceo-clarification scope_deferred task_id=%s request_id=%s",
+            task_id,
+            req.request_id,
+        )
+    if bounded_failure_memory:
+        logger.warning(
+            "event=memo_harness_d5_failure_memory root_id=%s matched_failures=%s "
+            "failure_code_count=%s failed_department_set_count=%s",
+            task_id,
+            bounded_failure_memory.get("matched_failures", 0),
+            len(bounded_failure_memory.get("failure_codes", ()))
+            if isinstance(bounded_failure_memory.get("failure_codes"), list)
+            else 0,
+            len(bounded_failure_memory.get("failed_department_sets", ()))
+            if isinstance(bounded_failure_memory.get("failed_department_sets"), list)
+            else 0,
         )
     completed = hermes_boundary.complete_kanban_task(task_id=task_id, result=answer)
     if not completed:
@@ -879,7 +904,7 @@ def _clarification_required_response(
         "status": "completed" if completed else "blocked",
         "latest_summary": answer,
     }
-    return _accepted_response(
+    response = _accepted_response(
         task_payload,
         {
             "status": "accepted",
@@ -900,6 +925,9 @@ def _clarification_required_response(
             },
         },
     )
+    if not scope_recorded:
+        response["warning"] = "clarification_scope_deferred"
+    return response
 
 
 def _planning_read_timeout() -> float:
@@ -1186,11 +1214,31 @@ def _deterministic_delayed_order_child_body(
 
 
 def _conditional_rule_indicator_catalog_prompt() -> str:
-    """Build the prompt vocabulary from the registry, never from a static list."""
+    """Build the prompt vocabulary from the registry, never from a static list.
+
+    Names alone left the interpreter guessing parameter spellings, so Korean
+    HTS notation such as ``bollingerband(종가,2,0,20)`` produced invented keys
+    that the deterministic validator could only answer with
+    ``UNSUPPORTED_INDICATOR_PARAMETER``.  Emitting each indicator's exact
+    parameter names, defaults, and outputs removes the guess.
+    """
 
     from orchestration.conditional_rules import list_supported_indicators
 
-    return ", ".join(item["name"] for item in list_supported_indicators())
+    entries = []
+    for item in list_supported_indicators():
+        parameters = [
+            f"{key}={value}" for key, value in item["defaults"].items()
+        ] + [
+            f"{key}=required"
+            for key in item["required_parameters"]
+            if key not in item["defaults"]
+        ]
+        entries.append(
+            f"{item['name']}({','.join(parameters)})"
+            f"->{'|'.join(item['outputs'])}"
+        )
+    return ", ".join(entries)
 
 
 def _conditional_rule_child_body(
@@ -1223,7 +1271,23 @@ def _conditional_rule_child_body(
             "into one LOGICAL OR rule.",
             "Supported expression node types are LITERAL, MARKET, PORTFOLIO, INDICATOR,",
             "ARITHMETIC, COMPARISON, LOGICAL, NOT, and CROSS.",
-            f"Supported indicators are {_conditional_rule_indicator_catalog_prompt()}.",
+            "Supported indicators follow, each as NAME(PARAMETER=default,...)->OUTPUT|OUTPUT.",
+            "Use only these exact parameter names and outputs; never invent, rename,",
+            "or translate one, and omit a parameter whose value equals the default.",
+            f"{_conditional_rule_indicator_catalog_prompt()}.",
+            "Korean HTS notation lists arguments positionally, as in",
+            "볼린저밴드(종가,2,0,20) = price source 종가, STDDEV 2, OFFSET 0, PERIOD 20.",
+            "Map each argument onto the named parameter it means; OFFSET is the bar",
+            "shift back from the latest completed bar and is 0 unless stated. Every",
+            "local indicator reads the 종가/CLOSE series, so a 종가 price-source",
+            "argument is already the default and adds no parameter. For any other",
+            "price source (시가/고가/저가/중간값), return candidate=null with",
+            "clarification_reason=UNSUPPORTED_INDICATOR_PRICE_SOURCE.",
+            "중심선/중간선 is output=MIDDLE, 상단선 is UPPER, and 하단선 is LOWER.",
+            "터치/닿으면 against a band or line means the completed bar spans it, so",
+            "build LOGICAL AND of MARKET LOW LTE <line> and MARKET HIGH GTE <line>",
+            "on BAR_CLOSE. Never express a touch as COMPARISON EQ: an exact tick",
+            "match against a computed band would essentially never trigger.",
             "Node field ownership is strict: MARKET uses only type+field; LITERAL uses",
             "only type+value+unit; INDICATOR uses type+name+timeframe and optional",
             "output/parameters. Never put unit on MARKET or INDICATOR. Price literals",
@@ -2259,12 +2323,38 @@ def ceo_query(
     if deterministic_routing_plan is None:
         from orchestration.ceo_query_routing import build_deterministic_bff_plan
 
-        deterministic_routing_plan = build_deterministic_bff_plan(req.query)
+        deterministic_routing_plan = build_deterministic_bff_plan(
+            req.query,
+            previous_question_context=getattr(
+                req, "previous_question_context", None
+            ),
+        )
     # The strict PAPER lane is itself deterministic and fail-closed.  Let its
     # verifier handle short imperative language such as ``팔아줘`` before the
     # generic analysis router labels the same request as underspecified.
     order_route_requested = looks_like_conditional_paper_rule(req.query) or (
         looks_like_user_order_request(req.query)
+    )
+    workflow_mode = infer_workflow_mode(req.query)
+    # Consult D5 before the clarification branch as well.  Ambiguity is a
+    # terminal, safe outcome, but its structured failure history is still
+    # useful to explain why no department fan-out is being guessed.  This is
+    # read-only and bounded; it must never turn a filler message into a risky
+    # route on its own.
+    d5_bank = ExperienceBank.from_env()
+    d5_lookup = None
+    if d5_bank.enabled and not order_route_requested:
+        d5_lookup = d5_bank.lookup(
+            case_type=discord_experience_case_type(
+                deterministic_routing_plan.get("category")
+            ),
+            binding=workflow_mode == "binding",
+            correlation_id=req.request_id,
+        )
+    d5_failure_memory = (
+        d5_lookup.failure_memory
+        if d5_lookup is not None and d5_bank.mode == "active"
+        else None
     )
     if (
         deterministic_routing_plan.get("mode") == "clarification_required"
@@ -2279,6 +2369,7 @@ def ceo_query(
             discord_guild_id=discord_guild_id,
             discord_thread_id=discord_thread_id,
             routing_plan=deterministic_routing_plan,
+            failure_memory=d5_failure_memory,
         )
 
     read_only_hr_e2e = _is_read_only_hr_e2e_request(req.query)
@@ -2348,7 +2439,6 @@ def ceo_query(
             discord_thread_id=discord_thread_id,
         )
 
-    workflow_mode = infer_workflow_mode(req.query)
     # The BFF may have already supplied the bounded deterministic route.  The
     # special read-only E2E lanes retain their existing CEO-owned handling;
     # they must not inherit a generic research/risk fallback from free text.
@@ -2366,16 +2456,6 @@ def ceo_query(
         )
         if str(profile).strip()
     }
-    d5_bank = ExperienceBank.from_env()
-    d5_lookup = None
-    if d5_bank.enabled:
-        d5_lookup = d5_bank.lookup(
-            case_type=discord_experience_case_type(
-                deterministic_routing_plan.get("category")
-            ),
-            binding=workflow_mode == "binding",
-            correlation_id=req.request_id,
-        )
     d5_hint = (
         d5_lookup.planner_hint
         if d5_lookup is not None and d5_bank.mode == "active"
@@ -2392,20 +2472,21 @@ def ceo_query(
     except Exception:  # noqa: BLE001 - advisory feedback is fail-open.
         approved_feedback = None
     ceo_self_improvement = None
-    try:
-        # CEO self-improvement is a local, payload-free read of the verified
-        # D5 ledger. It does not call LangSmith and cannot mutate routing,
-        # skills, mandates, or authority gates on the CEO hot path.
-        from orchestration.d5_improvement_pipeline import (
-            build_ceo_self_improvement_hint,
-            d5_feedback_ledger_from_env,
-        )
+    if d5_bank.mode == "active":
+        try:
+            # CEO self-improvement is a local, payload-free read of the
+            # verified D5 ledger. It does not call LangSmith and cannot mutate
+            # routing, skills, mandates, or authority gates on the hot path.
+            from orchestration.d5_improvement_pipeline import (
+                build_ceo_self_improvement_hint,
+                d5_feedback_ledger_from_env,
+            )
 
-        ceo_self_improvement = build_ceo_self_improvement_hint(
-            d5_feedback_ledger_from_env()
-        )
-    except Exception:  # noqa: BLE001 - self-improvement is advisory/fail-open.
-        ceo_self_improvement = None
+            ceo_self_improvement = build_ceo_self_improvement_hint(
+                d5_feedback_ledger_from_env()
+            )
+        except Exception:  # noqa: BLE001 - self-improvement is advisory/fail-open.
+            ceo_self_improvement = None
     root_trace = None
     try:
         from orchestration.llm_observability import start_root_trace
@@ -2593,6 +2674,20 @@ def ceo_query(
             _hint_count("avoid_patterns"),
             d5_lookup.hint_build_ms,
         )
+        failure_metadata = bounded_failure_memory_hint(d5_lookup.failure_memory)
+        if failure_metadata:
+            logger.warning(
+                "event=memo_harness_d5_failure_memory root_id=%s matched_failures=%s "
+                "failure_code_count=%s failed_department_set_count=%s",
+                root_id,
+                failure_metadata.get("matched_failures", 0),
+                len(failure_metadata.get("failure_codes", ()))
+                if isinstance(failure_metadata.get("failure_codes"), list)
+                else 0,
+                len(failure_metadata.get("failed_department_sets", ()))
+                if isinstance(failure_metadata.get("failed_department_sets"), list)
+                else 0,
+            )
         logger.info(
             "ceo-planning root=%s request_id=%s producer=portfolio-bff",
             str(task["task_id"]),

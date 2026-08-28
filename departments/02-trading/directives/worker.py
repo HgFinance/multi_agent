@@ -7,11 +7,11 @@ import os
 import time
 from datetime import datetime, timezone
 
-from broker.ls_paper_broker import LSPaperBroker
+from broker.ls_paper_broker import LSPaperBroker, LSPaperBrokerError
 
 from orchestration.service_health import probe_http, probe_postgres
 
-from .market_data import HttpMarketDataProvider
+from .market_data import HttpMarketDataProvider, with_quote_fallback
 from .repository import PostgresDirectiveRepository
 from .service import (
     DirectiveServiceError,
@@ -59,11 +59,32 @@ def build_service() -> UserDirectiveService:
         raise DirectiveServiceError(
             "TRADING_DIRECTIVE_DB_UNAVAILABLE", "DATABASE_URL is required", 503
         )
+    external_broker = LSPaperBroker.from_env() if adapter == "ls-paper" else None
+    # The admission API wraps its provider with the read-only LS quote
+    # fallback; this worker used to construct the projection-only provider
+    # bare, so a triggered conditional rule failed with
+    # TRADING_MARKET_QUOTE_STALE while a fresh t1101 quote was available
+    # (2026-08-28, 001210).  Both paths now share one decision.
     return UserDirectiveService(
         PostgresDirectiveRepository(dsn),
-        HttpMarketDataProvider.from_env(),
-        external_broker=LSPaperBroker.from_env() if adapter == "ls-paper" else None,
+        with_quote_fallback(
+            HttpMarketDataProvider.from_env(),
+            external_broker=external_broker,
+            broker_factory=_quote_broker_factory,
+        ),
+        external_broker=external_broker,
     )
+
+
+def _quote_broker_factory() -> LSPaperBroker:
+    try:
+        return LSPaperBroker.from_env()
+    except LSPaperBrokerError as exc:
+        raise DirectiveServiceError(
+            "TRADING_MARKET_QUOTE_FALLBACK_UNAVAILABLE",
+            f"LS PAPER quote fallback is enabled but unavailable: {exc}",
+            503,
+        ) from exc
 
 
 def run_once(

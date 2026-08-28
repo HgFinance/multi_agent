@@ -9,6 +9,8 @@ read-only local UI lane.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
 from datetime import datetime
 from decimal import Decimal
@@ -27,6 +29,11 @@ from pydantic import (
 )
 
 try:
+    from .conditional_rule_workflow import (
+        ConditionalRuleUnavailable,
+        conditional_rule_repository,
+    )
+    from .conditional_rules import conditional_status_message
     from .current_user import (
         current_user,
         require_trading_book_access,
@@ -52,6 +59,11 @@ try:
         user_order_repository,
     )
 except ImportError:  # pragma: no cover - direct module execution compatibility
+    from conditional_rule_workflow import (  # type: ignore[no-redef]
+        ConditionalRuleUnavailable,
+        conditional_rule_repository,
+    )
+    from conditional_rules import conditional_status_message  # type: ignore[no-redef]
     from current_user import (
         current_user,
         require_trading_book_access,
@@ -79,6 +91,8 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
 
 
 router = APIRouter(tags=["paper-user-orders"])
+
+logger = logging.getLogger(__name__)
 
 USER_DIRECTIVES_PATH = "/trading/v1/user-directives"
 USER_DIRECTIVE_STATUS_PATH = "/trading/v1/user-directives/{directive_id}"
@@ -226,6 +240,19 @@ class UserDirectiveResponse(BaseModel):
     legs: list[DirectiveLeg]
 
 
+class ConditionalRuleOutcome(BaseModel):
+    """What actually happened to a rule this request created."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: UUID
+    state: str
+    last_execution_state: str | None = None
+    last_guard_code: str | None = None
+    last_error_code: str | None = None
+    status_message: str | None = None
+
+
 class PaperOrderWorkflowStatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -243,6 +270,12 @@ class PaperOrderWorkflowStatusResponse(BaseModel):
     error_message: str | None = None
     directive: UserDirectiveResponse | None = None
     correlation: dict[str, Any] | None = None
+    # A conditional request finishes its *activation* workflow and is marked
+    # COMPLETED, but the rule it created can still fail at execution minutes
+    # later with no directive ever produced.  The request state alone therefore
+    # read as success while the rule was FAILED (2026-08-28), so the rule
+    # outcome travels beside it.
+    conditional_rules: list[ConditionalRuleOutcome] | None = None
 
 
 class ClarificationRequired(ValueError):
@@ -835,6 +868,51 @@ def _workflow_state_from_directive(response: UserDirectiveResponse) -> str:
     return "IN_PROGRESS"
 
 
+def _conditional_rule_outcomes(record: Any) -> list[ConditionalRuleOutcome] | None:
+    """Report what became of the rules this request created, if any.
+
+    Rules carry the request's ``client_request_id`` verbatim for a single
+    action, and a derived ``conditional-set:<digest>:<n>`` for a batch, so the
+    link needs no new column.  A lookup failure returns ``None`` rather than
+    raising: the request status must stay readable even when the rule store is
+    briefly unavailable.
+    """
+
+    base = str(getattr(record, "client_request_id", "") or "")
+    if not base:
+        return None
+    digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:48]
+    prefix = f"conditional-set:{digest}:"
+    try:
+        rules = conditional_rule_repository().list_for_user(record.user_id)
+    except ConditionalRuleUnavailable:
+        return None
+    except Exception:  # pragma: no cover - the status must stay readable
+        logger.exception("conditional rule outcome lookup failed request=%s", base)
+        return None
+    linked = [
+        rule
+        for rule in rules
+        if rule.client_request_id == base or rule.client_request_id.startswith(prefix)
+    ]
+    if not linked:
+        return None
+    return [
+        ConditionalRuleOutcome(
+            rule_id=UUID(rule.rule_id),
+            state=str(getattr(rule.state, "value", rule.state)),
+            last_execution_state=rule.last_execution_state,
+            last_guard_code=rule.last_guard_code,
+            last_error_code=rule.last_error_code,
+            status_message=conditional_status_message(
+                last_error_code=rule.last_error_code,
+                last_guard_code=rule.last_guard_code,
+            ),
+        )
+        for rule in linked
+    ]
+
+
 @router.get(
     "/ui/paper-order-requests/{order_request_id}",
     response_model=PaperOrderWorkflowStatusResponse,
@@ -899,6 +977,7 @@ def paper_order_workflow_status(
             correlation = directive_execution_event_payload(record, directive)
 
     return PaperOrderWorkflowStatusResponse(
+        conditional_rules=_conditional_rule_outcomes(record),
         order_request_id=UUID(record.order_request_id),
         client_request_id=record.client_request_id,
         request_source=(

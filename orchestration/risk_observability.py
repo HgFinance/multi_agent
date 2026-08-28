@@ -16,13 +16,13 @@ from pathlib import Path
 from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib.parse import quote
 from uuid import NAMESPACE_URL, uuid5
 
 logger = logging.getLogger(__name__)
 
 from orchestration.llm_observability import (
     _mark_langsmith_quota_pause,
+    _structured_langsmith_client,
     langsmith_enabled,
     langsmith_project,
 )
@@ -100,9 +100,7 @@ _DEFAULT_RISK_TRACE_SAMPLE_RATE = 0.10
 _DEFAULT_RISK_TRACE_SLOW_MS = 45_000
 
 
-def _bounded_float(
-    environment: Mapping[str, str], key: str, default: float
-) -> float:
+def _bounded_float(environment: Mapping[str, str], key: str, default: float) -> float:
     try:
         return min(max(float(environment.get(key, default)), 0.0), 1.0)
     except (TypeError, ValueError):
@@ -153,7 +151,7 @@ def risk_trace_should_publish(
     ):
         return True
 
-    env = environment or os.environ
+    env = os.environ if environment is None else environment
     slow_ms = _bounded_int(
         env, "LANGSMITH_RISK_TRACE_SLOW_MS", _DEFAULT_RISK_TRACE_SLOW_MS
     )
@@ -189,38 +187,6 @@ def _log_epoch_ms(line: str) -> int | None:
     except ValueError:
         return None
     return int(parsed.timestamp() * 1000)
-
-
-def _langsmith_project_id(environment: Mapping[str, str]) -> str | None:
-    """Resolve the LangSmith project UUID for direct batch ingestion.
-
-    The v1 ``/runs/batch`` endpoint accepts ``session_name`` for compatibility,
-    but current SmithDB indexing only associates the run when ``session_id`` is
-    also present.  Resolution is observer-only and fail-open: an outage must
-    never affect Risk completion or delivery.
-    """
-
-    project_name = str(environment.get("LANGSMITH_PROJECT") or "First").strip()
-    api_key = str(environment.get("LANGSMITH_API_KEY") or "").strip()
-    endpoint = str(
-        environment.get("LANGSMITH_ENDPOINT") or "https://api.smith.langchain.com"
-    ).rstrip("/")
-    if not project_name or not api_key:
-        return None
-    request = urllib_request.Request(
-        f"{endpoint}/sessions?name={quote(project_name)}&limit=1",
-        headers={"Accept": "application/json", "x-api-key": api_key},
-        method="GET",
-    )
-    try:
-        with urllib_request.urlopen(request, timeout=3.0) as response:
-            payload = json.loads(response.read() or b"[]")
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, list) or not payload:
-        return None
-    project_id = payload[0].get("id") if isinstance(payload[0], Mapping) else None
-    return str(project_id or "").strip() or None
 
 
 def _request_id_from_task_body(*, root_id: str, task_body: str) -> str:
@@ -363,7 +329,12 @@ def publish_risk_hermes_profile(
 
     env = environment or os.environ
     if not (
-        str(env.get("LANGSMITH_TRACING", "")).casefold() in {"1", "true", "yes", "on"}
+        (
+            str(env.get("LANGSMITH_TRACING", "")).casefold()
+            in {"1", "true", "yes", "on"}
+            or str(env.get("HGFINANCE_LANGSMITH_PUBLISH_ENABLED", "")).casefold()
+            in {"1", "true", "yes", "on"}
+        )
         and str(env.get("LANGSMITH_API_KEY", "")).strip()
     ):
         return False
@@ -385,7 +356,7 @@ def publish_risk_hermes_profile(
         logger.info(
             "langsmith-risk-profile-sampled task=%s sample_rate=%s",
             str(task_id)[:160],
-            env.get("LANGSMITH_RISK_TRACE_SAMPLE_RATE", "0.10"),
+            env.get("LANGSMITH_RISK_TRACE_SAMPLE_RATE", "0.05"),
         )
         return False
     try:
@@ -467,28 +438,109 @@ def publish_risk_hermes_profile(
         "tags": ["hgfinance", "risk", "hermes", "redacted", "worker-profile"],
         "parent_run_id": str(parent_run_id),
     }
-    project_id = _langsmith_project_id(env)
-    if project_id:
-        payload["session_id"] = project_id
-    endpoint = str(
-        env.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
-    ).rstrip("/")
+    try:
+        # Use the shared SDK queue rather than the old synchronous
+        # ``/sessions`` + ``/runs/batch`` pair. This removes two legacy HTTP
+        # calls and keeps Risk profile publication off the terminal path.
+        _client().create_run(
+            id=payload["id"],
+            name=payload["name"],
+            run_type=payload["run_type"],
+            project_name=payload["session_name"],
+            trace_id=payload["trace_id"],
+            dotted_order=payload["dotted_order"],
+            parent_run_id=payload["parent_run_id"],
+            inputs=payload["inputs"],
+            outputs=payload["outputs"],
+            start_time=datetime.fromtimestamp(started / 1000, tz=timezone.utc),
+            end_time=datetime.fromtimestamp(ended / 1000, tz=timezone.utc),
+            extra=payload["extra"],
+            tags=payload["tags"],
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - observer remains fail-open.
+        _mark_langsmith_quota_pause(exc)
+        return False
+
+
+def record_risk_hermes_terminal_activity(
+    *,
+    event_id: str,
+    task_id: str,
+    root_id: str,
+    request_id: str = "",
+    status: str,
+    started_ms: int = 0,
+    ended_ms: int = 0,
+    discord_status: str = "not_attempted",
+    discord_channel_id: str | None = None,
+    discord_thread_id: str | None = None,
+    discord_message_id: str | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Send one redacted Hermes terminal receipt to the existing Risk API.
+
+    This bridge is deliberately fail-open and carries no task body, result,
+    model output, credentials, or trading instruction.  It makes the already
+    existing Hermes -> supervisor -> Discord lifecycle visible to Risk API
+    observability while leaving Risk's typed decision endpoints unchanged.
+    """
+
+    env = os.environ if environment is None else environment
+    base_url = str(env.get("RISK_API_URL", "")).strip().rstrip("/")
+    if not base_url or not str(event_id).strip() or not str(task_id).strip():
+        return False
+
+    started = max(int(started_ms or 0), 0)
+    ended = max(int(ended_ms or 0), started)
+    payload = {
+        "schema_version": "risk.hermes-terminal-activity.v1",
+        "event_id": str(event_id)[:240],
+        "task_id": str(task_id)[:240],
+        "root_id": str(root_id)[:240],
+        "request_id": str(request_id)[:240] or None,
+        "status": str(status)[:40],
+        "duration_ms": max(ended - started, 0),
+        "discord_status": str(discord_status or "not_attempted")[:40],
+        "discord_channel_id": str(discord_channel_id)[:120]
+        if discord_channel_id
+        else None,
+        "discord_thread_id": str(discord_thread_id)[:120]
+        if discord_thread_id
+        else None,
+        "discord_message_id": str(discord_message_id)[:120]
+        if discord_message_id
+        else None,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "HgFinance-RiskHermesReceipt/1.0",
+    }
+    service_token = str(
+        env.get("RISK_SERVICE_AUTH_TOKEN") or env.get("RISK_API_INTERNAL_TOKEN") or ""
+    ).strip()
+    if service_token:
+        headers["Authorization"] = f"Bearer {service_token}"
+    try:
+        timeout = min(
+            max(float(env.get("RISK_HERMES_RECEIPT_TIMEOUT_SECONDS", "0.5")), 0.1),
+            2.0,
+        )
+    except (TypeError, ValueError):
+        timeout = 0.5
     request = urllib_request.Request(
-        f"{endpoint}/runs/batch",
-        data=json.dumps(
-            {"post": [payload], "patch": []}, separators=(",", ":")
-        ).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "x-api-key": str(env.get("LANGSMITH_API_KEY", "")),
-        },
+        f"{base_url}/risk/v1/observability/hermes",
+        data=json.dumps(payload, separators=(",", ":")).encode(),
+        headers=headers,
         method="POST",
     )
     try:
-        with urllib_request.urlopen(request, timeout=3.0) as response:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
             return 200 <= int(response.status) < 300
-    except (OSError, urllib_error.URLError, ValueError):
+    except (OSError, urllib_error.URLError, TypeError, ValueError):
+        # The Risk API is an observer for this receipt.  It must never turn a
+        # completed Hermes answer or Discord delivery into a failed workflow.
         return False
 
 
@@ -507,18 +559,10 @@ def _safe(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
 
 @lru_cache(maxsize=1)
 def _client():
-    from langsmith import Client
-
-    # risk_span accepts only the scalar allowlist above. Keeping these safe
-    # structural fields visible makes the trace useful to QA without sending
-    # raw questions, answers, portfolio payloads, or credentials.
-    return Client(
-        hide_inputs=False,
-        hide_outputs=False,
-        hide_metadata=False,
-        omit_traced_runtime_info=True,
-        tracing_error_callback=_mark_langsmith_quota_pause,
-    )
+    # Share the lifecycle client's queue with the root/worker publishers. A
+    # second Client would create another background worker and another startup
+    # capability probe in the same process.
+    return _structured_langsmith_client()
 
 
 def set_risk_span_outputs(run: Any, outputs: Mapping[str, Any]) -> None:
@@ -546,9 +590,7 @@ def risk_span(
     try:
         from langsmith import trace
 
-        safe_metadata = _safe(
-            {**dict(metadata or {}), "raw_payloads_sent": False}
-        )
+        safe_metadata = _safe({**dict(metadata or {}), "raw_payloads_sent": False})
         context = trace(
             name,
             run_type="chain",
@@ -595,4 +637,9 @@ def risk_span(
             )
 
 
-__all__ = ["RISK_SPANS", "risk_span", "set_risk_span_outputs"]
+__all__ = [
+    "RISK_SPANS",
+    "record_risk_hermes_terminal_activity",
+    "risk_span",
+    "set_risk_span_outputs",
+]

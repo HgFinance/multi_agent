@@ -1,7 +1,7 @@
 # Local Compose Runtime Baseline
 
 > **상태:** CURRENT RUNBOOK
-> **검토 기준:** 2026-08-25 UTC
+> **검토 기준:** 2026-08-28 UTC
 
 이 문서는 루트 [`docker-compose.yml`](../../docker-compose.yml)의 실제 로컬 개발·통합 Runtime을 설명한다. 서비스 수·포트·Profile이 이 문서와 다르면 Compose 파일을 먼저 확인하고 문서를 갱신한다.
 
@@ -117,6 +117,23 @@ AI Office의 메인 대표 지시창은 `POST /ui/ceo/ask`를 사용한다. Herm
 Dashboard 화면은 `NEXT_PUBLIC_HERMES_DASHBOARD_URL`에 있는 Hermes 공식 Dashboard를 그대로 표시한다. Dashboard Profile과 자체 인증이 준비되지 않은 경우 AI Office는 연결 안내를 표시하며 자체 가짜 Kanban으로 대체하지 않는다.
 
 ## 5. 시작·중지 명령
+
+### 필수 상주 서비스 운영 규칙
+
+`ls-realtime`은 Market Data Plane의 필수 상주 서비스다. 임의로 `stop`, `disable`,
+`remove`, `scale 0` 하거나 Compose에서 제외하지 않는다. 이 서비스가 중지되면
+`market.market_ticks`·`market.market_quotes` 적재가 끊기고, Strategy·Risk·Accounting은
+stale-data 보호에 따라 신규 진입을 차단할 수 있다.
+
+`ls-realtime`이 unhealthy여도 먼저 컨테이너를 끄지 말고 다음을 확인한다.
+
+1. `docker compose logs --since 15m ls-realtime`
+2. `docker compose ps ls-realtime timescaledb market-api`
+3. TimescaleDB 최신 `event_time`과 적재 증분
+
+재생성·재시작은 소유자 승인 아래 controlled recovery로만 수행하고, 복구 후
+healthcheck·체결/호가 적재·하류 조회를 확인한다. 일반적인 `docker compose down`은
+이 필수 서비스를 함께 중지하므로 장중 유지보수 명령으로 사용하지 않는다.
 
 ```bash
 docker compose up -d

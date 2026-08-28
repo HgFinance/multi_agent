@@ -255,6 +255,8 @@ def test_all_registered_workers_are_independent_graphs() -> None:
         if department == "trading":
             assert result["runtime"] == {
                 "executor": "deterministic_strategy_worker",
+                "service_id": "trading-directive-worker",
+                "worker_id": "desk-runner",
                 "topology": "dynamic_parallel_fan_out_fan_in",
                 "provider": "none",
                 "model": "none",

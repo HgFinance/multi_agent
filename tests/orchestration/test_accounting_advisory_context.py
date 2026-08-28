@@ -85,6 +85,12 @@ def test_accounting_context_reads_the_canonical_fixed_book(monkeypatch) -> None:
     assert compact["broker_evidence"]["schema_version"] == "accounting.broker-evidence.v1"
     assert compact["broker_evidence"]["positions"][0]["unit_cost_bep"] == "201000"
     assert compact["broker_evidence"]["authoritative"] is False
+    assert compact["broker_evidence"]["position_reconciliation_scope"] == (
+        "broker_internal_only"
+    )
+    assert "직접 비교해 새 대사 차이를 만들지 말고" in compact["broker_evidence"][
+        "position_reconciliation_note"
+    ]
 
 
 def test_accounting_context_keeps_engine_snapshot_when_broker_is_unavailable(monkeypatch) -> None:

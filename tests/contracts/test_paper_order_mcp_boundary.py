@@ -501,6 +501,8 @@ def test_trading_profile_and_prompts_pin_the_one_shot_paper_lane() -> None:
         "url": "http://paper-order-orchestrator-mcp:8046/mcp",
         "headers": {"Authorization": "Bearer ${MCP_TRADING_ORDER_API_KEY}"},
         "enabled": True,
+        "skip_preflight": True,
+        "keepalive_interval": 60,
     }
 
     ceo = (ROOT / "departments/00-ceo-office/hermes/SOUL.md").read_text(

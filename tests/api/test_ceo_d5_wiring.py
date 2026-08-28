@@ -151,6 +151,65 @@ class DiscordD5IngressTest(unittest.TestCase):
         self.assertIn("non-authoritative", body)
         self.assertIn("analysis_parallel", body)
 
+    def test_ambiguous_input_returns_clarification_when_scope_comment_is_deferred(self):
+        bank = _FakeBank("off")
+        task = {"task_id": "t_clarification", "status": "blocked"}
+        with (
+            patch.object(ceo.ExperienceBank, "from_env", return_value=bank),
+            patch.object(
+                ceo.hermes_boundary, "create_kanban_task", return_value=task
+            ),
+            patch.object(
+                ceo.hermes_boundary, "comment_root_scope", return_value=False
+            ),
+            patch.object(
+                ceo.hermes_boundary, "complete_kanban_task", return_value=True
+            ) as complete,
+        ):
+            response = ceo.ceo_query(
+                ceo.CeoAsk(query="안녕", request_id="req-clarify")
+            )
+
+        self.assertEqual(response["status"], "accepted")
+        self.assertEqual(response["warning"], "clarification_scope_deferred")
+        self.assertIn("요청 대상이나 원하는 작업이 불명확합니다", response["answer"])
+        complete.assert_called_once_with(
+            task_id="t_clarification",
+            result=response["answer"],
+        )
+
+    def test_ambiguous_input_consults_failure_memory_before_clarifying(self):
+        bank = _FakeBank("active")
+        lookup = ExperienceLookup(
+            mode="active",
+            available=True,
+            elapsed_ms=1,
+            matched_count=1,
+            failure_memory={
+                "source": "memo_harness_d5_failure_memory",
+                "matched_failures": 1,
+                "failure_codes": [{"code": "CLARIFICATION_REQUIRED", "count": 1}],
+            },
+        )
+        task = {"task_id": "t_clarification_memory", "status": "blocked"}
+        with (
+            patch.object(ceo.ExperienceBank, "from_env", return_value=bank),
+            patch.object(bank, "lookup", return_value=lookup) as lookup_call,
+            patch.object(
+                ceo.hermes_boundary,
+                "create_kanban_task",
+                return_value=task,
+            ),
+            patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True),
+            patch.object(ceo.hermes_boundary, "complete_kanban_task", return_value=True),
+        ):
+            response = ceo.ceo_query(
+                ceo.CeoAsk(query="안녕", request_id="req-clarify-memory")
+            )
+
+        lookup_call.assert_called_once()
+        self.assertIn("이전 실패 기록도 확인했지만", response["answer"])
+
     def test_ceo_self_improvement_is_scoped_to_synthesis_guardrails(self):
         hint = {
             "schema_version": "hgfinance.memo-harness.ceo-self-improvement.v1",

@@ -12,6 +12,16 @@
 #   accounting-ledger-consumer가 분개와 같은 주기에 저장한다(fill_consumer.project).
 #   accounting-api는 2026-08-04에 api/app.py가, accounting-ledger-consumer는
 #   2026-08-10에 ledger/consumer.py가 생기면서 추가했다.
+
+# The accounting services must enter through the dedicated login that is a
+# member of `svc_accounting_ledger`.  The generic runtime login is deliberately
+# not allowed to assume that NOLOGIN role.  Keep one local anchor in parity with
+# the AWS paper-order overlay so a recreate cannot silently regress the
+# accounting permission boundary.  An explicit ACCOUNTING_DATABASE_URL remains
+# the deployment override; the local default is composed from the provisioned
+# accounting secret.
+x-accounting-database-url: &accounting-database-url "${ACCOUNTING_DATABASE_URL:-postgresql://hgfinance_accounting_runtime:${HEDGEFUND_ACCOUNTING_DB_PASSWORD:?HEDGEFUND_ACCOUNTING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_accounting_ledger}"
+x-accounting-database-role: &accounting-database-role "${ACCOUNTING_DATABASE_ROLE:-svc_accounting_ledger}"
 services:
   # accounting-api: 원장·평가·대사·기업행위·일일보고의 조회·명령면.
   # 계약은 docs/02-engineering/ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md.
@@ -44,7 +54,8 @@ services:
       # 기본은 durable Paper DB다. 인메모리는 ACCOUNTING_MODE=OFFLINE을
       # 명시한 로컬 테스트에서만 선택한다.
       ACCOUNTING_MODE: ${ACCOUNTING_MODE:-PAPER_DB}
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: *accounting-database-url
+      ACCOUNTING_DATABASE_ROLE: *accounting-database-role
     ports:
       - "127.0.0.1:8046:8000"   # 로컬 전용 - 외부 노출 금지 (8041~8045 사용 중)
     mem_limit: 256m
@@ -61,12 +72,13 @@ services:
   #   상태를 본다. 이중 분개 자체는 journals의 unique (event_type, source_event_id)와
   #   PostgresLedger.post의 경합 복구가 막는다.
   #
-  # ▶ DATABASE_URL이 없으면 뜨지 않는다(consumer.py가 required=True로 연다). 인메모리로
+  # ▶ 전용 회계 DSN이 없으면 뜨지 않는다(consumer.py가 required=True로 연다). 인메모리로
   #   조용히 후퇴하면 "기록됐다고 믿은 분개"가 사라진다 - api와 다른 점이 아니라
   #   api도 durable mode에서 같게 동작해야 하는 쪽이다.
   #
-  # ▶ trading-outbox-relay와 **같은 DATABASE_URL을 봐야 한다.** outbox는 execution
-  #   스키마, 분개는 accounting 스키마이고 둘이 같은 Supabase DB에 있다.
+  # ▶ trading-outbox-relay와 **같은 control DB를 봐야 한다.** outbox는 execution
+  #   스키마, 분개는 accounting 스키마이고 둘이 같은 DB에 있지만, 회계는 별도
+  #   least-privilege 로그인으로 들어간다.
   accounting-ledger-consumer:
     build:
       context: ../..
@@ -80,8 +92,8 @@ services:
         max-file: "3"
     command: ["python", "departments/05-accounting-portfolio/ledger/consumer.py", "--serve"]
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
-      ACCOUNTING_DATABASE_ROLE: ${ACCOUNTING_DATABASE_ROLE:-svc_accounting_ledger}
+      DATABASE_URL: *accounting-database-url
+      ACCOUNTING_DATABASE_ROLE: *accounting-database-role
       LEDGER_CONSUMER_POLL_SECONDS: ${LEDGER_CONSUMER_POLL_SECONDS:-1.0}
       # 평가 시세. 컨테이너 안이라 127.0.0.1이 아니라 서비스 이름이다(market-api 주석과
       # 같은 사정). 못 붙으면 분개는 그대로 가고 NAV만 보류된다 - 시세가 없다고 체결
@@ -121,10 +133,10 @@ services:
       portfolio-bff:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: *accounting-database-url
       ACCOUNTING_MODE: ${ACCOUNTING_MODE:-PAPER_DB}
       PAPER_DB: "true"
-      ACCOUNTING_DATABASE_ROLE: ${ACCOUNTING_DATABASE_ROLE:-svc_accounting_ledger}
+      ACCOUNTING_DATABASE_ROLE: *accounting-database-role
       ACCOUNTING_DEFAULT_BOOK_ID: ${ACCOUNTING_DEFAULT_BOOK_ID:-}
       PORTFOLIO_BFF_INTERNAL_URL: ${PORTFOLIO_BFF_INTERNAL_URL:-http://portfolio-bff:8000}
       LS_PAPER_RECONCILE_INTERVAL_SECONDS: ${LS_PAPER_RECONCILE_INTERVAL_SECONDS:-60}
@@ -164,7 +176,10 @@ services:
         max-file: "3"
     command: ["python", "departments/05-accounting-portfolio/close_scheduler.py", "--serve"]
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: *accounting-database-url
+      ACCOUNTING_MODE: ${ACCOUNTING_MODE:-PAPER_DB}
+      PAPER_DB: "true"
+      ACCOUNTING_DATABASE_ROLE: *accounting-database-role
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
       # ACTIVE 장부가 둘 이상이면 이걸 지정해야 한다. 없으면 스케줄러가 아무거나

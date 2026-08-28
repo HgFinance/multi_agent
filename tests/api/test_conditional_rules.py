@@ -423,3 +423,118 @@ def test_market_closed_guard_is_visible_to_the_user(monkeypatch) -> None:
     assert view.last_guard_code == "MARKET_CLOSED_NO_ORDER"
     assert "장이 열려 있지 않아" in (view.status_message or "")
     assert "체결·원장 반영도 없습니다" in (view.status_message or "")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_seconds"),
+    (
+        ("3분 뒤 금호전기 5주 시장가 매수해줘", 180),
+        ("3분 기다렸다가 금호전기 5주 시장가 매수해줘", 180),
+        ("3분 후에 금호전기 5주 시장가 매수해줘", 180),
+        ("3분 후 금호전기 5주 시장가 매수해줘", 180),
+        ("10초 있다가 금호전기 5주 시장가 매수해줘", 10),
+        ("1시간 지나서 금호전기 5주 시장가 매수해줘", 3600),
+        ("3분 기다린 뒤 금호전기 5주 시장가 매수해줘", 180),
+        ("3분 지난 후에 금호전기 5주 시장가 매수해줘", 180),
+    ),
+)
+def test_natural_korean_delay_wordings_all_reach_the_delayed_lane(
+    raw: str, expected_seconds: int
+) -> None:
+    """Only "뒤" was recognized, so "3분 기다렸다가" fell to the immediate lane.
+
+    There the unparsed phrase corrupted the instrument span and the user was
+    told the *instrument* was missing or conflicting (2026-08-28).
+    """
+
+    from orchestration.user_order_language import deterministic_delayed_order_plan
+
+    plan = deterministic_delayed_order_plan(raw)
+    assert plan is not None, raw
+    assert plan.delay_seconds == expected_seconds
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "3분봉 60일선 돌파 후 금호전기 5주 시장가 매수해줘",
+        "금호전기 5주 시장가 매수해줘",
+        "3시간 후반 금호전기 5주 시장가 매수해줘",
+    ),
+)
+def test_delay_grammar_does_not_swallow_non_delay_phrases(raw: str) -> None:
+    from orchestration.user_order_language import deterministic_delayed_order_plan
+
+    assert deterministic_delayed_order_plan(raw) is None, raw
+
+
+def test_unparsed_duration_is_not_reported_as_an_instrument_problem() -> None:
+    """"3분 기다렸다가" was answered with MISSING_OR_CONFLICTING_INSTRUMENT.
+
+    The instrument was in the sentence and resolvable; the delay wording was
+    what the parser could not read (2026-08-28).  Blaming the instrument sent
+    the user to fix the one part that was already correct.
+    """
+
+    import hashlib
+
+    from orchestration.user_order_language import verify_order_candidate
+
+    raw = "3분 뜸들이다가 금호전기 5주 시장가 매수해줘"
+    mention = "금호전기"
+    start = raw.index(mention)
+    candidate = {
+        "schema_version": "user-paper-order-interpretation.v1",
+        "mode": "PAPER",
+        "binding": False,
+        "raw_text_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+        "decision": "EXECUTE",
+        "action": "PLACE_ORDER",
+        "instrument_mention": mention,
+        "side": "BUY",
+        "quantity": "5",
+        "order_type": "MARKET",
+        "limit_price": None,
+        "evidence": [
+            {
+                "field": "INSTRUMENT",
+                "text": mention,
+                "start": start,
+                "end": start + len(mention),
+            },
+            {"field": "SIDE", "text": "매수", "start": raw.index("매수"), "end": raw.index("매수") + 2},
+            {"field": "QUANTITY", "text": "5주", "start": raw.index("5주"), "end": raw.index("5주") + 2},
+            {
+                "field": "ORDER_TYPE",
+                "text": "시장가",
+                "start": raw.index("시장가"),
+                "end": raw.index("시장가") + 3,
+            },
+        ],
+        "reason_codes": [],
+    }
+    result = verify_order_candidate(raw, candidate)
+    codes = {code.value for code in result.reason_codes}
+    assert "UNSUPPORTED_DELAY_EXPRESSION" in codes
+    assert "MISSING_OR_CONFLICTING_INSTRUMENT" not in codes
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        "UNSUPPORTED_DELAY_EXPRESSION",
+        "MISSING_OR_CONFLICTING_INSTRUMENT",
+        "MISSING_OR_CONFLICTING_QUANTITY",
+        "trading_market_no_ask",
+        "trading_market_no_bid",
+        "trading_market_quote_stale",
+    ),
+)
+def test_known_rejections_reach_the_user_as_korean_sentences(code: str) -> None:
+    """Every one of these used to surface as the bare enum name."""
+
+    from apps.api.user_order_orchestrator import _non_execution_user_message
+
+    message = _non_execution_user_message([code])
+    assert message, code
+    assert code not in message

@@ -29,9 +29,12 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
+from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -51,11 +54,56 @@ ENABLE_BROKER_SNAPSHOT = os.getenv("ENABLE_BROKER_SNAPSHOT", "false").strip().lo
 # 같은 계좌를 여러 화면·에이전트가 동시에 물어본다. TR 호출 한도를 아끼되
 # **오래된 값을 새 값처럼 보이지 않게** 관측시각을 항상 같이 준다.
 CACHE_SECONDS = int(os.getenv("BROKER_SNAPSHOT_CACHE_SECONDS", "10"))
+_SYMBOL_RE = re.compile(r"^[0-9]{6}$")
 
 router = APIRouter(tags=["account-snapshot"])
 
 _lock = threading.Lock()
 _cached: tuple[float, dict[str, Any]] | None = None
+
+
+def _decimal_string(value: Any, field: str) -> str:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(502, f"브로커 보유잔고 {field}가 유효하지 않습니다") from exc
+    if not parsed.is_finite() or parsed < 0:
+        raise HTTPException(502, f"브로커 보유잔고 {field}가 유효하지 않습니다")
+    return str(parsed)
+
+
+def _normalize_positions(positions: Any) -> list[dict[str, str]]:
+    """Normalize the already-fetched t0424 rows for the accounting consumer.
+
+    This is intentionally a projection of the same PortfolioSnapshot used by
+    ``/ui/account/snapshot``. It does not call the portfolio-live endpoint or
+    issue another broker request, so Accounting and the user account card share
+    one aggregation/cache path.
+    """
+
+    if not isinstance(positions, (tuple, list)):
+        raise HTTPException(502, "브로커 보유잔고 행이 유효하지 않습니다")
+    rows: list[dict[str, str]] = []
+    for raw in positions:
+        if not isinstance(raw, Mapping):
+            raise HTTPException(502, "브로커 보유잔고 행이 유효하지 않습니다")
+        symbol = str(raw.get("expcode") or raw.get("symbol") or "").strip()
+        if symbol.startswith("A"):
+            symbol = symbol[1:]
+        if not _SYMBOL_RE.fullmatch(symbol):
+            raise HTTPException(502, "브로커 보유잔고 종목코드가 유효하지 않습니다")
+        quantity = raw.get("janqty", raw.get("quantity"))
+        average_cost = raw.get("pamt", raw.get("average_cost"))
+        if quantity is None or average_cost is None:
+            raise HTTPException(502, "브로커 보유잔고 수량/평균단가가 없습니다")
+        rows.append(
+            {
+                "symbol": symbol,
+                "quantity": _decimal_string(quantity, "quantity"),
+                "average_cost": _decimal_string(average_cost, "average_cost"),
+            }
+        )
+    return rows
 
 
 def _snapshot_now() -> dict[str, Any]:
@@ -107,6 +155,17 @@ def _snapshot_now() -> dict[str, Any]:
         "source": snap.source,
         "authoritative": False,
         "official_nav_source": "/accounting/v1/ledgers/{ledger_id}",
+        # Accounting consumes this projection from the same cached broker
+        # response. ``synced`` means directly observed from LS, not agreement
+        # with the official accounting ledger.
+        "holdings": {
+            "as_of": snap.observed_at.isoformat(),
+            "error": None,
+            "synced": True,
+            "drift": [],
+            "projection_source": "broker-account-snapshot-cache",
+            "rows": _normalize_positions(snap.positions),
+        },
     }
 
 
@@ -131,10 +190,12 @@ def broker_account_snapshot() -> dict[str, Any]:
     with _lock:
         if _cached is not None and time.time() - _cached[0] < CACHE_SECONDS:
             return _cached[1]
-    payload = _snapshot_now()
-    with _lock:
+        # Keep the refresh inside the same lock. Account cards and the
+        # accounting reconciler often wake together; without this single-flight
+        # boundary they each issue the same t0424+CSPAQ12200 pair.
+        payload = _snapshot_now()
         _cached = (time.time(), payload)
-    return payload
+        return payload
 
 
 __all__ = ["router", "ENABLE_BROKER_SNAPSHOT"]

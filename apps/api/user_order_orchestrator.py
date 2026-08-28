@@ -514,11 +514,64 @@ def _await_directive_status(
     return record, latest
 
 
+# Only the closed-session case had wording, so every other rejection reached
+# the user as the bare enum ("확인 필요: MISSING_OR_CONFLICTING_INSTRUMENT",
+# 2026-08-28) with nothing to act on.  Order follows how blocking each cause
+# is, so the first match is the one worth saying.
+_NON_EXECUTION_MESSAGES: tuple[tuple[str, str], ...] = (
+    (
+        "trading_market_no_ask",
+        "매도호가가 없어(상한가 등) 시장가 매수를 체결할 수 없습니다. "
+        "주문·체결·원장 반영은 없습니다.",
+    ),
+    (
+        "trading_market_no_bid",
+        "매수호가가 없어(하한가 등) 시장가 매도를 체결할 수 없습니다. "
+        "주문·체결·원장 반영은 없습니다.",
+    ),
+    (
+        "trading_market_quote_stale",
+        "현재가가 최신 상태가 아니어서 주문하지 않았습니다. "
+        "주문·체결·원장 반영은 없습니다.",
+    ),
+    (
+        "trading_insufficient_cash",
+        "PAPER 현금 잔고가 부족해 주문하지 않았습니다.",
+    ),
+    (
+        "trading_insufficient_sellable_position",
+        "매도 가능 수량이 부족해 주문하지 않았습니다.",
+    ),
+    (
+        "UNSUPPORTED_DELAY_EXPRESSION",
+        "요청하신 지연 표현을 아직 읽지 못합니다. "
+        "'3분 뒤'처럼 적어 주시면 처리할 수 있습니다. 주문은 없습니다.",
+    ),
+    (
+        "MISSING_OR_CONFLICTING_INSTRUMENT",
+        "종목을 하나로 확정하지 못했습니다. "
+        "종목명이나 6자리 코드를 정확히 적어 주세요. 주문은 없습니다.",
+    ),
+    (
+        "MISSING_OR_CONFLICTING_QUANTITY",
+        "수량을 확정하지 못했습니다. '5주'처럼 적어 주세요. 주문은 없습니다.",
+    ),
+    (
+        "MISSING_LIMIT_PRICE",
+        "지정가 주문인데 가격이 없습니다. 가격을 적어 주세요. 주문은 없습니다.",
+    ),
+)
+
+
 def _non_execution_user_message(reason_codes: list[str]) -> str | None:
     """Return a deterministic Discord-safe explanation for known rejections."""
 
     if "trading_market_session_closed" in reason_codes:
         return _MARKET_SESSION_CLOSED_MESSAGE
+    present = set(reason_codes)
+    for code, message in _NON_EXECUTION_MESSAGES:
+        if code in present:
+            return message
     return None
 
 

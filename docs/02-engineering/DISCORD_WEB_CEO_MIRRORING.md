@@ -40,16 +40,20 @@ requests/<request_id>`로 상태를 조회한다. 기존 `/ui/ceo/tasks*` read A
 사람이 보고서 요약을 확인하기 전에는 `AWAITING_APPROVAL`에서 멈춘다. 승인 시
 Strategy Hermes가 임의 코드를 실행하지 않고 allowlisted 3분봉 SMA 5/20/60
 Bundle을 만든 뒤 private runtime-control에 PAPER 컨테이너를 요청한다.
-현재 컨테이너는 `SIGNAL_ONLY`이며 Trading/Risk/OMS 주문 연결은 비활성이다.
-`LIVE`는 항상 `BLOCKED`다.
+현재 PAPER Bundle은 `PAPER_ORDERING`으로 실행할 수 있으며 조건 충족 시
+Trading API의 PAPER directive를 거쳐 설정된 LS PAPER 계좌에 모의주문을 제출한다.
+child에는 브로커 키를 넣지 않는다. `SIGNAL_ONLY` Bundle은 하위 호환용 관측
+모드이고, `LIVE`는 항상 `BLOCKED`다.
 
 승인된 배포는 Web 버튼 또는 `전략 배포 승인 <deployment_id>`로 시작할 수 있다.
 연구 결과가 `PIVOT`/`REVIEW_REQUIRED`인 경우에는 일반 승인으로 열리지 않으며,
 `STRATEGY_TOP_LEVEL_APPROVER_USER_IDS`에 등록된 최상위 사람이
 `전략 배포 예외 승인 <deployment_id>`처럼 예외 의도를 명시해야 한다. 이 경로는
 릴리스·후보 판정 게이트만 감사 기록과 함께 예외 처리하고, 결과 해시·전략 서명·2%
-익절 조건·종목·PAPER 및 신호 전용 계약은 다시 검증한다. LIVE와 주문 생성은 계속
-차단된다.
+익절 조건·종목·PAPER 계약은 다시 검증한다. LIVE는 계속 차단되고, PAPER는
+계좌·현금·호가·세션·멱등성 검사를 통과한 경우에만 주문을 생성한다.
+실제 PAPER 컨테이너 수명주기를 사용하려면 운영자가 `ENABLE_STRATEGY_CONTAINER_CONTROL=true`와
+양쪽 내부 서비스에 동일한 `STRATEGY_RUNTIME_SERVICE_TOKEN`을 별도로 설정해야 한다.
 `전략 컨테이너 중지/시작`은 해당 컨테이너만 제어하고, `전략 배포 제거`는 컨테이너를
 폐기하되 연구 원본·백테스트 결과·Bundle을 삭제하지 않고 `REMOVED` 감사 상태로
 남긴다. 모든 수명주기 명령은 요청자 소유권과 정확한 deployment ID를 재검증한다.

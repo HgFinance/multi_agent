@@ -200,6 +200,9 @@ def test_owner_can_read_admitted_request_before_directive_exists() -> None:
         "error_message": None,
         "directive": None,
         "correlation": None,
+        # A conditional request's rule outcome rides beside the request state,
+        # which on its own read as success while the rule had already FAILED.
+        "conditional_rules": None,
     }
     repository.mark_outcome.assert_not_called()
     read_status.assert_not_called()
@@ -436,3 +439,84 @@ def test_repository_transition_unavailable_returns_stable_503() -> None:
 
     assert response.status_code == 503
     assert response.json()["detail"] == "paper_order_workflow_unavailable"
+
+
+def test_conditional_rule_failure_travels_with_the_completed_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A COMPLETED request said nothing about the rule it created failing.
+
+    The activation workflow finishes and marks the request COMPLETED, but the
+    rule can fail minutes later at execution without ever producing a
+    directive.  The UI showed only "PAPER 주문 상태 COMPLETED" while the rule
+    was FAILED on TRADING_MARKET_QUOTE_STALE (2026-08-28).
+    """
+
+    from types import SimpleNamespace
+
+    from apps.api import user_orders
+
+    record = SimpleNamespace(
+        client_request_id="browser-request-0001",
+        user_id=OWNER_ID,
+    )
+    rule = SimpleNamespace(
+        rule_id="b1a19294-d41b-43bc-9442-90cb1a6d4534",
+        client_request_id="browser-request-0001",
+        state="FAILED",
+        last_execution_state="FAILED",
+        last_guard_code="READY_FOR_PAPER_DIRECTIVE",
+        last_error_code="MARKET_QUOTE_STALE",
+    )
+    unrelated = SimpleNamespace(
+        rule_id="00000000-0000-4000-8000-0000000000ff",
+        client_request_id="some-other-request",
+        state="ACTIVE",
+        last_execution_state=None,
+        last_guard_code=None,
+        last_error_code=None,
+    )
+    monkeypatch.setattr(
+        user_orders,
+        "conditional_rule_repository",
+        lambda: SimpleNamespace(list_for_user=lambda _user: [rule, unrelated]),
+    )
+
+    outcomes = user_orders._conditional_rule_outcomes(record)
+    assert outcomes is not None
+    assert len(outcomes) == 1
+    assert str(outcomes[0].rule_id) == rule.rule_id
+    assert outcomes[0].state == "FAILED"
+    assert outcomes[0].status_message  # a Korean sentence, not a bare code
+    assert "MARKET_QUOTE_STALE" not in outcomes[0].status_message
+
+
+def test_rule_lookup_failure_never_breaks_the_request_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from apps.api import user_orders
+
+    def _boom() -> None:
+        raise RuntimeError("rule store unavailable")
+
+    monkeypatch.setattr(user_orders, "conditional_rule_repository", _boom)
+    record = SimpleNamespace(client_request_id="browser-request-0001", user_id=OWNER_ID)
+    assert user_orders._conditional_rule_outcomes(record) is None
+
+
+def test_a_plain_order_request_reports_no_conditional_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from apps.api import user_orders
+
+    monkeypatch.setattr(
+        user_orders,
+        "conditional_rule_repository",
+        lambda: SimpleNamespace(list_for_user=lambda _user: []),
+    )
+    record = SimpleNamespace(client_request_id="browser-request-0001", user_id=OWNER_ID)
+    assert user_orders._conditional_rule_outcomes(record) is None

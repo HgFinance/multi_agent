@@ -59,10 +59,25 @@ _ACTIONABLE_FEEDBACK_CODES = frozenset(
         "STRUCTURED_EVAL_SCORE_LOW",
         "SEMANTIC_QA_FAILED",
         "SEMANTIC_QA_SCORE_LOW",
+        "SEMANTIC_QA_RELEVANCE_LOW",
+        "HALLUCINATION_DETECTED",
+        "HARMFUL_CONTENT_DETECTED",
+        "RELEVANCE_LOW",
+        "LENGTH_TERMINATION_HIGH",
         "PRIVACY_PAYLOAD_PRESENT",
         "REDACTION_MARKER_MISSING",
     }
 )
+
+
+def evaluation_is_worthy(result: "EvaluationResult") -> bool:
+    """Return true only for an operational or quality finding worth review."""
+
+    return result.decision != "OBSERVED_PASS" and bool(
+        _ACTIONABLE_FEEDBACK_CODES.intersection(result.finding_codes)
+    )
+
+
 TERMINAL_STATUSES = frozenset(
     {"success", "completed", "complete", "error", "failed", "blocked", "degraded"}
 )
@@ -129,8 +144,13 @@ _SAFE_METADATA_KEYS = frozenset(
         "attempts",
         "retries",
         "llm_calls",
+        "prompt_tokens",
+        "completion_tokens",
+        "max_tokens",
         "tool_calls",
         "tool_error_count",
+        "length_termination_count",
+        "length_termination_rate",
         "profile",
         "observation_unit",
         "workflow_root_task_id",
@@ -161,9 +181,26 @@ _SAFE_METADATA_KEYS = frozenset(
         "stage_status",
         "source",
         "metric_count",
+        "worker_count",
+        "token_observation_count",
+        "cost_observation_count",
+        "failed_count",
+        "error_rate",
+        "latency_sum_ms",
+        "latency_min_ms",
+        "latency_max_ms",
+        "latency_avg_ms",
         "window_start",
         "window_end",
         "p95_latency_ms",
+        "cost_usd",
+        "cost_status",
+        "cost_source",
+        "hallucination_verdict",
+        "hallucination_score",
+        "harmfulness_verdict",
+        "harmfulness_score",
+        "relevance_score",
         "trace_kind",
         "latency_scope",
         "observation_point",
@@ -221,6 +258,10 @@ _TEXT_METADATA_KEYS = frozenset(
         "semantic_qa_evaluator",
         "semantic_qa_verdict",
         "semantic_qa_finding_codes",
+        "cost_status",
+        "cost_source",
+        "hallucination_verdict",
+        "harmfulness_verdict",
         "profile",
         "observation_unit",
         "workflow_root_task_id",
@@ -241,9 +282,21 @@ _INT_METADATA_KEYS = frozenset(
         "attempts",
         "retries",
         "llm_calls",
+        "prompt_tokens",
+        "completion_tokens",
+        "max_tokens",
         "tool_calls",
         "tool_error_count",
+        "length_termination_count",
         "metric_count",
+        "worker_count",
+        "token_observation_count",
+        "cost_observation_count",
+        "failed_count",
+        "latency_sum_ms",
+        "latency_min_ms",
+        "latency_max_ms",
+        "latency_avg_ms",
         "p95_latency_ms",
         "primary_bottleneck_duration_ms",
         "semantic_qa_finding_count",
@@ -268,7 +321,15 @@ _SCORE_METADATA_KEYS = frozenset(
         "semantic_qa_temporal_consistency",
         "semantic_qa_uncertainty_honesty",
         "semantic_qa_relevance",
+        "hallucination_score",
+        "harmfulness_score",
+        "relevance_score",
     }
+)
+
+
+_FLOAT_METADATA_KEYS = frozenset(
+    {"cost_usd", "error_rate", "length_termination_rate"}
 )
 
 
@@ -289,6 +350,12 @@ def _normalized_metadata_value(key: str, value: Any) -> Any:
         return _bounded_text(value, 64)
     if key in _SCORE_METADATA_KEYS:
         return _bounded_score(value)
+    if key in _FLOAT_METADATA_KEYS:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
     if key == "raw_payloads_sent":
         if isinstance(value, bool):
             return value
@@ -413,11 +480,7 @@ def _bounded_score(value: Any) -> float | None:
 
 def feedback_mode(value: str | None = None) -> str:
     candidate = (
-        str(
-            value
-            if value is not None
-            else os.getenv("LANGSMITH_FEEDBACK_MODE", "off")
-        )
+        str(value if value is not None else os.getenv("LANGSMITH_FEEDBACK_MODE", "off"))
         .strip()
         .lower()
     )
@@ -795,6 +858,37 @@ def evaluate_observation(
         summaries.append(
             "answer contract semantic QA score is below the review threshold"
         )
+    semantic_relevance = _bounded_score(metadata.get("semantic_qa_relevance"))
+    if semantic_relevance is not None and semantic_relevance < 0.8:
+        findings.append("SEMANTIC_QA_RELEVANCE_LOW")
+        summaries.append("answer relevance is below the review threshold")
+    relevance_score = _bounded_score(metadata.get("relevance_score"))
+    if relevance_score is not None and relevance_score < 0.8:
+        findings.append("RELEVANCE_LOW")
+        summaries.append("answer relevance score is below the review threshold")
+    length_termination_rate = _bounded_score(
+        metadata.get("length_termination_rate")
+    )
+    if length_termination_rate is not None and length_termination_rate >= 0.05:
+        findings.append("LENGTH_TERMINATION_HIGH")
+        summaries.append("model output hit its token limit too often")
+    hallucination_verdict = _bounded_text(
+        metadata.get("hallucination_verdict"), 32
+    ).upper()
+    if hallucination_verdict in {
+        "FAIL",
+        "UNSUPPORTED",
+        "CONTRADICTED",
+        "DETECTED",
+    }:
+        findings.append("HALLUCINATION_DETECTED")
+        summaries.append("hallucination critic flagged the answer")
+    harmfulness_verdict = _bounded_text(
+        metadata.get("harmfulness_verdict"), 32
+    ).upper()
+    if harmfulness_verdict in {"FAIL", "UNSAFE", "HARMFUL", "DETECTED"}:
+        findings.append("HARMFUL_CONTENT_DETECTED")
+        summaries.append("harmfulness evaluator flagged the answer")
     if redaction_marker_missing:
         # Keep the established summary order for existing findings while
         # making an absent marker an explicit, reviewable finding.
@@ -853,12 +947,43 @@ def evaluate_observation(
         "metric_count": _bounded_int(metadata.get("metric_count")) or None,
         "window_start": metadata.get("window_start"),
         "window_end": metadata.get("window_end"),
+        "prompt_tokens": _bounded_int(metadata.get("prompt_tokens")) or None,
+        "completion_tokens": _bounded_int(metadata.get("completion_tokens")) or None,
+        "max_tokens": _bounded_int(metadata.get("max_tokens")) or None,
+        "worker_count": _bounded_int(metadata.get("worker_count")) or None,
+        "token_observation_count": _bounded_int(
+            metadata.get("token_observation_count")
+        )
+        or None,
+        "cost_observation_count": _bounded_int(
+            metadata.get("cost_observation_count")
+        )
+        or None,
+        "failed_count": _bounded_int(metadata.get("failed_count")) or None,
+        "error_rate": (
+            metadata.get("error_rate")
+            if isinstance(metadata.get("error_rate"), (int, float))
+            else None
+        ),
+        "latency_sum_ms": _bounded_int(metadata.get("latency_sum_ms")) or None,
+        "latency_min_ms": _bounded_int(metadata.get("latency_min_ms")) or None,
+        "latency_max_ms": _bounded_int(metadata.get("latency_max_ms")) or None,
+        "latency_avg_ms": _bounded_int(metadata.get("latency_avg_ms")) or None,
         "error_count": error_count,
         "attempts": _bounded_int(metadata.get("attempts")) or None,
         "retries": _bounded_int(metadata.get("retries")) or None,
         "llm_calls": _bounded_int(metadata.get("llm_calls")) or None,
         "tool_calls": _bounded_int(metadata.get("tool_calls")) or None,
         "tool_error_count": _bounded_int(metadata.get("tool_error_count")) or None,
+        "length_termination_count": _bounded_int(
+            metadata.get("length_termination_count")
+        )
+        or None,
+        "length_termination_rate": (
+            metadata.get("length_termination_rate")
+            if isinstance(metadata.get("length_termination_rate"), (int, float))
+            else None
+        ),
         "telemetry_completeness": metadata.get("telemetry_completeness"),
         "observability_source": metadata.get("observability_source"),
         "observation_unit": metadata.get("observation_unit"),
@@ -903,6 +1028,18 @@ def evaluate_observation(
         )
         or None,
         "semantic_qa_finding_codes": metadata.get("semantic_qa_finding_codes"),
+        "cost_usd": (
+            metadata.get("cost_usd")
+            if isinstance(metadata.get("cost_usd"), (int, float))
+            else None
+        ),
+        "cost_status": metadata.get("cost_status"),
+        "cost_source": metadata.get("cost_source"),
+        "hallucination_verdict": hallucination_verdict or None,
+        "hallucination_score": _bounded_score(metadata.get("hallucination_score")),
+        "harmfulness_verdict": harmfulness_verdict or None,
+        "harmfulness_score": _bounded_score(metadata.get("harmfulness_score")),
+        "relevance_score": relevance_score,
         "raw_payloads_sent": (
             raw_payloads_sent if isinstance(raw_payloads_sent, bool) else None
         ),
@@ -1292,6 +1429,19 @@ class FeedbackLedger:
                 )
         return artifact_id
 
+    def skip(self, source_run_id: str) -> None:
+        """Mark a normal observation handled without creating a QA artifact."""
+
+        now = _now()
+        with self._connect() as db:
+            db.execute(
+                """UPDATE langsmith_feedback_jobs
+                SET status='COMPLETED', eval_run_id=NULL, last_error=NULL,
+                    lease_until=NULL, updated_at=?
+                WHERE source_run_id=?""",
+                (now, source_run_id),
+            )
+
     def retry(self, source_run_id: str, error_code: str, attempts: int) -> None:
         now = datetime.now(timezone.utc)
         delay = min(300, 2 ** min(max(attempts, 0), 8))
@@ -1354,7 +1504,10 @@ class FeedbackLedger:
                 findings = json.loads(row["finding_codes"] or "[]")
             except (TypeError, json.JSONDecodeError):
                 continue
-            if not isinstance(metadata, Mapping) or metadata.get("source") != "memo_harness_d5":
+            if (
+                not isinstance(metadata, Mapping)
+                or metadata.get("source") != "memo_harness_d5"
+            ):
                 continue
             if not isinstance(findings, list):
                 continue
@@ -2067,6 +2220,8 @@ def evaluation_run_id(source_run_id: str, project_name: str) -> UUID:
 def publish_evaluation(result: EvaluationResult, project_name: str) -> str | None:
     """Publish one closed metadata-only evaluation run; failures are swallowed."""
 
+    if not evaluation_is_worthy(result):
+        return None
     try:
         from langsmith import RunTree
 
@@ -2114,7 +2269,7 @@ def _aggregate_metric_window(
         observation = observation_from_run(run)
         if not observation.source_run_id or not observation.ended_at:
             continue
-        count += 1
+        count += max(1, _bounded_int(observation.metadata.get("metric_count")))
         status = (
             observation.metadata.get("status") or observation.status or ""
         ).lower()
@@ -2127,7 +2282,12 @@ def _aggregate_metric_window(
         return None
     latencies.sort()
     p95 = (
-        latencies[min(len(latencies) - 1, max(0, int(len(latencies) * 0.95) - 1))]
+        latencies[
+            min(
+                len(latencies) - 1,
+                max(0, int(math.ceil(len(latencies) * 0.95)) - 1),
+            )
+        ]
         if latencies
         else 0
     )
@@ -2422,6 +2582,10 @@ class LangSmithFeedbackService:
                     )
                     eval_run_id = publish_evaluation(result, self.config.evals_project)
                     if not eval_run_id:
+                        if not evaluation_is_worthy(result):
+                            self.ledger.skip(job["source_run_id"])
+                            dropped += 1
+                            continue
                         raise RuntimeError("eval_publish_unavailable")
                     artifact_id = self.ledger.complete(
                         job["source_run_id"], eval_run_id, result

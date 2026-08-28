@@ -580,16 +580,27 @@ class QaAuditProjection:
             or None,
         )
 
-    def _comment(self, record: QaAuditProjectionRecord) -> None:
-        if self.kanban_client is not None:
-            self.kanban_client.comment_task(
-                record.qa_task_id,
-                f"{PROJECTION_MARKER} {QA_VERDICT_MARKER} "
-                f"root_task_id={record.root_task_id} "
-                f"eval_run_id={record.eval_run_id} status=persisted "
-                f"qa_task_id={record.qa_task_id} verdict={record.original_verdict} "
-                f"canonical_decision={record.canonical_decision}",
-            )
+    def _comment(
+        self,
+        record: QaAuditProjectionRecord,
+        task: Mapping[str, Any] | None = None,
+    ) -> None:
+        if self.kanban_client is None:
+            return
+
+        receipt_prefix = (
+            f"{PROJECTION_MARKER} {QA_VERDICT_MARKER} "
+            f"root_task_id={record.root_task_id} "
+            f"eval_run_id={record.eval_run_id}"
+        )
+        if isinstance(task, Mapping) and self._has_marker(task, receipt_prefix):
+            return
+        self.kanban_client.comment_task(
+            record.qa_task_id,
+            f"{receipt_prefix} status=persisted "
+            f"qa_task_id={record.qa_task_id} verdict={record.original_verdict} "
+            f"canonical_decision={record.canonical_decision}",
+        )
 
     @staticmethod
     def _has_marker(task: Mapping[str, Any], marker: str) -> bool:
@@ -742,7 +753,11 @@ class QaAuditProjection:
                 end_time=ended_at,
                 run_id=record.trace_id,
                 parent_run_id=record.langsmith_root_run_id,
-                confirm_delivery=True,
+                # QA is already a post-response observer.  The shared
+                # publisher queues this redacted run and its SDK worker owns
+                # transport retries; waiting up to three seconds here adds no
+                # delivery guarantee and only holds the QA worker open.
+                confirm_delivery=False,
             )
             if not published:
                 return "failed"
@@ -866,15 +881,18 @@ class QaAuditProjection:
             if not isinstance(result, Mapping):
                 result = {}
             comment_error = None
-            if not result.get("duplicate"):
-                try:
-                    self._comment(record)
-                except Exception as exc:  # noqa: BLE001 - audit row is already durable
-                    comment_error = str(exc)
-                    logger.warning(
-                        "qa_audit_projection_marker_failed",
-                        extra={"error": comment_error},
-                    )
+            try:
+                # Re-emit the durable Kanban receipt even when the audit row
+                # already exists. A process restart can lose the observer
+                # after the DB commit but before its task comment; the
+                # idempotent projection must repair that visible receipt.
+                self._comment(record, task)
+            except Exception as exc:  # noqa: BLE001 - audit row is already durable
+                comment_error = str(exc)
+                logger.warning(
+                    "qa_audit_projection_marker_failed",
+                    extra={"error": comment_error},
+                )
             langsmith_status = self._publish_langsmith(record, task)
             discord_status = self._publish_discord(record)
             return {

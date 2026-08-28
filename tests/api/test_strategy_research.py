@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,81 @@ def no_real_kanban_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
         "_ensure_tracking_root",
         lambda **_kwargs: (None, "UNAVAILABLE"),
     )
+
+
+def test_strategy_operational_data_gate_blocks_stale_market_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRATEGY_OPERATIONAL_DATA_GATE_ENABLED", "true")
+    monkeypatch.setattr(
+        strategy_research,
+        "_gate_json",
+        lambda _url: {
+            "domains": [
+                {"domain": "ticks", "rows": 12, "last_event": "2020-01-01T00:00:00+00:00"},
+                {"domain": "quotes", "rows": 12, "last_event": "2020-01-01T00:00:00+00:00"},
+            ]
+        },
+    )
+
+    evidence = strategy_research._strategy_operational_data_gate()
+
+    assert evidence["status"] == "BLOCKED"
+    assert "market_ticks_stale" in evidence["reason"]
+    assert evidence["nav"]["status"] == "NOT_CHECKED"
+
+
+def test_strategy_operational_data_gate_requires_fresh_market_and_nav(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRATEGY_OPERATIONAL_DATA_GATE_ENABLED", "true")
+    now = datetime.now(timezone.utc).isoformat()
+
+    def fake_gate_json(url: str) -> dict[str, object]:
+        if url.endswith("/health/freshness"):
+            return {
+                "domains": [
+                    {"domain": "ticks", "rows": 12, "last_event": now},
+                    {"domain": "quotes", "rows": 12, "last_event": now},
+                ]
+            }
+        return {"portfolio": {"nav": "100000", "quality_status": "PASS", "as_of": now}}
+
+    monkeypatch.setattr(strategy_research, "_gate_json", fake_gate_json)
+
+    evidence = strategy_research._strategy_operational_data_gate()
+
+    assert evidence["status"] == "PASS"
+    assert evidence["market"]["status"] == "PASS"
+    assert evidence["nav"]["status"] == "PASS"
+
+
+def test_candidate_deployment_is_blocked_until_operational_data_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request_id, _intake = _candidate_strategy_lab(
+        tmp_path / "research", monkeypatch, "research-deploy-data-gate-01"
+    )
+    blocked = {
+        "status": "BLOCKED",
+        "reason": "strategy_operational_data_gate:market_ticks_stale",
+    }
+    monkeypatch.setattr(strategy_research, "_strategy_operational_data_gate", lambda: blocked)
+
+    deployment = strategy_research.request_strategy_deployment(
+        request_id,
+        strategy_research.StrategyDeploymentAsk(
+            mode="paper",
+            symbols=["000660"],
+            confirm=True,
+            reason="실시간 시세와 NAV 복구 전 데이터 게이트를 검증합니다.",
+        ),
+        "user-a",
+    )
+
+    assert deployment.status == "BLOCKED"
+    assert deployment.operational_data_gate_status == "BLOCKED"
+    assert deployment.operational_data_gate == blocked
 
 
 def test_strategy_research_api_enqueues_a_natural_language_goal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

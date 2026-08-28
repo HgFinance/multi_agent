@@ -45,12 +45,12 @@ try:
         StrategyDeploymentAccepted,
         StrategyResearchAccepted,
         accept_strategy_research_query,
-        looks_like_strategy_research,
+        approve_strategy_deployment_from_text,
         looks_like_strategy_deployment,
         looks_like_strategy_deployment_approval,
         looks_like_strategy_deployment_power,
         looks_like_strategy_deployment_removal,
-        approve_strategy_deployment_from_text,
+        looks_like_strategy_research,
         power_strategy_deployment_from_text,
         remove_strategy_deployment_from_text,
         request_strategy_deployment_from_text,
@@ -90,12 +90,12 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         StrategyDeploymentAccepted,
         StrategyResearchAccepted,
         accept_strategy_research_query,
-        looks_like_strategy_research,
+        approve_strategy_deployment_from_text,
         looks_like_strategy_deployment,
         looks_like_strategy_deployment_approval,
         looks_like_strategy_deployment_power,
         looks_like_strategy_deployment_removal,
-        approve_strategy_deployment_from_text,
+        looks_like_strategy_research,
         power_strategy_deployment_from_text,
         remove_strategy_deployment_from_text,
         request_strategy_deployment_from_text,
@@ -119,7 +119,9 @@ def _deterministic_bff_routing_enabled() -> bool:
     return configured.strip().casefold() in {"1", "true", "yes", "on"}
 
 
-def _build_deterministic_bff_plan(query: str) -> dict[str, Any] | None:
+def _build_deterministic_bff_plan(
+    query: str, previous_question_context: str | None = None
+) -> dict[str, Any] | None:
     """Build the shared route without importing the full graph at module load."""
 
     if not _deterministic_bff_routing_enabled():
@@ -131,7 +133,9 @@ def _build_deterministic_bff_plan(query: str) -> dict[str, Any] | None:
             build_deterministic_bff_plan,
         )
     started = time.perf_counter()
-    plan = build_deterministic_bff_plan(query)
+    plan = build_deterministic_bff_plan(
+        query, previous_question_context=previous_question_context
+    )
     logger.info(
         "ceo-bff-deterministic-route route_ms=%.3f departments=%s basis=%s",
         (time.perf_counter() - started) * 1000,
@@ -139,6 +143,24 @@ def _build_deterministic_bff_plan(query: str) -> dict[str, Any] | None:
         plan.get("routing_basis", ""),
     )
     return plan
+
+
+def _uses_strategy_research_intake(
+    query: str,
+    deterministic_routing_plan: dict[str, Any] | None,
+    previous_question_context: str | None = None,
+) -> bool:
+    """Keep explicit Quant requests on the department execution pipeline."""
+
+    combined_query = " ".join(
+        part.strip()
+        for part in (str(previous_question_context or ""), str(query or ""))
+        if part and part.strip()
+    )[:4000]
+    return looks_like_strategy_research(combined_query) and not (
+        deterministic_routing_plan
+        and deterministic_routing_plan.get("routing_basis") == "explicit_quant_scope"
+    )
 
 
 def _resolved_owner(owner_id: object) -> str | None:
@@ -209,8 +231,18 @@ def _strategy_request_id(request: CanonicalIngress) -> str:
 
 
 def _strategy_query(request: CanonicalIngress) -> StrategyResearchAccepted:
+    query = request.query
+    previous_context = " ".join(
+        str(request.previous_question_context or "").split()
+    )[:3200]
+    if previous_context:
+        # Strategy follow-ups must retain the original hypothesis/universe in
+        # the lab manifest.  Keep the current turn as an explicit suffix so a
+        # terse "이어서" cannot accidentally become a fresh, underspecified
+        # experiment.
+        query = f"{previous_context}\n\n추가 요청: {request.query}"[:4000]
     return accept_strategy_research_query(
-        query=request.query,
+        query=query,
         request_id=_strategy_request_id(request),
         actor_id=request.actor_id,
         source=request.source,
@@ -257,7 +289,11 @@ def _strategy_deployment_removal_query(
     )
 
 
-def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
+def _ceo_query(
+    request: CanonicalIngress,
+    *,
+    deterministic_routing_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     # Lazy import avoids making apps.api.ceo import the mirror adapter and
     # keeps the existing CEO module's public contract unchanged.
     try:
@@ -350,7 +386,10 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
         discord_guild_id = mirror.guild_id if mirror else None
         discord_thread_id = mirror.thread_id if mirror else None
 
-    deterministic_routing_plan = _build_deterministic_bff_plan(request.query)
+    if deterministic_routing_plan is None:
+        deterministic_routing_plan = _build_deterministic_bff_plan(
+            request.query, request.previous_question_context
+        )
     response = ceo.ceo_query(
         CeoAsk(
             query=request.query,
@@ -374,12 +413,18 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
     return response
 
 
-def _execute(request: CanonicalIngress):
+def _execute(
+    request: CanonicalIngress,
+    *,
+    deterministic_routing_plan: dict[str, Any] | None = None,
+):
     try:
         return execute_once(
             request,
             store=MIRROR_STORE,
-            execute=lambda: _ceo_query(request),
+            execute=lambda: _ceo_query(
+                request, deterministic_routing_plan=deterministic_routing_plan
+            ),
         )
     except MirrorRequestConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -393,7 +438,9 @@ def _execute(request: CanonicalIngress):
     "/ask",
     status_code=202,
     operation_id="ceo_query_mirror_compat",
-    response_model=CeoQueryAcceptedResponse | StrategyResearchAccepted | StrategyDeploymentAccepted,
+    response_model=CeoQueryAcceptedResponse
+    | StrategyResearchAccepted
+    | StrategyDeploymentAccepted,
 )
 def mirror_ask(
     request: CeoAsk,
@@ -436,6 +483,10 @@ def mirror_ask(
                 source_message_id=x_source_message_id or request.request_id,
                 actor_id=owner_id or x_actor_id or "web-user",
                 actor_type="user",
+                previous_question_context=request.previous_question_context,
+                previous_question_context_source_message_id=(
+                    request.previous_question_context_source_message_id
+                ),
             )
         ).model_dump()
 
@@ -448,6 +499,10 @@ def mirror_ask(
                 source_message_id=x_source_message_id or request.request_id,
                 actor_id=owner_id or x_actor_id or "web-user",
                 actor_type="user",
+                previous_question_context=request.previous_question_context,
+                previous_question_context_source_message_id=(
+                    request.previous_question_context_source_message_id
+                ),
             )
         ).model_dump()
 
@@ -475,7 +530,14 @@ def mirror_ask(
             )
         ).model_dump()
 
-    if looks_like_strategy_research(request.query):
+    deterministic_routing_plan = _build_deterministic_bff_plan(
+        request.query, request.previous_question_context
+    )
+    if _uses_strategy_research_intake(
+        request.query,
+        deterministic_routing_plan,
+        request.previous_question_context,
+    ):
         return _strategy_query(
             CanonicalIngress(
                 query=request.query,
@@ -484,6 +546,10 @@ def mirror_ask(
                 source_message_id=x_source_message_id or request.request_id,
                 actor_id=owner_id or x_actor_id or "web-user",
                 actor_type="user",
+                previous_question_context=request.previous_question_context,
+                previous_question_context_source_message_id=(
+                    request.previous_question_context_source_message_id
+                ),
             )
         ).model_dump()
 
@@ -497,8 +563,14 @@ def mirror_ask(
         actor_type="user",
         fund_id=request.fund_id,
         book_id=request.book_id,
+        previous_question_context=request.previous_question_context,
+        previous_question_context_source_message_id=(
+            request.previous_question_context_source_message_id
+        ),
     )
-    execution = _execute(canonical)
+    execution = _execute(
+        canonical, deterministic_routing_plan=deterministic_routing_plan
+    )
     if execution.response is None:
         raise HTTPException(status_code=202, detail="request_in_progress")
     return execution.response
@@ -574,18 +646,29 @@ def mirror_ingress(
             execution_count=1,
             ceo=accepted.model_dump(),
         )
-    if looks_like_strategy_research(canonical.query):
+    deterministic_routing_plan = _build_deterministic_bff_plan(
+        canonical.query, canonical.previous_question_context
+    )
+    if _uses_strategy_research_intake(
+        canonical.query,
+        deterministic_routing_plan,
+        canonical.previous_question_context,
+    ):
         accepted = _strategy_query(canonical)
         return MirrorIngressResponse(
             accepted=True,
             duplicate=accepted.duplicate,
-            reason="strategy_research_duplicate" if accepted.duplicate else "strategy_research_accepted",
+            reason="strategy_research_duplicate"
+            if accepted.duplicate
+            else "strategy_research_accepted",
             request_id=canonical.request_id,
             source=canonical.source,
             execution_count=0 if accepted.duplicate else 1,
             ceo=accepted.model_dump(),
         )
-    execution = _execute(canonical)
+    execution = _execute(
+        canonical, deterministic_routing_plan=deterministic_routing_plan
+    )
     response = execution.response
     return MirrorIngressResponse(
         accepted=execution.accepted,

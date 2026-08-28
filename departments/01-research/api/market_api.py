@@ -124,6 +124,20 @@ def _iid_or_404(symbol: str) -> str:
     return iid
 
 
+@app.get("/instrument/{symbol}")
+def instrument(symbol: str) -> dict[str, str]:
+    """Return the canonical UUID used by the raw Timescale market tables.
+
+    PAPER strategy runtimes use this endpoint only once at startup to resolve
+    the symbol; all subsequent market data reads go directly to the read-only
+    Timescale connection.  Keeping the mapping here avoids copying the
+    control-database credential into the strategy container.
+    """
+
+    normalized = symbol.strip().upper()
+    return {"symbol": normalized, "instrument_id": _iid_or_404(normalized)}
+
+
 def _query(sql: str, params: tuple):
     conn = get_ts()
     try:
@@ -164,6 +178,36 @@ def health() -> dict:
         "status": "ok",
         "service": "market-api",
     }
+
+
+@app.get("/health/freshness")
+def health_freshness() -> dict:
+    """Return bounded tick/quote freshness evidence for release gates.
+
+    ``/health/ready`` intentionally reports two-day row counts for human
+    diagnostics, but counting hypertables can be slow as the archive grows.
+    Operational gates need only the existence and newest event for the two
+    authoritative streams, so this endpoint uses index-friendly ``EXISTS`` and
+    ``ORDER BY event_time DESC LIMIT 1`` probes instead of a full aggregation.
+    """
+
+    rows = _query(
+        """
+        select 'ticks' as domain,
+               case when exists (select 1 from market.market_ticks limit 1)
+                    then 1 else 0 end as rows,
+               (select event_time from market.market_ticks
+                order by event_time desc limit 1) as last_event
+        union all
+        select 'quotes',
+               case when exists (select 1 from market.market_quotes limit 1)
+                    then 1 else 0 end,
+               (select event_time from market.market_quotes
+                order by event_time desc limit 1)
+        """,
+        (),
+    )
+    return {"version": API_VERSION, "read_only": True, "domains": rows}
 
 
 def _deep_readiness() -> dict[str, object]:

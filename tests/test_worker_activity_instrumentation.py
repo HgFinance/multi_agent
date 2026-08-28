@@ -527,6 +527,33 @@ class _Usage:
         self.completion_tokens = completion
 
 
+class _OllamaUsage:
+    prompt_eval_count = 31
+    eval_count = 17
+
+
+def test_record_llm_call_accepts_native_ollama_usage_fields() -> None:
+    token = observability.begin_worker_metric(
+        worker_id="demo-worker",
+        role="Demo",
+        stage="research",
+        model_name="qwen3:1.7b",
+    )
+    try:
+        observability.record_llm_call(usage=_OllamaUsage())
+        measured = observability.end_worker_metric(
+            token, status="COMPLETED", attempts=1, eval_score=None
+        )
+    except Exception:
+        observability.end_worker_metric(
+            token, status="DEGRADED", attempts=1, eval_score=None
+        )
+        raise
+
+    assert measured["prompt_tokens"] == 31
+    assert measured["completion_tokens"] == 17
+
+
 def _token_reporting_llm(_system: str, _prompt: str) -> str:
     """실제 Worker LLM 과 같은 자리에서 record_llm_call 을 부르는 대역."""
 
