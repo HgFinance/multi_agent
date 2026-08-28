@@ -6,6 +6,7 @@ model:
   base_url: https://chatgpt.com/backend-api/codex
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+  DISCORD_COMMAND_SYNC_POLICY: off
 toolsets:
 - all
 - kanban

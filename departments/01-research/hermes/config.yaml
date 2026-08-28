@@ -7,6 +7,7 @@ model:
   default: gpt-5.6-luna
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+  DISCORD_COMMAND_SYNC_POLICY: off
 agent:
   # Strategy objectives are owned by the separate strategy-hermes profile.
   # This head is the Research HQ evidence/methodology provider only.

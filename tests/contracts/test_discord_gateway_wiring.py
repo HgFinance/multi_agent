@@ -122,7 +122,7 @@ class DiscordGatewayWiringTests(unittest.TestCase):
             path: path.read_text(encoding="utf-8")
             for path in set(GATEWAY_SERVICES.values())
         }
-        for service in ("ceo-hermes", "qa-hermes", "workforce-hermes"):
+        for service in EXPECTED_GATEWAY_PROFILES:
             block = _service_block(
                 sources[GATEWAY_SERVICES[service]], service
             )
@@ -131,6 +131,22 @@ class DiscordGatewayWiringTests(unittest.TestCase):
                 block,
                 service,
             )
+
+    def test_all_canonical_profiles_disable_slash_command_startup_sync(self) -> None:
+        for service, profile in EXPECTED_GATEWAY_PROFILES.items():
+            config = (
+                ROOT / "departments" / {
+                    "ceo-agent": "00-ceo-office",
+                    "hr-department": "07-agent-workforce",
+                    "research-department": "01-research",
+                    "trading-department": "02-trading",
+                    "risk-management": "03-risk",
+                    "quant-backtest-department": "04-quant-backtest",
+                    "accounting-portfolio-department": "05-accounting-portfolio",
+                    "qa-department": "06-ai-qa-audit",
+                }[profile] / "hermes/config.yaml"
+            ).read_text(encoding="utf-8")
+            self.assertIn("DISCORD_COMMAND_SYNC_POLICY: off", config, service)
 
     def test_compose_definitions_do_not_start_host_gateways(self) -> None:
         compose_paths = set(GATEWAY_SERVICES.values()) | {

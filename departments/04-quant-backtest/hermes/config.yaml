@@ -7,6 +7,7 @@ model:
   default: gpt-5.6-luna
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+  DISCORD_COMMAND_SYNC_POLICY: off
   # 업무 원장. **이 프로필에만 둔다** - 에이전트는 kanban-dispatcher 한
   # 컨테이너에서 전부 뜨므로, 여기 말고 compose environment 에 두면 8개
   # 본부가 전부 갖게 된다. 지금은 공용 DSN 이고, svc_quant 롤

@@ -214,6 +214,7 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      DISCORD_COMMAND_SYNC_POLICY: ${DISCORD_COMMAND_SYNC_POLICY:-off}
       # The profile can submit only a non-binding interpretation to the
       # internal MCP boundary. It never receives DATABASE_URL or either
       # Trading service-proof secret.

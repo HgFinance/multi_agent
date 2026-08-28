@@ -21,6 +21,7 @@ from typing import Any
 import redis
 
 from apps.api.conditional_rule_status import build_conditional_execution_status
+from apps.api.conditional_rule_status import ConditionalStatusError
 from apps.api.user_order_workflow import (
     directive_execution_event_payload,
     user_order_repository,
@@ -488,6 +489,21 @@ class RedisConditionalNotificationRunner:
     def _process_safely(self, message_id: str, fields: Mapping[str, Any]) -> int:
         try:
             return self._process(message_id, fields)
+        except ConditionalStatusError as exc:
+            # A malformed or internally inconsistent Trading snapshot cannot
+            # become valid by retrying the same immutable event. Leaving it in
+            # the pending list creates a hot retry loop that starves healthy
+            # conditional reports (observed at ~2s/message on 2026-08-28).
+            # Fail closed: preserve the contract error in the service log and
+            # acknowledge this one poison event so later events can progress.
+            LOG.error(
+                "conditional reporting event quarantined as terminal "
+                "message_id=%s reason=%s",
+                message_id,
+                str(exc),
+            )
+            self.client.xack(self.stream, self.group, message_id)
+            return 1
         except Exception:
             LOG.exception(
                 "conditional reporting event failed message_id=%s", message_id

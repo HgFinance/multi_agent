@@ -1518,6 +1518,7 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      DISCORD_COMMAND_SYNC_POLICY: ${DISCORD_COMMAND_SYNC_POLICY:-off}
       # LLM Provider(Codex/Claude)는 하드코딩하지 않는다 - /opt/data/config.yaml의
       # provider: 와 auth.json이 실제 Provider를 결정한다(docker-compose.claude.yml 참고).
       # 이 값은 Provider 키가 아니라 Profile의 mcp_servers.research.headers가 싣는
@@ -1688,6 +1689,7 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      DISCORD_COMMAND_SYNC_POLICY: ${DISCORD_COMMAND_SYNC_POLICY:-off}
       # Profile MCP headers expand this token for the read-only research
       # liaison.  Job mutation stays on quant-api/validation workers; Hermes gets
       # neither a database credential nor an implied write-capable MCP tool.
@@ -2003,6 +2005,7 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      DISCORD_COMMAND_SYNC_POLICY: ${DISCORD_COMMAND_SYNC_POLICY:-off}
       MCP_RISK_API_KEY: ${MCP_RISK_API_KEY:?A generated 32-byte Risk legal MCP key is required}
     mem_limit: 1g
     mem_reservation: 192m

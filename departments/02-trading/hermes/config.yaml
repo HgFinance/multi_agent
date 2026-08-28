@@ -33,6 +33,7 @@ model:
 
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
+  DISCORD_COMMAND_SYNC_POLICY: off
 
 agent:
   head_persona: trading-supervisor

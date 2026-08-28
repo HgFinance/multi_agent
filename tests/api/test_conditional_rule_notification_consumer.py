@@ -7,6 +7,7 @@ from apps.api.conditional_rule_notification_consumer import (
     ConditionalRuleNotificationConsumer,
     RedisConditionalNotificationRunner,
 )
+from apps.api.conditional_rule_status import ConditionalStatusError
 from apps.api.user_order_workflow import UserOrderRequestRecord
 from apps.api.user_orders import UserDirectiveResponse
 
@@ -349,3 +350,31 @@ def test_runner_does_not_let_one_poison_event_block_the_batch() -> None:
 
     assert runner.poll_once(block_ms=1) == 1
     assert client.acked == ["2-0"]
+
+
+def test_runner_acknowledges_terminal_authority_contract_error() -> None:
+    class RedisBatch:
+        def __init__(self) -> None:
+            self.acked = []
+
+        def xgroup_create(self, *_args, **_kwargs):
+            return True
+
+        def xautoclaim(self, *_args, **_kwargs):
+            return ("0-0", [("poison-1", {"event_id": "bad-authority"})], [])
+
+        def xreadgroup(self, *_args, **_kwargs):
+            return []
+
+        def xack(self, _stream, _group, message_id):
+            self.acked.append(message_id)
+
+    class AuthorityConsumer:
+        def handle_event(self, _event):
+            raise ConditionalStatusError("conditional directive must contain exactly one order leg")
+
+    client = RedisBatch()
+    runner = RedisConditionalNotificationRunner(client, AuthorityConsumer())
+
+    assert runner.poll_once(block_ms=1) == 1
+    assert client.acked == ["poison-1"]

@@ -216,6 +216,7 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      DISCORD_COMMAND_SYNC_POLICY: ${DISCORD_COMMAND_SYNC_POLICY:-off}
       # Keep the department worker eligible for redacted LangSmith traces.
       LANGSMITH_HIDE_INPUTS: "true"
       LANGSMITH_HIDE_OUTPUTS: "true"
