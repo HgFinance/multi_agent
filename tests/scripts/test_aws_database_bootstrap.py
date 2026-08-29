@@ -145,17 +145,20 @@ def test_paper_seed_adopts_only_exact_active_paper_book() -> None:
         )
 
 
-def test_runtime_login_contract_has_one_exact_settable_role_per_login() -> None:
+def test_runtime_login_contract_has_exact_settable_roles_per_login() -> None:
     assert bootstrap.RUNTIME_LOGIN_MEMBERSHIPS == {
-        "hgfinance_runtime": ("service_role", True),
-        "hgfinance_order_runtime": ("svc_order_orchestrator", False),
-        "hgfinance_trading_runtime": ("svc_trading_api", False),
-        "hgfinance_accounting_runtime": ("svc_accounting_ledger", False),
-        "hgfinance_conditional_orchestrator": (
-            "svc_conditional_rule_orchestrator",
-            False,
-        ),
-        "hgfinance_conditional_worker": ("svc_conditional_rule_worker", False),
+        "hgfinance_runtime": {"service_role": True},
+        "hgfinance_order_runtime": {"svc_order_orchestrator": False},
+        "hgfinance_trading_runtime": {
+            "svc_trading_api": False,
+            "svc_strategy_paper_executor": False,
+            "svc_trading_outbox_relay": False,
+        },
+        "hgfinance_accounting_runtime": {"svc_accounting_ledger": False},
+        "hgfinance_conditional_orchestrator": {
+            "svc_conditional_rule_orchestrator": False,
+        },
+        "hgfinance_conditional_worker": {"svc_conditional_rule_worker": False},
     }
     assert bootstrap.RUNTIME_LOGIN_PASSWORD_KEYS == {
         "hgfinance_runtime": "HEDGEFUND_RUNTIME_DB_PASSWORD",
@@ -181,7 +184,8 @@ def test_runtime_login_contract_has_one_exact_settable_role_per_login() -> None:
         "hgfinance_conditional_orchestrator",
         "hgfinance_conditional_worker",
     ):
-        assert len(bootstrap._memberships_for_login(login)) == 1
+        expected_count = 3 if login == "hgfinance_trading_runtime" else 1
+        assert len(bootstrap._memberships_for_login(login)) == expected_count
         assert "service_role" not in bootstrap._memberships_for_login(login)
 
 

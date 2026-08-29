@@ -25,7 +25,10 @@ def test_release_audit_keeps_unverified_gates_blocked() -> None:
 def test_release_audit_records_conditional_rule_and_dependency_gaps() -> None:
     findings = build_report(ROOT)["findings"]
 
-    assert findings["dependency_hygiene"]["status"] == "PARTIAL"
+    assert findings["dependency_hygiene"]["status"] == "PASS"
     assert findings["dependency_hygiene"]["direct_requirements_present"] is True
+    assert findings["dependency_hygiene"]["lock_present"] is True
+    assert findings["dependency_hygiene"]["sbom_present"] is True
+    assert findings["dependency_hygiene"]["cve_clean"] is True
     assert findings["conditional_rules"]["status"] == "PARTIAL"
     assert findings["conditional_rules"]["contract_evidence_present"] is True

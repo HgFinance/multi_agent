@@ -117,6 +117,15 @@ class PostgresRuleWorkerStore:
                 self._set_role(cursor)
                 cursor.execute("select 1")
                 cursor.fetchone()
+                # The relay's claim/finalize path depends on the lease columns.
+                # LIMIT 0 validates the deployed schema without reading rows.
+                cursor.execute(
+                    """
+                    select claim_token, claim_expires_at
+                      from execution.conditional_rule_outbox
+                     limit 0
+                    """
+                )
         except psycopg2.Error as exc:
             raise RuleWorkerStoreError(
                 "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",

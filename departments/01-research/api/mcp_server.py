@@ -344,6 +344,15 @@ def is_authorized(header: str | None, token: str | None) -> bool:
     return hmac.compare_digest(parts[1].strip(), token)
 
 
+def _healthcheck_headers(token: str | None) -> dict[str, str]:
+    """Use the server's configured bearer for its internal liveness probe."""
+
+    normalized = (token or "").strip()
+    if not normalized:
+        return {}
+    return {"Authorization": f"Bearer {normalized}"}
+
+
 def build_app(server, *, token: str | None):
     """MCP Starlette 앱 + Bearer 검사 미들웨어."""
     from starlette.responses import JSONResponse
@@ -2195,11 +2204,22 @@ if __name__ == "__main__":
         import urllib.error
         import urllib.request
 
-        url = f"http://127.0.0.1:{DEFAULT_PORT}/mcp"
+        token = os.environ.get("MCP_RESEARCH_API_KEY", "").strip()
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{DEFAULT_PORT}/mcp",
+            headers=_healthcheck_headers(token),
+        )
         try:
-            urllib.request.urlopen(url, timeout=3)
-        except urllib.error.HTTPError:
-            pass  # 401/404/406 도 서버가 응답했다는 뜻이다
+            with urllib.request.urlopen(request, timeout=3):
+                pass
+        except urllib.error.HTTPError as exc:
+            if exc.code >= 500 or (token and exc.code == 401):
+                print(
+                    f"research-mcp 헬스체크 실패: HTTP {exc.code}",
+                    flush=True,
+                )
+                raise SystemExit(1)
+            pass  # 404/406 은 서버가 응답했다는 뜻이다
         except Exception as exc:  # noqa: BLE001 - 타임아웃·연결거부는 그대로 실패
             print(f"research-mcp 헬스체크 실패: {type(exc).__name__}: {exc}")
             raise SystemExit(1)

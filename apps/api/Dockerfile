@@ -8,7 +8,8 @@ ENV PYTHONUNBUFFERED=1 \
     HERMES_HOME=/opt/hermes-cli
 
 COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock ./requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 RUN mkdir -p /opt/hermes-cli
 
 # The BFF needs the official Hermes CLI for the Kanban create boundary. It

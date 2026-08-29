@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from unittest.mock import patch
 
-from apps.api.conditional_rule_outbox_relay import RedisConditionalRulePublisher
+from apps.api.conditional_rule_outbox_relay import (
+    RedisConditionalRulePublisher,
+    _log_drain_result,
+)
 from orchestration.conditional_rules.worker_store import ConditionalRuleOutboxRow
 
 
@@ -47,3 +51,17 @@ def test_conditional_rule_outbox_publisher_emits_one_canonical_stream_event() ->
     assert fields["event_type"] == "DIRECTIVE_SUBMITTED"
     assert '"directive_id":"directive-1"' in fields["payload"]
     assert fake.kwargs == [{}]
+
+
+def test_empty_outbox_cycle_is_debug_only() -> None:
+    with patch("apps.api.conditional_rule_outbox_relay.LOG.log") as log:
+        _log_drain_result({"picked": 0, "published": 0, "failed": 0, "lost": 0})
+
+    assert log.call_args.args[0] == logging.DEBUG
+
+
+def test_non_empty_outbox_cycle_remains_info() -> None:
+    with patch("apps.api.conditional_rule_outbox_relay.LOG.log") as log:
+        _log_drain_result({"picked": 1, "published": 0, "failed": 1, "lost": 0})
+
+    assert log.call_args.args[0] == logging.INFO

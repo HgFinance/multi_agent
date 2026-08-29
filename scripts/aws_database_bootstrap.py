@@ -62,15 +62,22 @@ RUNTIME_LOGIN_PASSWORD_KEYS = {
     CONDITIONAL_WORKER_RUNTIME_LOGIN: "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD",
 }
 RUNTIME_LOGIN_MEMBERSHIPS = {
-    GENERIC_RUNTIME_LOGIN: ("service_role", True),
-    ORDER_RUNTIME_LOGIN: ("svc_order_orchestrator", False),
-    TRADING_RUNTIME_LOGIN: ("svc_trading_api", False),
-    ACCOUNTING_RUNTIME_LOGIN: ("svc_accounting_ledger", False),
-    CONDITIONAL_ORCHESTRATOR_RUNTIME_LOGIN: (
-        "svc_conditional_rule_orchestrator",
-        False,
-    ),
-    CONDITIONAL_WORKER_RUNTIME_LOGIN: ("svc_conditional_rule_worker", False),
+    GENERIC_RUNTIME_LOGIN: {"service_role": True},
+    ORDER_RUNTIME_LOGIN: {"svc_order_orchestrator": False},
+    # Trading uses one password-authenticated pool login but selects one
+    # explicit capability role per DSN: API, PAPER OMS, or outbox relay.
+    # Keeping all three memberships here prevents a bootstrap rerun from
+    # revoking the two valid PAPER execution boundaries as stale grants.
+    TRADING_RUNTIME_LOGIN: {
+        "svc_trading_api": False,
+        "svc_strategy_paper_executor": False,
+        "svc_trading_outbox_relay": False,
+    },
+    ACCOUNTING_RUNTIME_LOGIN: {"svc_accounting_ledger": False},
+    CONDITIONAL_ORCHESTRATOR_RUNTIME_LOGIN: {
+        "svc_conditional_rule_orchestrator": False,
+    },
+    CONDITIONAL_WORKER_RUNTIME_LOGIN: {"svc_conditional_rule_worker": False},
 }
 GENERIC_RUNTIME_SET_ROLES = (
     "svc_quant",
@@ -1070,8 +1077,7 @@ def _configure_login(
 
 
 def _memberships_for_login(login: str) -> dict[str, bool]:
-    granted_role, inherited = RUNTIME_LOGIN_MEMBERSHIPS[login]
-    memberships = {granted_role: inherited}
+    memberships = dict(RUNTIME_LOGIN_MEMBERSHIPS[login])
     if login == GENERIC_RUNTIME_LOGIN:
         memberships.update({role: False for role in GENERIC_RUNTIME_SET_ROLES})
     return memberships
@@ -1113,8 +1119,9 @@ def _replace_login_memberships(
 
 
 def _audit_runtime_logins(cursor) -> None:
-    for login, (expected_role, inherited_membership) in RUNTIME_LOGIN_MEMBERSHIPS.items():
+    for login in RUNTIME_LOGIN_MEMBERSHIPS:
         expected_memberships = _memberships_for_login(login)
+        inherited_membership = login == GENERIC_RUNTIME_LOGIN
         cursor.execute(
             """
             select rolcanlogin,rolsuper,rolcreatedb,rolcreaterole,
@@ -1205,7 +1212,7 @@ def provision_runtime_logins(
             _configure_control_compatibility_role(cursor)
             _configure_critical_runtime_roles(cursor)
             for login, password in passwords.items():
-                inherited = RUNTIME_LOGIN_MEMBERSHIPS[login][1]
+                inherited = login == GENERIC_RUNTIME_LOGIN
                 _configure_login(
                     cursor,
                     login=login,

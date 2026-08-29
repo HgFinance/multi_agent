@@ -2,6 +2,8 @@ begin;
 
 -- Research realtime capture only needs the current symbol set, never rule
 -- instructions, user identity, order authority, or lifecycle mutation rights.
+-- Keep that cross-department seam as a one-column projection instead of
+-- granting the collector access to conditional-rule tables.
 create or replace view execution.active_conditional_subscription_symbols
 with (security_barrier = true, security_invoker = false) as
 select distinct rule.symbol

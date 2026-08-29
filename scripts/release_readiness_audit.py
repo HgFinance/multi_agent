@@ -62,6 +62,45 @@ def _stress_ci_exists(root: Path) -> bool:
     )
 
 
+def _dependency_security_state(root: Path) -> tuple[str, dict[str, object], list[str]]:
+    lock_path = root / "requirements.lock"
+    sbom_path = root / "docs/dependency-python-sbom.cdx.json"
+    cve_path = root / "docs/dependency-cve-audit.json"
+    lock_present = lock_path.is_file()
+    sbom_present = sbom_path.is_file()
+    cve_report_present = cve_path.is_file()
+    cve_clean = False
+    if cve_report_present:
+        try:
+            report = json.loads(cve_path.read_text(encoding="utf-8"))
+            dependencies = report.get("dependencies", [])
+            cve_clean = bool(dependencies) and all(
+                not dependency.get("vulns") for dependency in dependencies
+            )
+        except (OSError, TypeError, ValueError):
+            cve_clean = False
+    evidence = [
+        "requirements.lock pins the shared Python runtime with hashes"
+        if lock_present
+        else "requirements.lock is absent",
+        "CycloneDX Python SBOM is tracked"
+        if sbom_present
+        else "CycloneDX Python SBOM is absent",
+        "pip-audit report is tracked with no known Python vulnerabilities"
+        if cve_clean
+        else "pip-audit report is absent, invalid, or contains vulnerabilities",
+        "isolated department Dockerfiles still use their own explicit pins and need a separate image-level scan",
+    ]
+    state = "PASS" if lock_present and sbom_present and cve_clean else "PARTIAL"
+    metadata = {
+        "lock_present": lock_present,
+        "sbom_present": sbom_present,
+        "cve_report_present": cve_report_present,
+        "cve_clean": cve_clean,
+    }
+    return state, metadata, evidence
+
+
 def build_report(root: Path) -> dict[str, object]:
     compose = _text(root, "docker-compose.yml")
     worker = _text(root, "departments/04-quant-backtest/pipeline/experiment_worker.py")
@@ -71,6 +110,9 @@ def build_report(root: Path) -> dict[str, object]:
     status_doc = _text(root, "docs/PROJECT_IMPLEMENTATION_STATUS.md")
     architecture_doc = _text(root, "docs/CURRENT_PROJECT_ARCHITECTURE.md")
     gc = build_gc_report(root)
+    dependency_status, dependency_metadata, dependency_evidence = (
+        _dependency_security_state(root)
+    )
 
     findings: dict[str, dict[str, object]] = {
         "paper_orders": {
@@ -107,11 +149,12 @@ def build_report(root: Path) -> dict[str, object]:
             ],
         },
         "dependency_hygiene": {
-            "status": "PARTIAL",
+            "status": dependency_status,
             "evidence": [
                 "langsmith, psycopg v3, and pyarrow are now direct requirements",
-                "a Python lockfile, SBOM, and CVE report are still absent",
+                *dependency_evidence,
             ],
+            **dependency_metadata,
             "direct_requirements_present": all(
                 token in requirements for token in ("langsmith", "psycopg[", "pyarrow")
             ),

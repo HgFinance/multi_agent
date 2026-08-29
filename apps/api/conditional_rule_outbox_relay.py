@@ -105,6 +105,24 @@ def _settings() -> tuple[PostgresRuleWorkerStore, RedisConditionalRulePublisher,
     return store, publisher, poll, batch
 
 
+def _log_drain_result(result: dict[str, int]) -> None:
+    """Keep empty polling cycles out of the default INFO log stream."""
+
+    level = (
+        logging.INFO
+        if any(result.get(key, 0) for key in ("picked", "published", "failed", "lost"))
+        else logging.DEBUG
+    )
+    LOG.log(
+        level,
+        "conditional rule outbox cycle picked=%d published=%d failed=%d lost=%d",
+        result["picked"],
+        result["published"],
+        result["failed"],
+        result.get("lost", 0),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
@@ -124,11 +142,7 @@ def main() -> int:
     while True:
         try:
             result = store.drain_outbox(publisher.publish, limit=batch)
-            LOG.info(
-                "conditional rule outbox cycle picked=%d published=%d failed=%d lost=%d",
-                result["picked"], result["published"], result["failed"],
-                result.get("lost", 0),
-            )
+            _log_drain_result(result)
         except Exception:
             LOG.exception("conditional rule outbox cycle failed")
         if args.once:
