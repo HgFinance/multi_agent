@@ -1,0 +1,66 @@
+name: Runtime stress evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Reachable BFF base URL for the optional CEO E2E endpoint"
+        required: true
+        type: string
+      service_urls_json:
+        description: "JSON map of read-only scenario names to reachable service base URLs"
+        required: true
+        type: string
+      requests:
+        description: "Requests per scenario"
+        required: true
+        default: "32"
+        type: string
+      concurrency:
+        description: "Concurrent requests per scenario"
+        required: true
+        default: "32"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-stress-evidence
+  cancel-in-progress: false
+
+jobs:
+  stress-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize Python runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate stress runner
+        run: python -m py_compile scripts/stress_test.py
+
+      - name: Run bounded read-only stress test matrix
+        env:
+          HGFINANCE_STRESS_SERVICE_URLS_JSON: ${{ inputs.service_urls_json }}
+        run: >-
+          python scripts/stress_test.py
+          --scenario read_only
+          --base-url "${{ inputs.base_url }}"
+          --requests "${{ inputs.requests }}"
+          --concurrency "${{ inputs.concurrency }}"
+          --require-service-urls
+          --output "${{ runner.temp }}/stress-evidence.json"
+
+      - name: Upload stress evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-stress-evidence
+          path: ${{ runner.temp }}/stress-evidence.json
+          if-no-files-found: error
