@@ -146,6 +146,21 @@ allowed tool call, recursively check each node against this field ownership:
 - `COMPARISON`/`CROSS`/`ARITHMETIC`: exactly `type`, `operator`, `left`, `right`.
 - `LOGICAL`: exactly `type`, `operator`, `children`; `NOT`: exactly `type`,
   `operand`; `PORTFOLIO`: exactly `type`, `field`.
+- `TEMPORAL_SEQUENCE`: exactly `type`, `parameters`, `children`; parameters are
+  only `WINDOW_BARS` (1..500), and children are exactly ARM, TRIGGER, CANCEL in
+  that order. It is a complete root condition on one completed-bar timeframe.
+
+The executable contract is one instrument and one `ONCE` action per candidate.
+Do not simulate unsupported atomic behavior by emitting several independent
+rules. Unbounded repetition, event-count windows, dynamic universes,
+cross-instrument `FIRST_OF`, consecutive hold-duration, post-order
+cancel/replace timers, partial-fill resubmission, and relative one-tick limit
+prices must return `candidate=null` with the specific unsupported capability.
+A quote `COMPARISON` is a state predicate; `CROSS` is a completed-bar edge
+predicate. Never exchange them. Mutually exclusive bounds on the same value
+are rejected as `CONTRADICTORY_CONDITION`. User wording can never disable
+risk, freshness, market-session, authority, audit, version, or idempotency
+checks.
 
 Use these canonical patterns:
 

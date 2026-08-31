@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "llm_wiki"))
 
-from wiki_reader import read_bounded
+from wiki_reader import citation_aliases, read_bounded
 
 
 def _write_page(
@@ -132,7 +132,6 @@ def test_citation_aliases_accept_unambiguous_document_and_clause_ids(tmp_path: P
     )
 
     from wiki_reader import citation_aliases
-
     aliases = citation_aliases(["page-a"], wiki_dir=wiki_dir)
 
     assert aliases["page-a"] == "page-a"

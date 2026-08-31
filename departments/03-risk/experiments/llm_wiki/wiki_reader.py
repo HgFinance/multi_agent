@@ -162,7 +162,13 @@ def _outgoing_links(body: str) -> list[tuple[str, str, str]]:
 def citation_aliases(
     page_ids: list[str], wiki_dir: Path = WIKI_DIR
 ) -> dict[str, str]:
-    """Return unambiguous page/document/clause aliases for visited pages."""
+    """Return unambiguous page/document/clause aliases for visited pages.
+
+    The model is instructed to cite page_id, but accepting the same page's
+    document_id or clause_id avoids rejecting a grounded answer solely because
+    the model used another identifier printed in the same Wiki frontmatter.
+    Ambiguous aliases are removed rather than guessed.
+    """
 
     aliases: dict[str, str] = {}
     ambiguous: set[str] = set()

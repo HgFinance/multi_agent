@@ -231,6 +231,27 @@ class CeoRouteVerificationTest(unittest.TestCase):
                 self.assertTrue(verification.valid, msg=case.query)
 
 
+class ConditionalOrderSafetyStressTest(unittest.TestCase):
+    """I08 and negation variants must never enter an executable order lane."""
+
+    NON_EXECUTABLE_QUERIES = (
+        "삼성전자가 7만 원 아래로 내려가면 주문하지 말고 나한테만 알려줘",
+        "7만 원 안 넘으면 사지 마",
+        "7만 원을 넘지 않을 때 매수하지 마",
+        "삼성전자 5분봉 RSI가 30 아래여도 매수하지 마",
+    )
+
+    def test_negation_and_alert_only_language_never_selects_an_order_lane(self) -> None:
+        for query in self.NON_EXECUTABLE_QUERIES:
+            with self.subTest(query=query):
+                decision = classify_ceo_request(query)
+                self.assertNotIn(decision.lane, ORDER_LANES)
+                self.assertTrue(
+                    {"negated_order_instruction", "insufficient_query_intent"}
+                    & set(decision.reason_codes)
+                )
+
+
 class CeoOperationalStatusLaneTest(unittest.TestCase):
     """운영 상태 조회는 부서 fan-out 없이 결정론 경로로 끝난다.
 

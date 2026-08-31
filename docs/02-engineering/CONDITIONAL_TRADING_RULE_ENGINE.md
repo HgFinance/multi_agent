@@ -50,10 +50,12 @@ trigger를 다시 제출하지 않도록 terminal failure로 처리한다.
 - timeframes: `1M`, `3M`, `5M`, `10M`, `15M`, `30M`, `1H`, `1D`
 - indicators: SMA, EMA, RSI, MACD, Bollinger Bands, Envelope, volume average,
   ATR, ADX, Stochastic, CCI, MFI, OBV, ROC, VWAP, Williams %R, Donchian, PSAR
-- expressions: arithmetic, comparison, cross above/below, AND, OR, NOT
+- expressions: arithmetic, comparison, completed-bar cross above/below, AND,
+  OR, NOT, root trailing stop, bounded root temporal sequence
 - portfolio facts: quantity, sellable quantity, average entry, market value, NAV,
   weight, unrealized PnL, PnL ratio, available cash
-- actions: fixed-share BUY/SELL, position-percent SELL, ALL SELL
+- actions: fixed-share BUY/SELL, notional-KRW BUY, capped available-cash-percent
+  BUY, position-percent/target-weight/ALL SELL; MARKET and an exact explicit LIMIT
 - exit OCO bracket: exactly two same-symbol, same-sizing `SELL` rules for an
   existing position; the server derives their group ID and activates both legs
   atomically.  Once one leg obtains the PAPER OMS submission slot, the worker
@@ -63,7 +65,7 @@ trigger를 다시 제출하지 않도록 terminal failure로 처리한다.
   restart cannot reset the watermark. `DRAWDOWN` is required; optional
   `ACTIVATION_RETURN` arms the stop only after canonical average entry has
   reached that return.
-- hard limits: `PAPER`, `ONCE`, market order, DAY, market-closed reject
+- hard limits: `PAPER`, `ONCE`, DAY, market-closed reject
 
 `1M`/`3M`/`5M`/`10M`/`15M`/`30M`/`1H` candle은 LS `t8452`의 final `1M`
 rows에서 같은 bucket 규칙으로 생성한다. `1D`는 LS `t8451`의 adjusted daily
@@ -110,9 +112,13 @@ chart에서 가져오며, 장중의 미완성 일봉은 제외한다. 중복 또
 | `하이닉스 평균 매입가 대비 2% 수익 이후 고점 대비 1% 하락하면 전량 매도` | fresh-quote trailing SELL; arms at +2% versus canonical average entry, then exits at or below 1% below the highest observed fresh quote since ACTIVE |
 
 다음은 의도적으로 아직 지원하지 않는다. 문장을 억지로 다른 주문으로 바꾸지 않고
-capability gap으로 알려야 한다.
+capability gap으로 알려야 한다. 여러 독립 규칙을 만들어 원자적 의미를 흉내 내는 것도
+금지한다.
 
-- 순차 조건·N회 반복·분할 청산 상태머신
+- 무제한/N회 반복 주문, 시간창 내 이벤트 횟수, 연속 N봉·N분 유지 조건
+- 동적 유니버스, 여러 종목 간 FIRST_OF, 기준 종목과 실행 종목이 다른 조건
+- 주문 후 미체결 타이머 취소·정정, 부분체결 잔량 재주문, 상대 호가 지정가
+- 조건 규칙 자체의 자연어 MODIFY(기존 API의 pause/resume/cancel/query는 지원)
 - 트레일링 조건과 다른 AND/OR·시간창·완성봉 조건의 결합, 여러 다리의 순차 상태 전이
 - 여러 종목을 하나의 원자적 basket으로 주문
 - 완성봉 지표와 실시간 호가를 같은 순간의 하나의 hybrid trigger로 결합

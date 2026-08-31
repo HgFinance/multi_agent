@@ -81,6 +81,97 @@ def test_rsi_rule_is_semantically_valid() -> None:
     assert validate_rule_spec(spec) is spec
 
 
+def test_impossible_same_scalar_conjunction_is_rejected() -> None:
+    """I07: a clear but impossible condition must never become ACTIVE."""
+
+    impossible = rule(
+        {
+            "type": "LOGICAL",
+            "operator": "AND",
+            "children": [
+                {
+                    "type": "COMPARISON",
+                    "operator": "LTE",
+                    "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                    "right": literal("70000", "PRICE"),
+                },
+                {
+                    "type": "COMPARISON",
+                    "operator": "GTE",
+                    "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                    "right": literal("80000", "PRICE"),
+                },
+            ],
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+
+    with pytest.raises(RuleSemanticError) as rejected:
+        validate_rule_spec(impossible)
+
+    assert rejected.value.code == "CONTRADICTORY_CONDITION"
+
+
+def test_boundary_touch_and_or_branch_are_not_false_positive_contradictions() -> None:
+    exact_boundary = rule(
+        {
+            "type": "LOGICAL",
+            "operator": "AND",
+            "children": [
+                {
+                    "type": "COMPARISON",
+                    "operator": "GTE",
+                    "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                    "right": literal("70000", "PRICE"),
+                },
+                {
+                    "type": "COMPARISON",
+                    "operator": "LTE",
+                    "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                    "right": literal("70000", "PRICE"),
+                },
+            ],
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+    alternative = rule(
+        {
+            "type": "LOGICAL",
+            "operator": "OR",
+            "children": [
+                {
+                    "type": "LOGICAL",
+                    "operator": "AND",
+                    "children": [
+                        {
+                            "type": "COMPARISON",
+                            "operator": "LTE",
+                            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                            "right": literal("70000", "PRICE"),
+                        },
+                        {
+                            "type": "COMPARISON",
+                            "operator": "GTE",
+                            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                            "right": literal("80000", "PRICE"),
+                        },
+                    ],
+                },
+                {
+                    "type": "COMPARISON",
+                    "operator": "EQ",
+                    "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                    "right": literal("75000", "PRICE"),
+                },
+            ],
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+
+    assert validate_rule_spec(exact_boundary) is exact_boundary
+    assert validate_rule_spec(alternative) is alternative
+
+
 def test_explicit_limit_action_preserves_exact_krw_price() -> None:
     spec = rule(
         {
@@ -632,6 +723,51 @@ def test_cross_requires_previous_observation_and_is_edge_triggered() -> None:
     assert raised.value.code == "PREVIOUS_FRAME_REQUIRED"
 
 
+def test_price_state_and_cross_below_have_distinct_runtime_semantics() -> None:
+    """A01/A02: an already-low price satisfies state, never a new crossing."""
+
+    state = rule(
+        {
+            "type": "COMPARISON",
+            "operator": "LTE",
+            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+            "right": literal("70000", "PRICE"),
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+    crossing = rule(
+        {
+            "type": "CROSS",
+            "operator": "BELOW",
+            "left": {"type": "MARKET", "field": "CLOSE"},
+            "right": literal("70000", "PRICE"),
+        },
+        evaluation={"clock": "BAR_CLOSE", "primary_timeframe": "5M"},
+    )
+    below_now = EvaluationFrame(
+        {"LAST_PRICE": Decimal("69000"), "CLOSE": Decimal("69000")},
+        {},
+        {},
+        NOW,
+    )
+    below_before = EvaluationFrame(
+        {"CLOSE": Decimal("68000")}, {}, {}, NOW - timedelta(minutes=5)
+    )
+    above_before = EvaluationFrame(
+        {"CLOSE": Decimal("71000")}, {}, {}, NOW - timedelta(minutes=5)
+    )
+
+    assert state.condition.type.value == "COMPARISON"
+    assert crossing.condition.type.value == "CROSS"
+    assert evaluate_condition(state, EvaluationContext(below_now)) is True
+    assert evaluate_condition(
+        crossing, EvaluationContext(below_now, below_before)
+    ) is False
+    assert evaluate_condition(
+        crossing, EvaluationContext(below_now, above_before)
+    ) is True
+
+
 def guard_input(**changes) -> ExecutionGuardInput:
     data = {
         "now": NOW,
@@ -707,6 +843,7 @@ def test_krw_notional_sizing_is_price_capped_and_lot_floored_at_trigger_time() -
     # 1,000,000 / 123,000 = 8.13...; KRX quantity must be a 2-share lot.
     assert allowed.allowed is True
     assert allowed.quantity == Decimal("8")
+    assert allowed.quantity * Decimal("123000") <= Decimal("1000000")
     assert insufficient_cash.code == "INSUFFICIENT_CASH"
 
 
@@ -756,6 +893,50 @@ def test_market_closed_and_duplicate_trigger_fail_closed() -> None:
     assert closed.code == "MARKET_CLOSED_NO_ORDER"
     assert "주문·체결·원장 반영" in closed.message
     assert duplicate.code == "DUPLICATE_TRIGGER"
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected_code"),
+    (
+        ({"rule_state": "PAUSED"}, "RULE_NOT_ACTIVE"),
+        ({"evaluated_rule_version": 1, "active_rule_version": 2}, "RULE_VERSION_CHANGED"),
+        ({"trigger_already_claimed": True}, "DUPLICATE_TRIGGER"),
+        ({"now": NOW + timedelta(days=31)}, "RULE_EXPIRED"),
+        ({"membership_active": False}, "MEMBERSHIP_INACTIVE"),
+        ({"fund_active": False}, "TRADING_SCOPE_INACTIVE"),
+        ({"book_active": False}, "TRADING_SCOPE_INACTIVE"),
+        ({"market_session_available": False}, "MARKET_SESSION_UNAVAILABLE"),
+        ({"market_open": False}, "MARKET_CLOSED_NO_ORDER"),
+        ({"data_complete": False}, "MARKET_DATA_INCOMPLETE"),
+        ({"quote_fresh": False}, "MARKET_QUOTE_STALE"),
+    ),
+)
+def test_p0_execution_guard_failure_matrix_never_allows_an_order(
+    changes: dict, expected_code: str
+) -> None:
+    spec = rule(
+        {
+            "type": "COMPARISON",
+            "operator": "GT",
+            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+            "right": literal("100000", "PRICE"),
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+
+    decision = guard_rule_execution(spec, guard_input(**changes))
+
+    assert decision.allowed is False
+    assert decision.quantity is None
+    assert decision.code == expected_code
+
+
+def test_p0_user_text_cannot_add_a_guard_override_field() -> None:
+    payload = guard_input().model_dump(mode="json")
+    payload["ignore_risk_and_audit"] = True
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        ExecutionGuardInput.model_validate(payload)
 
 
 def test_market_session_unavailable_is_not_reported_as_closed() -> None:

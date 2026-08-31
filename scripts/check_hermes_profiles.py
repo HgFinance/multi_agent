@@ -41,27 +41,8 @@ ANTHROPIC = {"ceo-agent", "research-department", "qa-department",
 OPENAI = {"trading-department", "risk-management",
           "accounting-portfolio-department", "hr-department"}
 
-# 부서별 기대 모델. 2026-08-02 재일님 결정: "내 부서는 내가 원하는 모델 쓰면 된다".
-# 모델 선택은 **권한 경계가 아니라 소유자 재량**이다 - 리스크 거부권·주문 제출
-# 같은 통제 경계와 층이 다르므로 부서마다 달라도 된다. 다만 "달라도 된다"가
-# "아무거나 돼도 된다"는 아니므로, 소유자가 선언한 값과 다르면 이 검사가 잡는다
-# (전역 동일성 강제를 여기서 이 표로 바꿨다 - 우연한 표류는 여전히 걸린다).
-# Historical snapshot (2026-08-02): retained only to explain prior checker output.
-LEGACY_EXPECTED_MODELS = {
-    "research-department": "nous/poolside/laguna-s-2.1:free",     # 재일
-    "quant-backtest-department": "nous/poolside/laguna-s-2.1:free",  # 재일
-    "ceo-agent": "nous/poolside/laguna-s-2.1:free",              # 영주
-    "hr-department": "nous/poolside/laguna-s-2.1:free",          # 영주
-    # 도현: 2026-08-03 팀 합의대로 Sonnet. 단 api.anthropic.com 직접이 아니라
-    # scripts/claude_code_proxy.py 를 거쳐 구독 플랜 한도로 부른다(각 config.yaml 주석).
-    "trading-department": "anthropic/sonnet",                    # 도현
-    "accounting-portfolio-department": "anthropic/sonnet",
-    "risk-management": "nous/poolside/laguna-s-2.1:free",        # 동규
-    "qa-department": "nous/poolside/laguna-s-2.1:free",
-}
-
 # Current runtime contract: every Hermes Head defaults to Codex/Luna.
-# The legacy table above is retained only as historical audit context.
+# Superseded model assignments live in Git history, not in the active checker.
 EXPECTED_MODELS = {
     "ceo-agent": "openai-codex/gpt-5.6-luna",
     "research-department": "openai-codex/gpt-5.6-luna",

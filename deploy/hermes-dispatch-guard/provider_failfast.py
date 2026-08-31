@@ -5,9 +5,12 @@ That container already propagates this directory through ``PYTHONPATH`` via
 ``sitecustomize``.  Keeping this hook here lets the repository pin the small
 provider policy without copying or vendoring the upstream Hermes runtime.
 
-Only the three provider-backed analysis profiles are enabled.  The helper is
-deliberately defensive: if an upstream Hermes contract moves, the hook fails
-open and the native retry behaviour remains in charge.
+Only the provider-backed analysis profiles and their bounded liaison workers
+are enabled.  Liaisons use the same Codex runtime but previously bypassed this
+hook, so a deterministic credential failure consumed the dispatcher's retry
+budget before reaching the existing block handoff.  The helper is deliberately
+defensive: if an upstream Hermes contract moves, the hook fails open and the
+native retry behaviour remains in charge.
 """
 
 from __future__ import annotations
@@ -28,7 +31,9 @@ LOG = logging.getLogger(__name__)
 
 TARGET_PROFILES = frozenset({
     "research-department",
+    "research-liaison",
     "quant-backtest-department",
+    "quant-liaison",
     "risk-management",
 })
 
