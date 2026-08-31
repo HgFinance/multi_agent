@@ -228,6 +228,16 @@ export function selectedAuthorizedBook(
   return books.find((book) => book.bookId === selectedBookId) ?? null;
 }
 
+/** SSR과 브라우저 프라이버시 설정 양쪽에서 안전한 sessionStorage 접근. */
+export function browserSessionStorage(): PaperOrderStorage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
 export function createPaperOrderSubmission(
   input: PaperOrderActionInput,
   randomUuid: () => string = () => crypto.randomUUID(),

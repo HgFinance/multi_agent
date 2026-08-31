@@ -3,6 +3,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
+  browserSessionStorage,
   clearPendingPaperDirective,
   clearRetryablePaperOrderAction,
   getPaperDirective,
@@ -19,7 +20,6 @@ import {
   shouldPollPaperDirective,
   submitPaperOrderSubmission,
   type PaperDirective,
-  type PaperOrderStorage,
   type PaperOrderStorageScope,
   type RetryablePaperOrderAction,
 } from "../lib/paperOrderClient";
@@ -320,15 +320,6 @@ function DirectiveResult({ directive, polling }: { directive: PaperDirective; po
       )}
     </section>
   );
-}
-
-function browserSessionStorage(): PaperOrderStorage | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.sessionStorage;
-  } catch {
-    return null;
-  }
 }
 
 function storageScope(

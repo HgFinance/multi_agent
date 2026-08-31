@@ -23,7 +23,13 @@ import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
 import { DEFAULT_ACCOUNT } from "../lib/currentAccount";
 import {
   authorizedBooksForFund,
+  browserSessionStorage,
+  clearRetryablePaperOrderAction,
+  loadRetryablePaperOrderAction,
+  persistRetryablePaperOrderAction,
+  preparePaperOrderAction,
   selectedAuthorizedBook,
+  type PaperOrderStorageScope,
 } from "../lib/paperOrderClient";
 import { PanelBar } from "./PanelBar";
 
@@ -181,9 +187,62 @@ function CeoControlRoomChatSession() {
     },
   });
 
+  /**
+   * 결과가 불확실한 재전송이 두 번째 주문이 되지 않게 하는 안전장치.
+   *
+   * `askCeo`는 `request_id`를 안 주면 호출마다 `crypto.randomUUID()`를 새로
+   * 뽑고, 서버 중복 방지는 그 값 하나에만 걸려 있다
+   * (`ceo.py` -> `client_request_id`, `UNIQUE (user_id, client_request_id)`).
+   * 그래서 타임아웃처럼 결말을 모르는 상태에서 사용자가 같은 지시를 다시
+   * 보내면 새 키가 발급돼 **주문이 두 번 들어갈 수 있었다**(2026-08-31).
+   *
+   * 전송 *전에* (fund, book, 지시문) 지문으로 키를 고정해 저장한다. 같은
+   * 지문의 재전송은 같은 키를 쓰고, 서버 `admit()`이 같은 키+같은 주문을
+   * 기존 요청으로 그대로 돌려주므로 두 번째 주문이 생기지 않는다. 결말을
+   * 확인한 뒤(onSuccess)에만 키를 버려, 나중에 같은 주문을 **의도적으로** 한
+   * 번 더 내는 것은 막지 않는다.
+   *
+   * 주문이 아닌 대화는 Book이 없어 지문을 만들 수 없다. 그때는 예전처럼
+   * 서버가 키를 발급하게 두고 안전장치는 적용하지 않는다.
+   */
+  function orderScope(
+    fundId?: string,
+    bookId?: string,
+  ): PaperOrderStorageScope | null {
+    if (!fundId || !bookId) return null;
+    return { accountId: DEFAULT_ACCOUNT.userId, fundId, bookId };
+  }
+
   const sendMutation = useMutation({
-    mutationFn: ({ text, bookId, fundId }: { text: string; bookId?: string; fundId?: string }) =>
-      askCeo(text, undefined, bookId, fundId),
+    mutationFn: ({ text, bookId, fundId }: { text: string; bookId?: string; fundId?: string }) => {
+      const scope = orderScope(fundId, bookId);
+      const storage = scope ? browserSessionStorage() : null;
+      if (!scope || !storage) return askCeo(text, undefined, bookId, fundId);
+
+      const input = { fundId: scope.fundId, bookId: scope.bookId, query: text };
+      let requestId: string;
+      try {
+        const action = preparePaperOrderAction(
+          input,
+          loadRetryablePaperOrderAction(storage, scope),
+        );
+        // 전송 전에 저장한다. 새로고침이 같은 주문에 두 번째 키를 뽑지 못한다.
+        if (!persistRetryablePaperOrderAction(storage, scope, action)) {
+          return askCeo(text, undefined, bookId, fundId);
+        }
+        requestId = action.submission.idempotencyKey;
+      } catch {
+        return askCeo(text, undefined, bookId, fundId);
+      }
+      return askCeo(text, requestId, bookId, fundId);
+    },
+    onSuccess: (_response, variables) => {
+      const scope = orderScope(variables.fundId, variables.bookId);
+      const storage = scope ? browserSessionStorage() : null;
+      if (scope && storage) clearRetryablePaperOrderAction(storage, scope);
+    },
+    // onError에서는 지우지 않는다. 결말을 모르는 상태가 정확히 이 장치가
+    // 필요한 순간이고, 다음 전송이 같은 키를 재사용해야 한다.
   });
 
   const approvalMutation = useMutation({
