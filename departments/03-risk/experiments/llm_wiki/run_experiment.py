@@ -8,6 +8,7 @@ golden_set.json이며, `--dataset`으로 튜닝과 분리된 holdout을 같은 �
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import os
 import sys
@@ -61,7 +62,11 @@ def validate_evaluation_set(dataset: dict[str, Any], path: Path) -> None:
     if dataset.get("split") != "holdout":
         return
     tuning_questions = load_golden_set()["questions"]
-    tuning_queries = {" ".join(str(q["query"]).casefold().split()) for q in tuning_questions}
+    comparison_queries = list(tuning_questions)
+    existing_holdout = path.parent / "holdout_set.json"
+    if path.resolve() != existing_holdout.resolve() and existing_holdout.exists():
+        comparison_queries.extend(load_golden_set(existing_holdout)["questions"])
+    tuning_queries = {" ".join(str(q["query"]).casefold().split()) for q in comparison_queries}
     overlap = [
         q["id"]
         for q in questions
@@ -74,6 +79,31 @@ def validate_evaluation_set(dataset: dict[str, Any], path: Path) -> None:
         query_kind = question.get("query_kind", "conduct_assessment")
         if query_kind not in VALID_QUERY_KINDS:
             raise ValueError(f"unknown query_kind {query_kind!r} in {path}")
+
+    contract = dataset.get("evaluation_contract", {})
+    expected_balance = contract.get("conduct_verdict_balance")
+    if expected_balance is not None:
+        actual_balance = Counter(
+            q.get("gold_verdict")
+            for q in questions
+            if q.get("query_kind", "conduct_assessment") == "conduct_assessment"
+        )
+        if dict(actual_balance) != expected_balance:
+            raise ValueError(
+                "conduct verdict balance does not match the frozen evaluation contract: "
+                f"expected={expected_balance}, actual={dict(actual_balance)}"
+            )
+    expected_nonconduct = contract.get("nonconduct_question_count")
+    if expected_nonconduct is not None:
+        actual_nonconduct = sum(
+            q.get("query_kind", "conduct_assessment") != "conduct_assessment"
+            for q in questions
+        )
+        if actual_nonconduct != expected_nonconduct:
+            raise ValueError(
+                "nonconduct question count does not match the frozen evaluation contract: "
+                f"expected={expected_nonconduct}, actual={actual_nonconduct}"
+            )
 
 
 def run_arm(
@@ -195,7 +225,7 @@ def render_report(
 ) -> str:
     dataset_label = golden.get("dataset_name") or (dataset_path.stem if dataset_path else "golden")
     lines = [
-        "# LLM-Wiki 부분 도입 실험 — Arm A/B/C 비교",
+        "# LLM-Wiki 부분 도입 실험 — 선택 Arm 비교",
         "",
         f"데이터셋: {dataset_label}",
         f"질문 수: {len(golden['questions'])} / 부서장 지시+mandate 고정 / as_of={golden['as_of']}",
