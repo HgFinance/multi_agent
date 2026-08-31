@@ -168,3 +168,38 @@ def test_wiki_answer_preserves_grounded_verdict_and_only_visited_citations() -> 
 
 def test_llm_wiki_prompt_requires_numeric_threshold_comparison() -> None:
     assert "M months/days with M less than or equal to N" in _LLM_WIKI_GENERATE_SYSTEM
+
+
+def test_wiki_answer_fails_closed_on_numeric_threshold_reversal() -> None:
+    result = _finalize_wiki_answer(
+        {
+            "verdict": "no_breach",
+            "cited_documents": ["visited-page"],
+            "rationale": "5개월은 6개월 이내 조건을 충족하지 못하므로 반환할 수 없다.",
+            "confidence": 0.8,
+            "escalate": False,
+        },
+        ["visited-page"],
+        query="5개월 후 매도했을 때 반환청구할 수 있는가?",
+        context="제172조는 6개월 이내에 매도하면 반환을 청구할 수 있다고 정한다.",
+    )
+
+    assert result["verdict"] == "ambiguous"
+    assert result["confidence"] == 0.0
+    assert result["escalate"] is True
+
+
+def test_wiki_answer_fails_closed_when_rationale_prohibits_but_verdict_is_no_breach() -> None:
+    result = _finalize_wiki_answer(
+        {
+            "verdict": "no_breach",
+            "cited_documents": ["visited-page"],
+            "rationale": "미공개정보를 받은 사람도 거래하면 안 되므로 금지된다. 해당하지 않는다.",
+            "confidence": 0.8,
+            "escalate": False,
+        },
+        ["visited-page"],
+    )
+
+    assert result["verdict"] == "ambiguous"
+    assert result["escalate"] is True

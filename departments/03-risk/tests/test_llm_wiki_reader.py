@@ -120,3 +120,35 @@ def test_missing_or_malformed_effective_from_is_not_visible(tmp_path: Path) -> N
 
     assert result.pages_visited == []
     assert result.context == ""
+
+
+def test_citation_aliases_accept_unambiguous_document_and_clause_ids(tmp_path: Path) -> None:
+    wiki_dir = tmp_path / "wiki"
+    wiki_dir.mkdir(parents=True, exist_ok=True)
+    (wiki_dir / "page-a.md").write_text(
+        "---\neffective_from: 2026-01-01\neffective_to: \n"
+        "document_id: doc-a\nclause_id: 제1조\n---\n\n근거 본문입니다.\n",
+        encoding="utf-8",
+    )
+
+    from wiki_reader import citation_aliases
+
+    aliases = citation_aliases(["page-a"], wiki_dir=wiki_dir)
+
+    assert aliases["page-a"] == "page-a"
+    assert aliases["doc-a"] == "page-a"
+    assert aliases["제1조"] == "page-a"
+
+
+def test_empty_effective_to_does_not_consume_following_frontmatter_fields(tmp_path: Path) -> None:
+    wiki_dir = tmp_path / "wiki"
+    wiki_dir.mkdir(parents=True, exist_ok=True)
+    (wiki_dir / "page-a.md").write_text(
+        "---\neffective_from: 2026-01-01\neffective_to: \n"
+        "document_id: doc-a\n---\n\n근거 본문입니다.\n",
+        encoding="utf-8",
+    )
+
+    result = read_bounded("근거", ["page-a"], wiki_dir=wiki_dir, as_of="2026-08-26")
+
+    assert result.pages_visited == ["page-a"]
