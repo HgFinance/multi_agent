@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from orchestration.ceo_query_routing import (
+    SYSTEM_STATUS_CATEGORY,
     build_deterministic_bff_plan,
     negated_departments,
 )
@@ -62,6 +63,7 @@ CeoLane = Literal[
     "conditional_order",  # 조건/예약 PAPER 주문
     "compound_order",  # 즉시 + 조건 매도
     "analysis_then_order",  # 리서치 선행 후 조건주문
+    "operational_status",  # 런타임/헬스 조회 - 부서 fan-out 없음
     "department_analysis",  # 부서 fan-out 분석
     "llm_planner_required",  # 결정론으로 못 정함 - LLM 플래너의 몫
 ]
@@ -244,6 +246,18 @@ def classify_ceo_request(
     # 처리를 유지해야 하므로 자유 문장에서 온 research/risk 기본값을
     # 물려받지 않는다.
     if workflow_mode == "analysis" and not read_only_risk_e2e:
+        # 운영 상태 조회는 부서 primary가 하나도 없는 별도 레인이다. 이름을
+        # 주지 않으면 "부서 분석인데 부서가 0개"인 상태로 섞여, 다음 사람이
+        # 또 호출부에 플래그를 하나 더 만들게 된다.
+        if (
+            plan.get("mode") == "operational_status"
+            and str(plan.get("category") or "") == SYSTEM_STATUS_CATEGORY
+        ):
+            return decide(
+                "operational_status",
+                "operational_status_intent",
+                order_grammar_detected=order_grammar,
+            )
         return decide(
             "department_analysis",
             *(

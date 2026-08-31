@@ -2496,13 +2496,11 @@ def ceo_query(
     # 읽기 전용 E2E 레인은 CEO가 소유한 처리를 유지하며, 자유 문장에서 온
     # research/risk 기본값을 물려받지 않는다.
     bff_routing_plan = (
-        deterministic_routing_plan if route.lane == "department_analysis" else None
+        deterministic_routing_plan
+        if route.lane in {"department_analysis", "operational_status"}
+        else None
     )
-    deterministic_operational_status = bool(
-        isinstance(bff_routing_plan, Mapping)
-        and bff_routing_plan.get("mode") == "operational_status"
-        and bff_routing_plan.get("category") == "SYSTEM_STATUS"
-    )
+    deterministic_operational_status = route.lane == "operational_status"
     selected_bff_profiles = {
         str(profile).strip()
         for profile in (

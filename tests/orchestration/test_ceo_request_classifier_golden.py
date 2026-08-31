@@ -131,6 +131,28 @@ STABLE_CASES: tuple[GoldenCase, ...] = (
         note="이전 질의 플랜 승계",
     ),
     GoldenCase("안녕", "clarification"),
+    # 아래 네 건은 main이 나중에 추가한 문법이다. 부정 가드가 이 레인들을
+    # 막지 않는지 고정한다.
+    GoldenCase(
+        "삼성전자, SK하이닉스 100만원씩 매수",
+        "immediate_order",
+        note="바스켓 동일금액 매수",
+    ),
+    GoldenCase(
+        "삼성전자 10주, SK하이닉스 5주 시장가 매수",
+        "immediate_order",
+        note="바스켓 수량 매수",
+    ),
+    GoldenCase(
+        "평균 매입가 대비 2% 수익이 난 뒤 고점 대비 1% 하락하면 전량 매도",
+        "conditional_order",
+        note="트레일링 청산",
+    ),
+    GoldenCase(
+        "시스템 상태 알려줘",
+        "operational_status",
+        note="런타임 조회 - 부서 primary 0개",
+    ),
 )
 
 
@@ -206,6 +228,41 @@ class CeoRouteVerificationTest(unittest.TestCase):
                 if case.previous_question_context is not None:
                     continue
                 self.assertTrue(verification.valid, msg=case.query)
+
+
+class CeoOperationalStatusLaneTest(unittest.TestCase):
+    """운영 상태 조회는 부서 fan-out 없이 결정론 경로로 끝난다.
+
+    `apps/api/ceo.py`가 이 레인에서만 root를 blocked로 만들고 결정론적으로
+    완료시킨다. 레인 이름이 사라지면 그 경로가 조용히 꺼진다.
+    """
+
+    QUERIES = (
+        "시스템 상태 알려줘",
+        "런타임 헬스 점검해줘",
+        "워크플로 지연 현황 요약해줘",
+    )
+
+    def test_operational_status_is_its_own_lane(self) -> None:
+        for query in self.QUERIES:
+            with self.subTest(query=query):
+                decision = classify_ceo_request(query)
+                self.assertEqual(decision.lane, "operational_status")
+                self.assertEqual(decision.selected_primary_profiles, ())
+
+    def test_plan_markers_survive_for_the_deterministic_completion(self) -> None:
+        decision = classify_ceo_request("시스템 상태 알려줘")
+        self.assertEqual(decision.routing_plan.get("mode"), "operational_status")
+        self.assertEqual(decision.category, "SYSTEM_STATUS")
+        self.assertEqual(decision.routing_basis, "operational_status_intent")
+
+    def test_execution_wording_leaves_the_lane(self) -> None:
+        """binding 어휘가 섞이면 운영 조회로 처리하지 않는다."""
+
+        self.assertNotEqual(
+            classify_ceo_request("주문 워크플로 상태 점검하고 집행해").lane,
+            "operational_status",
+        )
 
 
 class CeoRouteNegationGuardTest(unittest.TestCase):
@@ -288,6 +345,32 @@ class CeoRouteNegationGuardTest(unittest.TestCase):
         """
 
         self.assertNotEqual(_route("회계쪽은 건드리지 말고 리서치만 해줘").lane, "clarification")
+
+    def test_single_syllable_negation_needs_a_word_boundary(self) -> None:
+        """`동안`의 `안`은 부정이 아니다.
+
+        한 음절 표지(`안`·`못`)를 낱말 안에서도 잡으면 정상 조건주문이
+        막힌다 - `"최대 5거래일 동안 추적"`이 그렇게 걸렸다.
+        """
+
+        self._assert_lane(
+            "고점 대비 1% 하락하면 매도해줘, 최대 5거래일 동안 추적",
+            "conditional_order",
+        )
+        self._assert_lane("삼성전자 2주 시장가 매수를 잘못 했어", "immediate_order")
+
+    def test_word_boundary_fix_keeps_real_negation(self) -> None:
+        """어절 경계를 지켜도 진짜 부정은 그대로 잡는다.
+
+        이 문장의 최종 레인은 `llm_planner_required`다. `주문 안 하고`는
+        `infer_workflow_mode`의 비집행 선언 어휘(`하지 마`·`금지`)에 없어서
+        여전히 binding으로 남기 때문이며, 이는 main과 같은 기존 동작이다.
+        여기서 고정하는 것은 **주문 레인에 들어가지 않는다**는 것뿐이다.
+        """
+
+        decision = classify_ceo_request("주문 안 하고 분석만 해줘")
+        self.assertFalse(decision.is_order_lane)
+        self.assertIn("trading", decision.excluded_departments)
 
     def test_negation_on_the_instrument_still_allows_a_conditional_order(self) -> None:
         """가드가 레인 자체를 막아서는 안 된다. 부정이 종목에만 걸린 경우다."""
