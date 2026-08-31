@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import unittest
@@ -27,7 +28,22 @@ _COMPOSE_TEST_ENV = {
         "compose-contract-internal-trading-secret-32-bytes"
     ),
     "MCP_TRADING_ORDER_API_KEY": "compose-contract-paper-order-mcp-key-32-bytes",
+    "MCP_RISK_API_KEY": "compose-contract-risk-legal-mcp-key-32-bytes",
+    "STRATEGY_PAPER_ORDER_TOKEN": "compose-contract-strategy-paper-order-token-32b",
+    "HEDGEFUND_ORDER_DB_PASSWORD": "compose-contract-order-db",
+    "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD": (
+        "compose-contract-conditional-orchestrator-db"
+    ),
+    "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD": (
+        "compose-contract-conditional-worker-db"
+    ),
 }
+
+# 이 딕셔너리는 `docker-compose.yml`이 `${VAR:?}`로 **필수**라고 선언한 변수를
+# 전부 담아야 한다. 하나라도 빠지면 렌더 자체가 실패해 계약 검사가 시작도 못 하고,
+# 로컬에서는 개발자의 `.env`가 그 구멍을 메워 줘서 CI에서만 터진다 - 실제로
+# `x-order-database-url`이 추가된 뒤 이 테스트가 CI에서만 계속 깨졌다.
+_REQUIRED_COMPOSE_VARIABLES = re.compile(r"\$\{([A-Z_]+):\?")
 
 
 def _run_compose(*args: str) -> subprocess.CompletedProcess[str]:
@@ -60,6 +76,29 @@ def _run_compose(*args: str) -> subprocess.CompletedProcess[str]:
             return result
         failures.append(result.stderr or result.stdout)
     raise AssertionError("\n".join(failures))
+
+
+class ComposeTestEnvironmentTest(unittest.TestCase):
+    """필수 변수 목록이 갈리면 계약 검사가 CI에서만 깨진다.
+
+    Docker를 부르지 않는다. `docker-compose.yml`이 `${VAR:?}`로 필수라고
+    선언한 변수와 이 파일이 렌더에 넘기는 변수를 대조할 뿐이다. 이 검사가
+    없으면 compose에 필수 변수가 하나 추가될 때 개발자 `.env`가 구멍을
+    메워 로컬은 통과하고 CI만 빨개진다.
+    """
+
+    def test_every_required_compose_variable_is_supplied(self) -> None:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        required = set(_REQUIRED_COMPOSE_VARIABLES.findall(compose))
+        missing = sorted(required - set(_COMPOSE_TEST_ENV))
+        self.assertEqual(
+            missing,
+            [],
+            msg=(
+                "docker-compose.yml이 필수로 선언한 변수가 _COMPOSE_TEST_ENV에 "
+                f"없습니다: {missing}"
+            ),
+        )
 
 
 class _FakeRedisLock:
