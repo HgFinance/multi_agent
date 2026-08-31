@@ -599,11 +599,114 @@ export async function ceoWorkflowResult(
   );
 }
 
+function statusRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("paper_order_status_invalid_response");
+  }
+  return value as Record<string, unknown>;
+}
+
+function statusNullableString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") {
+    throw new Error("paper_order_status_invalid_response");
+  }
+  return value;
+}
+
+/**
+ * BFF 주문 상태 응답을 실제로 검증한다.
+ *
+ * `getJson`은 `body as T` 캐스팅뿐이라 응답이 계약을 벗어나도 컴파일 타임에도
+ * 런타임에도 신호가 없었다(2026-08-31). 화면은 이 값으로 사용자에게 주문의
+ * 결말을 보여주므로, 형태가 깨진 응답은 조용히 렌더링하는 대신 실패시킨다 -
+ * 호출부의 `isError` 분기가 "다시 확인 중" 문구로 받아 폴링을 이어간다.
+ *
+ * 반대로 `state`/`action` 같은 열거 문자열의 *값*은 여기서 막지 않는다.
+ * 백엔드가 새 상태를 추가했다는 이유로 주문 결말 화면을 통째로 못 쓰게 만드는
+ * 편이 더 나쁘다. 값 목록의 드리프트는 CI의
+ * `tests/contracts/test_ui_paper_order_action_contract.py`가 잡는다.
+ */
+export function parsePaperOrderWorkflowStatus(
+  value: unknown,
+): PaperOrderWorkflowStatus {
+  const body = statusRecord(value);
+  if (
+    body.schema_version !== "user-paper-order-status.v1" ||
+    typeof body.order_request_id !== "string" ||
+    body.mode !== "PAPER" ||
+    typeof body.state !== "string"
+  ) {
+    throw new Error("paper_order_status_invalid_response");
+  }
+
+  const directive =
+    body.directive === null || body.directive === undefined
+      ? null
+      : (() => {
+          const value = statusRecord(body.directive);
+          if (
+            typeof value.directive_id !== "string" ||
+            typeof value.state !== "string" ||
+            value.mode !== "PAPER"
+          ) {
+            throw new Error("paper_order_status_invalid_response");
+          }
+          return {
+            directive_id: value.directive_id,
+            state: value.state,
+            mode: "PAPER" as const,
+            error_code: statusNullableString(value.error_code),
+            error_message: statusNullableString(value.error_message),
+          };
+        })();
+
+  let conditionalRules: PaperOrderWorkflowStatus["conditional_rules"] = null;
+  if (body.conditional_rules !== null && body.conditional_rules !== undefined) {
+    if (!Array.isArray(body.conditional_rules)) {
+      throw new Error("paper_order_status_invalid_response");
+    }
+    conditionalRules = body.conditional_rules.map((entry) => {
+      const rule = statusRecord(entry);
+      if (typeof rule.rule_id !== "string" || typeof rule.state !== "string") {
+        throw new Error("paper_order_status_invalid_response");
+      }
+      return {
+        rule_id: rule.rule_id,
+        state: rule.state,
+        last_execution_state: statusNullableString(rule.last_execution_state),
+        last_guard_code: statusNullableString(rule.last_guard_code),
+        last_error_code: statusNullableString(rule.last_error_code),
+        status_message: statusNullableString(rule.status_message),
+      };
+    });
+  }
+
+  return {
+    schema_version: "user-paper-order-status.v1",
+    order_request_id: body.order_request_id,
+    mode: "PAPER",
+    state: body.state,
+    action: statusNullableString(
+      body.action,
+    ) as PaperOrderWorkflowStatus["action"],
+    ceo_root_task_id: statusNullableString(body.ceo_root_task_id),
+    trading_task_id: statusNullableString(body.trading_task_id),
+    clarification_code: statusNullableString(body.clarification_code),
+    error_code: statusNullableString(body.error_code),
+    error_message: statusNullableString(body.error_message),
+    directive,
+    conditional_rules: conditionalRules,
+  };
+}
+
 export async function paperOrderWorkflowStatus(
   orderRequestId: string,
 ): Promise<PaperOrderWorkflowStatus> {
-  return getJson<PaperOrderWorkflowStatus>(
-    `/ui/paper-order-requests/${encodeURIComponent(orderRequestId)}`,
+  return parsePaperOrderWorkflowStatus(
+    await getJson<unknown>(
+      `/ui/paper-order-requests/${encodeURIComponent(orderRequestId)}`,
+    ),
   );
 }
 
