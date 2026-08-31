@@ -122,7 +122,12 @@ export type PaperOrderWorkflowStatus = {
   order_request_id: string;
   mode: "PAPER";
   state: string;
-  action: "PLACE_ORDER" | "SELL_ALL" | "CANCEL_ALL" | null;
+  action:
+    | "PLACE_ORDER"
+    | "PLACE_BASKET"
+    | "SELL_ALL"
+    | "CANCEL_ALL"
+    | null;
   ceo_root_task_id: string | null;
   trading_task_id: string | null;
   clarification_code: string | null;
