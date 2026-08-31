@@ -31,50 +31,61 @@ from urllib.error import HTTPError, URLError
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from orchestration.langsmith_queries import close_query_client, query_runs
+from orchestration.qa_feedback_contract import (
+    ACTIONABLE_FEEDBACK_CODES,
+    IMPROVEMENT_TYPES,
+    OBSERVABILITY_FINDINGS,
+    PERFORMANCE_FINDINGS,
+    REVIEW_DECISIONS,
+    REVIEW_REQUIRED_FINDINGS,
+    qa_approver_is_allowed,
+    is_actionable_feedback,
+)
 
 LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 _SQLITE_LOCK_RETRY_DELAYS = (0.0, 0.5, 1.0, 2.0)
+_LEDGER_DERIVED_INDEX_MAINTENANCE = "derived_indexes_v1"
 
 WORKFLOW_PROJECT_DEFAULT = "First"
 EVALS_PROJECT_DEFAULT = "HgFinance-Evals"
 FEEDBACK_SCHEMA = "hgfinance.observability.feedback.v1"
 FEEDBACK_MODES = frozenset({"off", "shadow", "active"})
-IMPROVEMENT_TYPES = frozenset(
-    {
-        "SKILL_CREATE",
-        "SKILL_EVOLVE",
-        "CODE_FIX",
-        "PROMPT_POLICY",
-        "RUNTIME_CONFIG",
-        "DATA_QUALITY",
-        "NO_ACTION",
-    }
-)
-_ACTIONABLE_FEEDBACK_CODES = frozenset(
-    {
-        "LANGFUSE_OBSERVABILITY_UNAVAILABLE",
-        "WORKER_OR_WORKFLOW_DEGRADED",
-        "LATENCY_ABOVE_THRESHOLD",
-        "STRUCTURED_EVAL_SCORE_LOW",
-        "SEMANTIC_QA_FAILED",
-        "SEMANTIC_QA_SCORE_LOW",
-        "SEMANTIC_QA_RELEVANCE_LOW",
-        "HALLUCINATION_DETECTED",
-        "HARMFUL_CONTENT_DETECTED",
-        "RELEVANCE_LOW",
-        "LENGTH_TERMINATION_HIGH",
-        "PRIVACY_PAYLOAD_PRESENT",
-        "REDACTION_MARKER_MISSING",
-    }
+# Compatibility aliases for callers that imported the old private names.
+_ACTIONABLE_FEEDBACK_CODES = ACTIONABLE_FEEDBACK_CODES
+
+CORRELATION_AGGREGATION_WINDOW_SECONDS = 60 * 60
+
+# Keep every human-facing review surface on the same bounded priority order.
+# Required/privacy work and explicit improvement proposals deserve attention
+# before routine performance noise; creation time remains the stable tie-break.
+_PENDING_REVIEW_ORDER_SQL = """
+    CASE a.decision
+        WHEN 'REVIEW_REQUIRED' THEN 0
+        WHEN 'EVOLUTION_PROPOSAL' THEN 1
+        WHEN 'REVIEW_WORTHY' THEN 2
+        WHEN 'IMPROVEMENT_CANDIDATE' THEN 3
+        ELSE 4
+    END,
+    CASE COALESCE(json_extract(a.metadata, '$.review_class'), '')
+        WHEN 'QUALITY_OR_WORKFLOW_REVIEW' THEN 0
+        WHEN 'OBSERVABILITY_GAP' THEN 1
+        WHEN 'PERFORMANCE_EVENT' THEN 2
+        ELSE 3
+    END,
+    a.created_at,
+    a.artifact_id
+"""
+_EXCLUDE_SYNTHETIC_CANARY_SQL = (
+    "AND COALESCE(json_extract(a.metadata, '$.canary'), 0) != 1"
 )
 
 
 def evaluation_is_worthy(result: "EvaluationResult") -> bool:
-    """Return true only for an operational or quality finding worth review."""
+    """Return true only for a bounded operational or quality review item."""
 
-    return result.decision != "OBSERVED_PASS" and bool(
-        _ACTIONABLE_FEEDBACK_CODES.intersection(result.finding_codes)
+    return result.decision in REVIEW_DECISIONS and bool(
+        ACTIONABLE_FEEDBACK_CODES.intersection(result.finding_codes)
     )
 
 
@@ -221,6 +232,12 @@ _SAFE_METADATA_KEYS = frozenset(
         "semantic_qa_relevance",
         "semantic_qa_finding_count",
         "semantic_qa_finding_codes",
+        "improvement_candidate",
+        "review_class",
+        "sample_count",
+        "aggregation_window",
+        "observation_started_at",
+        "observation_ended_at",
     }
 )
 
@@ -258,6 +275,10 @@ _TEXT_METADATA_KEYS = frozenset(
         "semantic_qa_evaluator",
         "semantic_qa_verdict",
         "semantic_qa_finding_codes",
+        "review_class",
+        "aggregation_window",
+        "observation_started_at",
+        "observation_ended_at",
         "cost_status",
         "cost_source",
         "hallucination_verdict",
@@ -310,6 +331,7 @@ _INT_METADATA_KEYS = frozenset(
         "return_code",
         "configured_max_turns",
         "actual_turns",
+        "sample_count",
     }
 )
 _SCORE_METADATA_KEYS = frozenset(
@@ -356,7 +378,7 @@ def _normalized_metadata_value(key: str, value: Any) -> Any:
         except (TypeError, ValueError):
             return None
         return parsed if math.isfinite(parsed) and parsed >= 0 else None
-    if key == "raw_payloads_sent":
+    if key in {"raw_payloads_sent", "improvement_candidate"}:
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -373,6 +395,26 @@ def _normalized_metadata_value(key: str, value: Any) -> Any:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _artifact_fingerprint(db: sqlite3.Connection) -> str:
+    """Return a cheap revision for the artifact table used by maintenance."""
+
+    row = db.execute(
+        "SELECT count(*) AS count, COALESCE(max(created_at), '') AS latest "
+        "FROM langsmith_feedback_artifacts"
+    ).fetchone()
+    return f"{int(row['count'] if row else 0)}:{str(row['latest'] if row else '')}"
+
+
+def _mark_artifact_fingerprint(db: sqlite3.Connection, completed_at: str) -> None:
+    """Advance the maintenance marker after a normal artifact transaction."""
+
+    db.execute(
+        "UPDATE langsmith_feedback_maintenance SET completed_at=?, state=? "
+        "WHERE name=?",
+        (completed_at, _artifact_fingerprint(db), _LEDGER_DERIVED_INDEX_MAINTENANCE),
+    )
 
 
 def _with_sqlite_lock_retry(operation: Callable[[], _T]) -> _T:
@@ -414,6 +456,32 @@ def _observation_category(metadata: Mapping[str, Any]) -> str:
     }.get(source, "workflow")
 
 
+def _aggregation_window(metadata: Mapping[str, Any]) -> str:
+    """Return a deterministic UTC bucket for uncorrelated observations.
+
+    A missing request/root ID is an observability defect, not permission to
+    create one Discord card per run.  Prefer the producer's explicit window,
+    then the bounded observation timestamps.  ``unknown`` is intentionally a
+    stable last resort for old records that contain neither.
+    """
+
+    raw_value = (
+        metadata.get("window_start")
+        or metadata.get("observation_ended_at")
+        or metadata.get("observation_started_at")
+    )
+    if not raw_value:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return "unknown"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    bucket = int(parsed.timestamp()) // CORRELATION_AGGREGATION_WINDOW_SECONDS
+    return str(bucket)
+
+
 def _feedback_semantic_key(
     *,
     department: Any,
@@ -421,9 +489,16 @@ def _feedback_semantic_key(
     finding_codes: Any,
     metadata: Mapping[str, Any],
 ) -> str | None:
-    """Identify one actionable finding without conflating unrelated traces."""
+    """Identify one finding without turning missing correlation into a flood.
+
+    Correlated traces use the request/root identity.  Legacy or broken
+    producers use a bounded aggregation identity made from source, role,
+    department, finding set, and one UTC time bucket.  The latter intentionally
+    groups the observability defect so its sample count can be reviewed once.
+    """
 
     request_id = _bounded_text(metadata.get("request_id"), 160)
+    root_id = _bounded_text(metadata.get("root_id"), 160)
     if not request_id and metadata.get("source") == "metrics-window":
         try:
             window_start = datetime.fromisoformat(
@@ -445,16 +520,33 @@ def _feedback_semantic_key(
         }
     )
     normalized_decision = _bounded_text(decision, 48).upper()
-    if not request_id or not findings or normalized_decision == "OBSERVED_PASS":
+    if not findings or normalized_decision == "OBSERVED_PASS":
         return None
+    correlation_id = request_id or root_id
+    source = _bounded_text(
+        metadata.get("source")
+        or metadata.get("source_project")
+        or metadata.get("source_name"),
+        120,
+    )
+    role = _bounded_text(
+        metadata.get("workflow_role") or metadata.get("role"), 96
+    ).lower()
     identity = {
         "schema": "hgfinance.qa-finding-identity.v1",
-        "request_id": request_id,
+        "correlation_id": correlation_id,
         "department": canonical_department(department),
         "decision": normalized_decision,
         "finding_codes": findings,
         "latency_scope": _bounded_text(metadata.get("latency_scope"), 64).lower(),
     }
+    if not correlation_id:
+        identity["aggregation_scope"] = {
+            "source": source,
+            "workflow_role": role,
+            "department": canonical_department(department),
+            "window": _aggregation_window(metadata),
+        }
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -782,6 +874,197 @@ def attribute_workflow_bottleneck(
     return replace(observation, metadata=metadata)
 
 
+def _review_class(findings: set[str]) -> str:
+    """Map findings to an operational review lane, not an auto-fix claim."""
+
+    if findings and findings <= PERFORMANCE_FINDINGS:
+        return "PERFORMANCE_EVENT"
+    if findings and findings <= OBSERVABILITY_FINDINGS:
+        return "OBSERVABILITY_GAP"
+    if findings & PERFORMANCE_FINDINGS and not findings & {
+        "SEMANTIC_QA_FAILED",
+        "SEMANTIC_QA_SCORE_LOW",
+        "SEMANTIC_QA_RELEVANCE_LOW",
+        "RELEVANCE_LOW",
+        "HALLUCINATION_DETECTED",
+        "HARMFUL_CONTENT_DETECTED",
+    }:
+        return "PERFORMANCE_EVENT"
+    return "QUALITY_OR_WORKFLOW_REVIEW"
+
+
+def _classify_decision(findings: set[str], metadata: Mapping[str, Any]) -> str:
+    """Classify one observation conservatively.
+
+    A single deterministic signal proves that a human should review it.  It
+    does not prove that a Skill, prompt, or code change is the right remedy.
+    ``IMPROVEMENT_CANDIDATE`` is therefore reserved for an explicit verified
+    candidate lane (currently the persisted D5 QA lane) or a producer that
+    supplies its own bounded candidate evidence.
+    """
+
+    if not findings:
+        return "OBSERVED_PASS"
+    if REVIEW_REQUIRED_FINDINGS.intersection(findings):
+        return "REVIEW_REQUIRED"
+    if metadata.get("evolution_proposal_id"):
+        return "EVOLUTION_PROPOSAL"
+    if metadata.get("improvement_candidate") is True:
+        return "IMPROVEMENT_CANDIDATE"
+    if (
+        metadata.get("source") == "memo_harness_d5"
+        and _bounded_text(metadata.get("candidate_type"), 80)
+    ):
+        return "IMPROVEMENT_CANDIDATE"
+    return "REVIEW_WORTHY"
+
+
+def _deduplicate_legacy_uncorrelated_artifacts(db: sqlite3.Connection) -> bool:
+    """Merge old per-run correlation findings into one bounded artifact.
+
+    This migration only touches artifacts with a missing request/root ID and
+    only merges groups whose approval, benchmark, and Discord records do not
+    conflict.  Any ambiguous group is left intact for manual audit.
+    """
+
+    rows = db.execute(
+        """SELECT artifact_id, source_run_id, department, department_key,
+            decision, finding_codes, summaries, metadata, created_at
+        FROM langsmith_feedback_artifacts ORDER BY created_at, artifact_id"""
+    ).fetchall()
+    groups: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+            findings = json.loads(row["finding_codes"] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(metadata, Mapping) or not isinstance(findings, list):
+            continue
+        if not {
+            str(code).strip().upper() for code in findings
+        }.intersection({"CORRELATION_METADATA_MISSING"}):
+            continue
+        if _bounded_text(metadata.get("request_id"), 160) or _bounded_text(
+            metadata.get("root_id"), 160
+        ):
+            continue
+        semantic_key = _feedback_semantic_key(
+            department=row["department_key"] or row["department"],
+            decision=row["decision"],
+            finding_codes=findings,
+            metadata=metadata,
+        )
+        if semantic_key:
+            groups.setdefault(semantic_key, []).append(row)
+
+    merged = False
+    related_tables = (
+        "langsmith_feedback_decisions",
+        "langsmith_feedback_benchmarks",
+        "langsmith_feedback_discord_deliveries",
+    )
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        keeper = group[0]
+        duplicate_ids = [str(row["artifact_id"]) for row in group[1:]]
+        can_merge = True
+        for duplicate_id in duplicate_ids:
+            for table in related_tables:
+                keeper_has = db.execute(
+                    f"SELECT 1 FROM {table} WHERE artifact_id=?",  # noqa: S608
+                    (keeper["artifact_id"],),
+                ).fetchone()
+                duplicate_has = db.execute(
+                    f"SELECT 1 FROM {table} WHERE artifact_id=?",  # noqa: S608
+                    (duplicate_id,),
+                ).fetchone()
+                if keeper_has is not None and duplicate_has is not None:
+                    can_merge = False
+                    break
+            if not can_merge:
+                break
+        if not can_merge:
+            continue
+
+        keeper_id = str(keeper["artifact_id"])
+        try:
+            keeper_codes = json.loads(keeper["finding_codes"] or "[]")
+            keeper_summaries = json.loads(keeper["summaries"] or "[]")
+            keeper_metadata = json.loads(keeper["metadata"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            keeper_codes, keeper_summaries, keeper_metadata = [], [], {}
+        if not isinstance(keeper_codes, list):
+            keeper_codes = []
+        if not isinstance(keeper_summaries, list):
+            keeper_summaries = []
+        if not isinstance(keeper_metadata, Mapping):
+            keeper_metadata = {}
+        merged_codes = list(dict.fromkeys(str(code) for code in keeper_codes))
+        merged_summaries = list(
+            dict.fromkeys(str(summary) for summary in keeper_summaries)
+        )
+        for duplicate_id in duplicate_ids:
+            duplicate = next(
+                row for row in group if str(row["artifact_id"]) == duplicate_id
+            )
+            try:
+                duplicate_codes = json.loads(duplicate["finding_codes"] or "[]")
+                duplicate_summaries = json.loads(duplicate["summaries"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                duplicate_codes, duplicate_summaries = [], []
+            if isinstance(duplicate_codes, list):
+                merged_codes.extend(str(code) for code in duplicate_codes)
+            if isinstance(duplicate_summaries, list):
+                merged_summaries.extend(str(summary) for summary in duplicate_summaries)
+            for table in related_tables:
+                db.execute(
+                    f"UPDATE {table} SET artifact_id=? WHERE artifact_id=?",  # noqa: S608
+                    (keeper_id, duplicate_id),
+                )
+            db.execute(
+                "UPDATE langsmith_feedback_artifact_sources SET artifact_id=? "
+                "WHERE artifact_id=?",
+                (keeper_id, duplicate_id),
+            )
+            db.execute(
+                "DELETE FROM langsmith_feedback_semantic_keys WHERE artifact_id=?",
+                (duplicate_id,),
+            )
+            db.execute(
+                "DELETE FROM langsmith_feedback_artifacts WHERE artifact_id=?",
+                (duplicate_id,),
+            )
+
+        source_count = db.execute(
+            "SELECT count(*) FROM langsmith_feedback_artifact_sources "
+            "WHERE artifact_id=?",
+            (keeper_id,),
+        ).fetchone()[0]
+        keeper_metadata = dict(keeper_metadata)
+        keeper_metadata["sample_count"] = max(1, int(source_count or 1))
+        keeper_metadata.setdefault(
+            "review_class", _review_class(set(merged_codes))
+        )
+        db.execute(
+            """UPDATE langsmith_feedback_artifacts
+            SET finding_codes=?, summaries=?, metadata=? WHERE artifact_id=?""",
+            (
+                json.dumps(list(dict.fromkeys(merged_codes))[:12], separators=(",", ":")),
+                json.dumps(
+                    list(dict.fromkeys(merged_summaries))[:8],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                json.dumps(keeper_metadata, ensure_ascii=False, separators=(",", ":")),
+                keeper_id,
+            ),
+        )
+        merged = True
+    return merged
+
+
 def evaluate_observation(
     observation: TraceObservation,
     *,
@@ -896,13 +1179,13 @@ def evaluate_observation(
         summaries.append("trace payload redaction status is unverified")
     if score is None:
         score = semantic_score
+    finding_set = set(findings)
+    decision = _classify_decision(finding_set, metadata)
     if not findings:
-        decision = "OBSERVED_PASS"
         summaries.append("metadata-only trace passed operational checks")
-    elif {"PRIVACY_PAYLOAD_PRESENT", "REDACTION_MARKER_MISSING"} & set(findings):
-        decision = "REVIEW_REQUIRED"
-    else:
-        decision = "IMPROVEMENT_CANDIDATE"
+    review_class = _review_class(finding_set) if findings else "NORMAL"
+    observation_started_at = getattr(observation, "started_at", None)
+    observation_ended_at = getattr(observation, "ended_at", None)
     department_key = getattr(
         observation,
         "department_key",
@@ -1028,6 +1311,22 @@ def evaluate_observation(
         )
         or None,
         "semantic_qa_finding_codes": metadata.get("semantic_qa_finding_codes"),
+        "review_class": review_class,
+        "sample_count": 1,
+        "aggregation_window": _aggregation_window(
+            {
+                **metadata,
+                "observation_started_at": observation_started_at,
+                "observation_ended_at": observation_ended_at,
+            }
+        ),
+        "observation_started_at": observation_started_at,
+        "observation_ended_at": observation_ended_at,
+        "improvement_candidate": (
+            decision == "IMPROVEMENT_CANDIDATE"
+            if metadata.get("improvement_candidate") is True
+            else None
+        ),
         "cost_usd": (
             metadata.get("cost_usd")
             if isinstance(metadata.get("cost_usd"), (int, float))
@@ -1087,6 +1386,7 @@ class FeedbackLedger:
     def _init_schema_once(self) -> None:
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
+            legacy_state_migrated = False
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS langsmith_feedback_jobs (
@@ -1119,7 +1419,9 @@ class FeedbackLedger:
                 );
                 CREATE TABLE IF NOT EXISTS langsmith_feedback_decisions (
                     artifact_id TEXT PRIMARY KEY,
-                    decision TEXT NOT NULL CHECK(decision IN ('APPROVED', 'REJECTED')),
+                    decision TEXT NOT NULL CHECK(
+                        decision IN ('APPROVED', 'REJECTED', 'CLOSED_NO_ACTION')
+                    ),
                     approved_by TEXT NOT NULL,
                     reason TEXT NOT NULL,
                     improvement_type TEXT NOT NULL DEFAULT 'NO_ACTION',
@@ -1160,7 +1462,43 @@ class FeedbackLedger:
                 );
                 CREATE INDEX IF NOT EXISTS idx_feedback_artifact_sources_artifact
                     ON langsmith_feedback_artifact_sources(artifact_id);
+                CREATE TABLE IF NOT EXISTS langsmith_feedback_maintenance (
+                    name TEXT PRIMARY KEY,
+                    completed_at TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS langsmith_feedback_manual_labels (
+                    artifact_id TEXT PRIMARY KEY,
+                    label TEXT NOT NULL CHECK(
+                        label IN ('REVIEW', 'NO_ACTION', 'INSUFFICIENT_EVIDENCE')
+                    ),
+                    labeled_by TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
+            )
+            maintenance_columns = {
+                str(row["name"])
+                for row in db.execute(
+                    "PRAGMA table_info(langsmith_feedback_maintenance)"
+                ).fetchall()
+            }
+            if "state" not in maintenance_columns:
+                db.execute(
+                    "ALTER TABLE langsmith_feedback_maintenance "
+                    "ADD COLUMN state TEXT NOT NULL DEFAULT ''"
+                )
+            current_artifact_fingerprint = _artifact_fingerprint(db)
+            maintenance_row = db.execute(
+                "SELECT completed_at, state FROM langsmith_feedback_maintenance "
+                "WHERE name=?",
+                (_LEDGER_DERIVED_INDEX_MAINTENANCE,),
+            ).fetchone()
+            derived_indexes_ready = bool(
+                maintenance_row is not None
+                and str(maintenance_row["state"] or "")
+                == current_artifact_fingerprint
             )
             artifact_columns = {
                 str(row["name"])
@@ -1172,6 +1510,70 @@ class FeedbackLedger:
                 db.execute(
                     "ALTER TABLE langsmith_feedback_artifacts ADD COLUMN department_key TEXT NOT NULL DEFAULT ''"
                 )
+            # ``APPROVED + NO_ACTION`` was historically possible in the
+            # persisted ledger even though the current API rejected it.  Move
+            # that legacy combination to an explicit terminal decision while
+            # retaining the original actor, reason, and timestamp.
+            decision_schema_row = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' "
+                "AND name='langsmith_feedback_decisions'"
+            ).fetchone()
+            decision_schema = str(decision_schema_row[0] or "") if decision_schema_row else ""
+            if "CLOSED_NO_ACTION" not in decision_schema:
+                legacy_state_migrated = True
+                db.execute(
+                    "ALTER TABLE langsmith_feedback_decisions "
+                    "RENAME TO langsmith_feedback_decisions_legacy"
+                )
+                legacy_columns = {
+                    str(row["name"])
+                    for row in db.execute(
+                        "PRAGMA table_info(langsmith_feedback_decisions_legacy)"
+                    ).fetchall()
+                }
+                if "improvement_type" not in legacy_columns:
+                    db.execute(
+                        "ALTER TABLE langsmith_feedback_decisions_legacy "
+                        "ADD COLUMN improvement_type TEXT NOT NULL DEFAULT 'NO_ACTION'"
+                    )
+                if "target_skill_slug" not in legacy_columns:
+                    db.execute(
+                        "ALTER TABLE langsmith_feedback_decisions_legacy "
+                        "ADD COLUMN target_skill_slug TEXT"
+                    )
+                db.execute(
+                    """
+                    CREATE TABLE langsmith_feedback_decisions (
+                        artifact_id TEXT PRIMARY KEY,
+                        decision TEXT NOT NULL CHECK(
+                            decision IN ('APPROVED', 'REJECTED', 'CLOSED_NO_ACTION')
+                        ),
+                        approved_by TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        improvement_type TEXT NOT NULL DEFAULT 'NO_ACTION',
+                        target_skill_slug TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    INSERT INTO langsmith_feedback_decisions
+                    (artifact_id, decision, approved_by, reason, improvement_type,
+                     target_skill_slug, created_at)
+                    SELECT artifact_id,
+                           CASE
+                               WHEN decision='APPROVED' AND improvement_type='NO_ACTION'
+                               THEN 'CLOSED_NO_ACTION'
+                               ELSE decision
+                           END,
+                           approved_by, reason, improvement_type,
+                           target_skill_slug, created_at
+                    FROM langsmith_feedback_decisions_legacy
+                    """
+                )
+                db.execute("DROP TABLE langsmith_feedback_decisions_legacy")
+
             decision_columns = {
                 str(row["name"])
                 for row in db.execute(
@@ -1224,34 +1626,122 @@ class FeedbackLedger:
                 db.execute(
                     "ALTER TABLE langsmith_feedback_jobs ADD COLUMN lease_until TEXT"
                 )
-            # Seed the semantic index from existing artifacts.  If historical
-            # duplicates exist, the oldest artifact owns the key; no approval
-            # or audit row is deleted during migration.
-            for row in db.execute(
-                "SELECT * FROM langsmith_feedback_artifacts ORDER BY created_at"
-            ).fetchall():
-                try:
-                    metadata = json.loads(row["metadata"] or "{}")
-                    findings = json.loads(row["finding_codes"] or "[]")
-                except (TypeError, json.JSONDecodeError):
-                    metadata, findings = {}, ()
-                semantic_key = _feedback_semantic_key(
-                    department=row["department_key"] or row["department"],
-                    decision=row["decision"],
-                    finding_codes=findings,
-                    metadata=metadata if isinstance(metadata, Mapping) else {},
-                )
-                db.execute(
-                    """INSERT OR IGNORE INTO langsmith_feedback_artifact_sources
-                    (source_run_id, artifact_id, created_at) VALUES (?, ?, ?)""",
-                    (row["source_run_id"], row["artifact_id"], row["created_at"]),
-                )
-                if semantic_key:
-                    db.execute(
-                        """INSERT OR IGNORE INTO langsmith_feedback_semantic_keys
-                        (semantic_key, artifact_id, created_at) VALUES (?, ?, ?)""",
-                        (semantic_key, row["artifact_id"], row["created_at"]),
+            if not derived_indexes_ready:
+                # Before the state split, every non-pass finding was labelled as
+                # ``IMPROVEMENT_CANDIDATE``.  That was a review queue label, not
+                # evidence of a proposed change.  Migrate historical automatic
+                # labels to the honest state while retaining explicit D5/producer
+                # candidates.  Derived semantic keys are rebuilt if any state
+                # changed so future completions still deduplicate correctly.
+                for row in db.execute(
+                    "SELECT artifact_id, decision, finding_codes, metadata "
+                    "FROM langsmith_feedback_artifacts"
+                ).fetchall():
+                    if row["decision"] != "IMPROVEMENT_CANDIDATE":
+                        continue
+                    try:
+                        metadata = json.loads(row["metadata"] or "{}")
+                        findings = json.loads(row["finding_codes"] or "[]")
+                    except (TypeError, json.JSONDecodeError):
+                        metadata, findings = {}, []
+                    explicit_candidate = (
+                        isinstance(metadata, Mapping)
+                        and (
+                            metadata.get("improvement_candidate") is True
+                            or (
+                                metadata.get("source") == "memo_harness_d5"
+                                and _bounded_text(metadata.get("candidate_type"), 80)
+                            )
+                        )
                     )
+                    if explicit_candidate:
+                        continue
+                    if not isinstance(findings, list):
+                        findings = []
+                    migrated_metadata = (
+                        dict(metadata) if isinstance(metadata, Mapping) else {}
+                    )
+                    source_count = db.execute(
+                        "SELECT count(*) FROM langsmith_feedback_artifact_sources "
+                        "WHERE artifact_id=?",
+                        (row["artifact_id"],),
+                    ).fetchone()[0]
+                    migrated_metadata.setdefault(
+                        "review_class", _review_class(set(str(code) for code in findings))
+                    )
+                    migrated_metadata["sample_count"] = max(1, int(source_count or 1))
+                    db.execute(
+                        "UPDATE langsmith_feedback_artifacts SET decision=?, metadata=? "
+                        "WHERE artifact_id=?",
+                        (
+                            "REVIEW_WORTHY",
+                            json.dumps(
+                                migrated_metadata,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                            row["artifact_id"],
+                        ),
+                    )
+                    legacy_state_migrated = True
+            def seed_semantic_index() -> None:
+                """Seed derived indexes after any legacy artifact migration."""
+
+                for row in db.execute(
+                    "SELECT * FROM langsmith_feedback_artifacts ORDER BY created_at"
+                ).fetchall():
+                    try:
+                        metadata = json.loads(row["metadata"] or "{}")
+                        findings = json.loads(row["finding_codes"] or "[]")
+                    except (TypeError, json.JSONDecodeError):
+                        metadata, findings = {}, ()
+                    semantic_key = _feedback_semantic_key(
+                        department=row["department_key"] or row["department"],
+                        decision=row["decision"],
+                        finding_codes=findings,
+                        metadata=metadata if isinstance(metadata, Mapping) else {},
+                    )
+                    db.execute(
+                        """INSERT OR IGNORE INTO langsmith_feedback_artifact_sources
+                        (source_run_id, artifact_id, created_at) VALUES (?, ?, ?)""",
+                        (row["source_run_id"], row["artifact_id"], row["created_at"]),
+                    )
+                    if semantic_key:
+                        db.execute(
+                            """INSERT OR IGNORE INTO langsmith_feedback_semantic_keys
+                            (semantic_key, artifact_id, created_at) VALUES (?, ?, ?)""",
+                            (semantic_key, row["artifact_id"], row["created_at"]),
+                        )
+
+            # Seed the semantic index from existing artifacts only once per
+            # ledger version. New completions write both derived rows in the
+            # same transaction, so repeating this full JSON scan on every
+            # FeedbackLedger construction only adds startup contention.
+            if not derived_indexes_ready or legacy_state_migrated:
+                if legacy_state_migrated:
+                    db.execute("DELETE FROM langsmith_feedback_semantic_keys")
+                seed_semantic_index()
+                if _deduplicate_legacy_uncorrelated_artifacts(db):
+                    db.execute("DELETE FROM langsmith_feedback_semantic_keys")
+                    seed_semantic_index()
+                db.execute(
+                    "INSERT INTO langsmith_feedback_maintenance"
+                    "(name, completed_at, state) VALUES (?, ?, ?) "
+                    "ON CONFLICT(name) DO UPDATE SET completed_at=excluded.completed_at, "
+                    "state=excluded.state",
+                    (
+                        _LEDGER_DERIVED_INDEX_MAINTENANCE,
+                        _now(),
+                        _artifact_fingerprint(db),
+                    ),
+                )
+            # Discord 429 means the request was rate-limited before message
+            # creation. Those claims are safe to retry; ambiguous timeouts and
+            # readback failures remain FAILED_FINAL to avoid duplicates.
+            db.execute(
+                """DELETE FROM langsmith_feedback_discord_deliveries
+                WHERE status='FAILED_FINAL' AND error_code='discord_http_429'"""
+            )
 
     def enqueue(
         self,
@@ -1351,6 +1841,9 @@ class FeedbackLedger:
     ) -> str:
         artifact_id = f"feedback-{uuid4().hex}"
         now = _now()
+        artifact_metadata = dict(result.metadata)
+        artifact_metadata.setdefault("sample_count", 1)
+        artifact_metadata.setdefault("last_observed_at", now)
         semantic_key = _feedback_semantic_key(
             department=result.department,
             decision=result.decision,
@@ -1374,11 +1867,89 @@ class FeedbackLedger:
                 ).fetchone()
             if existing is not None:
                 existing_artifact_id = str(existing["artifact_id"])
-                db.execute(
+                source_cursor = db.execute(
                     """INSERT OR IGNORE INTO langsmith_feedback_artifact_sources
                     (source_run_id, artifact_id, created_at) VALUES (?, ?, ?)""",
                     (source_run_id, existing_artifact_id, now),
                 )
+                source_count_row = db.execute(
+                    """SELECT count(*) AS count
+                    FROM langsmith_feedback_artifact_sources
+                    WHERE artifact_id=?""",
+                    (existing_artifact_id,),
+                ).fetchone()
+                sample_count = int(source_count_row["count"] if source_count_row else 1)
+                if source_cursor.rowcount == 1:
+                    current = db.execute(
+                        """SELECT finding_codes, summaries, metadata
+                        FROM langsmith_feedback_artifacts WHERE artifact_id=?""",
+                        (existing_artifact_id,),
+                    ).fetchone()
+                    if current is not None:
+                        try:
+                            existing_codes = json.loads(current["finding_codes"] or "[]")
+                            existing_summaries = json.loads(current["summaries"] or "[]")
+                            existing_metadata = json.loads(current["metadata"] or "{}")
+                        except (TypeError, json.JSONDecodeError):
+                            existing_codes, existing_summaries, existing_metadata = (
+                                [],
+                                [],
+                                {},
+                            )
+                        if not isinstance(existing_codes, list):
+                            existing_codes = []
+                        if not isinstance(existing_summaries, list):
+                            existing_summaries = []
+                        merged_codes = list(
+                            dict.fromkeys(
+                                [
+                                    *(item for item in existing_codes if isinstance(item, str)),
+                                    *result.finding_codes,
+                                ]
+                            )
+                        )[:12]
+                        merged_summaries = list(
+                            dict.fromkeys(
+                                [
+                                    *(
+                                        item
+                                        for item in existing_summaries
+                                        if isinstance(item, str)
+                                    ),
+                                    *result.summaries,
+                                ]
+                            )
+                        )[:8]
+                        merged_metadata = (
+                            dict(existing_metadata)
+                            if isinstance(existing_metadata, Mapping)
+                            else {}
+                        )
+                        merged_metadata.update(
+                            {
+                                "sample_count": sample_count,
+                                "last_observed_at": now,
+                            }
+                        )
+                        db.execute(
+                            """UPDATE langsmith_feedback_artifacts
+                            SET finding_codes=?, summaries=?, metadata=?
+                            WHERE artifact_id=?""",
+                            (
+                                json.dumps(merged_codes, separators=(",", ":")),
+                                json.dumps(
+                                    merged_summaries,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                                json.dumps(
+                                    merged_metadata,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                                existing_artifact_id,
+                            ),
+                        )
                 db.execute(
                     """UPDATE langsmith_feedback_jobs
                     SET status='COMPLETED', eval_run_id=?, last_error=NULL,
@@ -1386,6 +1957,7 @@ class FeedbackLedger:
                     WHERE source_run_id=?""",
                     (eval_run_id, now, source_run_id),
                 )
+                _mark_artifact_fingerprint(db, now)
                 return existing_artifact_id
             db.execute(
                 """INSERT OR IGNORE INTO langsmith_feedback_artifacts
@@ -1407,7 +1979,7 @@ class FeedbackLedger:
                         separators=(",", ":"),
                     ),
                     json.dumps(
-                        result.metadata, ensure_ascii=False, separators=(",", ":")
+                        artifact_metadata, ensure_ascii=False, separators=(",", ":")
                     ),
                     now,
                 ),
@@ -1427,6 +1999,7 @@ class FeedbackLedger:
                     (semantic_key, artifact_id, created_at) VALUES (?, ?, ?)""",
                     (semantic_key, artifact_id, now),
                 )
+            _mark_artifact_fingerprint(db, now)
         return artifact_id
 
     def skip(self, source_run_id: str) -> None:
@@ -1463,15 +2036,165 @@ class FeedbackLedger:
         limit = max(1, min(int(limit), 100))
         with self._connect() as db:
             rows = db.execute(
-                """SELECT a.*, d.decision AS approval_decision, d.approved_by,
+                f"""SELECT a.*, d.decision AS approval_decision, d.approved_by,
                     d.reason AS approval_reason, d.improvement_type,
                     d.target_skill_slug
                 FROM langsmith_feedback_artifacts a
                 LEFT JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
-                WHERE d.artifact_id IS NULL ORDER BY a.created_at LIMIT ?""",
+                WHERE d.artifact_id IS NULL
+                  AND a.decision != 'OBSERVED_PASS'
+                  {_EXCLUDE_SYNTHETIC_CANARY_SQL}
+                ORDER BY {_PENDING_REVIEW_ORDER_SQL}
+                LIMIT ?""",
                 (limit,),
             ).fetchall()
         return [self._artifact(row) for row in rows]
+
+    def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        """Read one redacted artifact with its current aggregate count."""
+
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT a.*, d.decision AS approval_decision, d.approved_by,
+                    d.reason AS approval_reason, d.improvement_type,
+                    d.target_skill_slug, b.status AS benchmark_status,
+                    b.benchmark_id, b.score AS benchmark_score,
+                    b.report_ref, b.result_summary AS benchmark_result_summary
+                FROM langsmith_feedback_artifacts a
+                LEFT JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
+                LEFT JOIN langsmith_feedback_benchmarks b ON b.artifact_id=a.artifact_id
+                WHERE a.artifact_id=?""",
+                (artifact_id,),
+            ).fetchone()
+        return self._artifact(row) if row is not None else None
+
+    def record_manual_label(
+        self,
+        artifact_id: str,
+        *,
+        label: str,
+        labeled_by: str,
+        rationale: str,
+    ) -> bool:
+        """Persist one redacted adjudication without changing QA lifecycle."""
+
+        normalized_label = _bounded_text(label, 32).upper()
+        if normalized_label not in {
+            "REVIEW",
+            "NO_ACTION",
+            "INSUFFICIENT_EVIDENCE",
+        }:
+            return False
+        if not _bounded_text(labeled_by, 128) or not _bounded_text(rationale, 240):
+            return False
+        try:
+            with self._connect() as db:
+                artifact = db.execute(
+                    "SELECT 1 FROM langsmith_feedback_artifacts WHERE artifact_id=?",
+                    (artifact_id,),
+                ).fetchone()
+                if artifact is None:
+                    return False
+                cursor = db.execute(
+                    """INSERT OR IGNORE INTO langsmith_feedback_manual_labels
+                    (artifact_id, label, labeled_by, rationale, created_at)
+                    VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        artifact_id,
+                        normalized_label,
+                        _bounded_text(labeled_by, 128),
+                        _bounded_text(rationale, 240),
+                        _now(),
+                    ),
+                )
+                return cursor.rowcount == 1
+        except sqlite3.Error:
+            LOGGER.exception("langsmith_feedback_manual_label_failed")
+            return False
+
+    def manual_labels(
+        self, artifact_ids: list[str] | tuple[str, ...] | None = None
+    ) -> dict[str, dict[str, str]]:
+        """Return measurement labels only; never expose artifact payloads."""
+
+        try:
+            with self._connect() as db:
+                if artifact_ids is None:
+                    rows = db.execute(
+                        "SELECT artifact_id, label, labeled_by, rationale, created_at "
+                        "FROM langsmith_feedback_manual_labels ORDER BY artifact_id"
+                    ).fetchall()
+                else:
+                    ids = tuple(str(value) for value in artifact_ids if str(value))
+                    if not ids:
+                        return {}
+                    placeholders = ",".join("?" for _ in ids)
+                    rows = db.execute(
+                        "SELECT artifact_id, label, labeled_by, rationale, created_at "
+                        "FROM langsmith_feedback_manual_labels "
+                        f"WHERE artifact_id IN ({placeholders}) ORDER BY artifact_id",
+                        ids,
+                    ).fetchall()
+                return {
+                    str(row["artifact_id"]): {
+                        "label": str(row["label"]),
+                        "labeled_by": str(row["labeled_by"]),
+                        "rationale": str(row["rationale"]),
+                        "created_at": str(row["created_at"]),
+                    }
+                    for row in rows
+                }
+        except sqlite3.Error:
+            LOGGER.exception("langsmith_feedback_manual_labels_read_failed")
+            return {}
+
+    def discord_delivery(self, artifact_id: str) -> dict[str, Any] | None:
+        """Return the bounded Discord delivery state for one artifact."""
+
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT status, discord_message_id, error_code, updated_at
+                FROM langsmith_feedback_discord_deliveries WHERE artifact_id=?""",
+                (artifact_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def pending_discord_reviews(self, limit: int = 25) -> list[dict[str, Any]]:
+        """Return actionable artifacts that never received a QA card.
+
+        Review delivery is deliberately separate from LangSmith polling.  A
+        provider outage or a deployment that was previously in ``shadow``
+        mode must not make already-persisted, metadata-only evidence
+        permanently invisible to the named QA reviewer.  The delivery table
+        remains the idempotency fence; this method only reads the backlog.
+        """
+
+        limit = max(1, min(int(limit), 100))
+        actionable_codes = tuple(sorted(ACTIONABLE_FEEDBACK_CODES))
+        placeholders = ",".join("?" for _ in actionable_codes)
+        with self._connect() as db:
+            rows = db.execute(
+                f"""SELECT a.*
+                FROM langsmith_feedback_artifacts a
+                LEFT JOIN langsmith_feedback_discord_deliveries d
+                  ON d.artifact_id=a.artifact_id
+                WHERE d.artifact_id IS NULL
+                  AND a.decision != 'OBSERVED_PASS'
+                  {_EXCLUDE_SYNTHETIC_CANARY_SQL}
+                  AND EXISTS (
+                      SELECT 1
+                      FROM json_each(a.finding_codes) AS finding
+                      WHERE upper(finding.value) IN ({placeholders})
+                  )
+                ORDER BY {_PENDING_REVIEW_ORDER_SQL}
+                LIMIT ?""",
+                (*actionable_codes, limit),
+            ).fetchall()
+        return [
+            self._artifact(row)
+            for row in rows
+            if is_actionable_feedback(json.loads(row["finding_codes"] or "[]"))
+        ]
 
     def d5_finding_codes(self, limit: int = 400) -> tuple[str, ...]:
         """Return only structured D5 finding identities for CEO self-review.
@@ -1527,13 +2250,19 @@ class FeedbackLedger:
         improvement_type: str = "NO_ACTION",
         target_skill_slug: str = "",
     ) -> bool:
-        if decision not in {"APPROVED", "REJECTED"}:
+        if not qa_approver_is_allowed(approved_by):
+            LOGGER.warning("langsmith_feedback_decision_rejected_invalid_approver")
+            return False
+        decision = _bounded_text(decision, 32).upper()
+        if decision not in {"APPROVED", "REJECTED", "CLOSED_NO_ACTION"}:
             return False
         normalized_type = _bounded_text(improvement_type, 32).upper()
         if normalized_type not in IMPROVEMENT_TYPES:
             return False
         if decision == "APPROVED" and normalized_type == "NO_ACTION":
             return False
+        if decision in {"REJECTED", "CLOSED_NO_ACTION"}:
+            normalized_type = "NO_ACTION"
         normalized_slug = _bounded_text(target_skill_slug, 64).lower()
         if normalized_type == "SKILL_EVOLVE" and not normalized_slug:
             return False
@@ -1641,6 +2370,19 @@ class FeedbackLedger:
                 )
         except sqlite3.Error:
             LOGGER.exception("langsmith_feedback_discord_finish_failed")
+
+    def requeue_discord_delivery(self, artifact_id: str) -> None:
+        """Release a claimed card only when Discord explicitly rate-limited it."""
+
+        try:
+            with self._connect() as db:
+                db.execute(
+                    """DELETE FROM langsmith_feedback_discord_deliveries
+                    WHERE artifact_id=? AND status='CLAIMED'""",
+                    (artifact_id,),
+                )
+        except sqlite3.Error:
+            LOGGER.exception("langsmith_feedback_discord_requeue_failed")
 
     def cleanup_qa_discord_messages(
         self,
@@ -2105,7 +2847,9 @@ class FeedbackLedger:
             "summaries": json.loads(row["summaries"]),
             "metadata": json.loads(row["metadata"]),
             "created_at": row["created_at"],
-            "approval_decision": row["approval_decision"],
+            "approval_decision": (
+                row["approval_decision"] if "approval_decision" in keys else None
+            ),
             "approved_by": row["approved_by"] if "approved_by" in keys else None,
             "approval_reason": (
                 row["approval_reason"] if "approval_reason" in keys else None
@@ -2323,6 +3067,7 @@ def _publish_qa_discord_request(
     """Publish one redacted QA card through the existing QA bot identity."""
 
     from orchestration.qa_discord_feedback import (
+        edit_qa_discord_message,
         format_qa_feedback_request,
         is_actionable_feedback,
         post_qa_discord_message,
@@ -2330,22 +3075,45 @@ def _publish_qa_discord_request(
         verify_discord_message_delivery,
     )
 
-    if not is_actionable_feedback(result.finding_codes):
+    artifact = ledger.get_artifact(artifact_id)
+    if artifact is None:
+        return False
+    finding_codes = artifact["finding_codes"]
+    if not is_actionable_feedback(finding_codes):
         return False
     channel_id = qa_feedback_channel_id()
     token = os.getenv("DISCORD_BOT_TOKEN_QA", "").strip()
     if not channel_id or not token:
         return False
-    if not ledger.claim_discord_delivery(artifact_id):
-        return False
     content = format_qa_feedback_request(
         artifact_id=artifact_id,
-        department=result.department,
-        decision=result.decision,
-        finding_codes=result.finding_codes,
-        summaries=result.summaries,
-        metadata=result.metadata,
+        department=str(artifact["department"]),
+        decision=str(artifact["decision"]),
+        finding_codes=finding_codes,
+        summaries=artifact["summaries"],
+        metadata=artifact["metadata"],
     )
+    if not ledger.claim_discord_delivery(artifact_id):
+        delivery = ledger.discord_delivery(artifact_id)
+        if (
+            delivery
+            and delivery.get("status") == "DELIVERED"
+            and delivery.get("discord_message_id")
+        ):
+            try:
+                edit_qa_discord_message(
+                    content,
+                    token=token,
+                    channel_id=channel_id,
+                    message_id=str(delivery["discord_message_id"]),
+                )
+                return True
+            except (HTTPError, URLError, TimeoutError, ValueError, OSError):
+                LOGGER.warning(
+                    "qa_discord_feedback_refresh_failed artifact_id=%s",
+                    artifact_id,
+                )
+        return False
     try:
         message_id = post_qa_discord_message(
             content, token=token, channel_id=channel_id
@@ -2364,6 +3132,12 @@ def _publish_qa_discord_request(
         )
         return True
     except HTTPError as exc:
+        if exc.code == 429:
+            ledger.requeue_discord_delivery(artifact_id)
+            LOGGER.warning(
+                "qa_discord_feedback_rate_limited artifact_id=%s", artifact_id
+            )
+            return False
         ledger.finish_discord_delivery(
             artifact_id,
             delivered=False,
@@ -2378,6 +3152,37 @@ def _publish_qa_discord_request(
             error_code=type(exc).__name__,
         )
     return False
+
+
+def _evaluation_result_from_artifact(
+    artifact: Mapping[str, Any],
+) -> EvaluationResult:
+    """Rebuild the bounded card payload from the local artifact projection."""
+
+    metadata = artifact.get("metadata")
+    safe_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    findings = tuple(
+        str(value).strip().upper()
+        for value in (artifact.get("finding_codes") or ())
+        if str(value).strip()
+    )
+    summaries = tuple(
+        str(value).strip()
+        for value in (artifact.get("summaries") or ())
+        if str(value).strip()
+    )
+    return EvaluationResult(
+        source_run_id=str(artifact.get("source_run_id") or ""),
+        department=str(artifact.get("department") or "unknown"),
+        workflow_role=str(safe_metadata.get("workflow_role") or ""),
+        decision=str(artifact.get("decision") or "REVIEW_REQUIRED"),
+        score=artifact.get("score")
+        if isinstance(artifact.get("score"), (int, float))
+        else None,
+        finding_codes=findings,
+        summaries=summaries,
+        metadata=safe_metadata,
+    )
 
 
 class LangSmithFeedbackService:
@@ -2427,6 +3232,28 @@ class LangSmithFeedbackService:
         backoff = min(300.0, base * (2 ** min(self._poll_failure_streak, 5)))
         return max(0.1, backoff - max(0.0, elapsed))
 
+    def _publish_pending_qa_reviews(self) -> int:
+        """Drain a bounded local review backlog during an explicit active window."""
+
+        if self.config.mode != "active" or self.ledger is None:
+            return 0
+
+        delivered = 0
+        for artifact in self.ledger.pending_discord_reviews(
+            limit=self.config.batch_size
+        ):
+            findings = artifact.get("finding_codes") or ()
+            if not is_actionable_feedback(findings):
+                continue
+            result = _evaluation_result_from_artifact(artifact)
+            if _publish_qa_discord_request(
+                self.ledger, str(artifact["artifact_id"]), result
+            ):
+                delivered += 1
+        if delivered:
+            LOGGER.info("langsmith_feedback_review_backfill delivered=%d", delivered)
+        return delivered
+
     def start(self) -> None:
         if self.config.mode == "off" or self._thread is not None:
             return
@@ -2448,6 +3275,12 @@ class LangSmithFeedbackService:
         discovered = completed = failed = dropped = 0
         client: Any | None = None
         try:
+            # This runs before the provider query so a temporary LangSmith 5xx
+            # cannot strand artifacts that were already evaluated locally.
+            # ``claim_discord_delivery`` makes the one-shot transport attempt
+            # idempotent, so switching from shadow to active does not duplicate
+            # cards that were already delivered.
+            self._publish_pending_qa_reviews()
             from orchestration.llm_observability import langsmith_enabled
 
             if not langsmith_enabled():
@@ -2497,6 +3330,9 @@ class LangSmithFeedbackService:
                     "OUTPUTS",
                 ],
             )
+            pending_slots = max(
+                0, self.config.max_pending - self.ledger.pending_count()
+            )
             for run in root_runs:
                 observation = observation_from_run(run)
                 if not _is_workflow_feedback_source(observation):
@@ -2514,14 +3350,15 @@ class LangSmithFeedbackService:
                 ) and not observation.metadata.get("department"):
                     continue
                 discovered += 1
-                if self.ledger.pending_count() >= self.config.max_pending:
+                if pending_slots <= 0:
                     dropped += 1
                     continue
-                self.ledger.enqueue(
+                if self.ledger.enqueue(
                     observation.source_run_id,
                     self.config.workflow_project,
                     observation=observation,
-                )
+                ):
+                    pending_slots -= 1
             # High-frequency metrics are aggregated into one completed
             # window. Evaluating every metric run would amplify QA work and
             # create an unbounded Evals project without adding signal.
@@ -2549,12 +3386,12 @@ class LangSmithFeedbackService:
             )
             if metrics_observation is not None:
                 discovered += 1
-                if self.ledger.pending_count() < self.config.max_pending:
-                    self.ledger.enqueue(
-                        metrics_observation.source_run_id,
-                        self.config.metrics_project,
-                        observation=metrics_observation,
-                    )
+                if pending_slots > 0 and self.ledger.enqueue(
+                    metrics_observation.source_run_id,
+                    self.config.metrics_project,
+                    observation=metrics_observation,
+                ):
+                    pending_slots -= 1
                 else:
                     dropped += 1
             for _ in range(self.config.batch_size):

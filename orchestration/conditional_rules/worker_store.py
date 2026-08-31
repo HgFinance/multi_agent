@@ -18,7 +18,7 @@ from psycopg2.extras import Json, register_uuid
 
 from .contracts import ConditionalRuleSpec, expression_fingerprint, rule_fingerprint
 from .identities import evaluation_id, execution_idempotency_key, trigger_id
-from .semantic import validate_rule_spec
+from .semantic import TrailingStopParameters, trailing_stop_parameters, validate_rule_spec
 
 register_uuid()
 
@@ -49,6 +49,81 @@ class TriggerClaim:
 
 
 @dataclass(frozen=True)
+class TrailingStopState:
+    high_price: Decimal
+    armed_at: datetime | None
+    last_observed_at: datetime
+
+
+@dataclass(frozen=True)
+class TrailingStopObservation:
+    state: TrailingStopState
+    condition_result: bool
+    ignored_stale_quote: bool = False
+
+
+def advance_trailing_stop(
+    state: TrailingStopState | None,
+    *,
+    parameters: TrailingStopParameters,
+    last_price: Decimal,
+    average_entry_price: Decimal,
+    observed_at: datetime,
+) -> TrailingStopObservation:
+    """Apply one quote to a high-water exit without any external side effect.
+
+    The database caller locks the row before persisting this result.  Quotes at
+    or behind the saved watermark are deliberately ignored: a delayed lower
+    quote must never fire a stop after a newer observation has already moved
+    the high-water mark forward.
+    """
+
+    if observed_at.tzinfo is None:
+        raise RuleWorkerStoreError(
+            "TRAILING_STOP_TIME_INVALID",
+            "trailing stop quote time must include timezone",
+        )
+    if not last_price.is_finite() or last_price <= 0:
+        raise RuleWorkerStoreError(
+            "TRAILING_STOP_PRICE_INVALID",
+            "trailing stop requires a positive finite last price",
+        )
+    if parameters.activation_return is not None and (
+        not average_entry_price.is_finite() or average_entry_price <= 0
+    ):
+        raise RuleWorkerStoreError(
+            "TRAILING_STOP_COST_BASIS_UNAVAILABLE",
+            "activation return requires a positive average entry price",
+        )
+    if state is not None and observed_at <= state.last_observed_at:
+        return TrailingStopObservation(
+            state=state,
+            condition_result=False,
+            ignored_stale_quote=True,
+        )
+    high_price = max(state.high_price, last_price) if state is not None else last_price
+    armed_at = state.armed_at if state is not None else None
+    if armed_at is None and (
+        parameters.activation_return is None
+        or last_price
+        >= average_entry_price * (Decimal("1") + parameters.activation_return)
+    ):
+        armed_at = observed_at
+    next_state = TrailingStopState(
+        high_price=high_price,
+        armed_at=armed_at,
+        last_observed_at=observed_at,
+    )
+    return TrailingStopObservation(
+        state=next_state,
+        condition_result=(
+            armed_at is not None
+            and last_price <= high_price * (Decimal("1") - parameters.drawdown)
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class SubmitReadyExecution:
     rule_execution_id: UUID
     trigger_id: str
@@ -72,6 +147,106 @@ class ConditionalNotificationContext:
     rule_id: str
     rule_execution_id: str
     directive_id: str
+    user_id: str
+    fund_id: str
+    book_id: str
+    client_request_id: str
+    order_request_id: str | None
+    ceo_root_task_id: str | None
+    trading_task_id: str | None
+
+
+@dataclass(frozen=True)
+class EntryPositionMismatchNotificationContext:
+    """DB-authoritative context for a cancelled entry-originated trail."""
+
+    rule_id: str
+    symbol: str
+    user_id: str
+    fund_id: str
+    book_id: str
+    client_request_id: str
+    order_request_id: str | None
+    ceo_root_task_id: str | None
+    trading_task_id: str | None
+    expected_position_quantity: str
+    actual_position_quantity: str
+    occurred_at: datetime
+    lifecycle_event_id: str
+
+
+@dataclass(frozen=True)
+class ExpiredRuleNotificationContext:
+    """DB-authoritative context for a condition that ended without an order."""
+
+    rule_id: str
+    symbol: str
+    action_side: str
+    prior_state: str
+    expires_at: datetime
+    occurred_at: datetime
+    lifecycle_event_id: str
+    user_id: str
+    fund_id: str
+    book_id: str
+    client_request_id: str
+    order_request_id: str | None
+    ceo_root_task_id: str | None
+    trading_task_id: str | None
+    is_compound_entry_exit: bool
+
+
+@dataclass(frozen=True)
+class ActivationBlockedNotificationContext:
+    """DB-owned context for a fully filled entry whose exit never armed."""
+
+    rule_id: str
+    symbol: str
+    user_id: str
+    fund_id: str
+    book_id: str
+    client_request_id: str
+    order_request_id: str | None
+    ceo_root_task_id: str | None
+    trading_task_id: str | None
+    failure_code: str
+    occurred_at: datetime
+    lifecycle_event_id: str
+
+
+@dataclass(frozen=True)
+class BundleActivatedNotificationContext:
+    """DB-owned confirmation that a protective exit is currently armed."""
+
+    rule_id: str
+    symbol: str
+    action_side: str
+    current_state: str
+    expires_at: datetime
+    activation_lifetime_trading_days: int | None
+    occurred_at: datetime
+    lifecycle_event_id: str
+    user_id: str
+    fund_id: str
+    book_id: str
+    client_request_id: str
+    order_request_id: str | None
+    ceo_root_task_id: str | None
+    trading_task_id: str | None
+
+
+@dataclass(frozen=True)
+class TriggerClaimedNotificationContext:
+    """DB-owned proof that a PAPER condition evaluated true exactly once."""
+
+    rule_id: str
+    symbol: str
+    action_side: str
+    current_state: str
+    trigger_id: str
+    data_watermark: datetime
+    occurred_at: datetime
+    lifecycle_event_id: str
     user_id: str
     fund_id: str
     book_id: str
@@ -208,6 +383,639 @@ class PostgresRuleWorkerStore:
                 retryable=True,
             ) from exc
 
+    def entry_position_mismatch_notification_context(
+        self, *, rule_id: str
+    ) -> EntryPositionMismatchNotificationContext:
+        """Resolve a terminal entry-trailing event without trusting Redis data.
+
+        The outbox/Redis envelope carries only routing identity.  Quantities,
+        account scope, and workflow links are reloaded from the immutable
+        lifecycle event and the bundle's admitted immediate order.
+        """
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select rule.rule_id,rule.symbol,rule.user_id,rule.fund_id,
+                           rule.book_id,
+                           coalesce(bundle_request.client_request_id,
+                                    fallback.client_request_id,
+                                    rule.client_request_id),
+                           coalesce(bundle_request.order_request_id,
+                                    fallback.order_request_id),
+                           coalesce(bundle_request.ceo_root_task_id,
+                                    fallback.ceo_root_task_id),
+                           coalesce(bundle_request.trading_task_id,
+                                    fallback.trading_task_id),
+                           mismatch.payload->>'expected_position_quantity',
+                           mismatch.payload->>'actual_position_quantity',
+                           mismatch.created_at,mismatch.event_id
+                      from execution.conditional_trade_rules rule
+                      join lateral (
+                        select event.event_id,event.payload,event.created_at
+                          from execution.conditional_trade_rule_events event
+                         where event.rule_id=rule.rule_id
+                           and event.event_type='ENTRY_POSITION_MISMATCH'
+                         order by event.created_at desc,event.event_id desc
+                         limit 1
+                      ) mismatch on true
+                      left join lateral (
+                        select request.order_request_id,request.client_request_id,
+                               request.ceo_root_task_id,request.trading_task_id
+                          from execution.user_paper_order_bundles bundle
+                          join execution.user_order_requests request
+                            on request.order_request_id=
+                               bundle.immediate_order_request_id
+                         where bundle.conditional_rule_id=rule.rule_id
+                           and bundle.user_id=rule.user_id
+                           and bundle.fund_id=rule.fund_id
+                           and bundle.book_id=rule.book_id
+                         order by bundle.updated_at desc,bundle.bundle_id desc
+                         limit 1
+                      ) bundle_request on true
+                      left join lateral (
+                        select request.order_request_id,request.client_request_id,
+                               request.ceo_root_task_id,request.trading_task_id
+                          from execution.user_order_requests request
+                         where request.user_id=rule.user_id
+                           and (
+                             request.client_request_id=rule.client_request_id
+                             or request.canonical_payload->>'rule_id'
+                                  = rule.rule_id::text
+                             or coalesce(
+                                  request.canonical_payload->'rule_ids',
+                                  '[]'::jsonb
+                                ) ? rule.rule_id::text
+                           )
+                         order by
+                           (request.client_request_id=rule.client_request_id) desc,
+                           request.updated_at desc
+                         limit 1
+                      ) fallback on true
+                     where rule.rule_id=%s
+                    """,
+                    (UUID(str(rule_id)),),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuleWorkerStoreError(
+                        "ENTRY_POSITION_MISMATCH_CONTEXT_MISSING",
+                        "entry-position mismatch lifecycle event was not found",
+                        retryable=True,
+                    )
+                expected = str(row[9] or "").strip()
+                actual = str(row[10] or "").strip()
+                if not expected or not actual:
+                    raise RuleWorkerStoreError(
+                        "ENTRY_POSITION_MISMATCH_CONTEXT_INVALID",
+                        "entry-position mismatch lifecycle event lacks quantities",
+                        retryable=True,
+                    )
+                return EntryPositionMismatchNotificationContext(
+                    rule_id=str(row[0]),
+                    symbol=str(row[1]),
+                    user_id=str(row[2]),
+                    fund_id=str(row[3]),
+                    book_id=str(row[4]),
+                    client_request_id=str(row[5]),
+                    order_request_id=str(row[6]) if row[6] else None,
+                    ceo_root_task_id=str(row[7]) if row[7] else None,
+                    trading_task_id=str(row[8]) if row[8] else None,
+                    expected_position_quantity=expected,
+                    actual_position_quantity=actual,
+                    occurred_at=row[11],
+                    lifecycle_event_id=str(row[12]),
+                )
+        except RuleWorkerStoreError:
+            raise
+        except (ValueError, psycopg2.Error) as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not resolve entry-position mismatch notification context",
+                retryable=True,
+            ) from exc
+
+    def expired_rule_notification_context(
+        self, *, rule_id: str
+    ) -> ExpiredRuleNotificationContext:
+        """Resolve one durable expiry without trusting its Redis envelope."""
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select rule.rule_id,rule.symbol,version.spec->'action'->>'side',
+                           expired.from_state,rule.expires_at,expired.created_at,
+                           expired.event_id,rule.user_id,rule.fund_id,rule.book_id,
+                           coalesce(bundle_request.client_request_id,
+                                    fallback.client_request_id,
+                                    rule.client_request_id),
+                           coalesce(bundle_request.order_request_id,
+                                    fallback.order_request_id),
+                           coalesce(bundle_request.ceo_root_task_id,
+                                    fallback.ceo_root_task_id),
+                           coalesce(bundle_request.trading_task_id,
+                                    fallback.trading_task_id),
+                           (bundle_request.order_request_id is not null)
+                      from execution.conditional_trade_rules rule
+                      join execution.conditional_trade_rule_versions version
+                        on version.rule_id=rule.rule_id
+                       and version.rule_version=rule.current_version
+                      join lateral (
+                        select event.event_id,event.from_state,event.created_at
+                          from execution.conditional_trade_rule_events event
+                         where event.rule_id=rule.rule_id
+                           and event.event_type='CONDITIONAL_RULE_EXPIRED'
+                         order by event.created_at desc,event.event_id desc
+                         limit 1
+                      ) expired on true
+                      left join lateral (
+                        select request.order_request_id,request.client_request_id,
+                               request.ceo_root_task_id,request.trading_task_id
+                          from execution.user_paper_order_bundles bundle
+                          join execution.user_order_requests request
+                            on request.order_request_id=
+                               bundle.immediate_order_request_id
+                         where bundle.conditional_rule_id=rule.rule_id
+                           and bundle.user_id=rule.user_id
+                           and bundle.fund_id=rule.fund_id
+                           and bundle.book_id=rule.book_id
+                         order by bundle.updated_at desc,bundle.bundle_id desc
+                         limit 1
+                      ) bundle_request on true
+                      left join lateral (
+                        select request.order_request_id,request.client_request_id,
+                               request.ceo_root_task_id,request.trading_task_id
+                          from execution.user_order_requests request
+                         where request.user_id=rule.user_id
+                           and (
+                             request.client_request_id=rule.client_request_id
+                             or request.canonical_payload->>'rule_id'
+                                  = rule.rule_id::text
+                             or coalesce(
+                                  request.canonical_payload->'rule_ids',
+                                  '[]'::jsonb
+                                ) ? rule.rule_id::text
+                           )
+                         order by
+                           (request.client_request_id=rule.client_request_id) desc,
+                           request.updated_at desc
+                         limit 1
+                      ) fallback on true
+                     where rule.rule_id=%s
+                    """,
+                    (UUID(str(rule_id)),),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_EXPIRY_CONTEXT_MISSING",
+                        "conditional-rule expiry lifecycle event was not found",
+                        retryable=True,
+                    )
+                action_side = str(row[2] or "").upper()
+                prior_state = str(row[3] or "")
+                if action_side not in {"BUY", "SELL"} or prior_state not in {
+                    "PENDING_CONFIRMATION",
+                    "ACTIVE",
+                    "PAUSED",
+                }:
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_EXPIRY_CONTEXT_INVALID",
+                        "conditional-rule expiry lifecycle event has invalid rule context",
+                        retryable=True,
+                    )
+                if not isinstance(row[4], datetime) or not isinstance(row[5], datetime):
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_EXPIRY_CONTEXT_INVALID",
+                        "conditional-rule expiry context is missing timestamps",
+                        retryable=True,
+                    )
+                return ExpiredRuleNotificationContext(
+                    rule_id=str(row[0]),
+                    symbol=str(row[1]),
+                    action_side=action_side,
+                    prior_state=prior_state,
+                    expires_at=row[4],
+                    occurred_at=row[5],
+                    lifecycle_event_id=str(row[6]),
+                    user_id=str(row[7]),
+                    fund_id=str(row[8]),
+                    book_id=str(row[9]),
+                    client_request_id=str(row[10]),
+                    order_request_id=str(row[11]) if row[11] else None,
+                    ceo_root_task_id=str(row[12]) if row[12] else None,
+                    trading_task_id=str(row[13]) if row[13] else None,
+                    is_compound_entry_exit=bool(row[14]),
+                )
+        except RuleWorkerStoreError:
+            raise
+        except (ValueError, psycopg2.Error) as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not resolve conditional-rule expiry notification context",
+                retryable=True,
+            ) from exc
+
+    def activation_blocked_notification_context(
+        self, *, rule_id: str
+    ) -> ActivationBlockedNotificationContext:
+        """Resolve a failed protective activation from its durable event."""
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select rule.rule_id,rule.symbol,rule.user_id,rule.fund_id,
+                           rule.book_id,
+                           coalesce(bundle_request.client_request_id,
+                                    fallback.client_request_id,
+                                    rule.client_request_id),
+                           coalesce(bundle_request.order_request_id,
+                                    fallback.order_request_id),
+                           coalesce(bundle_request.ceo_root_task_id,
+                                    fallback.ceo_root_task_id),
+                           coalesce(bundle_request.trading_task_id,
+                                    fallback.trading_task_id),
+                           blocked.payload->>'code',blocked.created_at,
+                           blocked.event_id
+                      from execution.conditional_trade_rules rule
+                      join lateral (
+                        select event.event_id,event.payload,event.created_at
+                          from execution.conditional_trade_rule_events event
+                         where event.rule_id=rule.rule_id
+                           and event.event_type='BUNDLE_ACTIVATION_BLOCKED'
+                         order by event.created_at desc,event.event_id desc
+                         limit 1
+                      ) blocked on true
+                      left join lateral (
+                        select request.order_request_id,request.client_request_id,
+                               request.ceo_root_task_id,request.trading_task_id
+                          from execution.user_paper_order_bundles bundle
+                          join execution.user_order_requests request
+                            on request.order_request_id=
+                               bundle.immediate_order_request_id
+                         where bundle.conditional_rule_id=rule.rule_id
+                           and bundle.user_id=rule.user_id
+                           and bundle.fund_id=rule.fund_id
+                           and bundle.book_id=rule.book_id
+                         order by bundle.updated_at desc,bundle.bundle_id desc
+                         limit 1
+                      ) bundle_request on true
+                      left join lateral (
+                        select request.order_request_id,request.client_request_id,
+                               request.ceo_root_task_id,request.trading_task_id
+                          from execution.user_order_requests request
+                         where request.user_id=rule.user_id
+                           and (
+                             request.client_request_id=rule.client_request_id
+                             or request.canonical_payload->>'rule_id'
+                                  = rule.rule_id::text
+                             or coalesce(
+                                  request.canonical_payload->'rule_ids',
+                                  '[]'::jsonb
+                                ) ? rule.rule_id::text
+                           )
+                         order by
+                           (request.client_request_id=rule.client_request_id) desc,
+                           request.updated_at desc
+                         limit 1
+                      ) fallback on true
+                     where rule.rule_id=%s
+                    """,
+                    (UUID(str(rule_id)),),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_ACTIVATION_BLOCKED_CONTEXT_MISSING",
+                        "conditional-rule activation-blocked lifecycle event was not found",
+                        retryable=True,
+                    )
+                failure_code = str(row[9] or "").strip()
+                if failure_code not in {
+                    "ENTRY_EXIT_ACTIVATION_KRX_CALENDAR_UNAVAILABLE",
+                    "ENTRY_EXIT_ACTIVATION_KRX_CALENDAR_INVALID",
+                } or not isinstance(row[10], datetime):
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_ACTIVATION_BLOCKED_CONTEXT_INVALID",
+                        "conditional-rule activation-blocked context is invalid",
+                        retryable=True,
+                    )
+                return ActivationBlockedNotificationContext(
+                    rule_id=str(row[0]),
+                    symbol=str(row[1]),
+                    user_id=str(row[2]),
+                    fund_id=str(row[3]),
+                    book_id=str(row[4]),
+                    client_request_id=str(row[5]),
+                    order_request_id=str(row[6]) if row[6] else None,
+                    ceo_root_task_id=str(row[7]) if row[7] else None,
+                    trading_task_id=str(row[8]) if row[8] else None,
+                    failure_code=failure_code,
+                    occurred_at=row[10],
+                    lifecycle_event_id=str(row[11]),
+                )
+        except RuleWorkerStoreError:
+            raise
+        except (ValueError, psycopg2.Error) as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not resolve conditional-rule activation-blocked context",
+                retryable=True,
+            ) from exc
+
+    def bundle_activated_notification_context(
+        self, *, rule_id: str
+    ) -> BundleActivatedNotificationContext:
+        """Resolve one currently armed protective exit from durable state."""
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select rule.rule_id,rule.symbol,version.spec->'action'->>'side',
+                           rule.state,rule.expires_at,
+                           activated.payload->>'activation_lifetime_trading_days',
+                           activated.created_at,activated.event_id,
+                           rule.user_id,rule.fund_id,rule.book_id,
+                           coalesce(bundle_request.client_request_id,
+                                    fallback.client_request_id,
+                                    rule.client_request_id),
+                           coalesce(bundle_request.order_request_id,
+                                    fallback.order_request_id),
+                           coalesce(bundle_request.ceo_root_task_id,
+                                    fallback.ceo_root_task_id),
+                           coalesce(bundle_request.trading_task_id,
+                                    fallback.trading_task_id)
+                      from execution.conditional_trade_rules rule
+                      join execution.conditional_trade_rule_versions version
+                        on version.rule_id=rule.rule_id
+                       and version.rule_version=rule.current_version
+                      join lateral (
+                        select event.event_id,event.payload,event.created_at
+                          from execution.conditional_trade_rule_events event
+                         where event.rule_id=rule.rule_id
+                           and event.event_type='BUNDLE_ACTIVATED'
+                         order by event.created_at desc,event.event_id desc
+                         limit 1
+                      ) activated on true
+                      left join lateral (
+                        select request.order_request_id,request.client_request_id,
+                               request.ceo_root_task_id,request.trading_task_id
+                          from execution.user_paper_order_bundles bundle
+                          join execution.user_order_requests request
+                            on request.order_request_id=
+                               bundle.immediate_order_request_id
+                         where bundle.conditional_rule_id=rule.rule_id
+                           and bundle.user_id=rule.user_id
+                           and bundle.fund_id=rule.fund_id
+                           and bundle.book_id=rule.book_id
+                         order by bundle.updated_at desc,bundle.bundle_id desc
+                         limit 1
+                      ) bundle_request on true
+                      left join lateral (
+                        select request.order_request_id,request.client_request_id,
+                               request.ceo_root_task_id,request.trading_task_id
+                          from execution.user_order_requests request
+                         where request.user_id=rule.user_id
+                           and (
+                             request.client_request_id=rule.client_request_id
+                             or request.canonical_payload->>'rule_id'
+                                  = rule.rule_id::text
+                             or coalesce(
+                                  request.canonical_payload->'rule_ids',
+                                  '[]'::jsonb
+                                ) ? rule.rule_id::text
+                           )
+                         order by
+                           (request.client_request_id=rule.client_request_id) desc,
+                           request.updated_at desc
+                         limit 1
+                      ) fallback on true
+                     where rule.rule_id=%s
+                    """,
+                    (UUID(str(rule_id)),),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_BUNDLE_ACTIVATION_CONTEXT_MISSING",
+                        "conditional-rule activation lifecycle event was not found",
+                        retryable=True,
+                    )
+                action_side = str(row[2] or "").upper()
+                current_state = str(row[3] or "")
+                lifetime_raw = row[5]
+                try:
+                    lifetime = (
+                        None
+                        if lifetime_raw in {None, ""}
+                        else int(str(lifetime_raw))
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_BUNDLE_ACTIVATION_CONTEXT_INVALID",
+                        "conditional-rule activation lifetime is invalid",
+                        retryable=True,
+                    ) from exc
+                if (
+                    action_side not in {"BUY", "SELL"}
+                    or current_state
+                    not in {
+                        "DRAFT",
+                        "NEEDS_CLARIFICATION",
+                        "VALIDATED",
+                        "PENDING_CONFIRMATION",
+                        "ACTIVE",
+                        "TRIGGERED",
+                        "EXECUTION_PENDING",
+                        "COMPLETED",
+                        "PAUSED",
+                        "EXPIRED",
+                        "CANCELLED",
+                        "FAILED",
+                    }
+                    or (lifetime is not None and not 1 <= lifetime <= 20)
+                    or not isinstance(row[4], datetime)
+                    or not isinstance(row[6], datetime)
+                ):
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_BUNDLE_ACTIVATION_CONTEXT_INVALID",
+                        "conditional-rule activation context is invalid",
+                        retryable=True,
+                    )
+                return BundleActivatedNotificationContext(
+                    rule_id=str(row[0]),
+                    symbol=str(row[1]),
+                    action_side=action_side,
+                    current_state=current_state,
+                    expires_at=row[4],
+                    activation_lifetime_trading_days=lifetime,
+                    occurred_at=row[6],
+                    lifecycle_event_id=str(row[7]),
+                    user_id=str(row[8]),
+                    fund_id=str(row[9]),
+                    book_id=str(row[10]),
+                    client_request_id=str(row[11]),
+                    order_request_id=str(row[12]) if row[12] else None,
+                    ceo_root_task_id=str(row[13]) if row[13] else None,
+                    trading_task_id=str(row[14]) if row[14] else None,
+                )
+        except RuleWorkerStoreError:
+            raise
+        except (ValueError, psycopg2.Error) as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not resolve conditional-rule activation notification context",
+                retryable=True,
+            ) from exc
+
+    def trigger_claimed_notification_context(
+        self, *, rule_id: str
+    ) -> TriggerClaimedNotificationContext:
+        """Resolve one true condition from durable trigger/evaluation facts."""
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select rule.rule_id,rule.symbol,version.spec->'action'->>'side',
+                           rule.state,trigger.trigger_id,evaluation.data_watermark,
+                           claimed.created_at,claimed.event_id,
+                           rule.user_id,rule.fund_id,rule.book_id,
+                           coalesce(bundle_request.client_request_id,
+                                    fallback.client_request_id,
+                                    rule.client_request_id),
+                           coalesce(bundle_request.order_request_id,
+                                    fallback.order_request_id),
+                           coalesce(bundle_request.ceo_root_task_id,
+                                    fallback.ceo_root_task_id),
+                           coalesce(bundle_request.trading_task_id,
+                                    fallback.trading_task_id)
+                      from execution.conditional_trade_rules rule
+                      join execution.conditional_trade_rule_versions version
+                        on version.rule_id=rule.rule_id
+                       and version.rule_version=rule.current_version
+                      join lateral (
+                        select event.event_id,event.payload,event.created_at
+                          from execution.conditional_trade_rule_events event
+                         where event.rule_id=rule.rule_id
+                           and event.event_type='TRIGGER_CLAIMED'
+                         order by event.created_at desc,event.event_id desc
+                         limit 1
+                      ) claimed on true
+                      join execution.conditional_rule_triggers trigger
+                        on trigger.trigger_id=claimed.payload->>'trigger_id'
+                       and trigger.rule_id=rule.rule_id
+                      join execution.conditional_rule_evaluations evaluation
+                        on evaluation.evaluation_id=trigger.evaluation_id
+                       and evaluation.outcome='TRUE'
+                      left join lateral (
+                        select request.order_request_id,request.client_request_id,
+                               request.ceo_root_task_id,request.trading_task_id
+                          from execution.user_paper_order_bundles bundle
+                          join execution.user_order_requests request
+                            on request.order_request_id=
+                               bundle.immediate_order_request_id
+                         where bundle.conditional_rule_id=rule.rule_id
+                           and bundle.user_id=rule.user_id
+                           and bundle.fund_id=rule.fund_id
+                           and bundle.book_id=rule.book_id
+                         order by bundle.updated_at desc,bundle.bundle_id desc
+                         limit 1
+                      ) bundle_request on true
+                      left join lateral (
+                        select request.order_request_id,request.client_request_id,
+                               request.ceo_root_task_id,request.trading_task_id
+                          from execution.user_order_requests request
+                         where request.user_id=rule.user_id
+                           and (
+                             request.client_request_id=rule.client_request_id
+                             or request.canonical_payload->>'rule_id'
+                                  = rule.rule_id::text
+                             or coalesce(
+                                  request.canonical_payload->'rule_ids',
+                                  '[]'::jsonb
+                                ) ? rule.rule_id::text
+                           )
+                         order by
+                           (request.client_request_id=rule.client_request_id) desc,
+                           request.updated_at desc
+                         limit 1
+                      ) fallback on true
+                     where rule.rule_id=%s
+                    """,
+                    (UUID(str(rule_id)),),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_TRIGGER_CONTEXT_MISSING",
+                        "conditional-rule true trigger was not found",
+                        retryable=True,
+                    )
+                action_side = str(row[2] or "").upper()
+                current_state = str(row[3] or "")
+                trigger = str(row[4] or "").strip()
+                if (
+                    action_side not in {"BUY", "SELL"}
+                    or current_state
+                    not in {
+                        "DRAFT",
+                        "NEEDS_CLARIFICATION",
+                        "VALIDATED",
+                        "PENDING_CONFIRMATION",
+                        "ACTIVE",
+                        "TRIGGERED",
+                        "EXECUTION_PENDING",
+                        "COMPLETED",
+                        "PAUSED",
+                        "EXPIRED",
+                        "CANCELLED",
+                        "FAILED",
+                    }
+                    or not trigger
+                    or not isinstance(row[5], datetime)
+                    or not isinstance(row[6], datetime)
+                ):
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_RULE_TRIGGER_CONTEXT_INVALID",
+                        "conditional-rule true trigger context is invalid",
+                        retryable=True,
+                    )
+                return TriggerClaimedNotificationContext(
+                    rule_id=str(row[0]),
+                    symbol=str(row[1]),
+                    action_side=action_side,
+                    current_state=current_state,
+                    trigger_id=trigger,
+                    data_watermark=row[5],
+                    occurred_at=row[6],
+                    lifecycle_event_id=str(row[7]),
+                    user_id=str(row[8]),
+                    fund_id=str(row[9]),
+                    book_id=str(row[10]),
+                    client_request_id=str(row[11]),
+                    order_request_id=str(row[12]) if row[12] else None,
+                    ceo_root_task_id=str(row[13]) if row[13] else None,
+                    trading_task_id=str(row[14]) if row[14] else None,
+                )
+        except RuleWorkerStoreError:
+            raise
+        except (ValueError, psycopg2.Error) as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not resolve conditional-rule trigger notification context",
+                retryable=True,
+            ) from exc
+
     @staticmethod
     def _active_row(row: tuple[Any, ...]) -> ActiveRule:
         raw_spec = json.loads(row[5]) if isinstance(row[5], str) else row[5]
@@ -280,7 +1088,7 @@ class PostgresRuleWorkerStore:
                     """
                     select bundle.bundle_id, bundle.conditional_rule_id,
                            request.state, rule.state, rule.current_version,
-                           version.spec_sha256
+                           version.spec_sha256, version.spec
                       from execution.user_paper_order_bundles bundle
                       join execution.user_order_requests request
                         on request.order_request_id=bundle.immediate_order_request_id
@@ -309,20 +1117,80 @@ class PostgresRuleWorkerStore:
                     rule_state,
                     rule_version,
                     spec_sha,
+                    raw_spec,
                 ) in cursor.fetchall():
                     if (
                         request_state == "COMPLETED"
                         and str(rule_state) == "PENDING_CONFIRMATION"
                     ):
-                        cursor.execute(
-                            """
-                            update execution.conditional_trade_rules
-                               set state='ACTIVE',confirmation_sha256=%s,
-                                   confirmed_at=now(),version=version+1
-                             where rule_id=%s and state='PENDING_CONFIRMATION'
-                            """,
-                            (str(spec_sha), rule_id),
-                        )
+                        try:
+                            decoded_spec = (
+                                json.loads(raw_spec)
+                                if isinstance(raw_spec, str)
+                                else raw_spec
+                            )
+                            spec = validate_rule_spec(
+                                ConditionalRuleSpec.model_validate(decoded_spec)
+                            )
+                        except Exception as exc:
+                            raise RuleWorkerStoreError(
+                                "CONDITIONAL_RULE_STORED_SPEC_INVALID",
+                                "deferred compound rule has an invalid stored specification",
+                            ) from exc
+                        if rule_fingerprint(spec) != str(spec_sha):
+                            raise RuleWorkerStoreError(
+                                "CONDITIONAL_RULE_STORED_SPEC_INVALID",
+                                "deferred compound rule fingerprint does not match its specification",
+                            )
+
+                        active_expires_at = None
+                        if spec.activation_lifetime_trading_days is not None:
+                            try:
+                                active_expires_at = self._krx_close_after_activation(
+                                    cursor,
+                                    trading_days=spec.activation_lifetime_trading_days,
+                                )
+                            except RuleWorkerStoreError as exc:
+                                failure_codes = {
+                                    "CONDITIONAL_RULE_KRX_CALENDAR_UNAVAILABLE": (
+                                        "ENTRY_EXIT_ACTIVATION_KRX_CALENDAR_UNAVAILABLE"
+                                    ),
+                                    "CONDITIONAL_RULE_KRX_CALENDAR_INVALID": (
+                                        "ENTRY_EXIT_ACTIVATION_KRX_CALENDAR_INVALID"
+                                    ),
+                                }
+                                failure_code = failure_codes.get(exc.code)
+                                if failure_code is None:
+                                    raise
+                                if self._fail_bundle_activation(
+                                    cursor,
+                                    bundle_id=bundle_id,
+                                    rule_id=rule_id,
+                                    rule_version=rule_version,
+                                    failure_code=failure_code,
+                                ):
+                                    changed += 1
+                                continue
+                            cursor.execute(
+                                """
+                                update execution.conditional_trade_rules
+                                   set state='ACTIVE',confirmation_sha256=%s,
+                                       confirmed_at=now(),expires_at=%s,
+                                       version=version+1
+                                 where rule_id=%s and state='PENDING_CONFIRMATION'
+                                """,
+                                (str(spec_sha), active_expires_at, rule_id),
+                            )
+                        else:
+                            cursor.execute(
+                                """
+                                update execution.conditional_trade_rules
+                                   set state='ACTIVE',confirmation_sha256=%s,
+                                       confirmed_at=now(),version=version+1
+                                 where rule_id=%s and state='PENDING_CONFIRMATION'
+                                """,
+                                (str(spec_sha), rule_id),
+                            )
                         if cursor.rowcount != 1:
                             continue
                         cursor.execute(
@@ -333,21 +1201,26 @@ class PostgresRuleWorkerStore:
                             """,
                             (bundle_id,),
                         )
-                        cursor.execute(
-                            """
-                            insert into execution.conditional_trade_rule_events (
-                              event_id,rule_id,rule_version,event_type,from_state,
-                              to_state,payload
-                            ) values (%s,%s,%s,'BUNDLE_ACTIVATED',
-                                      'PENDING_CONFIRMATION','ACTIVE',%s)
-                            on conflict (event_id) do nothing
-                            """,
-                            (
-                                _stable_id("dep_", bundle_id, "ACTIVATED"),
-                                rule_id,
-                                rule_version,
-                                Json({"bundle_id": str(bundle_id)}),
-                            ),
+                        self._record_lifecycle_event(
+                            cursor,
+                            event_id=_stable_id("dep_", bundle_id, "ACTIVATED"),
+                            rule_id=rule_id,
+                            rule_version=rule_version,
+                            event_type="BUNDLE_ACTIVATED",
+                            from_state="PENDING_CONFIRMATION",
+                            to_state="ACTIVE",
+                            payload={
+                                "bundle_id": str(bundle_id),
+                                "activation_lifetime_trading_days": (
+                                    spec.activation_lifetime_trading_days
+                                ),
+                                "active_expires_at": (
+                                    active_expires_at.isoformat()
+                                    if active_expires_at is not None
+                                    else None
+                                ),
+                                "order_submitted": False,
+                            },
                         )
                         changed += 1
                     elif str(rule_state) == "EXPIRED" or request_state in {
@@ -383,6 +1256,125 @@ class PostgresRuleWorkerStore:
                 "could not activate deferred compound PAPER rules",
                 retryable=True,
             ) from exc
+
+    def _fail_bundle_activation(
+        self,
+        cursor: Any,
+        *,
+        bundle_id: UUID,
+        rule_id: UUID,
+        rule_version: int,
+        failure_code: str,
+    ) -> bool:
+        """Fail closed after a full entry when its protective exit cannot arm.
+
+        Retrying a calendar-less activation in the background leaves the user
+        believing an unarmed exit is watching.  Terminating the bundle makes
+        the missing protection visible and creates no compensating order.
+        """
+
+        if failure_code not in {
+            "ENTRY_EXIT_ACTIVATION_KRX_CALENDAR_UNAVAILABLE",
+            "ENTRY_EXIT_ACTIVATION_KRX_CALENDAR_INVALID",
+        }:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_ACTIVATION_FAILURE_CODE_INVALID",
+                "activation-blocked failure code is invalid",
+            )
+        cursor.execute(
+            """
+            update execution.conditional_trade_rules
+               set state='FAILED',version=version+1,completed_at=now()
+             where rule_id=%s and current_version=%s
+               and state='PENDING_CONFIRMATION'
+            returning rule_id
+            """,
+            (rule_id, rule_version),
+        )
+        if cursor.fetchone() is None:
+            return False
+        lifecycle_event_id = _stable_id(
+            "blk_", bundle_id, rule_id, rule_version, failure_code
+        )
+        self._record_lifecycle_event(
+            cursor,
+            event_id=lifecycle_event_id,
+            rule_id=rule_id,
+            rule_version=int(rule_version),
+            event_type="BUNDLE_ACTIVATION_BLOCKED",
+            from_state="PENDING_CONFIRMATION",
+            to_state="FAILED",
+            payload={"code": failure_code, "order_submitted": False},
+        )
+        cursor.execute(
+            """
+            update execution.user_paper_order_bundles
+               set state='FAILED',error_code=%s,
+                   error_message='protective PAPER exit could not activate from the official KRX calendar',
+                   completed_at=now(),version=version+1
+             where bundle_id=%s and conditional_rule_id=%s
+               and state='WAITING_FOR_IMMEDIATE_FILL'
+            """,
+            (failure_code, bundle_id, rule_id),
+        )
+        return True
+
+    @staticmethod
+    def _krx_close_after_activation(cursor: Any, *, trading_days: int) -> datetime:
+        """Read the Nth eligible KRX close from the governed session calendar.
+
+        This intentionally avoids a weekday approximation.  A full fill might
+        be detected after the current regular session has already closed, in
+        which case ``closes_at > now()`` starts from the next official session.
+        A missing or incomplete calendar fails closed: the protective exit is
+        not activated with a guessed expiry.
+        """
+
+        if not 1 <= trading_days <= 20:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_ACTIVATION_LIFETIME_INVALID",
+                "activation lifetime must be between one and twenty KRX sessions",
+            )
+        cursor.execute(
+            """
+            with governed_sessions as (
+              select distinct on (session.trade_date)
+                     session.trade_date,session.closes_at
+                from reference.market_sessions session
+                join reference.market_calendar_versions calendar
+                  on calendar.calendar_version_id=session.calendar_version_id
+               where session.market='KRX'
+                 and session.session_type='REGULAR'
+                 and session.is_trading_day
+                 and calendar.market='KRX'
+                 and calendar.effective_from <= session.trade_date
+                 and (calendar.effective_to is null
+                      or calendar.effective_to >= session.trade_date)
+                 and session.trade_date >= (now() at time zone 'Asia/Seoul')::date
+                 and session.closes_at > now()
+               order by session.trade_date,calendar.version desc
+            )
+            select closes_at
+              from governed_sessions
+             order by trade_date
+             offset %s
+             limit 1
+            """,
+            (trading_days - 1,),
+        )
+        row = cursor.fetchone()
+        if row is None or row[0] is None or not isinstance(row[0], datetime):
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_KRX_CALENDAR_UNAVAILABLE",
+                "official KRX regular-session calendar cannot supply the requested exit lifetime",
+                retryable=True,
+            )
+        if row[0].tzinfo is None:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_KRX_CALENDAR_INVALID",
+                "official KRX regular-session close must include timezone",
+            )
+        return row[0]
 
     def list_claimed(
         self, *, limit: int = 100
@@ -433,13 +1425,63 @@ class PostgresRuleWorkerStore:
                 self._set_role(cursor)
                 cursor.execute(
                     """
-                    update execution.conditional_trade_rules
-                       set state='EXPIRED',version=version+1,completed_at=now()
+                    select rule_id,current_version,state,expires_at
+                      from execution.conditional_trade_rules
                      where state in ('PENDING_CONFIRMATION','ACTIVE','PAUSED')
                        and expires_at<=now()
+                     order by expires_at,rule_id
+                     limit 1000
+                     for update skip locked
                     """
                 )
-                return int(cursor.rowcount)
+                changed = 0
+                for rule_id, rule_version, prior_state, expires_at in cursor.fetchall():
+                    cursor.execute(
+                        """
+                        update execution.conditional_trade_rules
+                           set state='EXPIRED',version=version+1,completed_at=now()
+                         where rule_id=%s and current_version=%s
+                           and state=%s and expires_at<=now()
+                        """,
+                        (rule_id, rule_version, prior_state),
+                    )
+                    if cursor.rowcount != 1:
+                        continue
+                    lifecycle_event_id = _stable_id(
+                        "exp_", rule_id, rule_version, "CONDITIONAL_RULE_EXPIRED"
+                    )
+                    payload = {
+                        "expires_at": expires_at.isoformat(),
+                        "prior_state": str(prior_state),
+                        "order_submitted": False,
+                    }
+                    self._record_lifecycle_event(
+                        cursor,
+                        event_id=lifecycle_event_id,
+                        rule_id=rule_id,
+                        rule_version=int(rule_version),
+                        event_type="CONDITIONAL_RULE_EXPIRED",
+                        from_state=str(prior_state),
+                        to_state="EXPIRED",
+                        payload=payload,
+                    )
+                    # A linked entry/exit bundle must not continue to present
+                    # itself as actively protected once its child rule stopped
+                    # watching.  No PAPER order is created by this transition.
+                    cursor.execute(
+                        """
+                        update execution.user_paper_order_bundles
+                           set state='FAILED',
+                               error_code='CONDITIONAL_EXIT_EXPIRED',
+                               error_message='conditional PAPER exit expired without submitting an order',
+                               completed_at=now(),version=version+1
+                         where conditional_rule_id=%s
+                           and state in ('WAITING_FOR_IMMEDIATE_FILL','CONDITIONAL_ACTIVE')
+                        """,
+                        (rule_id,),
+                    )
+                    changed += 1
+                return changed
         except psycopg2.Error as exc:
             raise RuleWorkerStoreError(
                 "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
@@ -533,6 +1575,226 @@ class PostgresRuleWorkerStore:
                 retryable=True,
             ) from exc
 
+    def observe_trailing_stop(
+        self,
+        rule: ActiveRule,
+        *,
+        last_price: Decimal,
+        average_entry_price: Decimal,
+        observed_at: datetime,
+    ) -> TrailingStopObservation:
+        """Durably advance one trailing high-water state under its row lock."""
+
+        parameters = trailing_stop_parameters(rule.spec.condition)
+        initial = advance_trailing_stop(
+            None,
+            parameters=parameters,
+            last_price=last_price,
+            average_entry_price=average_entry_price,
+            observed_at=observed_at,
+        )
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    insert into execution.conditional_rule_trailing_states (
+                      rule_id,rule_version,high_price,armed_at,last_observed_at
+                    ) values (%s,%s,%s,%s,%s)
+                    on conflict (rule_id,rule_version) do nothing
+                    """,
+                    (
+                        rule.rule_id,
+                        rule.rule_version,
+                        initial.state.high_price,
+                        initial.state.armed_at,
+                        initial.state.last_observed_at,
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    return initial
+                cursor.execute(
+                    """
+                    select high_price,armed_at,last_observed_at
+                      from execution.conditional_rule_trailing_states
+                     where rule_id=%s and rule_version=%s
+                     for update
+                    """,
+                    (rule.rule_id, rule.rule_version),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuleWorkerStoreError(
+                        "TRAILING_STOP_STATE_MISSING",
+                        "trailing stop state disappeared during observation",
+                        retryable=True,
+                    )
+                existing = TrailingStopState(
+                    high_price=Decimal(str(row[0])),
+                    armed_at=row[1],
+                    last_observed_at=row[2],
+                )
+                observation = advance_trailing_stop(
+                    existing,
+                    parameters=parameters,
+                    last_price=last_price,
+                    average_entry_price=average_entry_price,
+                    observed_at=observed_at,
+                )
+                if observation.ignored_stale_quote:
+                    return observation
+                cursor.execute(
+                    """
+                    update execution.conditional_rule_trailing_states
+                       set high_price=%s,armed_at=%s,last_observed_at=%s
+                     where rule_id=%s and rule_version=%s
+                    """,
+                    (
+                        observation.state.high_price,
+                        observation.state.armed_at,
+                        observation.state.last_observed_at,
+                        rule.rule_id,
+                        rule.rule_version,
+                    ),
+                )
+                return observation
+        except RuleWorkerStoreError:
+            raise
+        except (ValueError, psycopg2.Error) as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not persist trailing stop state",
+                retryable=True,
+            ) from exc
+
+    def cancel_entry_trailing_on_position_mismatch(
+        self,
+        rule: ActiveRule,
+        *,
+        expected_position_quantity: Decimal,
+        actual_position_quantity: Decimal,
+        evaluation_key: str,
+        context_sha256: str,
+        data_watermark: datetime,
+    ) -> bool:
+        """Terminally retire an already-started entry-originated trailing rule.
+
+        A bundle is permitted to wait for its first post-fill holding snapshot.
+        Once its high-water row exists, though, a position quantity mismatch
+        proves that the original entry no longer maps one-to-one to the
+        account position.  This transaction records the diagnostic, cancels
+        the rule, fails the linked bundle, and emits one outbox event.  It is
+        intentionally not a pause: a later coincidental quantity match must
+        not re-arm an automatic exit for a manually changed position.
+        """
+
+        identity = evaluation_id(str(rule.rule_id), rule.rule_version, evaluation_key)
+        event_id = _stable_id(
+            "trail_", rule.rule_id, rule.rule_version, "ENTRY_POSITION_QUANTITY_MISMATCH"
+        )
+        payload = {
+            "code": "ENTRY_POSITION_QUANTITY_MISMATCH",
+            "expected_position_quantity": str(expected_position_quantity),
+            "actual_position_quantity": str(actual_position_quantity),
+            "evaluation_key": evaluation_key,
+        }
+        message = (
+            "entry-originated trailing exit was cancelled because the current "
+            f"position quantity {actual_position_quantity} no longer matches the "
+            f"fully filled entry quantity {expected_position_quantity}"
+        )
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                # Lock the aggregate before its state row.  A concurrent true
+                # trigger therefore cannot pass ACTIVE after this terminal
+                # transition commits.
+                cursor.execute(
+                    """
+                    select state
+                      from execution.conditional_trade_rules
+                     where rule_id=%s and current_version=%s and version=%s
+                     for update
+                    """,
+                    (rule.rule_id, rule.rule_version, rule.row_version),
+                )
+                aggregate = cursor.fetchone()
+                if aggregate is None or str(aggregate[0]) != "ACTIVE":
+                    return False
+                cursor.execute(
+                    """
+                    select 1
+                      from execution.conditional_rule_trailing_states
+                     where rule_id=%s and rule_version=%s
+                     for update
+                    """,
+                    (rule.rule_id, rule.rule_version),
+                )
+                # No high-water state yet means settlement may still be
+                # propagating.  Keep waiting rather than cancelling a fresh
+                # full-fill bundle before its first usable snapshot.
+                if cursor.fetchone() is None:
+                    return False
+                cursor.execute(
+                    """
+                    insert into execution.conditional_rule_evaluations (
+                      evaluation_id,rule_id,rule_version,evaluation_key,
+                      evaluation_clock,condition_result,outcome,context_sha256,
+                      data_watermark,error_code,error_message
+                    ) values (%s,%s,%s,%s,%s,null,'ERROR',%s,%s,%s,%s)
+                    on conflict (rule_id,rule_version,evaluation_key) do nothing
+                    """,
+                    (
+                        identity,
+                        rule.rule_id,
+                        rule.rule_version,
+                        evaluation_key,
+                        rule.spec.evaluation.clock.value,
+                        context_sha256,
+                        data_watermark,
+                        "ENTRY_POSITION_QUANTITY_MISMATCH",
+                        message,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    update execution.conditional_trade_rules
+                       set state='CANCELLED',version=version+1,completed_at=now()
+                     where rule_id=%s and current_version=%s and version=%s
+                       and state='ACTIVE'
+                    returning rule_id
+                    """,
+                    (rule.rule_id, rule.rule_version, rule.row_version),
+                )
+                if cursor.fetchone() is None:
+                    return False
+                self._record_lifecycle_event(
+                    cursor,
+                    event_id=event_id,
+                    rule_id=rule.rule_id,
+                    rule_version=rule.rule_version,
+                    event_type="ENTRY_POSITION_MISMATCH",
+                    from_state="ACTIVE",
+                    to_state="CANCELLED",
+                    payload=payload,
+                )
+                cursor.execute(
+                    """
+                    update execution.user_paper_order_bundles
+                       set state='FAILED',error_code='ENTRY_POSITION_QUANTITY_MISMATCH',
+                           error_message=%s,completed_at=now(),version=version+1
+                     where conditional_rule_id=%s and state='CONDITIONAL_ACTIVE'
+                    """,
+                    (message, rule.rule_id),
+                )
+                return True
+        except psycopg2.Error as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not terminally cancel entry-originated trailing rule",
+                retryable=True,
+            ) from exc
+
     def claim_true(
         self,
         rule: ActiveRule,
@@ -608,19 +1870,18 @@ class PostgresRuleWorkerStore:
                         condition_sha256,
                     ),
                 )
-                cursor.execute(
-                    """
-                    insert into execution.conditional_trade_rule_events (
-                      event_id,rule_id,rule_version,event_type,from_state,to_state,payload
-                    ) values (%s,%s,%s,'TRIGGER_CLAIMED','ACTIVE','TRIGGERED',%s)
-                    on conflict (event_id) do nothing
-                    """,
-                    (
-                        _stable_id("cre_", trigger_identity, "claimed"),
-                        rule.rule_id,
-                        rule.rule_version,
-                        Json({"trigger_id": trigger_identity}),
-                    ),
+                self._record_lifecycle_event(
+                    cursor,
+                    event_id=_stable_id("cre_", trigger_identity, "claimed"),
+                    rule_id=rule.rule_id,
+                    rule_version=rule.rule_version,
+                    event_type="TRIGGER_CLAIMED",
+                    from_state="ACTIVE",
+                    to_state="TRIGGERED",
+                    payload={
+                        "trigger_id": trigger_identity,
+                        "order_submitted": False,
+                    },
                 )
                 return TriggerClaim(trigger_identity, evaluation_identity)
         except psycopg2.Error as exc:
@@ -848,7 +2109,7 @@ class PostgresRuleWorkerStore:
                 retryable=True,
             ) from exc
 
-    def _record_oco_event(
+    def _record_lifecycle_event(
         self,
         cursor: Any,
         *,
@@ -860,7 +2121,7 @@ class PostgresRuleWorkerStore:
         to_state: str,
         payload: Mapping[str, Any],
     ) -> None:
-        """Persist one OCO lifecycle event and its transactional outbox row."""
+        """Persist one conditional-rule lifecycle event and its outbox row."""
 
         cursor.execute(
             """
@@ -950,7 +2211,7 @@ class PostgresRuleWorkerStore:
                 "reserved_by_rule_id": str(rule_id),
                 "oco_group_id": group_id,
             }
-            self._record_oco_event(
+            self._record_lifecycle_event(
                 cursor,
                 event_id=_stable_id("oco_", sibling_id, rule_id, "reserved"),
                 rule_id=sibling_id,
@@ -1005,7 +2266,7 @@ class PostgresRuleWorkerStore:
             """,
             (rule_id, rule_version),
         )
-        self._record_oco_event(
+        self._record_lifecycle_event(
             cursor,
             event_id=_stable_id("oco_", rule_execution_id, winner_rule_id, "superseded"),
             rule_id=rule_id,
@@ -1336,7 +2597,7 @@ class PostgresRuleWorkerStore:
         )
         released = cursor.fetchall()
         for sibling_id, sibling_version in released:
-            self._record_oco_event(
+            self._record_lifecycle_event(
                 cursor,
                 event_id=_stable_id("oco_", sibling_id, rule_id, "released"),
                 rule_id=sibling_id,
@@ -1395,7 +2656,7 @@ class PostgresRuleWorkerStore:
         )
         cancelled = cursor.fetchall()
         for sibling_id, sibling_version, previous_state in cancelled:
-            self._record_oco_event(
+            self._record_lifecycle_event(
                 cursor,
                 event_id=_stable_id("oco_", sibling_id, rule_id, "cancelled"),
                 rule_id=sibling_id,
@@ -1721,6 +2982,7 @@ __all__ = [
     "ActiveRule",
     "ConditionalNotificationContext",
     "ConditionalRuleOutboxRow",
+    "EntryPositionMismatchNotificationContext",
     "PostgresRuleWorkerStore",
     "RuleWorkerStoreError",
     "SubmitReadyExecution",

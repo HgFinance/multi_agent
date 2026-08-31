@@ -31,13 +31,26 @@ First/Metrics metadata
   → HgFinance-Evals
   → QA Discord card
   → qa-hermes review
-  → authorized human APPROVED / REJECTED
+  → authorized human APPROVED / REJECTED / CLOSED_NO_ACTION
   → benchmark_status=PENDING
   → offline benchmark PASSED
   → LANGSMITH_FEEDBACK_MODE=active인 다음 CEO/대상 부서 Hermes task의 advisory hint
 ```
 
-`APPROVED`와 `PASSED`는 다른 상태다. `APPROVED`만으로 prompt, router,
+자동 분류 상태는 `OBSERVED_PASS`, `REVIEW_REQUIRED`, `REVIEW_WORTHY`,
+`IMPROVEMENT_CANDIDATE`, `EVOLUTION_PROPOSAL`로 분리한다. 단일 실행의 이상 신호는
+`REVIEW_WORTHY`일 뿐, Skill·prompt·code 변경을 뜻하지 않는다. `IMPROVEMENT_CANDIDATE`는
+검증된 candidate lane에서만 사용하고 `EVOLUTION_PROPOSAL`은 별도 제안 lifecycle에서만
+사용한다. `LATENCY_ABOVE_THRESHOLD`는 먼저 `PERFORMANCE_EVENT`로 검토하며 반복성,
+측정된 병목 귀속, semantic 실패 동반 근거가 있어야 Evolution으로 승격한다.
+
+`CORRELATION_METADATA_MISSING`은 `source·workflow_role·department·UTC 1시간 창`으로
+집계하고 artifact의 `sample_count`에 누적한다. 새 producer는
+`trace_correlation_metadata()`를 통해 `request_id`와 `root_id`를 전파해야 하며,
+누락된 legacy trace는 집계 대상으로만 남긴다.
+
+`APPROVED`와 `PASSED`는 다른 상태다. 조치가 없다는 사람의 결론은 `CLOSED_NO_ACTION`으로
+기록하며 `APPROVED + NO_ACTION`은 허용하지 않는다. `APPROVED`만으로 prompt, router,
 model, Hermes 동작은 바뀌지 않는다. `PASSED` 뒤에도 hint는 비권위 참고자료일
 뿐이며, 자동 prompt/model 배포는 하지 않는다.
 
@@ -123,12 +136,16 @@ message ID를 Discord GET으로 readback한 뒤에만 delivered로 기록한다.
 identity만 생성할 수 있다. QA 전용 채널의 승인·거부 명령은 `qa-hermes`만
 처리하고, CEO를 포함한 다른 프로필은 일반 사용자 질의로 전달하지 않는다.
 사람은 QA Agent 응답에 Reply해
-`승인 유형=<개선유형> <사유>` / `거부 <사유>`를 쓰거나,
+`승인 유형=<개선유형> <사유>` / `종료 <사유>` / `거부 <사유>`를 쓰거나,
 `승인 feedback-... 유형=<개선유형> <사유>` 형식을 쓴다.
 artifact ID만 입력하거나 사유를 생략한 결정은 fail-closed로 기록하지 않는다.
 게이트웨이는 `QA_DISCORD_APPROVER_USER_IDS` 또는
 `QA_DISCORD_APPROVER_ROLE_IDS`의 명시적 allowlist를 확인하며 Discord guild owner도
 local administrator로 허용한다. 봇 계정과 미등록 사람은 fail-closed다.
+`audit-api`와 `FeedbackLedger`도 독립적으로 `discord:<numeric-user-id>` 형식과
+`QA_DISCORD_APPROVER_USER_IDS`를 검증한다. 승인 API는 `qa-discord-gateway` Service
+Token subject와 숫자형 Discord message ID가 없으면 거부하므로, body의
+`approved_by`만 조작한 직접 호출은 승인으로 기록되지 않는다.
 같은 Discord message는 durable inbound ledger로,
 같은 artifact decision은 `langsmith_feedback_decisions`의 PK로 중복 적용되지 않는다.
 승인 직후 상태는 적용 완료가 아니라 `benchmark_status=PENDING`이다.
@@ -146,6 +163,12 @@ Discord에는 artifact마다 두 역할만 나타난다. `① 자동 감지 · Q
 immutable evidence card이고, `② QA Hermes 검토 결과`는 이를 반복하지 않는 구조화된
 검토 의견이다. Hermes의 `승인 검토 권고`, `보류 권고`, `거부 검토 권고`는 사람을 위한
 비구속 의견이며 실제 결정은 허용된 사람의 명시적 명령만 기록한다.
+
+과분류 측정은 `scripts/measure_qa_overclassification.py`로 수행한다. 이 명령은
+30~50건의 상태 층화 redacted 표본을 별도 `langsmith_feedback_manual_labels` 원장에
+기록하고, QA decision·benchmark·Evolution 상태는 변경하지 않는다. `REVIEW`,
+`NO_ACTION`, `INSUFFICIENT_EVIDENCE`를 분리해 precision·overclassification·false
+negative를 계산하며, 이 라벨은 승인자가 아니므로 스킬 생성이나 승격을 유발하지 않는다.
 
 ### Active 전환 runbook
 
@@ -196,8 +219,9 @@ fallback에서 `true`로 명시되며, `cache_age_seconds`와 `cache_reason`으�
 
 유입이 처리량을 넘으면 업무 흐름을 보호하기 위해 pending 상한(기본 500)을 넘는
 관측 finding을 버린다. Metrics는 개별 event를 approval queue에 넣지 않고 5분당
-최대 1개 Evals 관측으로 축약하며, 같은 finding의 QA artifact는 6시간 incident
-bucket 안에서 다시 합친다. local ledger는 기본 30일 후 정리되고, 외부 LangSmith
+최대 1개 Evals 관측으로 축약하며, 같은 correlated finding은 요청/root ID로,
+상관관계가 없는 legacy finding은 source·역할·부서·1시간 창으로 다시 합친다.
+local ledger는 기본 30일 후 정리되고, 외부 LangSmith
 trace 보존은 workspace retention 정책으로 별도 관리된다. 외부 trace retention은
 `First`, `HgFinance-Metrics`, `HgFinance-Evals` 세 project만 대상으로 하며
 `default`와 미등록 project는 제외한다. 한 pass의 삭제 요청은 project별 최대

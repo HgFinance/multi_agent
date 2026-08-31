@@ -394,8 +394,19 @@ class InMemoryDirectiveRepository:
                 reduce_only = (
                     elected.action is DirectiveAction.SELL_ALL
                     or (
-                        elected.action is DirectiveAction.PLACE_ORDER
-                        and elected.payload.get("side") == "SELL"
+                        (
+                            elected.action is DirectiveAction.PLACE_ORDER
+                            and elected.payload.get("side") == "SELL"
+                        )
+                        or (
+                            elected.action is DirectiveAction.PLACE_BASKET
+                            and isinstance(elected.payload.get("orders"), list)
+                            and bool(elected.payload["orders"])
+                            and all(
+                                isinstance(item, dict) and item.get("side") == "SELL"
+                                for item in elected.payload["orders"]
+                            )
+                        )
                     )
                 )
                 self.state.barriers[key] = (
@@ -993,7 +1004,8 @@ class InMemoryDirectiveRepository:
                 record.state in ACTIVE_DIRECTIVE_STATES
                 and not (
                     record.state is DirectiveState.UNKNOWN
-                    and record.action is DirectiveAction.PLACE_ORDER
+                    and record.action
+                    in {DirectiveAction.PLACE_ORDER, DirectiveAction.PLACE_BASKET}
                     and any(leg.side is not None for leg in record.legs)
                     and all(
                         leg.state is DirectiveLegState.UNKNOWN
@@ -1005,7 +1017,8 @@ class InMemoryDirectiveRepository:
             )
             or (
                 record.state is DirectiveState.PARTIAL
-                and record.action is DirectiveAction.PLACE_ORDER
+                and record.action
+                in {DirectiveAction.PLACE_ORDER, DirectiveAction.PLACE_BASKET}
                 and record.error_code == "TRADING_DIRECTIVE_INTERNAL_ERROR"
                 and any(leg.side is not None for leg in record.legs)
                 and all(
@@ -1369,6 +1382,9 @@ class PostgresDirectiveRepository:
                        case
                          when action='SELL_ALL' then 'REDUCE_ONLY'
                          when action='PLACE_ORDER' and payload->>'side'='SELL'
+                           then 'REDUCE_ONLY'
+                         when action='PLACE_BASKET'
+                           and payload->'orders'->0->>'side'='SELL'
                            then 'REDUCE_ONLY'
                          else 'USER_PRIORITY'
                        end as mode
@@ -2418,7 +2434,7 @@ class PostgresDirectiveRepository:
                        state in ('RECEIVED','RUNNING','IN_PROGRESS','UNKNOWN')
                    and not (
                            state='UNKNOWN'
-                       and action='PLACE_ORDER'
+                       and action in ('PLACE_ORDER','PLACE_BASKET')
                        and exists (
                              select 1
                                from execution.user_directive_legs unknown_order_leg
@@ -2438,7 +2454,7 @@ class PostgresDirectiveRepository:
                  )
                     or (
                          state='PARTIAL'
-                     and action='PLACE_ORDER'
+                     and action in ('PLACE_ORDER','PLACE_BASKET')
                      and error_code='TRADING_DIRECTIVE_INTERNAL_ERROR'
                      and exists (
                            select 1

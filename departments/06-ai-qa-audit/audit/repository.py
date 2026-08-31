@@ -41,6 +41,7 @@ from typing import Any
 from uuid import UUID
 
 from audit.db_session import configure_writer_connection, runtime_session_dsn
+from orchestration.connection_pool import create_blocking_connection_pool
 
 try:
     # `audit.repository` is imported as a package by the supervisor.  Keep the
@@ -112,7 +113,12 @@ class PostgresAuditRepository:
         characteristic without changing the server-wide default.  Injected
         unit-test connections may omit that driver method.
         """
-        conn = self._pool.getconn()
+        try:
+            conn = self._pool.getconn()
+        except Exception as exc:  # noqa: BLE001 - pool errors vary by driver
+            raise QaDecisionPersistenceError(
+                "QA audit connection pool is unavailable"
+            ) from exc
         try:
             configure_writer_connection(conn)
             return conn
@@ -134,9 +140,15 @@ class PostgresAuditRepository:
         cls, dsn: str, *, minconn: int = 1, maxconn: int = 4
     ) -> PostgresAuditRepository:
         _, ThreadedConnectionPool = _load_postgres_driver()
-        return cls(ThreadedConnectionPool(
-            minconn, maxconn, runtime_session_dsn(dsn)
-        ))
+        return cls(
+            create_blocking_connection_pool(
+                ThreadedConnectionPool,
+                runtime_session_dsn(dsn),
+                minconn=minconn,
+                default_maxconn=maxconn,
+                env_prefix="RISK_QA",
+            )
+        )
 
     @staticmethod
     def _test_mode() -> bool:

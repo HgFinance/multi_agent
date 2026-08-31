@@ -6,8 +6,10 @@ import json
 import logging
 import math
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
@@ -23,16 +25,28 @@ from .auth import (
     decode_directive_read_proof,
 )
 from .contracts import (
+    BasketOrderItem,
     DirectiveAction,
     DirectiveLegState,
     DirectiveState,
     UserDirectiveRequest,
 )
-from .market_data import MarketDataError, MarketDataProvider
+from .market_data import MarketDataError, MarketDataProvider, TrustedQuote
 from .repository import DirectiveRecord, DirectiveRepository, DirectiveRepositoryError, InstrumentRef
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _BasketAdmission:
+    """The all-or-nothing preflight result for one basket member."""
+
+    item: BasketOrderItem
+    instrument: InstrumentRef
+    quote: TrustedQuote
+    quantity: Decimal
+    reserve_cash: Decimal | None
 
 
 class DirectiveServiceError(RuntimeError):
@@ -206,6 +220,8 @@ class UserDirectiveService:
         *,
         now: datetime | None = None,
         market_quote_max_age_seconds: float | None = None,
+        conditional_quantity_validator: Callable[[InstrumentRef, TrustedQuote], None]
+        | None = None,
     ) -> DirectiveRecord:
         """Submit one DB-verified standing rule through the same mechanical gate.
 
@@ -224,6 +240,7 @@ class UserDirectiveService:
             proof,
             current_time=current_time,
             market_quote_max_age_seconds=market_quote_max_age_seconds,
+            conditional_quantity_validator=conditional_quantity_validator,
         )
 
     def _submit_bound(
@@ -233,6 +250,8 @@ class UserDirectiveService:
         *,
         current_time: datetime,
         market_quote_max_age_seconds: float | None = None,
+        conditional_quantity_validator: Callable[[InstrumentRef, TrustedQuote], None]
+        | None = None,
     ) -> DirectiveRecord:
         try:
             record, created = self.repository.accept(request, proof)
@@ -266,7 +285,10 @@ class UserDirectiveService:
                         request,
                         now=current_time,
                         market_quote_max_age_seconds=market_quote_max_age_seconds,
+                        conditional_quantity_validator=conditional_quantity_validator,
                     )
+                elif request.action is DirectiveAction.PLACE_BASKET:
+                    result = self._place_basket(record, request, now=current_time)
                 elif request.action is DirectiveAction.CANCEL_ALL:
                     result = self._cancel_all(record)
                 else:
@@ -375,6 +397,18 @@ class UserDirectiveService:
                                 }
                             )
                             current = self._place(current, request, now=current_time)
+                        elif current.action is DirectiveAction.PLACE_BASKET:
+                            request = UserDirectiveRequest.model_validate(
+                                {
+                                    "fund_id": current.fund_id,
+                                    "book_id": current.book_id,
+                                    "action": current.action,
+                                    "instruction_ref": current.instruction_ref,
+                                    "idempotency_key": current.idempotency_key,
+                                    "payload": current.payload,
+                                }
+                            )
+                            current = self._place_basket(current, request, now=current_time)
                         elif current.action is DirectiveAction.CANCEL_ALL:
                             current = self._cancel_all(current)
                         else:
@@ -403,7 +437,10 @@ class UserDirectiveService:
         now: datetime,
     ) -> None:
         for expired in self.repository.expire_scope_legs(fund_id, book_id, now=now):
-            if expired.action is DirectiveAction.PLACE_ORDER:
+            if expired.action in {
+                DirectiveAction.PLACE_ORDER,
+                DirectiveAction.PLACE_BASKET,
+            }:
                 if any(leg.filled_quantity > 0 for leg in expired.legs):
                     self.repository.set_state(
                         expired.directive_id,
@@ -880,6 +917,8 @@ class UserDirectiveService:
         *,
         now: datetime,
         market_quote_max_age_seconds: float | None = None,
+        conditional_quantity_validator: Callable[[InstrumentRef, TrustedQuote], None]
+        | None = None,
     ) -> DirectiveRecord:
         payload = request.place_order()
         instrument = self.repository.resolve_instrument(
@@ -901,6 +940,12 @@ class UserDirectiveService:
             now=now,
             max_age_seconds=market_quote_max_age_seconds,
         )
+        if conditional_quantity_validator is not None:
+            # A conditional rule is confirmed as a sizing policy, whereas the
+            # durable directive payload contains a concrete quantity. Invoke
+            # the policy-specific check only after this service owns the book
+            # lock and has read the exact executable quote used below.
+            conditional_quantity_validator(instrument, trusted)
         reserve_cash: Decimal | None = None
         reduce_only = payload.side == "SELL"
         if payload.side == "BUY":
@@ -1005,6 +1050,229 @@ class UserDirectiveService:
                 DirectiveLegState.PARTIALLY_FILLED,
             }:
                 self._sync_external_leg(record, leg, instrument, now=now)
+        self.repository.set_state(record.directive_id, DirectiveState.IN_PROGRESS)
+        refreshed = self.repository.get(record.directive_id) or record
+        return self._status_locked(refreshed, now=now)
+
+    def _place_basket(
+        self,
+        record: DirectiveRecord,
+        request: UserDirectiveRequest,
+        *,
+        now: datetime,
+    ) -> DirectiveRecord:
+        """Submit a bounded PAPER basket after one complete preflight.
+
+        A basket is deliberately *not* represented as a sequence of browser
+        requests.  Every member is catalog-resolved, quoted, lot-rounded, and
+        included in one aggregate BUY-cash or SELL-position check before the
+        first broker call. Broker placements themselves cannot be atomic; after an
+        ambiguous or terminal member result we preserve the submitted legs and
+        stop before widening the exposure with later members.
+        """
+
+        basket = request.place_basket()
+        side = basket.orders[0].side
+        admissions: list[_BasketAdmission] = []
+        resolved_ids: set[UUID] = set()
+        for item in basket.orders:
+            instrument = self.repository.resolve_instrument(
+                record.fund_id,
+                record.book_id,
+                item.instrument_id,
+                item.symbol,
+            )
+            if instrument.instrument_id in resolved_ids:
+                raise DirectiveServiceError(
+                    "TRADING_BASKET_DUPLICATE_INSTRUMENT",
+                    "basket resolves multiple members to the same instrument",
+                    422,
+                )
+            resolved_ids.add(instrument.instrument_id)
+            if instrument.currency != "KRW":
+                raise DirectiveServiceError(
+                    "TRADING_BASKET_CURRENCY_UNSUPPORTED",
+                    "PAPER basket members must be KRW instruments",
+                    422,
+                )
+            quote = self.market_data.quote(instrument, now=now)
+            if item.quantity is not None:
+                quantity = item.quantity
+            else:
+                assert item.notional_krw is not None
+                raw_quantity = (item.notional_krw / quote.ask).to_integral_value(
+                    rounding=ROUND_DOWN
+                )
+                quantity = (
+                    (raw_quantity / instrument.lot_size).to_integral_value(
+                        rounding=ROUND_DOWN
+                    )
+                    * instrument.lot_size
+                )
+            if quantity <= 0:
+                raise DirectiveServiceError(
+                    "TRADING_BASKET_NOTIONAL_TOO_SMALL",
+                    (
+                        f"basket amount for {instrument.symbol} cannot buy one "
+                        "canonical lot at the current executable ask"
+                    ),
+                    422,
+                )
+            _mechanical_order_rules(
+                instrument,
+                quantity=quantity,
+                limit_price=None,
+            )
+            admissions.append(
+                _BasketAdmission(
+                    item=item,
+                    instrument=instrument,
+                    quote=quote,
+                    quantity=quantity,
+                    reserve_cash=(
+                        quantity * quote.ask * _cost_buffer()
+                        if side == "BUY"
+                        else None
+                    ),
+                )
+            )
+
+        reserve_cash = sum(
+            (
+                admission.reserve_cash or Decimal(0)
+                for admission in admissions
+            ),
+            Decimal(0),
+        )
+        if side == "BUY":
+            available = self.repository.available_cash(
+                record.fund_id, record.book_id, "KRW"
+            )
+            if available < reserve_cash:
+                raise DirectiveServiceError(
+                    "TRADING_INSUFFICIENT_CASH",
+                    f"available cash {available} is below required basket reservation {reserve_cash}",
+                    409,
+                )
+        else:
+            for admission in admissions:
+                sellable = self.repository.sellable_quantity(
+                    record.fund_id,
+                    record.book_id,
+                    admission.instrument.instrument_id,
+                )
+                if sellable < admission.quantity:
+                    raise DirectiveServiceError(
+                        "TRADING_INSUFFICIENT_SELLABLE_POSITION",
+                        (
+                            f"sellable quantity {sellable} is below basket request "
+                            f"{admission.quantity} for {admission.instrument.symbol}"
+                        ),
+                        409,
+                    )
+
+        expires_at = self.repository.market_session_close(now=now)
+        self.repository.activate_barrier(record, reduce_only=side == "SELL")
+        preemption_legs = self._cancel_open_orders(
+            record,
+            below_priority=record.priority,
+        )
+        if any(leg.state is DirectiveLegState.UNKNOWN for leg in preemption_legs):
+            return self.repository.set_state(
+                record.directive_id,
+                DirectiveState.UNKNOWN,
+                error_code="TRADING_CANCEL_CONFIRMATION_PENDING",
+                error_message="lower-priority PAPER orders must cancel before USER sizing",
+            )
+        if any(leg.error_code == "TRADING_CANCEL_LOST_RACE" for leg in preemption_legs):
+            partial = self.repository.set_state(
+                record.directive_id,
+                DirectiveState.PARTIAL,
+                error_code="TRADING_CANCEL_LOST_RACE",
+                error_message="a lower-priority order filled during USER preemption",
+            )
+            self.repository.release_barrier(record)
+            return partial
+        if side == "BUY":
+            available = self.repository.available_cash(
+                record.fund_id, record.book_id, "KRW"
+            )
+            if available < reserve_cash:
+                raise DirectiveServiceError(
+                    "TRADING_INSUFFICIENT_CASH",
+                    f"available cash {available} is below required basket reservation {reserve_cash}",
+                    409,
+                )
+        else:
+            for admission in admissions:
+                sellable = self.repository.sellable_quantity(
+                    record.fund_id,
+                    record.book_id,
+                    admission.instrument.instrument_id,
+                )
+                if sellable < admission.quantity:
+                    raise DirectiveServiceError(
+                        "TRADING_INSUFFICIENT_SELLABLE_POSITION",
+                        (
+                            f"sellable quantity {sellable} is below basket request "
+                            f"{admission.quantity} for {admission.instrument.symbol}"
+                        ),
+                        409,
+                    )
+
+        for admission in admissions:
+            if self.external_broker is None:
+                leg = self.repository.create_acknowledged_leg(
+                    record,
+                    admission.instrument,
+                    side=side,
+                    order_type="MARKET",
+                    quantity=admission.quantity,
+                    limit_price=None,
+                    reserve_cash=admission.reserve_cash,
+                    reduce_only=side == "SELL",
+                    expires_at=expires_at,
+                )
+                self._fill_from_quote(
+                    record,
+                    leg,
+                    admission.instrument,
+                    admission.quote,
+                )
+                continue
+
+            leg = self.repository.create_pending_leg(
+                record,
+                admission.instrument,
+                side=side,
+                order_type="MARKET",
+                quantity=admission.quantity,
+                limit_price=None,
+                reserve_cash=admission.reserve_cash,
+                reduce_only=side == "SELL",
+                expires_at=expires_at,
+            )
+            leg = self._submit_external_leg(record, leg, admission.instrument)
+            if leg.state in {
+                DirectiveLegState.ACKNOWLEDGED,
+                DirectiveLegState.PARTIALLY_FILLED,
+            }:
+                leg = self._sync_external_leg(
+                    record,
+                    leg,
+                    admission.instrument,
+                    now=now,
+                )
+            if leg.state not in {
+                DirectiveLegState.ACKNOWLEDGED,
+                DirectiveLegState.PARTIALLY_FILLED,
+                DirectiveLegState.FILLED,
+            }:
+                # The broker boundary is non-atomic.  Do not submit an
+                # unattempted remaining member after any ambiguous, rejected,
+                # cancelled, or expired member result.
+                break
+
         self.repository.set_state(record.directive_id, DirectiveState.IN_PROGRESS)
         refreshed = self.repository.get(record.directive_id) or record
         return self._status_locked(refreshed, now=now)
@@ -1146,7 +1414,8 @@ class UserDirectiveService:
         if current.state is DirectiveState.PARTIAL:
             order_legs = [leg for leg in current.legs if leg.side is not None]
             recoverable_internal_failure = (
-                current.action is DirectiveAction.PLACE_ORDER
+                current.action
+                in {DirectiveAction.PLACE_ORDER, DirectiveAction.PLACE_BASKET}
                 and current.error_code == "TRADING_DIRECTIVE_INTERNAL_ERROR"
                 and bool(order_legs)
                 and all(
@@ -1162,9 +1431,16 @@ class UserDirectiveService:
                 return current
         current = self.repository.reconcile_cancel_legs(current)
         current = self._reconcile_external_cancel_targets(current)
-        if current.action in {DirectiveAction.PLACE_ORDER, DirectiveAction.SELL_ALL}:
+        if current.action in {
+            DirectiveAction.PLACE_ORDER,
+            DirectiveAction.PLACE_BASKET,
+            DirectiveAction.SELL_ALL,
+        }:
             current = self._fill_active_direct_legs(current, now=now)
-        if current.action is DirectiveAction.PLACE_ORDER:
+        if current.action in {
+            DirectiveAction.PLACE_ORDER,
+            DirectiveAction.PLACE_BASKET,
+        }:
             cancel_legs = [leg for leg in current.legs if leg.side is None]
             order_legs = [leg for leg in current.legs if leg.side is not None]
             if any(leg.state is DirectiveLegState.UNKNOWN for leg in cancel_legs):
@@ -1178,7 +1454,7 @@ class UserDirectiveService:
                 )
                 self.repository.release_barrier(current)
                 return partial
-            if not order_legs:
+            if not order_legs and current.action is DirectiveAction.PLACE_ORDER:
                 request = UserDirectiveRequest.model_validate(
                     {
                         "fund_id": current.fund_id,
@@ -1190,6 +1466,50 @@ class UserDirectiveService:
                     }
                 )
                 return self._place(current, request, now=now)
+            if current.action is DirectiveAction.PLACE_BASKET:
+                expected_count = len(current.payload.get("orders", ()))
+                if len(order_legs) < expected_count:
+                    states = {leg.state for leg in order_legs}
+                    if DirectiveLegState.UNKNOWN in states:
+                        return self.repository.set_state(
+                            current.directive_id,
+                            DirectiveState.UNKNOWN,
+                            error_code="TRADING_BASKET_SUBMISSION_STOPPED",
+                            error_message=(
+                                "a basket member has an ambiguous broker outcome; "
+                                "unsubmitted members were not placed"
+                            ),
+                        )
+                    active_states = {
+                        DirectiveLegState.PENDING,
+                        DirectiveLegState.ACKNOWLEDGED,
+                        DirectiveLegState.PARTIALLY_FILLED,
+                    }
+                    if states & active_states:
+                        return self.repository.set_state(
+                            current.directive_id,
+                            DirectiveState.IN_PROGRESS,
+                            error_code="TRADING_BASKET_SUBMISSION_STOPPED",
+                            error_message=(
+                                "a basket member terminated before all members "
+                                "were submitted"
+                            ),
+                        )
+                    terminal = (
+                        DirectiveState.PARTIAL
+                        if any(leg.filled_quantity > 0 for leg in order_legs)
+                        else DirectiveState.FAILED
+                    )
+                    result = self.repository.set_state(
+                        current.directive_id,
+                        terminal,
+                        error_code="TRADING_BASKET_SUBMISSION_STOPPED",
+                        error_message=(
+                            "a basket member terminated before all members were submitted"
+                        ),
+                    )
+                    self.repository.release_barrier(current)
+                    return result
             states = {leg.state for leg in order_legs}
             if DirectiveLegState.UNKNOWN in states:
                 return self.repository.set_state(current.directive_id, DirectiveState.UNKNOWN)

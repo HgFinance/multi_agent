@@ -1,0 +1,110 @@
+# GPU resource and efficiency recording rules.
+#
+# This file deliberately uses the existing DCGM exporter and vLLM native
+# /metrics endpoint. It does not add a second exporter or a second scheduler.
+# The *_vs_7d rules are a comparison only: they remain empty until Prometheus
+# has seven days of matching data, so an unmeasured saving is never reported
+# as zero or as a fabricated percentage.
+
+groups:
+  - name: hgfinance-gpu-resource-savings
+    interval: 15s
+    rules:
+      # --- Hardware -------------------------------------------------------
+      - record: hgfinance:gpu:utilization_ratio
+        expr: DCGM_FI_DEV_GPU_UTIL / 100
+
+      - record: hgfinance:gpu:memory_used_bytes
+        expr: DCGM_FI_DEV_FB_USED * 1024 * 1024
+
+      - record: hgfinance:gpu:memory_total_bytes
+        expr: (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) * 1024 * 1024
+
+      - record: hgfinance:gpu:memory_used_ratio
+        expr: DCGM_FI_DEV_FB_USED / clamp_min(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE, 1)
+
+      - record: hgfinance:gpu:power_watts
+        expr: DCGM_FI_DEV_POWER_USAGE
+
+      - record: hgfinance:gpu:energy_joules
+        expr: DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION / 1000
+
+      - record: hgfinance:gpu:power_watts_1h
+        expr: sum(avg_over_time(hgfinance:gpu:power_watts[1h]))
+
+      - record: hgfinance:gpu:memory_peak_1h_bytes
+        expr: max(max_over_time(hgfinance:gpu:memory_used_bytes[1h]))
+
+      - record: hgfinance:gpu:busy_ratio_5m
+        expr: avg(avg_over_time(hgfinance:gpu:utilization_ratio[5m]))
+
+      # --- vLLM workload --------------------------------------------------
+      - record: hgfinance:vllm:requests_waiting
+        expr: sum(vllm:num_requests_waiting)
+
+      - record: hgfinance:vllm:requests_running
+        expr: sum(vllm:num_requests_running)
+
+      - record: hgfinance:vllm:kv_cache_usage_ratio
+        expr: max(vllm:kv_cache_usage_perc)
+
+      - record: hgfinance:vllm:preemptions_total
+        expr: sum(vllm:num_preemptions_total)
+
+      - record: hgfinance:vllm:tokens_total
+        expr: sum(vllm:prompt_tokens_total) + sum(vllm:generation_tokens_total)
+
+      - record: hgfinance:vllm:token_rate_per_second
+        expr: rate(hgfinance:vllm:tokens_total[5m])
+
+      - record: hgfinance:vllm:request_rate_per_second
+        expr: sum(rate(vllm:request_success_total{finished_reason=~"stop|length|repetition"}[5m]))
+
+      - record: hgfinance:vllm:error_rate_per_second
+        expr: sum(rate(vllm:request_success_total{finished_reason=~"abort|error"}[5m]))
+
+      - record: hgfinance:vllm:preemption_rate_per_second
+        expr: rate(hgfinance:vllm:preemptions_total[5m])
+
+      - record: hgfinance:vllm:prefix_cache_hit_ratio
+        expr: sum(rate(vllm:prefix_cache_hits_total[5m])) / clamp_min(sum(rate(vllm:prefix_cache_queries_total[5m])), 1)
+
+      # Keep the request latency signal beside the resource signal. It is
+      # needed to reject a "saving" that merely moved cost into queue time.
+      - record: hgfinance:vllm:e2e_latency_p95_seconds
+        expr: histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket[5m])))
+
+      - record: hgfinance:vllm:ttft_p95_seconds
+        expr: histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))
+
+      # --- Normalized cost and efficiency --------------------------------
+      # These are intentionally workload-normalized. Raw GPU utilization is
+      # not a saving metric: an idle GPU has low utilization but zero output.
+      - record: hgfinance:vllm:tokens_per_busy_gpu_second
+        expr: (hgfinance:vllm:token_rate_per_second / clamp_min(hgfinance:gpu:busy_ratio_5m, 0.01)) and on() (hgfinance:vllm:token_rate_per_second > 0)
+
+      - record: hgfinance:vllm:busy_gpu_seconds_per_1k_tokens
+        expr: (1000 / clamp_min(hgfinance:vllm:tokens_per_busy_gpu_second, 1)) and on() (hgfinance:vllm:token_rate_per_second > 0)
+
+      - record: hgfinance:vllm:energy_mj_per_1k_tokens
+        expr: ((sum(rate(hgfinance:gpu:energy_joules[5m])) * 1000000) / clamp_min(hgfinance:vllm:token_rate_per_second, 1) * 1000) and on() (hgfinance:vllm:token_rate_per_second > 0)
+
+      - record: hgfinance:vllm:memory_headroom_ratio
+        expr: 1 - (sum(hgfinance:gpu:memory_used_bytes) / clamp_min(sum(hgfinance:gpu:memory_total_bytes), 1))
+
+      # --- Honest comparison baseline ------------------------------------
+      # Same metric, same wall-clock position one week earlier. Positive is
+      # a reduction; negative means regression. Empty means no baseline yet.
+      - record: hgfinance:vllm:energy_savings_vs_7d_ratio
+        expr: 1 - (hgfinance:vllm:energy_mj_per_1k_tokens / hgfinance:vllm:energy_mj_per_1k_tokens offset 7d)
+
+      - record: hgfinance:vllm:busy_gpu_seconds_savings_vs_7d_ratio
+        expr: 1 - (hgfinance:vllm:busy_gpu_seconds_per_1k_tokens / hgfinance:vllm:busy_gpu_seconds_per_1k_tokens offset 7d)
+
+      - record: hgfinance:vllm:memory_peak_savings_vs_7d_ratio
+        # Use the raw DCGM series here so an already-running DCGM history can
+        # be used immediately; recording rules themselves have no backfill.
+        expr: 1 - (max(max_over_time(DCGM_FI_DEV_FB_USED[1h])) / max(max_over_time(DCGM_FI_DEV_FB_USED[1h] offset 7d)))
+
+      - record: hgfinance:vllm:power_savings_vs_7d_ratio
+        expr: 1 - (sum(avg_over_time(DCGM_FI_DEV_POWER_USAGE[1h])) / sum(avg_over_time(DCGM_FI_DEV_POWER_USAGE[1h] offset 7d)))

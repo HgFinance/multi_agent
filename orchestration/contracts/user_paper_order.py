@@ -13,6 +13,7 @@ payload-bound service proof, and submit the resulting PAPER directive.
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -38,6 +39,7 @@ class CandidateDecision(StrEnum):
 
 class DirectiveAction(StrEnum):
     PLACE_ORDER = "PLACE_ORDER"
+    PLACE_BASKET = "PLACE_BASKET"
     SELL_ALL = "SELL_ALL"
     CANCEL_ALL = "CANCEL_ALL"
 
@@ -60,6 +62,8 @@ class EvidenceField(StrEnum):
     QUANTITY = "QUANTITY"
     ORDER_TYPE = "ORDER_TYPE"
     LIMIT_PRICE = "LIMIT_PRICE"
+    BASKET_INSTRUMENTS = "BASKET_INSTRUMENTS"
+    NOTIONAL = "NOTIONAL"
 
 
 class OrderReasonCode(StrEnum):
@@ -83,6 +87,7 @@ class OrderReasonCode(StrEnum):
     MISSING_OR_CONFLICTING_SIDE = "MISSING_OR_CONFLICTING_SIDE"
     MISSING_OR_CONFLICTING_INSTRUMENT = "MISSING_OR_CONFLICTING_INSTRUMENT"
     MISSING_OR_CONFLICTING_QUANTITY = "MISSING_OR_CONFLICTING_QUANTITY"
+    MISSING_OR_CONFLICTING_NOTIONAL = "MISSING_OR_CONFLICTING_NOTIONAL"
     INVALID_NUMBER = "INVALID_NUMBER"
     MISSING_OR_CONFLICTING_ORDER_TYPE = "MISSING_OR_CONFLICTING_ORDER_TYPE"
     MISSING_LIMIT_PRICE = "MISSING_LIMIT_PRICE"
@@ -101,7 +106,7 @@ class TextEvidence(BaseModel):
     field: EvidenceField
     start: int = Field(ge=0)
     end: int = Field(gt=0)
-    text: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=500)
     normalized: str | None = Field(
         default=None,
         max_length=200,
@@ -132,8 +137,16 @@ class HermesOrderCandidate(BaseModel):
     decision: CandidateDecision
     action: DirectiveAction | None = None
     instrument_mention: str | None = Field(default=None, min_length=1, max_length=80)
+    basket_instrument_mentions: tuple[str, ...] = Field(
+        default=(), max_length=20
+    )
+    basket_quantities: tuple[str, ...] = Field(default=(), max_length=20)
+    basket_notionals_krw: tuple[str, ...] = Field(default=(), max_length=20)
     side: OrderSide | None = None
     quantity: str | None = Field(default=None, pattern=r"^[1-9]\d*$", max_length=30)
+    notional_krw: str | None = Field(
+        default=None, pattern=r"^[1-9]\d*$", max_length=30
+    )
     order_type: OrderType | None = None
     limit_price: str | None = Field(
         default=None, pattern=r"^[1-9]\d*$", max_length=30
@@ -150,18 +163,62 @@ class HermesOrderCandidate(BaseModel):
             raise ValueError("instrument_mention must be an exact printable substring")
         return value
 
+    @field_validator("basket_instrument_mentions")
+    @classmethod
+    def _clean_basket_instrument_mentions(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        for mention in value:
+            if (
+                not isinstance(mention, str)
+                or not mention
+                or mention != mention.strip()
+                or len(mention) > 80
+                or any(ord(character) < 32 for character in mention)
+            ):
+                raise ValueError("basket instrument mention is invalid")
+        return value
+
+    @field_validator("basket_quantities")
+    @classmethod
+    def _clean_basket_quantities(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for quantity in value:
+            if not re.fullmatch(r"[1-9]\d*", quantity):
+                raise ValueError("basket quantity is invalid")
+        return value
+
+    @field_validator("basket_notionals_krw")
+    @classmethod
+    def _clean_basket_notionals_krw(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        for notional in value:
+            if not re.fullmatch(r"[1-9]\d*", notional):
+                raise ValueError("basket notional is invalid")
+        return value
+
     @model_validator(mode="after")
     def _decision_shape(self) -> "HermesOrderCandidate":
         execution_fields = (
             self.action,
             self.instrument_mention,
+            self.basket_instrument_mentions,
+            self.basket_quantities,
+            self.basket_notionals_krw,
             self.side,
             self.quantity,
+            self.notional_krw,
             self.order_type,
             self.limit_price,
         )
         if self.decision is not CandidateDecision.EXECUTE:
-            if any(value is not None for value in execution_fields) or self.evidence:
+            if (
+                any(value is not None for value in execution_fields if value != ())
+                or self.basket_instrument_mentions
+                or self.basket_quantities
+                or self.basket_notionals_krw
+                or self.evidence
+            ):
                 raise ValueError("non-execution candidates cannot carry execution fields")
             if not self.reason_codes:
                 raise ValueError("non-execution candidates require a reason code")
@@ -174,6 +231,9 @@ class HermesOrderCandidate(BaseModel):
         if self.action is DirectiveAction.PLACE_ORDER:
             if (
                 self.instrument_mention is None
+                or self.basket_instrument_mentions
+                or self.basket_quantities
+                or self.basket_notionals_krw
                 or self.side is None
                 or self.quantity is None
                 or self.order_type is None
@@ -183,15 +243,51 @@ class HermesOrderCandidate(BaseModel):
                 raise ValueError("MARKET candidate cannot carry limit_price")
             if self.order_type is OrderType.LIMIT and self.limit_price is None:
                 raise ValueError("LIMIT candidate requires limit_price")
+            if self.notional_krw is not None:
+                raise ValueError("PLACE_ORDER candidate cannot carry notional_krw")
+        elif self.action is DirectiveAction.PLACE_BASKET:
+            if (
+                self.instrument_mention is not None
+                or len(self.basket_instrument_mentions) < 2
+                or self.quantity is not None
+                or self.order_type is not OrderType.MARKET
+                or self.limit_price is not None
+            ):
+                raise ValueError("PLACE_BASKET candidate is incomplete or unsupported")
+            if self.notional_krw is not None:
+                if (
+                    self.side is not OrderSide.BUY
+                    or self.basket_quantities
+                    or self.basket_notionals_krw
+                ):
+                    raise ValueError("notional basket candidate is invalid")
+            elif self.basket_notionals_krw:
+                if (
+                    self.side is not OrderSide.BUY
+                    or self.basket_quantities
+                    or len(self.basket_notionals_krw)
+                    != len(self.basket_instrument_mentions)
+                ):
+                    raise ValueError("member-notional basket candidate is invalid")
+            elif (
+                self.side is None
+                or len(self.basket_quantities) != len(self.basket_instrument_mentions)
+            ):
+                raise ValueError("quantity basket candidate is incomplete")
         elif any(
             value is not None
             for value in (
                 self.instrument_mention,
                 self.side,
                 self.quantity,
+                self.notional_krw,
                 self.order_type,
                 self.limit_price,
             )
+        ) or (
+            self.basket_instrument_mentions
+            or self.basket_quantities
+            or self.basket_notionals_krw
         ):
             raise ValueError("aggregate candidate cannot carry order fields")
         if not self.evidence:
@@ -222,6 +318,48 @@ class CanonicalPlaceOrderPayload(BaseModel):
         return self
 
 
+class CanonicalBasketOrderItem(BaseModel):
+    """One unresolved member of a strict PAPER market basket."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    instrument_mention: str = Field(min_length=1, max_length=80)
+    notional_krw: str | None = Field(
+        default=None, pattern=r"^[1-9]\d*$", max_length=30
+    )
+    quantity: str | None = Field(
+        default=None, pattern=r"^[1-9]\d*$", max_length=30
+    )
+    side: OrderSide
+    order_type: Literal[OrderType.MARKET] = OrderType.MARKET
+    time_in_force: Literal["DAY"] = "DAY"
+
+    @model_validator(mode="after")
+    def _sizing_policy(self) -> "CanonicalBasketOrderItem":
+        if (self.notional_krw is None) == (self.quantity is None):
+            raise ValueError("basket member requires exactly one sizing policy")
+        if self.notional_krw is not None and self.side is not OrderSide.BUY:
+            raise ValueError("notional basket member must be BUY")
+        return self
+
+
+class CanonicalPlaceBasketPayload(BaseModel):
+    """A list of unresolved catalog mentions and explicit sizing policies."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    orders: tuple[CanonicalBasketOrderItem, ...] = Field(min_length=2, max_length=20)
+
+    @model_validator(mode="after")
+    def _unique_mentions(self) -> "CanonicalPlaceBasketPayload":
+        mentions = [order.instrument_mention for order in self.orders]
+        if len(set(mentions)) != len(mentions):
+            raise ValueError("basket cannot contain duplicate instrument mentions")
+        if len({order.side for order in self.orders}) != 1:
+            raise ValueError("basket members must have one shared side")
+        return self
+
+
 class VerifiedPaperDirective(BaseModel):
     """A verified interpretation that still requires authenticated admission."""
 
@@ -233,14 +371,19 @@ class VerifiedPaperDirective(BaseModel):
     requires_authenticated_admission: Literal[True] = True
     raw_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     action: DirectiveAction
-    payload: CanonicalPlaceOrderPayload | None = None
+    payload: CanonicalPlaceOrderPayload | CanonicalPlaceBasketPayload | None = None
     evidence: tuple[TextEvidence, ...]
 
     @model_validator(mode="after")
     def _payload_matches_action(self) -> "VerifiedPaperDirective":
         if self.action is DirectiveAction.PLACE_ORDER and self.payload is None:
             raise ValueError("PLACE_ORDER verified directive requires payload")
-        if self.action is not DirectiveAction.PLACE_ORDER and self.payload is not None:
+        if self.action is DirectiveAction.PLACE_BASKET and self.payload is None:
+            raise ValueError("PLACE_BASKET verified directive requires payload")
+        if self.action not in {
+            DirectiveAction.PLACE_ORDER,
+            DirectiveAction.PLACE_BASKET,
+        } and self.payload is not None:
             raise ValueError("aggregate verified directive must not carry payload")
         return self
 
@@ -277,6 +420,8 @@ OrderLanguageResult = VerifiedPaperDirective | OrderClarification | NotOrder
 
 __all__ = [
     "CandidateDecision",
+    "CanonicalBasketOrderItem",
+    "CanonicalPlaceBasketPayload",
     "CanonicalPlaceOrderPayload",
     "DirectiveAction",
     "EvidenceField",

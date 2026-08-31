@@ -144,8 +144,7 @@ def build_report(root: Path) -> dict[str, object]:
                 for finding in gc["findings"]
             ) else "REVIEW",
             "evidence": [
-                "packet_gate.py removed after zero source/test references",
-                "fact_router.py and ceo_hermes_client.py retained because tests still import them",
+                "all registered retired source candidates are removed after zero source/test references",
             ],
         },
         "dependency_hygiene": {
@@ -180,16 +179,25 @@ def build_report(root: Path) -> dict[str, object]:
             "scenario_count": 10,
             "missing_evidence": list(REQUIRED_STRESS_EVIDENCE),
             "evidence": [
-                "no dedicated stress/load harness was found",
-                "no stress/load CI job was found",
-                "PDF p.64 lists scenarios but not executable workload results",
+                (
+                    "scripts/stress_test.py provides a bounded 10-scenario runner"
+                    if _stress_harness_exists(root)
+                    else "no dedicated stress/load harness was found"
+                ),
+                (
+                    ".github/workflows/stress-evidence.yml provides a stress test CI job"
+                    if _stress_ci_exists(root)
+                    else "no stress/load CI job was found"
+                ),
+                "local 32-way read-only evidence is recorded; PDF 10-scenario certification and fault-recovery evidence remain unverified",
             ],
         },
         "latency_sla": {
             "status": "NOT_VERIFIED",
             "missing_evidence": ["current p50", "current p95", "current p99", "bottleneck trace"],
             "evidence": [
-                "no current latency baseline artifact is tracked",
+                "read-only runtime p50/p95/p99 evidence is recorded in OPS_HEALTHCHECK_LATENCY_REPORT.md",
+                "latest local user-query-to-result sample is 108.050s against the 120s SLA, but continuous/runtime release evidence remains unverified",
                 "historical PDF timings are not runtime SLA proof",
             ],
         },
@@ -201,7 +209,7 @@ def build_report(root: Path) -> dict[str, object]:
             )
             else "REVIEW",
             "evidence": [
-                "canonical project status still marks continuously operated E2E as not runtime verified",
+                "latest local E2E graph is terminal completed with HTTP 200, but canonical project status still requires continuously operated runtime evidence",
             ],
         },
     }
@@ -238,9 +246,10 @@ def render_markdown(report: dict[str, object]) -> str:
             "",
             "## Stress gate",
             "",
-            "PDF p.64 names 10 scenarios. The repository still lacks an executable load runner, a CI job, "
-            "and measured workload/concurrency/duration/SLA/p50/p95/p99/throughput/error/recovery evidence. "
-            "Therefore this gate is **BLOCKED**, not passed by unit-test coverage.",
+            "PDF p.64 names 10 scenarios. The repository now contains an executable runner and CI job, "
+            "and local read-only latency evidence, but full 10-scenario workload/concurrency/duration/SLA "
+            "coverage plus injected recovery evidence is still absent. Therefore this gate is **BLOCKED**, "
+            "not passed by unit-test coverage.",
             "",
             "## PAPER order gate",
             "",

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from orchestration.langsmith_feedback import (
     FeedbackLedger,
@@ -30,6 +31,9 @@ _PATCH_PATH = (
 )
 _QA_SOUL_PATH = (
     Path(__file__).parents[2] / "departments" / "06-ai-qa-audit" / "hermes" / "SOUL.md"
+)
+_QA_FEEDBACK_SKILL_PATH = (
+    Path(__file__).parents[2] / "skills" / "qa-feedback-bottleneck-review" / "SKILL.md"
 )
 _SPEC = importlib.util.spec_from_file_location("qa_feedback_gateway_patch", _PATCH_PATH)
 assert _SPEC and _SPEC.loader
@@ -458,18 +462,51 @@ def test_qa_card_separates_bottleneck_joint_owners_and_observation_point() -> No
     assert "대상 부서:** `CEO 요청 접수 단계`" not in card
 
 
+def test_long_qa_card_keeps_manager_commands_after_bounding() -> None:
+    card = format_qa_feedback_request(
+        artifact_id=ARTIFACT_ID,
+        department="risk-management",
+        decision="REVIEW_WORTHY",
+        finding_codes=("WORKER_OR_WORKFLOW_DEGRADED", "LATENCY_ABOVE_THRESHOLD"),
+        summaries=("관측값 " + "x" * 180,) * 3,
+        metadata={
+            "source_project": "First",
+            "source_name": "hgfinance.user-query",
+            "source_run_id": "run-redacted-2",
+            "request_id": "request-redacted-2",
+            "root_id": "root-redacted-2",
+            "task_id": "task-redacted-2",
+            "stage": "risk",
+            "latency_ms": 154_910,
+            "latency_threshold_ms": 60_000,
+            "latency_scope": "end_to_end",
+            "error_class": "E" * 160,
+            "joint_improvement_targets": "ceo-workflow / observability",
+        },
+    )
+
+    assert len(card) <= 1_900
+    assert card.startswith(QA_FEEDBACK_MARKER)
+    assert "### 관리자 결정" in card
+    assert f"승인 {ARTIFACT_ID} 유형=SKILL_CREATE" in card
+    assert "QA Hermes는 이 artifact 한 건만" in card
+
+
 def test_qa_hermes_profile_requires_distinct_structured_review() -> None:
     soul = _QA_SOUL_PATH.read_text(encoding="utf-8")
+    skill = _QA_FEEDBACK_SKILL_PATH.read_text(encoding="utf-8")
 
-    assert "## ② QA Hermes 검토 결과" in soul
-    assert "**검토 의견:**" in soul
-    assert "**근거 충족도:**" in soul
-    assert "### 아직 확인되지 않은 점" in soul
-    assert "### 관리자 판단 가이드" in soul
-    assert "never write `승인 완료` or `거부 완료`" in soul
-    assert "`주요 병목`" in soul
-    assert "`공동 개선 대상`" in soul
-    assert "`관측 시작 지점`" in soul
+    assert "qa-feedback-bottleneck-review" in soul
+    assert "must never apply the decision" in soul
+    assert "## ② QA Hermes 검토 결과" in skill
+    assert "**검토 의견:**" in skill
+    assert "**근거 충족도:**" in skill
+    assert "### 아직 확인되지 않은 점" in skill
+    assert "### 관리자 판단 가이드" in skill
+    assert "`승인 완료`, `거부 완료`, `적용 완료`" in skill
+    assert "주요 병목:" in skill
+    assert "공동 개선 대상:" in skill
+    assert "관측 시작 지점:" in skill
 
 
 def test_duration_is_used_when_trace_has_no_latency_metadata() -> None:
@@ -527,8 +564,55 @@ def test_discord_delivery_claim_is_one_shot(tmp_path) -> None:
         ),
     )
     assert ledger.claim_discord_delivery(artifact_id) is True
+    ledger.requeue_discord_delivery(artifact_id)
+    assert ledger.claim_discord_delivery(artifact_id) is True
     ledger.finish_discord_delivery(artifact_id, delivered=False, error_code="timeout")
     assert ledger.claim_discord_delivery(artifact_id) is False
+
+
+def test_discord_post_retries_rate_limit_using_retry_after() -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"id":"message-1"}'
+
+    calls = 0
+
+    def open_request(_request, timeout=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise HTTPError(
+                "https://discord.test",
+                429,
+                "rate limited",
+                {"Retry-After": "0"},
+                None,
+            )
+        return Response()
+
+    with (
+        patch("orchestration.qa_discord_feedback.urlopen", open_request),
+        patch("orchestration.qa_discord_feedback.time.sleep") as sleep,
+    ):
+        from orchestration.qa_discord_feedback import post_qa_discord_message
+
+        assert (
+            post_qa_discord_message(
+                "bounded QA card",
+                token="qa-token",
+                channel_id="qa-channel",
+            )
+            == "message-1"
+        )
+
+    assert calls == 2
+    sleep.assert_called_once_with(0.0)
 
 
 def test_gateway_routes_authorized_qa_decision_without_invoking_hermes(

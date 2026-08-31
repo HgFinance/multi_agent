@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from decimal import Decimal
@@ -133,6 +134,7 @@ from risk_events.redis_event_bus import (
 from risk_mandate_workers import RiskMandateAssessmentRequest, assess_mandate
 from risk_observability import risk_span
 from risk_repository import RiskDecisionPersistenceError, RiskDecisionRepository
+from orchestration.readiness_cache import SingleFlightTTLCache
 from trading_state_store import (
     RedisTradingStateStore,
     TradingStateStoreError,
@@ -408,6 +410,13 @@ _state_store: RedisTradingStateStore | None = None
 _decision_repository: RiskDecisionRepository | None = None
 _event_publisher: RedisEventPublisher | None = None
 _control_repository: RiskControlRepository | None = None
+_RISK_REPOSITORY_INIT_LOCK = threading.Lock()
+_RISK_RUNTIME_CACHE = SingleFlightTTLCache(
+    env_var="RISK_RUNTIME_OBSERVABILITY_CACHE_SECONDS",
+    default_seconds=2.0,
+    minimum_seconds=1.0,
+    maximum_seconds=30.0,
+)
 
 
 def _canonical_database_url() -> str:
@@ -427,12 +436,14 @@ def _risk_decision_repository() -> RiskDecisionRepository | None:
     if not dsn:
         return None
     if _decision_repository is None:
-        try:
-            _decision_repository = RiskDecisionRepository.connect(dsn)
-        except Exception as exc:
-            raise RiskDecisionPersistenceError(
-                "Canonical Risk DB connection failed; decision was not persisted"
-            ) from exc
+        with _RISK_REPOSITORY_INIT_LOCK:
+            if _decision_repository is None:
+                try:
+                    _decision_repository = RiskDecisionRepository.connect(dsn)
+                except Exception as exc:
+                    raise RiskDecisionPersistenceError(
+                        "Canonical Risk DB connection failed; decision was not persisted"
+                    ) from exc
     return _decision_repository
 
 
@@ -444,12 +455,14 @@ def _risk_control_repository() -> RiskControlRepository | None:
     if not dsn:
         return None
     if _control_repository is None:
-        try:
-            _control_repository = RiskControlRepository.connect(dsn)
-        except Exception as exc:
-            raise RiskControlPersistenceError(
-                "Canonical Risk control DB connection failed"
-            ) from exc
+        with _RISK_REPOSITORY_INIT_LOCK:
+            if _control_repository is None:
+                try:
+                    _control_repository = RiskControlRepository.connect(dsn)
+                except Exception as exc:
+                    raise RiskControlPersistenceError(
+                        "Canonical Risk control DB connection failed"
+                    ) from exc
     return _control_repository
 
 
@@ -1182,7 +1195,12 @@ def runtime_observability():
     if repository is None:
         return snapshot
     try:
-        durable = repository.runtime_observability()
+        # The endpoint is polled by the container healthcheck and operator
+        # tooling together. Share one successful DB projection for a short
+        # interval so probes cannot exhaust the four-connection control pool.
+        durable = _RISK_RUNTIME_CACHE.get_or_compute(
+            repository.runtime_observability
+        )
     except RiskControlPersistenceError as exc:
         snapshot["canonical_store"] = "UNAVAILABLE"
         snapshot["canonical_error"] = type(exc).__name__

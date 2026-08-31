@@ -21,6 +21,7 @@ from rules.admission import (
 )
 from rules.context import context_repository_from_env
 from directives.repository import DirectiveRepositoryError
+from directives.market_data import TrustedQuote
 from orchestration.conditional_rules import SizingType
 
 
@@ -140,12 +141,40 @@ def _current_context(authority, repository) -> dict:
     }
 
 
-def _assert_confirmed_rule_quantity(admission, repository) -> None:
+def _assert_confirmed_rule_quantity(
+    admission,
+    repository,
+    *,
+    instrument=None,
+    trusted_quote: TrustedQuote | None = None,
+) -> None:
     """Bind the worker-proposed quantity back to the confirmed sizing policy."""
 
     spec = admission.spec
     payload = admission.request.place_order()
     sizing = spec.action.sizing
+    if sizing.type is SizingType.NOTIONAL_KRW:
+        # The worker calculates a preliminary whole-share quantity from a
+        # fresh last price.  Trading repeats the cap check with its own
+        # executable quote under the book lock.  A price decline may leave the
+        # preliminary quantity below the current cap; that is intentional:
+        # NOTIONAL_KRW is a maximum amount, never permission to increase a
+        # confirmed order's shares after activation.
+        if instrument is None or trusted_quote is None:
+            return
+        price = (
+            trusted_quote.ask
+            if spec.action.side.value == "BUY"
+            else trusted_quote.bid
+        )
+        maximum = ((sizing.value or Decimal("0")) / price // instrument.lot_size) * instrument.lot_size
+        if maximum <= 0 or payload.quantity > maximum:
+            raise DirectiveServiceError(
+                "TRADING_CONDITIONAL_RULE_QUANTITY_MISMATCH",
+                "conditional execution quantity exceeds the confirmed KRW notional cap",
+                409,
+            )
+        return
     with repository.book_guard(spec.authority.fund_id, spec.authority.book_id):
         instrument = repository.resolve_instrument(
             spec.authority.fund_id,
@@ -190,12 +219,25 @@ def submit_conditional_rule_execution(
         _assert_confirmed_rule_quantity(admission, service.repository)
     except DirectiveRepositoryError as exc:
         raise DirectiveServiceError(exc.code, str(exc), exc.status_code) from exc
+    def _validate_quote_bound_notional(instrument, quote) -> None:
+        _assert_confirmed_rule_quantity(
+            admission,
+            service.repository,
+            instrument=instrument,
+            trusted_quote=quote,
+        )
+
     record = service.submit_trusted_rule(
         admission.request,
         admission.proof,
         market_quote_max_age_seconds=(
             CONDITIONAL_LIMIT_QUOTE_MAX_AGE_SECONDS
             if admission.spec.action.order_type == "LIMIT"
+            else None
+        ),
+        conditional_quantity_validator=(
+            _validate_quote_bound_notional
+            if admission.spec.action.sizing.type is SizingType.NOTIONAL_KRW
             else None
         ),
     )

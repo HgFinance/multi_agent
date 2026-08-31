@@ -56,6 +56,11 @@ class _Pool:
         pass
 
 
+class _ExhaustedPool:
+    def getconn(self):
+        raise RuntimeError("connection pool exhausted")
+
+
 def test_activate_compilation_passes_uuid_columns_as_driver_safe_strings(monkeypatch) -> None:
     monkeypatch.setattr(repository_module, "_driver", lambda: (lambda value: value, object))
     compilation = compile_mandate_limits(
@@ -93,3 +98,14 @@ def test_activate_compilation_passes_uuid_columns_as_driver_safe_strings(monkeyp
         for params in pool.connection.cursor_value.params
         for value in params
     )
+
+
+def test_pool_exhaustion_is_normalized_to_control_persistence_error() -> None:
+    repository = RiskControlRepository(_ExhaustedPool())
+
+    try:
+        repository.runtime_observability()
+    except repository_module.RiskControlPersistenceError as exc:
+        assert str(exc) == "Risk control connection pool is unavailable"
+    else:
+        raise AssertionError("pool exhaustion must fail closed")

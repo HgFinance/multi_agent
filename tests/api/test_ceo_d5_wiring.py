@@ -143,10 +143,9 @@ class DiscordD5IngressTest(unittest.TestCase):
             ceo.hermes_boundary, "comment_root_scope", return_value=True
         ), patch.object(
             ceo.hermes_boundary, "show_kanban_task", return_value=None
-        ), patch("apps.api.ceo_hermes_client.ask_ceo") as ask:
+        ):
             ceo.ceo_query(ceo.CeoAsk(query="analyze Samsung", request_id="req-active"))
 
-        ask.assert_not_called()
         body = create.call_args.kwargs["body"]
         self.assertIn("non-authoritative", body)
         self.assertIn("analysis_parallel", body)

@@ -158,6 +158,12 @@ from orchestration.evolution_skills import (
 )
 from orchestration.d5_improvement_pipeline import d5_regression_candidates
 from orchestration.langsmith_feedback import FeedbackConfig, FeedbackLedger
+from orchestration.qa_feedback_contract import (
+    configured_qa_approver_user_ids,
+    human_approver_user_id,
+    is_human_approver,
+)
+from orchestration.readiness_cache import SingleFlightTTLCache
 
 # DATABASE_URL이 있을 때만 audit 및 QA Eval write-through을 활성화한다.
 # Shadow import에서 DATABASE_URL이 없으면 어떤 PostgreSQL pool도 만들지 않는다.
@@ -177,6 +183,12 @@ else:
     _audit_repository = PostgresAuditRepository.connect(_DATABASE_URL)
 _event_bus: RedisEventBus | None = None
 _forward_event_bus: RedisEventBus | None = None
+_QA_READY_CACHE = SingleFlightTTLCache(
+    env_var="QA_HEALTH_READY_CACHE_SECONDS",
+    default_seconds=2.0,
+    minimum_seconds=1.0,
+    maximum_seconds=30.0,
+)
 
 
 def _qa_event_bus() -> RedisEventBus | None:
@@ -534,7 +546,7 @@ class EvalResultResponse(BaseModel):
 
 
 class ObservabilityFeedbackDecisionRequest(BaseModel):
-    decision: str = Field(pattern=r"^(APPROVED|REJECTED)$")
+    decision: str = Field(pattern=r"^(APPROVED|REJECTED|CLOSED_NO_ACTION)$")
     approved_by: str = Field(min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=240)
     improvement_type: str = Field(
@@ -803,6 +815,55 @@ def _require_eval_service_token(
         authorization,
         required_scope=required_scope,
     )
+
+
+def _require_human_qa_approver(
+    authorization: str | None,
+    *,
+    approved_by: str,
+    discord_message_id: str | None,
+):
+    """Require a Discord-authenticated, allowlisted human approver.
+
+    The gateway performs the Discord role check, but the audit API must not
+    trust a caller-provided ``approved_by`` value by itself. Requiring the
+    gateway service subject, a real Discord message ID, and the server-side
+    user allowlist prevents direct API calls from manufacturing approval.
+    """
+
+    identity = _require_eval_service_token(
+        authorization, required_scope="qa.observability.approve"
+    )
+    approver_id = human_approver_user_id(approved_by)
+    if approver_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "QA_HUMAN_APPROVER_REQUIRED"},
+        )
+    allowed_users = configured_qa_approver_user_ids()
+    if not allowed_users:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "QA_APPROVER_ALLOWLIST_NOT_CONFIGURED"},
+        )
+    if not is_human_approver(approved_by, allowed_user_ids=allowed_users):
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "QA_APPROVER_NOT_ALLOWLISTED"},
+        )
+    if not str(discord_message_id or "").strip().isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail={"error_code": "DISCORD_APPROVAL_MESSAGE_REQUIRED"},
+        )
+    if _QA_RUNTIME != "test" and (
+        identity is None or identity.subject != "qa-discord-gateway"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "QA_APPROVAL_GATEWAY_SUBJECT_DENIED"},
+        )
+    return identity
 
 
 # 3.1 승인된 QA Evidence Gate v1 — Case에 종속된 판정 -------------------------------
@@ -1090,10 +1151,17 @@ def decide_observability_feedback(
     artifact_id: str,
     body: ObservabilityFeedbackDecisionRequest,
     authorization: str | None = Header(default=None),
+    discord_message_id: str | None = Header(
+        default=None, alias="X-HgFinance-Discord-Message-Id"
+    ),
 ):
     """Append one QA approval/rejection decision for a feedback artifact."""
 
-    _require_eval_service_token(authorization, required_scope="qa.observability.approve")
+    _require_human_qa_approver(
+        authorization,
+        approved_by=body.approved_by,
+        discord_message_id=discord_message_id,
+    )
     if not _observability_feedback_ledger().approve(
         artifact_id,
         body.decision,
@@ -1124,8 +1192,10 @@ def decide_evolution_skill_proposal(
 ):
     """Record the second human decision against the exact proposal hashes."""
 
-    _require_eval_service_token(
-        authorization, required_scope="qa.observability.approve"
+    _require_human_qa_approver(
+        authorization,
+        approved_by=body.approved_by,
+        discord_message_id=discord_message_id,
     )
     try:
         state = _evolution_skill_store().approve(
@@ -1472,7 +1542,12 @@ def health_ready() -> dict:
             },
         )
     try:
-        database = _audit_repository.runtime_database_status()
+        # Docker and operator probes commonly arrive together. Only a
+        # successful role/read-write proof is cached; failures stay fail-closed
+        # and are retried on the next probe.
+        database = _QA_READY_CACHE.get_or_compute(
+            _audit_repository.runtime_database_status
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=503,

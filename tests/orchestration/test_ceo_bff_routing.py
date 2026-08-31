@@ -47,6 +47,16 @@ def test_discord_follow_up_uses_previous_question_context_for_routing() -> None:
     )
 
 
+def test_operational_status_uses_bounded_advisory_mode() -> None:
+    plan = build_deterministic_bff_plan("현재 시스템 상태를 요약해줘")
+
+    assert plan["mode"] == "operational_status"
+    assert plan["category"] == "SYSTEM_STATUS"
+    assert plan["routing_basis"] == "operational_status_intent"
+    assert plan["selected_primary_profiles"] == ()
+    assert plan["analysis_mode"] == "fast_advisory"
+
+
 def test_unrelated_filler_does_not_attach_to_previous_question() -> None:
     plan = build_deterministic_bff_plan(
         "안녕",

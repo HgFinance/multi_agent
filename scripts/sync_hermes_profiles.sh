@@ -72,9 +72,9 @@ sync_one() {
 }
 
 # Only repository-owned, profile-specific skills are copied into a profile.
-# Shared skills (agentic-rag and financial-portfolio-assessment) stay on their
-# existing shared roots. This keeps profile memory/config/SOUL isolation intact
-# and prevents a runtime profile from becoming the canonical source.
+# Shared skills (including QA's feedback-review skill) stay on their existing
+# shared roots. This keeps profile memory/config/SOUL isolation intact and
+# prevents a runtime profile from becoming the canonical source.
 sync_local_skill() {
   local dept="$1"
   local source_rel="$2"
@@ -145,6 +145,11 @@ case "$MODE" in
     # not the Research HQ profile. Strategy Hermes receives it from the shared
     # /opt/shared-skills mount; do not copy it into research-department.
     sync_local_skill "research-department" "methodology-scout" "research/methodology-scout"
+    # QA feedback review is a single shared skill. Retire the two old,
+    # profile-local trigger matches so Hermes cannot choose an obsolete
+    # duplicate instead of /opt/shared-skills/qa-feedback-bottleneck-review.
+    retire_legacy_skill "qa-department" "qa/metadata-only-qa-feedback-review"
+    retire_legacy_skill "qa-department" "qa/skill-create-latency-control"
     # Shared /opt/shared-skills is the canonical copy for this byte-identical
     # research skill; retire only an identical profile duplicate so qualified
     # and categorized skill_view names do not become ambiguous.

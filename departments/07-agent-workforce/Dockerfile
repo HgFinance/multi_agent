@@ -61,6 +61,7 @@ COPY orchestration/__init__.py /app/orchestration/__init__.py
 COPY orchestration/langsmith_queries.py /app/orchestration/langsmith_queries.py
 COPY orchestration/langsmith_feedback.py /app/orchestration/langsmith_feedback.py
 COPY orchestration/qa_discord_feedback.py /app/orchestration/qa_discord_feedback.py
+COPY orchestration/qa_feedback_contract.py /app/orchestration/qa_feedback_contract.py
 COPY orchestration/hr_langfuse_feedback.py /app/orchestration/hr_langfuse_feedback.py
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1

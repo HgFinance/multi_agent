@@ -46,7 +46,12 @@ LOG = logging.getLogger("conditional-rule-notification-consumer")
 DEFAULT_STREAM = "hf:conditional-rule-events:v1"
 DEFAULT_GROUP = "conditional-paper-reporting-v1"
 DEFAULT_PROJECTION_GROUP = "conditional-paper-projection-v1"
-SUPPORTED_EVENT = "DIRECTIVE_SUBMITTED"
+DIRECTIVE_SUBMITTED_EVENT = "DIRECTIVE_SUBMITTED"
+ENTRY_POSITION_MISMATCH_EVENT = "ENTRY_POSITION_MISMATCH"
+CONDITIONAL_RULE_EXPIRED_EVENT = "CONDITIONAL_RULE_EXPIRED"
+BUNDLE_ACTIVATION_BLOCKED_EVENT = "BUNDLE_ACTIVATION_BLOCKED"
+BUNDLE_ACTIVATED_EVENT = "BUNDLE_ACTIVATED"
+TRIGGER_CLAIMED_EVENT = "TRIGGER_CLAIMED"
 CONSUMER_MODES = frozenset({"all", "delivery", "projection"})
 
 
@@ -196,6 +201,487 @@ class ConditionalRuleNotificationConsumer:
         context["directive_id"] = directive_id
         return context
 
+    @staticmethod
+    def _entry_position_mismatch_answer(context: Any) -> str:
+        """Render a bounded safety-stop report from DB-owned lifecycle facts."""
+
+        proof_hash = str(context.lifecycle_event_id).rsplit("_", 1)[-1]
+        return "\n".join(
+            (
+                "⚠️ PAPER 트레일링 청산 안전 중단",
+                f"종목 : {context.symbol}",
+                "조건 규칙 상태 : CANCELLED",
+                "추가 매도 주문 : 없음",
+                (
+                    "중단 사유 : 최초 진입 수량 "
+                    f"{context.expected_position_quantity}주와 현재 보유 수량 "
+                    f"{context.actual_position_quantity}주가 달라 자동 청산을 중단했습니다."
+                ),
+                "다음 조치 : 현재 보유 수량을 확인한 뒤 새 PAPER 전략으로 다시 배포해 주세요.",
+                f"검증 시각 : {context.occurred_at.isoformat()}",
+                "권위 근거 : execution.conditional_trade_rules / "
+                "execution.conditional_trade_rule_events",
+                f"검증 기록 식별자: {proof_hash}",
+                "조건 규칙 ID : " + str(context.rule_id),
+                "미확인 항목 : 수량 변동의 개별 원인은 계좌 스냅샷만으로 추정하지 않습니다.",
+            )
+        )
+
+    def _handle_entry_position_mismatch(self, event: Mapping[str, Any]) -> bool:
+        """Deliver the terminal safety stop without inventing a broker result."""
+
+        event_id = str(event.get("event_id") or "").strip()
+        rule_id = str(event.get("aggregate_id") or "").strip()
+        if not event_id or not rule_id:
+            raise ConditionalNotificationError(
+                "entry-position mismatch event correlation is incomplete"
+            )
+        context = self.rule_store.entry_position_mismatch_notification_context(
+            rule_id=rule_id
+        )
+        if not context.order_request_id:
+            LOG.info(
+                "entry-position mismatch has no admitted user order rule=%s",
+                context.rule_id,
+            )
+            return True
+        record = self.order_store.get(str(context.order_request_id))
+        if record is None:
+            raise ConditionalNotificationError("linked order request was not found")
+        for key in ("user_id", "fund_id", "book_id", "client_request_id"):
+            if str(getattr(record, key)) != str(getattr(context, key)):
+                raise ConditionalNotificationError(
+                    f"entry-position mismatch {key} does not match admitted authority"
+                )
+        content = self._entry_position_mismatch_answer(context)
+        qa = evaluate_answer(content, status="completed")
+        if qa.verdict != "PASS":
+            raise ConditionalNotificationError(
+                "entry-position mismatch answer failed deterministic QA"
+            )
+        content += f"\nQA 검증 : {qa.verdict} ({qa.version})"
+        # The delivery lane is the immediate user-facing path.  The projection
+        # lane deliberately leaves the already-visible Discord status alone;
+        # the frontend reads the same durable CANCELLED/error state directly.
+        if self.mode == "projection":
+            return True
+        discord_status = self.discord_delivery.deliver_to_existing_thread(
+            root_task_id=str(context.ceo_root_task_id or context.rule_id),
+            source_task={
+                "id": str(context.trading_task_id or ""),
+                "body": f"discord_request_id={record.client_request_id}",
+            },
+            root_task={
+                "id": str(context.ceo_root_task_id or ""),
+                "body": f"discord_request_id={record.client_request_id}",
+            },
+            content=content,
+            title="⚠️ 조건주문 안전 중단",
+            store=self.discord_store,
+            profile=canonical_profile_for_department("ceo"),
+            response_key_suffix=f"entry-position-mismatch-v1:{event_id}",
+        )
+        if discord_status not in {"sent", "deduped", "missing_thread"}:
+            raise ConditionalNotificationError(
+                f"Discord entry-position mismatch report failed: {discord_status}"
+            )
+        if discord_status == "missing_thread":
+            LOG.warning(
+                "entry-position mismatch has no Discord thread event_id=%s root=%s",
+                event_id,
+                context.ceo_root_task_id,
+            )
+        return True
+
+    @staticmethod
+    def _expired_rule_answer(context: Any) -> str:
+        """Render an expiry report without implying a fill or a position fact."""
+
+        proof_hash = str(context.lifecycle_event_id).rsplit("_", 1)[-1]
+        if context.prior_state == "PENDING_CONFIRMATION":
+            reason = (
+                "즉시 PAPER 주문과 연결된 조건 규칙이 활성화되기 전에 "
+                "감시 기한이 끝났습니다."
+            )
+        elif context.is_compound_entry_exit and context.action_side == "SELL":
+            reason = (
+                "매수 뒤 보호 매도 조건이 기한 내 충족되지 않아 종료되었습니다. "
+                "보유분이 남아 있을 수 있으나 자동 매도는 실행하지 않습니다."
+            )
+        else:
+            reason = "조건 감시 기한이 끝나 자동 주문을 더 이상 시도하지 않습니다."
+        return "\n".join(
+            (
+                "⏱️ PAPER 조건주문 만료",
+                f"종목 : {context.symbol}",
+                "조건 규칙 상태 : EXPIRED",
+                f"만료 시각 : {context.expires_at.isoformat()}",
+                "추가 주문 생성 : 없음",
+                f"만료 사유 : {reason}",
+                "다음 조치 : 현재 보유·주문 상태를 확인한 뒤 필요하면 새 PAPER 전략을 배포해 주세요.",
+                f"검증 시각 : {context.occurred_at.isoformat()}",
+                "권위 근거 : execution.conditional_trade_rules / "
+                "execution.conditional_trade_rule_events",
+                f"검증 기록 식별자: {proof_hash}",
+                "조건 규칙 ID : " + str(context.rule_id),
+                "미확인 항목 : 실제 잔고·체결 여부는 이 만료 event만으로 추정하지 않습니다.",
+            )
+        )
+
+    def _handle_rule_expired(self, event: Mapping[str, Any]) -> bool:
+        """Deliver an idempotent terminal expiry report without order authority."""
+
+        event_id = str(event.get("event_id") or "").strip()
+        rule_id = str(event.get("aggregate_id") or "").strip()
+        if not event_id or not rule_id:
+            raise ConditionalNotificationError(
+                "conditional-rule expiry event correlation is incomplete"
+            )
+        context = self.rule_store.expired_rule_notification_context(rule_id=rule_id)
+        if not context.order_request_id:
+            LOG.info("expired rule has no admitted user order rule=%s", context.rule_id)
+            return True
+        record = self.order_store.get(str(context.order_request_id))
+        if record is None:
+            raise ConditionalNotificationError("linked order request was not found")
+        for key in ("user_id", "fund_id", "book_id", "client_request_id"):
+            if str(getattr(record, key)) != str(getattr(context, key)):
+                raise ConditionalNotificationError(
+                    f"expired rule {key} does not match admitted authority"
+                )
+        content = self._expired_rule_answer(context)
+        qa = evaluate_answer(content, status="completed")
+        if qa.verdict != "PASS":
+            raise ConditionalNotificationError("expired rule answer failed deterministic QA")
+        content += f"\nQA 검증 : {qa.verdict} ({qa.version})"
+        # The frontend reads EXPIRED and effective_expires_at from the durable
+        # rule.  A projection therefore only acknowledges this terminal event.
+        if self.mode == "projection":
+            return True
+        discord_status = self.discord_delivery.deliver_to_existing_thread(
+            root_task_id=str(context.ceo_root_task_id or context.rule_id),
+            source_task={
+                "id": str(context.trading_task_id or ""),
+                "body": f"discord_request_id={record.client_request_id}",
+            },
+            root_task={
+                "id": str(context.ceo_root_task_id or ""),
+                "body": f"discord_request_id={record.client_request_id}",
+            },
+            content=content,
+            title="⏱️ 조건주문 만료",
+            store=self.discord_store,
+            profile=canonical_profile_for_department("ceo"),
+            response_key_suffix=f"conditional-rule-expired-v1:{event_id}",
+        )
+        if discord_status not in {"sent", "deduped", "missing_thread"}:
+            raise ConditionalNotificationError(
+                f"Discord conditional-rule expiry report failed: {discord_status}"
+            )
+        if discord_status == "missing_thread":
+            LOG.warning(
+                "expired rule has no Discord thread event_id=%s root=%s",
+                event_id,
+                context.ceo_root_task_id,
+            )
+        return True
+
+    @staticmethod
+    def _activation_blocked_answer(context: Any) -> str:
+        """Render the unarmed-protection report from the DB lifecycle event."""
+
+        proof_hash = str(context.lifecycle_event_id).rsplit("_", 1)[-1]
+        reason = (
+            "공식 KRX 정규장 캘린더가 요청한 보호 기간을 공급하지 못했습니다."
+            if context.failure_code
+            == "ENTRY_EXIT_ACTIVATION_KRX_CALENDAR_UNAVAILABLE"
+            else "공식 KRX 정규장 캘린더의 만료 시각 형식이 유효하지 않았습니다."
+        )
+        return "\n".join(
+            (
+                "⚠️ PAPER 보호 청산 활성화 중단",
+                f"종목 : {context.symbol}",
+                "조건 규칙 상태 : FAILED",
+                "보호 청산 규칙 : 활성화하지 않음",
+                "추가 주문 생성 : 없음",
+                f"중단 사유 : {reason}",
+                "다음 조치 : KRX 캘린더 복구 뒤 현재 보유·주문 상태를 확인하고 새 PAPER 전략을 배포해 주세요.",
+                f"검증 시각 : {context.occurred_at.isoformat()}",
+                "권위 근거 : execution.conditional_trade_rules / "
+                "execution.conditional_trade_rule_events",
+                f"검증 기록 식별자: {proof_hash}",
+                "조건 규칙 ID : " + str(context.rule_id),
+                "미확인 항목 : 이 event만으로 진입 주문의 체결·잔고 상태를 추정하지 않습니다.",
+            )
+        )
+
+    def _handle_bundle_activation_blocked(self, event: Mapping[str, Any]) -> bool:
+        """Report an unarmed protective exit; this path cannot submit an order."""
+
+        event_id = str(event.get("event_id") or "").strip()
+        rule_id = str(event.get("aggregate_id") or "").strip()
+        if not event_id or not rule_id:
+            raise ConditionalNotificationError(
+                "bundle activation-blocked event correlation is incomplete"
+            )
+        context = self.rule_store.activation_blocked_notification_context(rule_id=rule_id)
+        if not context.order_request_id:
+            LOG.info(
+                "activation-blocked rule has no admitted user order rule=%s",
+                context.rule_id,
+            )
+            return True
+        record = self.order_store.get(str(context.order_request_id))
+        if record is None:
+            raise ConditionalNotificationError("linked order request was not found")
+        for key in ("user_id", "fund_id", "book_id", "client_request_id"):
+            if str(getattr(record, key)) != str(getattr(context, key)):
+                raise ConditionalNotificationError(
+                    f"activation-blocked rule {key} does not match admitted authority"
+                )
+        content = self._activation_blocked_answer(context)
+        qa = evaluate_answer(content, status="completed")
+        if qa.verdict != "PASS":
+            raise ConditionalNotificationError(
+                "activation-blocked rule answer failed deterministic QA"
+            )
+        content += f"\nQA 검증 : {qa.verdict} ({qa.version})"
+        if self.mode == "projection":
+            return True
+        discord_status = self.discord_delivery.deliver_to_existing_thread(
+            root_task_id=str(context.ceo_root_task_id or context.rule_id),
+            source_task={
+                "id": str(context.trading_task_id or ""),
+                "body": f"discord_request_id={record.client_request_id}",
+            },
+            root_task={
+                "id": str(context.ceo_root_task_id or ""),
+                "body": f"discord_request_id={record.client_request_id}",
+            },
+            content=content,
+            title="⚠️ 보호 청산 활성화 중단",
+            store=self.discord_store,
+            profile=canonical_profile_for_department("ceo"),
+            response_key_suffix=f"bundle-activation-blocked-v1:{event_id}",
+        )
+        if discord_status not in {"sent", "deduped", "missing_thread"}:
+            raise ConditionalNotificationError(
+                "Discord protective-exit activation-blocked report failed: "
+                f"{discord_status}"
+            )
+        if discord_status == "missing_thread":
+            LOG.warning(
+                "activation-blocked rule has no Discord thread event_id=%s root=%s",
+                event_id,
+                context.ceo_root_task_id,
+            )
+        return True
+
+    @staticmethod
+    def _bundle_activated_answer(context: Any) -> str:
+        """Render a current-state confirmation without claiming an exit fill."""
+
+        proof_hash = str(context.lifecycle_event_id).rsplit("_", 1)[-1]
+        lifetime = context.activation_lifetime_trading_days
+        duration = (
+            f"전량 체결 뒤 {lifetime}거래일"
+            if lifetime is not None
+            else "기본 만료 정책"
+        )
+        return "\n".join(
+            (
+                "✅ PAPER 보호 청산 활성화",
+                f"종목 : {context.symbol}",
+                "조건 규칙 상태 : ACTIVE",
+                f"보호 청산 : {context.action_side} 조건 감시 중",
+                f"추적 기간 : {duration}",
+                f"보호 만료 시각 : {context.expires_at.isoformat()}",
+                "추가 주문 생성 : 없음 (조건 충족 전)",
+                "확인 내용 : 즉시 진입 주문의 전량 완료 뒤 보호 청산 규칙이 활성화되었습니다.",
+                f"검증 시각 : {context.occurred_at.isoformat()}",
+                "권위 근거 : execution.conditional_trade_rules / "
+                "execution.conditional_trade_rule_events",
+                f"검증 기록 식별자: {proof_hash}",
+                "조건 규칙 ID : " + str(context.rule_id),
+                "미확인 항목 : 이 활성화 event만으로 이후 청산 체결·현재 잔고를 추정하지 않습니다.",
+            )
+        )
+
+    def _handle_bundle_activated(self, event: Mapping[str, Any]) -> bool:
+        """Confirm an armed exit without reading directives or submitting orders."""
+
+        event_id = str(event.get("event_id") or "").strip()
+        rule_id = str(event.get("aggregate_id") or "").strip()
+        if not event_id or not rule_id:
+            raise ConditionalNotificationError(
+                "bundle activation event correlation is incomplete"
+            )
+        context = self.rule_store.bundle_activated_notification_context(rule_id=rule_id)
+        # The outbox can be delivered after another terminal lifecycle event.
+        # Never tell the user a rule is active unless the DB still says ACTIVE.
+        if context.current_state != "ACTIVE":
+            LOG.info(
+                "stale protective-exit activation report suppressed event_id=%s "
+                "rule=%s state=%s",
+                event_id,
+                context.rule_id,
+                context.current_state,
+            )
+            return True
+        if not context.order_request_id:
+            LOG.info(
+                "activated protective exit has no admitted user order rule=%s",
+                context.rule_id,
+            )
+            return True
+        record = self.order_store.get(str(context.order_request_id))
+        if record is None:
+            raise ConditionalNotificationError("linked order request was not found")
+        for key in ("user_id", "fund_id", "book_id", "client_request_id"):
+            if str(getattr(record, key)) != str(getattr(context, key)):
+                raise ConditionalNotificationError(
+                    f"bundle activation {key} does not match admitted authority"
+                )
+        content = self._bundle_activated_answer(context)
+        qa = evaluate_answer(content, status="completed")
+        if qa.verdict != "PASS":
+            raise ConditionalNotificationError(
+                "bundle activation answer failed deterministic QA"
+            )
+        content += f"\nQA 검증 : {qa.verdict} ({qa.version})"
+        # The frontend reads the durable ACTIVE state and expiry directly.
+        # This delivery confirmation must never change order state or submit.
+        if self.mode == "projection":
+            return True
+        discord_status = self.discord_delivery.deliver_to_existing_thread(
+            root_task_id=str(context.ceo_root_task_id or context.rule_id),
+            source_task={
+                "id": str(context.trading_task_id or ""),
+                "body": f"discord_request_id={record.client_request_id}",
+            },
+            root_task={
+                "id": str(context.ceo_root_task_id or ""),
+                "body": f"discord_request_id={record.client_request_id}",
+            },
+            content=content,
+            title="✅ PAPER 보호 청산 활성화",
+            store=self.discord_store,
+            profile=canonical_profile_for_department("ceo"),
+            response_key_suffix=f"bundle-activated-v1:{event_id}",
+        )
+        if discord_status not in {"sent", "deduped", "missing_thread"}:
+            raise ConditionalNotificationError(
+                f"Discord protective-exit activation report failed: {discord_status}"
+            )
+        if discord_status == "missing_thread":
+            LOG.warning(
+                "activated protective exit has no Discord thread event_id=%s root=%s",
+                event_id,
+                context.ceo_root_task_id,
+            )
+        return True
+
+    @staticmethod
+    def _trigger_claimed_answer(context: Any) -> str:
+        """Report a true condition without claiming an admitted or filled order."""
+
+        proof_hash = str(context.lifecycle_event_id).rsplit("_", 1)[-1]
+        progress = (
+            "PAPER 주문 guard 검증 중"
+            if context.current_state == "TRIGGERED"
+            else "PAPER 주문 제출 준비 중"
+        )
+        return "\n".join(
+            (
+                "🔔 PAPER 조건 충족 감지",
+                f"종목 : {context.symbol}",
+                f"조건 규칙 상태 : {context.current_state}",
+                f"감지된 실행 방향 : {context.action_side}",
+                f"조건 데이터 시각 : {context.data_watermark.isoformat()}",
+                f"후속 처리 : {progress}",
+                "주문 제출 : 아직 확인되지 않음",
+                "다음 알림 : Trading PAPER 주문의 최종 제출·체결 상태를 확인해 보고합니다.",
+                f"검증 시각 : {context.occurred_at.isoformat()}",
+                "권위 근거 : execution.conditional_rule_triggers / "
+                "execution.conditional_rule_evaluations",
+                f"검증 기록 식별자: {proof_hash}",
+                "조건 규칙 ID : " + str(context.rule_id),
+                "미확인 항목 : 이 조건 충족 event만으로 주문 접수·청산 체결·현재 잔고를 추정하지 않습니다.",
+            )
+        )
+
+    def _handle_trigger_claimed(self, event: Mapping[str, Any]) -> bool:
+        """Report condition truth while the order is still awaiting final authority."""
+
+        event_id = str(event.get("event_id") or "").strip()
+        rule_id = str(event.get("aggregate_id") or "").strip()
+        if not event_id or not rule_id:
+            raise ConditionalNotificationError(
+                "conditional trigger event correlation is incomplete"
+            )
+        context = self.rule_store.trigger_claimed_notification_context(rule_id=rule_id)
+        # If submission/expiry already won the race, its dedicated terminal
+        # event owns the user result.  Never replay a stale pre-submission view.
+        if context.current_state not in {"TRIGGERED", "EXECUTION_PENDING"}:
+            LOG.info(
+                "stale conditional trigger report suppressed event_id=%s rule=%s "
+                "state=%s",
+                event_id,
+                context.rule_id,
+                context.current_state,
+            )
+            return True
+        if not context.order_request_id:
+            LOG.info(
+                "conditional trigger has no admitted user order rule=%s",
+                context.rule_id,
+            )
+            return True
+        record = self.order_store.get(str(context.order_request_id))
+        if record is None:
+            raise ConditionalNotificationError("linked order request was not found")
+        for key in ("user_id", "fund_id", "book_id", "client_request_id"):
+            if str(getattr(record, key)) != str(getattr(context, key)):
+                raise ConditionalNotificationError(
+                    f"conditional trigger {key} does not match admitted authority"
+                )
+        content = self._trigger_claimed_answer(context)
+        qa = evaluate_answer(content, status="completed")
+        if qa.verdict != "PASS":
+            raise ConditionalNotificationError(
+                "conditional trigger answer failed deterministic QA"
+            )
+        content += f"\nQA 검증 : {qa.verdict} ({qa.version})"
+        if self.mode == "projection":
+            return True
+        discord_status = self.discord_delivery.deliver_to_existing_thread(
+            root_task_id=str(context.ceo_root_task_id or context.rule_id),
+            source_task={
+                "id": str(context.trading_task_id or ""),
+                "body": f"discord_request_id={record.client_request_id}",
+            },
+            root_task={
+                "id": str(context.ceo_root_task_id or ""),
+                "body": f"discord_request_id={record.client_request_id}",
+            },
+            content=content,
+            title="🔔 PAPER 조건 충족 감지",
+            store=self.discord_store,
+            profile=canonical_profile_for_department("ceo"),
+            response_key_suffix=f"conditional-trigger-claimed-v1:{event_id}",
+        )
+        if discord_status not in {"sent", "deduped", "missing_thread"}:
+            raise ConditionalNotificationError(
+                f"Discord conditional trigger report failed: {discord_status}"
+            )
+        if discord_status == "missing_thread":
+            LOG.warning(
+                "conditional trigger has no Discord thread event_id=%s root=%s",
+                event_id,
+                context.ceo_root_task_id,
+            )
+        return True
+
     def _related_workflows(
         self, context: Mapping[str, Any]
     ) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -251,7 +737,18 @@ class ConditionalRuleNotificationConsumer:
     def handle_event(self, event: Mapping[str, Any]) -> bool:
         """Project one event. Return true only at the accounting terminal state."""
 
-        if str(event.get("event_type") or "") != SUPPORTED_EVENT:
+        event_type = str(event.get("event_type") or "")
+        if event_type == ENTRY_POSITION_MISMATCH_EVENT:
+            return self._handle_entry_position_mismatch(event)
+        if event_type == CONDITIONAL_RULE_EXPIRED_EVENT:
+            return self._handle_rule_expired(event)
+        if event_type == BUNDLE_ACTIVATION_BLOCKED_EVENT:
+            return self._handle_bundle_activation_blocked(event)
+        if event_type == BUNDLE_ACTIVATED_EVENT:
+            return self._handle_bundle_activated(event)
+        if event_type == TRIGGER_CLAIMED_EVENT:
+            return self._handle_trigger_claimed(event)
+        if event_type != DIRECTIVE_SUBMITTED_EVENT:
             return True
         event_id = str(event.get("event_id") or "").strip()
         if not event_id:

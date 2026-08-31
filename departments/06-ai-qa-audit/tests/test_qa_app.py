@@ -16,12 +16,13 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
 
 sys.modules.pop("app", None)  # 03-risk도 모듈명 app이라 캐시 충돌 방지
-from app import app, evidence_store
+from app import app, evidence_store, _require_human_qa_approver
 from evidence_qa_engine import EvidenceChunk
 
 from tests.security.service_auth_test_utils import make_token
@@ -48,6 +49,26 @@ def _qa_close_headers(subject: str) -> dict[str, str]:
         aud="qa-test-audience",
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_qa_approval_requires_allowlisted_discord_human(monkeypatch):
+    monkeypatch.setenv(
+        "QA_DISCORD_APPROVER_USER_IDS", "382384727245455360"
+    )
+    assert _require_human_qa_approver(
+        None,
+        approved_by="discord:382384727245455360",
+        discord_message_id="123456789012345678",
+    ) is None
+
+    with pytest.raises(HTTPException) as exc_info:
+        _require_human_qa_approver(
+            None,
+            approved_by="codex:qa-bottleneck-review",
+            discord_message_id="123456789012345678",
+        )
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail["error_code"] == "QA_HUMAN_APPROVER_REQUIRED"
 
 
 now = datetime.now(timezone.utc)

@@ -49,7 +49,10 @@ from .worker_store import (
     PostgresRuleWorkerStore,
     RuleWorkerStoreError,
     SubmitReadyExecution,
+    TrailingStopObservation,
+    TrailingStopState,
     TriggerClaim,
+    advance_trailing_stop,
 )
 
 __all__ = [
@@ -88,7 +91,10 @@ __all__ = [
     "Timeframe",
     "ValueUnit",
     "SubmitReadyExecution",
+    "TrailingStopObservation",
+    "TrailingStopState",
     "TriggerClaim",
+    "advance_trailing_stop",
     "evaluate_condition",
     "evaluation_id",
     "execution_idempotency_key",

@@ -94,9 +94,14 @@ def test_deep_readiness_checks_symbol_authority_and_market_relation(monkeypatch)
         "market.market_bars" in statement
         for statement, _params in market.cursor_instance.executions
     )
+    assert any(
+        "from only market.market_bars" in statement
+        for statement, _params in market.cursor_instance.executions
+    )
 
 
 def test_ready_fails_closed_without_exposing_database_details(monkeypatch):
+    market_api._MARKET_READY_CACHE.clear()
     monkeypatch.setattr(
         market_api,
         "_deep_readiness",
@@ -111,6 +116,23 @@ def test_ready_fails_closed_without_exposing_database_details(monkeypatch):
         "status": "not_ready",
         "error_code": "RuntimeError",
     }
+
+
+def test_deep_ready_reuses_a_short_cache(monkeypatch):
+    calls = []
+    market_api._MARKET_READY_CACHE.clear()
+    monkeypatch.setenv("MARKET_DEEP_READY_CACHE_SECONDS", "2")
+    monkeypatch.setattr(
+        market_api,
+        "_deep_readiness",
+        lambda: calls.append(True) or {"status": "ready", "market_query": True},
+    )
+
+    first = market_api.ready()
+    second = market_api.ready()
+
+    assert first == second
+    assert len(calls) == 1
 
 
 def test_freshness_probe_returns_only_bounded_tick_quote_evidence(monkeypatch):
@@ -133,6 +155,24 @@ def test_freshness_probe_returns_only_bounded_tick_quote_evidence(monkeypatch):
     assert result["domains"] == rows
     assert "count(*)" not in captured["statement"].lower()
     assert "order by event_time desc limit 1" in captured["statement"].lower()
+
+
+def test_detailed_health_ready_reuses_a_short_cache(monkeypatch):
+    rows = [{"domain": "ticks", "rows": 1, "last_event": "tick-time"}]
+    calls = []
+    monkeypatch.setattr(
+        market_api,
+        "_query",
+        lambda statement, params: calls.append((statement, params)) or rows,
+    )
+    monkeypatch.setenv("MARKET_HEALTH_READY_CACHE_SECONDS", "30")
+    market_api._HEALTH_READY_CACHE.clear()
+
+    first = market_api.health_ready()
+    second = market_api.health_ready()
+
+    assert first == second
+    assert len(calls) == 1
 
 
 class _Cursor:

@@ -26,6 +26,9 @@ os.environ.setdefault(
 # setdefault 가 아니라 강제 설정이다(.env 를 export 한 셸에서 도는 경우가 막을 대상).
 # 계측 테스트는 monkeypatch 로 직접 켜므로 영향받지 않는다.
 os.environ["LANGFUSE_TRACING"] = "false"
+# Unit tests use synthetic Discord identities; production API/store processes
+# receive the real allowlist from Compose and remain fail-closed.
+os.environ.setdefault("QA_APPROVER_ALLOWLIST_REQUIRED", "false")
 
 
 @pytest.fixture(autouse=True)

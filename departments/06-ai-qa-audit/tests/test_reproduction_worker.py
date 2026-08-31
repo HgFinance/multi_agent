@@ -33,7 +33,9 @@ class Cursor:
             None)
         if operation and operation in self.connection.operation_errors:
             raise self.connection.operation_errors[operation]
-        if "claim_intraday_forward_reproduction_work" in normalized:
+        if "has_intraday_forward_reproduction_work" in normalized:
+            self.row = (self.connection.has_pending_work,)
+        elif "claim_intraday_forward_reproduction_work" in normalized:
             self.row = (self.connection.bundle,)
         elif "heartbeat_intraday_forward_reproduction_work" in normalized:
             self.row = (self.connection.heartbeat_owned,)
@@ -57,6 +59,7 @@ class Cursor:
 class Connection:
     def __init__(self, bundle=None):
         self.bundle = bundle
+        self.has_pending_work = True
         self.heartbeat_owned = True
         self.failure_status = "RETRY"
         self.readonly_mode = "on"
@@ -134,6 +137,21 @@ def test_process_completes_scientific_pass_with_heartbeats_and_closes_market():
     assert sum("heartbeat_intraday" in sql for sql in statements) == 3
     assert sum("complete_intraday" in sql for sql in statements) == 1
     assert not any("fail_intraday" in sql for sql in statements)
+
+
+def test_empty_queue_skips_expensive_claim():
+    metadata = Connection()
+    metadata.has_pending_work = False
+
+    assert worker.process_once(
+        metadata, market_connect=Connection,
+        worker="qa-reproducer/test", monotonic_fn=lambda: 100.0) is None
+
+    statements = [sql for sql, _params in metadata.executions]
+    assert any("has_intraday_forward_reproduction_work" in sql
+               for sql in statements)
+    assert not any("claim_intraday" in sql for sql in statements)
+    assert metadata.commits == 1
 
 
 def test_scientific_fail_is_completed_not_retried():

@@ -228,6 +228,11 @@ class DepartmentComposeWiringTests(unittest.TestCase):
             service,
         )
         self.assertIn(
+            "HGFINANCE_FAST_ADVISORY_REASONING: "
+            "${HGFINANCE_FAST_ADVISORY_REASONING:-low}",
+            service,
+        )
+        self.assertIn(
             "HGFINANCE_USER_RESPONSE_MAX_TURNS: "
             "${HGFINANCE_USER_RESPONSE_MAX_TURNS:-12}",
             service,

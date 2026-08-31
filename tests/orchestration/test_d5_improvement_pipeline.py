@@ -146,7 +146,7 @@ def test_route_mismatch_requires_approval_and_central_router_regression(
     assert ledger.approve(
         artifact_id,
         "APPROVED",
-        "qa-manager",
+        "discord:382384727245455360",
         "route mismatch reproduced",
         improvement_type="CODE_FIX",
     )

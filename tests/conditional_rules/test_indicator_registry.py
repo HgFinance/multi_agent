@@ -17,6 +17,7 @@ from orchestration.conditional_rules import (
     IndicatorProviderError,
     IndicatorValue,
     RuleSemanticError,
+    Timeframe,
     evaluate_condition,
     get_indicator_definition,
     list_supported_indicators,
@@ -462,9 +463,11 @@ def test_bar_close_and_quote_clocks_cannot_mix_realtime_indicator() -> None:
     assert context.current.observed_at == NOW
 
 
-def test_required_history_uses_registry_and_skips_broker_warmup() -> None:
+def test_required_history_uses_registry_and_keeps_primary_clock_for_broker_values() -> None:
     broker_history = _required_history(_active(_broker_spec()))
-    assert broker_history == {}
+    # A broker-backed value needs no local warm-up, but BAR_CLOSE still needs
+    # one primary final candle to establish the evaluation watermark.
+    assert broker_history == {Timeframe.D1: 1}
 
     local_spec = _rule(
         {

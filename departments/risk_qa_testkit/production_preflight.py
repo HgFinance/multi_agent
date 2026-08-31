@@ -55,8 +55,6 @@ REQUIRED_FLAGS: tuple[str, ...] = (
     "QA_CHECK_CONTRACT_APPROVED",
     "QA_TRACE_PERSIST",
     "QA_INCIDENT_PERSIST",
-    "QA_INGEST_MODE",
-    "QA_ENABLE_LEGACY_EVIDENCE_INGESTION",
     "RISK_REQUIRE_P1_ANALYTICS",
     "RISK_CONTEXT_SOURCE",
     "RISK_BROKER_ADAPTER",
@@ -173,8 +171,6 @@ def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
         "QA_CHECK_CONTRACT_APPROVED": "true",
         "QA_TRACE_PERSIST": "true",
         "QA_INCIDENT_PERSIST": "true",
-        "QA_INGEST_MODE": "disabled",
-        "QA_ENABLE_LEGACY_EVIDENCE_INGESTION": "false",
         "RISK_REQUIRE_P1_ANALYTICS": "true",
         "RISK_CONTEXT_SOURCE": "database",
     }

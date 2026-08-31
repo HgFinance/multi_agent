@@ -20,6 +20,24 @@ OUTBOX_CLAIM_MIGRATION = (
     / "migrations"
     / "20260827000200_conditional_rule_outbox_claim_lease.sql"
 )
+INTRADAY_OCO_CONTRACT_MIGRATION = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260829000100_conditional_rule_intraday_oco_contract.sql"
+)
+TRAILING_STOP_STATE_MIGRATION = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260829000200_conditional_rule_trailing_stop_state.sql"
+)
+ACTIVATION_LIFETIME_MIGRATION = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260829000300_conditional_rule_activation_lifetime.sql"
+)
 
 
 def compact() -> str:
@@ -98,3 +116,44 @@ def test_outbox_claim_lease_is_worker_writable_and_pairwise() -> None:
     assert "conditional_rule_outbox_claim_pair_check" in sql
     assert "grant update (claim_token,claim_expires_at)" in sql
     assert "conditional_rule_outbox_claim_idx" in sql
+
+
+def test_intraday_timeframe_and_oco_worker_contract_is_migrated() -> None:
+    sql = " ".join(
+        INTRADAY_OCO_CONTRACT_MIGRATION.read_text(encoding="utf-8")
+        .lower()
+        .split()
+    )
+
+    assert "drop constraint if exists conditional_trade_rules_primary_timeframe_check" in sql
+    assert "primary_timeframe in ('1m','3m','5m','10m','15m','30m','1h','1d')" in sql
+    assert "conditional_rule_versions_oco_group_idx" in sql
+    assert "(spec->>'oco_group_id')" in sql
+
+
+def test_trailing_stop_state_is_durable_and_worker_only() -> None:
+    sql = " ".join(
+        TRAILING_STOP_STATE_MIGRATION.read_text(encoding="utf-8")
+        .lower()
+        .split()
+    )
+
+    assert "create table execution.conditional_rule_trailing_states" in sql
+    assert "primary key (rule_id, rule_version)" in sql
+    assert "on delete cascade" in sql
+    assert "enable row level security" in sql
+    assert "grant select, insert, update on execution.conditional_rule_trailing_states" in sql
+    assert "to svc_conditional_rule_worker" in sql
+    assert "conditional_rule_trailing_states_worker_all" in sql
+
+
+def test_fill_gated_activation_lifetime_uses_only_the_governed_krx_calendar() -> None:
+    sql = " ".join(
+        ACTIVATION_LIFETIME_MIGRATION.read_text(encoding="utf-8").lower().split()
+    )
+
+    assert "on reference.market_calendar_versions to svc_conditional_rule_worker" in sql
+    assert "on reference.market_sessions to svc_conditional_rule_worker" in sql
+    assert "grant update (expires_at) on execution.conditional_trade_rules to svc_conditional_rule_worker" in sql
+    assert "market_sessions_conditional_rule_worker_krx_select" in sql
+    assert "conditional_trade_rule_versions', 'update'" in sql

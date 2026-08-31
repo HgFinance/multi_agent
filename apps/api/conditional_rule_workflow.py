@@ -54,6 +54,10 @@ class ConditionalRuleRecord:
     last_guard_code: str | None = None
     directive_id: str | None = None
     last_error_code: str | None = None
+    # The stored spec retains its immutable requested lifetime.  For a
+    # fill-gated entry exit the worker materializes the actual KRX close in the
+    # rules table only after full fill, so status must expose that value too.
+    effective_expires_at: datetime | None = None
 
 
 class ConditionalRuleRepository(Protocol):
@@ -77,6 +81,13 @@ class ConditionalRuleRepository(Protocol):
     def activate(
         self, rule_id: str, *, user_id: str, confirmation_sha256: str
     ) -> ConditionalRuleRecord: ...
+
+    def activate_group(
+        self,
+        records: tuple[tuple[str, str], ...],
+        *,
+        user_id: str,
+    ) -> list[ConditionalRuleRecord]: ...
 
     def transition(
         self, rule_id: str, *, user_id: str, target: RuleState
@@ -123,6 +134,7 @@ class InMemoryConditionalRuleRepository:
                 confirmed_at=None,
                 created_at=now,
                 updated_at=now,
+                effective_expires_at=spec.expires_at,
             )
             self._records[record.rule_id] = record
             self._requests[key] = record.rule_id
@@ -169,6 +181,58 @@ class InMemoryConditionalRuleRepository:
             self._records[record.rule_id] = updated
             return updated
 
+    def activate_group(
+        self,
+        records: tuple[tuple[str, str], ...],
+        *,
+        user_id: str,
+    ) -> list[ConditionalRuleRecord]:
+        """Activate a linked OCO set under one in-memory lock."""
+
+        if not records or len({rule_id for rule_id, _digest in records}) != len(records):
+            raise ConditionalRuleConflict("conditional rule activation group is invalid")
+        with self._lock:
+            selected: list[ConditionalRuleRecord] = []
+            for rule_id, digest in records:
+                record = self.get(rule_id, user_id=user_id)
+                if record is None:
+                    raise ConditionalRuleNotFound("conditional rule not found")
+                if digest != record.spec_sha256:
+                    raise ConditionalRuleConflict("confirmation fingerprint does not match rule")
+                if record.state not in {RuleState.PENDING_CONFIRMATION, RuleState.ACTIVE}:
+                    raise ConditionalRuleConflict("conditional rule is not awaiting confirmation")
+                if (
+                    record.state is RuleState.PENDING_CONFIRMATION
+                    and record.spec.expires_at <= datetime.now(timezone.utc)
+                ):
+                    raise ConditionalRuleConflict("conditional rule expired before confirmation")
+                selected.append(record)
+            oco_group_ids = {record.spec.oco_group_id for record in selected}
+            if (
+                len(selected) != 2
+                or len(oco_group_ids) != 1
+                or None in oco_group_ids
+            ):
+                raise ConditionalRuleConflict(
+                    "conditional rule activation group is not an OCO exit pair"
+                )
+            now = datetime.now(timezone.utc)
+            activated: list[ConditionalRuleRecord] = []
+            for record in selected:
+                updated = (
+                    record
+                    if record.state is RuleState.ACTIVE
+                    else replace(
+                        record,
+                        state=RuleState.ACTIVE,
+                        confirmed_at=now,
+                        updated_at=now,
+                    )
+                )
+                self._records[record.rule_id] = updated
+                activated.append(updated)
+            return activated
+
     def transition(
         self, rule_id: str, *, user_id: str, target: RuleState
     ) -> ConditionalRuleRecord:
@@ -214,7 +278,13 @@ r.current_version,v.spec,v.spec_sha256,r.confirmed_at,r.created_at,r.updated_at,
 (select execution.error_code
    from execution.conditional_rule_executions execution
   where execution.rule_id=r.rule_id
-  order by execution.created_at desc limit 1)
+  order by execution.created_at desc limit 1),
+(select evaluation.error_code
+   from execution.conditional_rule_evaluations evaluation
+  where evaluation.rule_id=r.rule_id
+    and evaluation.error_code is not null
+  order by evaluation.data_watermark desc,evaluation.created_at desc limit 1),
+r.expires_at
 """
 
 
@@ -262,7 +332,12 @@ class PostgresConditionalRuleRepository:
             last_execution_state=str(row[12]) if row[12] is not None else None,
             last_guard_code=str(row[13]) if row[13] is not None else None,
             directive_id=str(row[14]) if row[14] is not None else None,
-            last_error_code=str(row[15]) if row[15] is not None else None,
+            last_error_code=(
+                str(row[15])
+                if row[15] is not None
+                else (str(row[16]) if row[16] is not None else None)
+            ),
+            effective_expires_at=row[17],
         )
 
     @staticmethod
@@ -498,6 +573,100 @@ class PostgresConditionalRuleRepository:
             raise
         except (psycopg2.Error, TypeError, ValueError) as exc:
             raise ConditionalRuleUnavailable("could not activate conditional rule") from exc
+
+    def activate_group(
+        self,
+        records: tuple[tuple[str, str], ...],
+        *,
+        user_id: str,
+    ) -> list[ConditionalRuleRecord]:
+        """Atomically activate a linked OCO set after locking every leg.
+
+        Pending rules are invisible to the worker.  Activating a bracket one
+        leg at a time leaves a narrow interval where the first exit can submit
+        before the stop/take-profit sibling exists.  Lock, validate, and flip
+        the entire set in one transaction instead.
+        """
+
+        if not records or len({rule_id for rule_id, _digest in records}) != len(records):
+            raise ConditionalRuleConflict("conditional rule activation group is invalid")
+        ordered = tuple((UUID(str(rule_id)), str(digest)) for rule_id, digest in records)
+        rule_ids = sorted((rule_id for rule_id, _digest in ordered), key=str)
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    f"""
+                    select {_SELECT}
+                      from execution.conditional_trade_rules r
+                      join execution.conditional_trade_rule_versions v
+                        on v.rule_id=r.rule_id and v.rule_version=r.current_version
+                     where r.rule_id=any(%s) and r.user_id=%s
+                     order by r.rule_id
+                     for update of r
+                    """,
+                    (rule_ids, UUID(str(user_id))),
+                )
+                found = {
+                    record.rule_id: record
+                    for record in (self._row(row) for row in cursor.fetchall())
+                    if record is not None
+                }
+                if len(found) != len(ordered):
+                    raise ConditionalRuleNotFound("conditional rule not found")
+                current = [found[str(rule_id)] for rule_id, _digest in ordered]
+                now = datetime.now(timezone.utc)
+                for record, (_rule_id, digest) in zip(current, ordered, strict=True):
+                    if record.spec_sha256 != digest:
+                        raise ConditionalRuleConflict("confirmation fingerprint does not match rule")
+                    if record.state not in {RuleState.PENDING_CONFIRMATION, RuleState.ACTIVE}:
+                        raise ConditionalRuleConflict("conditional rule is not awaiting confirmation")
+                    if (
+                        record.state is RuleState.PENDING_CONFIRMATION
+                        and record.spec.expires_at <= now
+                    ):
+                        raise ConditionalRuleConflict("conditional rule expired before confirmation")
+                oco_group_ids = {record.spec.oco_group_id for record in current}
+                if (
+                    len(current) != 2
+                    or len(oco_group_ids) != 1
+                    or None in oco_group_ids
+                ):
+                    raise ConditionalRuleConflict(
+                        "conditional rule activation group is not an OCO exit pair"
+                    )
+                pending_ids = [
+                    UUID(record.rule_id)
+                    for record in current
+                    if record.state is RuleState.PENDING_CONFIRMATION
+                ]
+                if pending_ids:
+                    cursor.execute(
+                        """
+                        update execution.conditional_trade_rules
+                           set state='ACTIVE',confirmation_sha256=(
+                                 select version.spec_sha256
+                                   from execution.conditional_trade_rule_versions version
+                                  where version.rule_id=conditional_trade_rules.rule_id
+                                    and version.rule_version=conditional_trade_rules.current_version
+                               ),
+                               confirmed_at=now(),version=version+1
+                         where rule_id=any(%s) and user_id=%s
+                           and state='PENDING_CONFIRMATION'
+                        """,
+                        (pending_ids, UUID(str(user_id))),
+                    )
+                    if cursor.rowcount != len(pending_ids):
+                        raise ConditionalRuleConflict("concurrent conditional rule activation")
+                activated = [self._locked(cursor, record.rule_id, user_id) for record in current]
+                for before, after in zip(current, activated, strict=True):
+                    if before.state is RuleState.PENDING_CONFIRMATION:
+                        self._event(cursor, after, "ACTIVATED", before.state)
+                return activated
+        except ConditionalRuleWorkflowError:
+            raise
+        except (psycopg2.Error, TypeError, ValueError) as exc:
+            raise ConditionalRuleUnavailable("could not atomically activate conditional rules") from exc
 
     def transition(
         self, rule_id: str, *, user_id: str, target: RuleState

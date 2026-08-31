@@ -883,6 +883,15 @@ async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool 
                 "- **다음 단계:** `offline benchmark PENDING`\n"
                 "- **자동 변경:** 없음",
             )
+        elif resolved.decision == "CLOSED_NO_ACTION":
+            await _qa_reply(
+                message,
+                "## ✅ 관리자 결정 기록\n"
+                f"- **Artifact:** `{artifact_id}`\n"
+                "- **결정:** `CLOSED_NO_ACTION`\n"
+                "- **다음 단계:** 종료\n"
+                "- **자동 변경:** 없음",
+            )
         else:
             await _qa_reply(
                 message,
@@ -1058,6 +1067,15 @@ async def _maybe_handle_hr_langfuse_message(adapter: Any, message: Any) -> bool 
                 f"- **관측 검토 ID:** `{artifact_id}`\n"
                 "- **결정:** `APPROVED`\n"
                 f"- **다음 단계:** `{body.get('benchmark_status') or 'offline benchmark PENDING'}`\n"
+                "- **자동 변경:** 없음",
+            )
+        elif resolved.decision == "CLOSED_NO_ACTION":
+            await _qa_reply(
+                message,
+                "## ✅ HR Langfuse 관리자 결정\n"
+                f"- **관측 검토 ID:** `{artifact_id}`\n"
+                "- **결정:** `CLOSED_NO_ACTION`\n"
+                "- **다음 단계:** 종료\n"
                 "- **자동 변경:** 없음",
             )
         else:

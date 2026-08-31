@@ -10,11 +10,18 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+
+from orchestration.qa_feedback_contract import (
+    ACTIONABLE_FEEDBACK_CODES,
+    feedback_decision_label,
+    is_actionable_feedback,
+)
 
 QA_FEEDBACK_MARKER = "[hgfinance-qa-feedback-request-v1]"
 HR_LANGFUSE_FEEDBACK_MARKER = "[hgfinance-hr-langfuse-review-v1]"
@@ -32,26 +39,20 @@ _TYPE_RE = re.compile(
     r"PROMPT_POLICY|RUNTIME_CONFIG|DATA_QUALITY|NO_ACTION)\b",
     re.IGNORECASE,
 )
+_DISCORD_RATE_LIMIT_RETRIES = 3
+_DISCORD_RETRY_AFTER_DEFAULT_SECONDS = 1.0
+_DISCORD_RETRY_AFTER_MAX_SECONDS = 30.0
+_DISCORD_CONTENT_LIMIT = 1_900
 _SKILL_RE = re.compile(
     r"\b(?:스킬|skill)\s*=\s*([a-z0-9][a-z0-9-]{1,62})\b", re.IGNORECASE
 )
 _COMMAND_RE = re.compile(
-    r"^\s*(승인|거부|반려|미승인|approve|approved|reject|rejected)\b[\s,:-]*(.*)$",
+    r"^\s*(승인|거부|반려|미승인|확인|종료|acknowledge|acknowledged|close|closed|"
+    r"approve|approved|reject|rejected)\b[\s,:-]*(.*)$",
     re.IGNORECASE,
 )
-_ACTIONABLE_FINDINGS = frozenset(
-    {
-        "PRIVACY_PAYLOAD_PRESENT",
-        "LANGFUSE_OBSERVABILITY_UNAVAILABLE",
-        "WORKER_OR_WORKFLOW_DEGRADED",
-        "LATENCY_ABOVE_THRESHOLD",
-        "STRUCTURED_EVAL_SCORE_LOW",
-        "SEMANTIC_QA_FAILED",
-        "SEMANTIC_QA_SCORE_LOW",
-        "SEMANTIC_QA_RELEVANCE_LOW",
-        "REDACTION_MARKER_MISSING",
-    }
-)
+# Compatibility alias for integrations that imported the old private name.
+_ACTIONABLE_FINDINGS = ACTIONABLE_FEEDBACK_CODES
 
 _MANAGER_TERMS = (
     (
@@ -506,6 +507,32 @@ def _bounded(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+def _fit_discord_content(
+    content: str,
+    *,
+    preserve_suffix: str | None = None,
+) -> str:
+    """Fit one card while retaining its command/decision footer."""
+
+    value = str(content or "")
+    if len(value) <= _DISCORD_CONTENT_LIMIT:
+        return value
+    suffix = str(preserve_suffix or "")
+    if suffix and value.endswith(suffix):
+        head_budget = _DISCORD_CONTENT_LIMIT - len(suffix) - 2
+        if head_budget > 0:
+            return f"{value[:head_budget].rstrip()}\n\n{suffix}"
+        return suffix[:_DISCORD_CONTENT_LIMIT]
+    return value[:_DISCORD_CONTENT_LIMIT]
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _qa_evidence_lines(value: Any, *, limit: int = 4) -> list[str]:
     """Render bounded worker-declared facts for the QA/operations card."""
 
@@ -537,6 +564,38 @@ def hr_langfuse_channel_id() -> str:
     return os.getenv("HR_LANGFUSE_CHANNEL_ID", HR_LANGFUSE_CHANNEL_DEFAULT).strip()
 
 
+def _discord_retry_after(error: HTTPError) -> float:
+    """Return a bounded Discord rate-limit delay without trusting raw input."""
+
+    raw_value = ""
+    headers = getattr(error, "headers", None)
+    if headers is not None:
+        try:
+            raw_value = str(headers.get("Retry-After") or "")
+        except AttributeError:
+            raw_value = ""
+    try:
+        delay = float(raw_value)
+    except (TypeError, ValueError):
+        delay = _DISCORD_RETRY_AFTER_DEFAULT_SECONDS
+    if delay < 0:
+        delay = _DISCORD_RETRY_AFTER_DEFAULT_SECONDS
+    return min(delay, _DISCORD_RETRY_AFTER_MAX_SECONDS)
+
+
+def _with_discord_rate_limit_retry(operation: Callable[[], Any]) -> Any:
+    """Retry only explicit HTTP 429 responses; other errors stay fail-closed."""
+
+    for attempt in range(_DISCORD_RATE_LIMIT_RETRIES + 1):
+        try:
+            return operation()
+        except HTTPError as error:
+            if error.code != 429 or attempt >= _DISCORD_RATE_LIMIT_RETRIES:
+                raise
+            time.sleep(_discord_retry_after(error))
+    raise RuntimeError("discord_rate_limit_retry_exhausted")
+
+
 def _post_discord_message(
     content: str,
     *,
@@ -552,7 +611,10 @@ def _post_discord_message(
     request = Request(
         f"https://discord.com/api/v10/channels/{channel_id}/messages",
         data=json.dumps(
-            {"content": content[:1900], "allowed_mentions": {"parse": []}},
+            {
+                "content": _fit_discord_content(content),
+                "allowed_mentions": {"parse": []},
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8"),
@@ -563,8 +625,12 @@ def _post_discord_message(
         },
         method="POST",
     )
-    with urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+
+    def read_response() -> Any:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    payload = _with_discord_rate_limit_retry(read_response)
     message_id = str(payload.get("id") or "") if isinstance(payload, Mapping) else ""
     if not message_id:
         raise RuntimeError("discord_message_id_missing")
@@ -631,9 +697,13 @@ def verify_discord_message_delivery(
         },
         method="GET",
     )
-    try:
+
+    def read_response() -> Any:
         with urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            return json.loads(response.read().decode("utf-8"))
+
+    try:
+        payload = _with_discord_rate_limit_retry(read_response)
     except (HTTPError, TimeoutError, ValueError, OSError, json.JSONDecodeError):
         return False
     if not isinstance(payload, Mapping):
@@ -641,7 +711,8 @@ def verify_discord_message_delivery(
     return (
         str(payload.get("id") or "") == str(message_id)
         and str(payload.get("channel_id") or "") == str(channel_id)
-        and str(payload.get("content") or "") == content[:1900]
+        and str(payload.get("content") or "")
+        == _fit_discord_content(content)
     )
 
 
@@ -660,7 +731,10 @@ def edit_qa_discord_message(
     request = Request(
         f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}",
         data=json.dumps(
-            {"content": content[:1900], "allowed_mentions": {"parse": []}},
+            {
+                "content": _fit_discord_content(content),
+                "allowed_mentions": {"parse": []},
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8"),
@@ -671,8 +745,12 @@ def edit_qa_discord_message(
         },
         method="PATCH",
     )
-    with urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+
+    def read_response() -> Any:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    payload = _with_discord_rate_limit_retry(read_response)
     returned_id = (
         str(payload.get("id") or message_id)
         if isinstance(payload, Mapping)
@@ -861,17 +939,7 @@ def format_qa_terminal_report(record: Any) -> str:
         f"- 평가 기록: `{_bounded(getattr(record, 'eval_run_id', ''), 100)}`\n"
         "\n> PAPER·읽기 전용 검토입니다. 주문 제출과 원장 변경은 수행하지 않았습니다."
     )
-    return report[:1900]
-
-
-def is_actionable_feedback(finding_codes: object) -> bool:
-    if not isinstance(finding_codes, (list, tuple, set, frozenset)):
-        return False
-    return bool(
-        _ACTIONABLE_FINDINGS.intersection(
-            str(code).strip().upper() for code in finding_codes
-        )
-    )
+    return _fit_discord_content(report)
 
 
 def format_qa_feedback_request(
@@ -899,8 +967,19 @@ def format_qa_feedback_request(
     latency_threshold_ms = metadata.get("latency_threshold_ms")
     metric_count = metadata.get("metric_count")
     observations: list[str] = []
-    if metric_count:
-        observations.append(f"집계된 metric trace 수: {int(metric_count)}")
+    metric_count_value = _nonnegative_int(metric_count)
+    if metric_count_value:
+        observations.append(f"집계된 metric trace 수: {metric_count_value}")
+    sample_count_value = _nonnegative_int(metadata.get("sample_count"))
+    if sample_count_value > 1:
+        observations.append(
+            f"동일 범주 집계 표본: {sample_count_value}건 (중복 카드 없음)"
+        )
+    review_class = str(metadata.get("review_class") or "").strip().upper()
+    if review_class == "OBSERVABILITY_GAP":
+        observations.append("관측성 이슈: source·역할·부서·시간창 기준으로 집계")
+    elif review_class == "PERFORMANCE_EVENT":
+        observations.append("분류: 성능 사건 — Skill 변경 후보로 확정하지 않음")
     if latency_ms:
         latency = f"관측 지연: {float(latency_ms) / 1000:.2f}초"
         if latency_threshold_ms:
@@ -970,25 +1049,31 @@ def format_qa_feedback_request(
             f"- **관측 시작 지점:** `{observation_point or qa_owner_label(department)}` "
             "(원인 부서로 간주하지 않음)\n"
         )
-    return (
+    decision_footer = (
+        "### 관리자 결정\n"
+        "- 조치 승인: `승인 유형=<개선유형> <사유 필수>`\n"
+        "- 문제 없음으로 종료: `종료 <사유 필수>`\n"
+        "- 개선안 거부: `거부 <사유 필수>`\n"
+        f"- 새 개선안 생성: `승인 {artifact_id} 유형=SKILL_CREATE <사유 필수>`\n"
+        "- 기존 개선안 보완: `유형=SKILL_EVOLVE 스킬=<이름>`를 함께 입력\n"
+        "- **보류:** 명령을 입력하지 않으면 `대기` 상태 유지\n\n"
+        "QA Hermes는 이 artifact 한 건만 검토하고 승인·거부·설정 변경을 직접 수행하지 마세요."
+    )
+    content = (
         f"{QA_FEEDBACK_MARKER}\n"
         "## ① 자동 감지 · QA 검토 요청\n"
         f"- 피드백 기록 ID: `{_bounded(artifact_id, 80)}`\n"
         f"{attribution_text}"
-        f"- **자동 분류:** `{_manager_label(decision, 40).replace('IMPROVEMENT_CANDIDATE', '개선 검토 대상')}`\n"
+        f"- **자동 분류:** `{feedback_decision_label(decision)}`\n"
         f"- **감지 신호:** `{code_text}`\n\n"
         "### 관측\n"
         f"{observation_text}\n"
         "\n### 문제 추적 정보 · 원문 제외\n"
         f"{evidence_text}\n\n"
         "> 다음 메시지 `② QA Hermes 검토 결과`에서 사실·한계·조치·판단 가이드를 제공합니다.\n\n"
-        "### 관리자 결정\n"
-        "- QA 결과에 답글: `승인 유형=<개선유형> <사유 필수>` 또는 `거부 <사유 필수>`\n"
-        f"- 새 개선안 생성: `승인 {artifact_id} 유형=SKILL_CREATE <사유 필수>`\n"
-        "- 기존 개선안 보완: `유형=SKILL_EVOLVE 스킬=<이름>`를 함께 입력\n"
-        "- **보류:** 명령을 입력하지 않으면 `대기` 상태 유지\n\n"
-        "QA Hermes는 이 artifact 한 건만 검토하고 승인·거부·설정 변경을 직접 수행하지 마세요."
-    )[:1900]
+        + decision_footer
+    )
+    return _fit_discord_content(content, preserve_suffix=decision_footer)
 
 
 def format_hr_langfuse_feedback_request(
@@ -1019,7 +1104,9 @@ def format_hr_langfuse_feedback_request(
     )
     decision_label = {
         "REVIEW_REQUIRED": "검토 필요",
+        "REVIEW_WORTHY": "검토 대상",
         "IMPROVEMENT_CANDIDATE": "개선 검토 대상",
+        "EVOLUTION_PROPOSAL": "Evolution 제안",
         "OBSERVED_PASS": "관측상 정상",
     }.get(str(decision or "").upper(), "확인 필요")
     observations: list[str] = []
@@ -1078,7 +1165,14 @@ def format_hr_langfuse_feedback_request(
         bottleneck_text += (
             f" ({float(metadata['primary_bottleneck_duration_ms']) / 1000:.2f}초)"
         )
-    return (
+    decision_footer = (
+        "### 관리자 결정\n"
+        f"- 이 카드에 답글: `승인 {_bounded(artifact_id, 80)} 유형=CODE_FIX <사유>`\n"
+        f"- 미승인: `미승인 {_bounded(artifact_id, 80)} <사유>`\n"
+        "- 보류: 답글 없이 대기\n\n"
+        "> HR Hermes는 관측 요약·근거·한계만 검토하며 권한·설정·코드 변경과 주문을 수행하지 않습니다."
+    )
+    content = (
         f"{HR_LANGFUSE_FEEDBACK_MARKER}\n"
         "## HR · Langfuse 관측 요약 및 관리자 결정 요청\n"
         f"- 관측 검토 ID: `{_bounded(artifact_id, 80)}`\n"
@@ -1090,12 +1184,9 @@ def format_hr_langfuse_feedback_request(
         f"{observation_text}\n\n"
         "### 근거 좌표 · 원문 제외\n"
         f"{evidence_text}\n\n"
-        "### 관리자 결정\n"
-        f"- 이 카드에 답글: `승인 {_bounded(artifact_id, 80)} 유형=CODE_FIX <사유>`\n"
-        f"- 미승인: `미승인 {_bounded(artifact_id, 80)} <사유>`\n"
-        "- 보류: 답글 없이 대기\n\n"
-        "> HR Hermes는 관측 요약·근거·한계만 검토하며 권한·설정·코드 변경과 주문을 수행하지 않습니다."
-    )[:1900]
+        + decision_footer
+    )
+    return _fit_discord_content(content, preserve_suffix=decision_footer)
 
 
 def format_skill_proposal_request(
@@ -1117,7 +1208,13 @@ def format_skill_proposal_request(
     benchmarks = ", ".join(str(value) for value in benchmark_ids or ()) or "NONE"
     stages = validation.get("stages") if isinstance(validation, Mapping) else {}
     stages = stages if isinstance(stages, Mapping) else {}
-    return (
+    decision_footer = (
+        "### 관리자 2차 결정\n"
+        "- 이 카드에 Reply: `승인 <사유>` 또는 `거부 <사유>`\n"
+        "- 승인은 위 두 hash에 결박되며, 이후 control worker가 정본 승격과 회귀 검증을 수행합니다.\n"
+        "- 승인 전 자동 활성화는 없습니다."
+    )
+    content = (
         f"{SKILL_PROPOSAL_MARKER}\n"
         "## ⑨ Evolution Skill 2차 검토 요청\n"
         f"- 개선안 기록 ID: `{_bounded(proposal_id, 100)}`\n"
@@ -1131,11 +1228,9 @@ def format_skill_proposal_request(
         f"- **구조·provenance:** `{_bounded(stages.get('structure_and_provenance'), 40)}`\n"
         f"- **실행 검증:** `{_bounded(stages.get('execution'), 60)}`\n"
         f"- **정본 회귀:** `{_bounded(stages.get('canonical_regression'), 60)}`\n\n"
-        "### 관리자 2차 결정\n"
-        "- 이 카드에 Reply: `승인 <사유>` 또는 `거부 <사유>`\n"
-        "- 승인은 위 두 hash에 결박되며, 이후 control worker가 정본 승격과 회귀 검증을 수행합니다.\n"
-        "- 승인 전 자동 활성화는 없습니다."
-    )[:1900]
+        + decision_footer
+    )
+    return _fit_discord_content(content, preserve_suffix=decision_footer)
 
 
 def format_skill_activation_notice(report: Mapping[str, Any]) -> str:
@@ -1152,7 +1247,7 @@ def format_skill_activation_notice(report: Mapping[str, Any]) -> str:
     artifacts = ", ".join(
         str(value) for value in problem.get("source_artifact_ids") or ()
     )
-    return (
+    content = (
         "[hgfinance-skill-activation-evidence-v1]\n"
         "## ⑪ Evolution Skill 정본 승격 결과\n"
         f"skill_proposal_id={_bounded(report.get('proposal_id'), 100)}\n"
@@ -1166,7 +1261,8 @@ def format_skill_activation_notice(report: Mapping[str, Any]) -> str:
         f"- **운영 검증:** {int(outcome.get('observed_distinct_runs') or 0)}/"
         f"{int(outcome.get('required_distinct_runs') or 3)}개 독립 실행\n\n"
         f"> {_bounded(outcome.get('claim'), 120)}. 활성화와 문제 해결 확인은 별도입니다."
-    )[:1900]
+    )
+    return _fit_discord_content(content)
 
 
 @dataclass(frozen=True)
@@ -1210,7 +1306,20 @@ def parse_qa_feedback_command(content: object) -> QaFeedbackCommand | None:
         tail = (tail[: skill_match.start()] + " " + tail[skill_match.end() :]).strip(
             " ,:-"
         )
-    decision = "APPROVED" if verb in {"승인", "approve", "approved"} else "REJECTED"
+    decision = (
+        "APPROVED"
+        if verb in {"승인", "approve", "approved"}
+        else "CLOSED_NO_ACTION"
+        if verb in {
+            "확인",
+            "종료",
+            "acknowledge",
+            "acknowledged",
+            "close",
+            "closed",
+        }
+        else "REJECTED"
+    )
     reason = _bounded(tail, 240)
     return QaFeedbackCommand(
         decision=decision,
@@ -1263,7 +1372,11 @@ def submit_qa_feedback_decision(
         "decision": command.decision,
         "approved_by": f"discord:{_bounded(actor_id, 64)}",
         "reason": command.reason,
-        "improvement_type": command.improvement_type or "NO_ACTION",
+        "improvement_type": (
+            "NO_ACTION"
+            if command.decision == "CLOSED_NO_ACTION"
+            else command.improvement_type or "NO_ACTION"
+        ),
         "target_skill_slug": command.target_skill_slug or "",
     }
     return _post_internal_decision(

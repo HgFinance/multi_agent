@@ -1,4 +1,4 @@
-"""Policy corpus readiness checks for QA production ingestion."""
+"""Policy corpus readiness checks for request-time QA evidence."""
 
 from __future__ import annotations
 
@@ -6,10 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-try:
-    from .production_ingestion import PLACEHOLDER_MARKER
-except ImportError:  # pragma: no cover - direct FastAPI app import path
-    from production_ingestion import PLACEHOLDER_MARKER
+PLACEHOLDER_MARKER = "SAMPLE_PLACEHOLDER"
 
 
 class PolicyCorpusError(RuntimeError):

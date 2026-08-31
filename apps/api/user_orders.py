@@ -34,6 +34,10 @@ try:
         conditional_rule_repository,
     )
     from .conditional_rules import conditional_status_message
+    from .paper_order_bundle import (
+        PaperOrderBundleError,
+        paper_order_bundle_repository,
+    )
     from .current_user import (
         current_user,
         require_trading_book_access,
@@ -64,6 +68,10 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
         conditional_rule_repository,
     )
     from conditional_rules import conditional_status_message  # type: ignore[no-redef]
+    from paper_order_bundle import (  # type: ignore[no-redef]
+        PaperOrderBundleError,
+        paper_order_bundle_repository,
+    )
     from current_user import (
         current_user,
         require_trading_book_access,
@@ -103,6 +111,7 @@ _KRX_TRADING_SYMBOL = re.compile(r"^[0-9A-Z]{6}$")
 
 class DirectiveAction(str, Enum):
     PLACE_ORDER = "PLACE_ORDER"
+    PLACE_BASKET = "PLACE_BASKET"
     SELL_ALL = "SELL_ALL"
     CANCEL_ALL = "CANCEL_ALL"
 
@@ -160,13 +169,73 @@ class PaperOrderInput(BaseModel):
         return self
 
 
+class PaperBasketOrderInput(BaseModel):
+    """One bounded PAPER basket allocation, sized from a fresh ask in Trading."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    instrument_id: UUID | None = None
+    symbol: str = Field(min_length=1, max_length=80)
+    notional_krw: Decimal | None = Field(
+        default=None, gt=0, max_digits=18, decimal_places=0
+    )
+    quantity: Decimal | None = Field(
+        default=None, gt=0, max_digits=18, decimal_places=0
+    )
+    side: OrderSide = OrderSide.BUY
+    order_type: Literal[OrderType.MARKET] = OrderType.MARKET
+    time_in_force: Literal["DAY"] = "DAY"
+
+    @field_validator("symbol")
+    @classmethod
+    def _clean_symbol(cls, value: str) -> str:
+        cleaned = " ".join(value.strip().split())
+        if not cleaned or any(ord(character) < 32 for character in cleaned):
+            raise ValueError("symbol is invalid")
+        canonical_code = cleaned.upper()
+        if _KRX_TRADING_SYMBOL.fullmatch(canonical_code):
+            return canonical_code
+        return cleaned
+
+    @model_validator(mode="after")
+    def _sizing_policy(self) -> "PaperBasketOrderInput":
+        if (self.notional_krw is None) == (self.quantity is None):
+            raise ValueError("basket member requires exactly one sizing policy")
+        if self.notional_krw is not None and self.side is not OrderSide.BUY:
+            raise ValueError("notional basket member must be BUY")
+        return self
+
+
+class PaperBasketInput(BaseModel):
+    """A non-atomic but single-tracked group of at most twenty PAPER legs."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    orders: tuple[PaperBasketOrderInput, ...] = Field(min_length=2, max_length=20)
+
+    @model_validator(mode="after")
+    def _unique_symbols(self) -> "PaperBasketInput":
+        symbols = [order.symbol for order in self.orders]
+        if len(set(symbols)) != len(symbols):
+            raise ValueError("basket contains a duplicate symbol")
+        ids = [order.instrument_id for order in self.orders if order.instrument_id]
+        if len(set(ids)) != len(ids):
+            raise ValueError("basket contains a duplicate instrument_id")
+        if len({order.side for order in self.orders}) != 1:
+            raise ValueError("basket members must have one shared side")
+        return self
+
+
 class PaperOrderRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fund_id: UUID
     book_id: UUID
-    action: Literal[DirectiveAction.PLACE_ORDER] = DirectiveAction.PLACE_ORDER
+    action: Literal[
+        DirectiveAction.PLACE_ORDER, DirectiveAction.PLACE_BASKET
+    ] = DirectiveAction.PLACE_ORDER
     order: PaperOrderInput | None = None
+    basket: PaperBasketInput | None = None
     query: str | None = Field(default=None, min_length=1, max_length=500)
 
     @field_validator("query")
@@ -181,8 +250,14 @@ class PaperOrderRequest(BaseModel):
 
     @model_validator(mode="after")
     def _one_instruction_source(self) -> "PaperOrderRequest":
-        if (self.order is None) == (self.query is None):
-            raise ValueError("provide exactly one of order or query")
+        if sum(
+            source is not None for source in (self.order, self.basket, self.query)
+        ) != 1:
+            raise ValueError("provide exactly one of order, basket, or query")
+        if self.order is not None and self.action is not DirectiveAction.PLACE_ORDER:
+            raise ValueError("order requires PLACE_ORDER")
+        if self.basket is not None and self.action is not DirectiveAction.PLACE_BASKET:
+            raise ValueError("basket requires PLACE_BASKET")
         return self
 
 
@@ -251,6 +326,7 @@ class ConditionalRuleOutcome(BaseModel):
     last_guard_code: str | None = None
     last_error_code: str | None = None
     status_message: str | None = None
+    effective_expires_at: datetime | None = None
 
 
 class PaperOrderWorkflowStatusResponse(BaseModel):
@@ -301,6 +377,20 @@ _WON_PRICE_PATTERN = re.compile(rf"(?<![\d,])({_GROUPED_INTEGER})\s*원")
 _LIMIT_PRICE_PATTERN = re.compile(rf"지정가(?:는|로|에)?\s*({_GROUPED_INTEGER})\s*원?")
 _MARKET_PATTERN = re.compile(r"시장가(?:로|에)?")
 _LIMIT_MARKER_PATTERN = re.compile(r"지정가(?:는|로|에)?")
+_BASKET_NOTIONAL_PATTERN = re.compile(
+    rf"(?<![\d,])(?P<amount>{_GROUPED_INTEGER})\s*만\s*원\s*씩(?![가-힣A-Za-z0-9])"
+)
+_BASKET_NAME_PATTERN = re.compile(r"[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]*")
+_BASKET_QUANTITY_MEMBER_PATTERN = re.compile(
+    rf"(?P<symbol>(?:[0-9A-Za-z]{{6}}|[가-힣A-Za-z]"
+    rf"[가-힣A-Za-z0-9&+._\- ]{{0,79}}?))\s+"
+    rf"(?P<quantity>{_GROUPED_INTEGER})\s*(?:주식|주)"
+)
+_BASKET_MEMBER_NOTIONAL_PATTERN = re.compile(
+    rf"\s*(?P<symbol>(?:[0-9A-Za-z]{{6}}|[가-힣A-Za-z]"
+    rf"[가-힣A-Za-z0-9&+._\- ]{{0,79}}?))\s+"
+    rf"(?P<amount>{_GROUPED_INTEGER})\s*만\s*원(?:\s*어치)?\s*"
+)
 
 # Aggregate directives are deliberately full-sentence grammars.  A substring
 # such as "취소" or "전량 매도" inside a question, negation, or audit request
@@ -360,6 +450,226 @@ def _natural_name(query: str, quantity_match: re.Match[str]) -> str:
     return candidate
 
 
+def _basket_payload_from_query(normalized: str) -> dict[str, Any] | None:
+    """Parse ``A, B 100만원씩 매수`` without guessing any missing member.
+
+    This intentionally accepts one narrow allocation grammar.  It has no
+    quantity, price, limit, or sell interpretation: each named member is a
+    market BUY capped at the exact KRW amount and is later catalog-resolved by
+    the authenticated BFF.
+    """
+
+    amounts = list(_BASKET_NOTIONAL_PATTERN.finditer(normalized))
+    buys = list(_BUY_PATTERN.finditer(normalized))
+    sells = list(_SELL_PATTERN.finditer(normalized))
+    if len(amounts) != 1 or len(buys) != 1 or sells:
+        return None
+    if _QUANTITY_PATTERN.search(normalized) or _WON_PRICE_PATTERN.search(normalized):
+        return None
+    if _LIMIT_MARKER_PATTERN.search(normalized):
+        return None
+    market_markers = list(_MARKET_PATTERN.finditer(normalized))
+    if len(market_markers) > 1:
+        return None
+    amount = amounts[0]
+    action = buys[0]
+    if action.start() < amount.end():
+        return None
+
+    list_text = normalized[: amount.start()].strip(" ,")
+    # A direct browser query has no Discord transport metadata.  Do not
+    # silently discard arbitrary leading prose; only this narrow noun wrapper
+    # is presentation-only.
+    list_text = re.sub(r"^(?:종목|주식)\s+", "", list_text)
+    if not list_text or "," not in list_text:
+        return None
+    raw_names = [part.strip() for part in list_text.split(",")]
+    if not 2 <= len(raw_names) <= 20 or any(not name for name in raw_names):
+        return None
+    names: list[str] = []
+    for index, raw_name in enumerate(raw_names):
+        name = raw_name
+        if index == len(raw_names) - 1:
+            name = name.rstrip("을를").strip()
+        if (
+            not name
+            or len(name) > 80
+            or _BASKET_NAME_PATTERN.fullmatch(name) is None
+        ):
+            return None
+        canonical_code = name.upper()
+        names.append(
+            canonical_code if _KRX_TRADING_SYMBOL.fullmatch(canonical_code) else name
+        )
+    if len(set(names)) != len(names):
+        raise ClarificationRequired("duplicate_instrument")
+
+    consumed_spans = [
+        (0, amount.start()),
+        amount.span(),
+        action.span(),
+        *(match.span() for match in market_markers),
+    ]
+    remaining = list(normalized)
+    for start, end in consumed_spans:
+        remaining[start:end] = " " * (end - start)
+    residual = " ".join("".join(remaining).strip(" ,.!?").split())
+    if residual or "?" in normalized:
+        return None
+    notional_krw = Decimal(amount.group("amount").replace(",", "")) * Decimal(
+        10_000
+    )
+    basket = PaperBasketInput(
+        orders=tuple(
+            PaperBasketOrderInput(symbol=name, notional_krw=notional_krw)
+            for name in names
+        )
+    )
+    return _basket_payload(basket)
+
+
+def _member_notional_basket_payload_from_query(
+    normalized: str,
+) -> dict[str, Any] | None:
+    """Parse ``A 100만원, B 50만원 시장가 매수`` without allocation inference."""
+
+    if (
+        _BASKET_NOTIONAL_PATTERN.search(normalized)
+        or _QUANTITY_PATTERN.search(normalized)
+        or _LIMIT_MARKER_PATTERN.search(normalized)
+    ):
+        return None
+    buys = list(_BUY_PATTERN.finditer(normalized))
+    sells = list(_SELL_PATTERN.finditer(normalized))
+    market_markers = list(_MARKET_PATTERN.finditer(normalized))
+    if len(buys) != 1 or sells or len(market_markers) > 1:
+        return None
+    action = buys[0]
+    list_end = min(
+        action.start(),
+        market_markers[0].start() if market_markers else action.start(),
+    )
+    list_text = normalized[:list_end].strip(" ,")
+    list_text = re.sub(r"^(?:종목|주식)\s+", "", list_text)
+    if not list_text or "," not in list_text:
+        return None
+
+    orders: list[PaperBasketOrderInput] = []
+    symbols: set[str] = set()
+    cursor = 0
+    while cursor < len(list_text):
+        member = _BASKET_MEMBER_NOTIONAL_PATTERN.match(list_text, cursor)
+        if member is None:
+            return None
+        symbol = member.group("symbol").strip()
+        canonical_code = symbol.upper()
+        symbol = (
+            canonical_code if _KRX_TRADING_SYMBOL.fullmatch(canonical_code) else symbol
+        )
+        if symbol in symbols:
+            raise ClarificationRequired("duplicate_instrument")
+        symbols.add(symbol)
+        orders.append(
+            PaperBasketOrderInput(
+                symbol=symbol,
+                notional_krw=(
+                    Decimal(member.group("amount").replace(",", ""))
+                    * Decimal(10_000)
+                ),
+            )
+        )
+        cursor = member.end()
+        if cursor == len(list_text):
+            break
+        separator = re.match(r",\s*", list_text[cursor:])
+        if separator is None:
+            return None
+        cursor += separator.end()
+        if cursor == len(list_text):
+            return None
+    if not 2 <= len(orders) <= 20:
+        return None
+
+    consumed_spans = [
+        (0, list_end),
+        action.span(),
+        *(match.span() for match in market_markers),
+    ]
+    remaining = list(normalized)
+    for start, end in consumed_spans:
+        remaining[start:end] = " " * (end - start)
+    residual = " ".join("".join(remaining).strip(" ,.!?").split())
+    if residual or "?" in normalized:
+        return None
+    return _basket_payload(PaperBasketInput(orders=tuple(orders)))
+
+
+def _quantity_basket_payload_from_query(normalized: str) -> dict[str, Any] | None:
+    """Parse ``A 3주, B 2주 시장가 매수/매도`` as one uniform-side basket."""
+
+    if _BASKET_NOTIONAL_PATTERN.search(normalized) or _WON_PRICE_PATTERN.search(
+        normalized
+    ):
+        return None
+    buys = list(_BUY_PATTERN.finditer(normalized))
+    sells = list(_SELL_PATTERN.finditer(normalized))
+    market_markers = list(_MARKET_PATTERN.finditer(normalized))
+    if (
+        bool(buys) == bool(sells)
+        or len(buys) + len(sells) != 1
+        or len(market_markers) > 1
+        or _LIMIT_MARKER_PATTERN.search(normalized)
+    ):
+        return None
+    action = buys[0] if buys else sells[0]
+    side = OrderSide.BUY if buys else OrderSide.SELL
+    list_end = min(
+        action.start(),
+        market_markers[0].start() if market_markers else action.start(),
+    )
+    list_text = normalized[:list_end].strip(" ,")
+    list_text = re.sub(r"^(?:종목|주식)\s+", "", list_text)
+    if not list_text or "," not in list_text:
+        return None
+    raw_members = [part.strip() for part in list_text.split(",")]
+    if not 2 <= len(raw_members) <= 20 or any(not member for member in raw_members):
+        return None
+    orders: list[PaperBasketOrderInput] = []
+    symbols: set[str] = set()
+    for raw_member in raw_members:
+        member = _BASKET_QUANTITY_MEMBER_PATTERN.fullmatch(raw_member)
+        if member is None:
+            return None
+        symbol = member.group("symbol").strip()
+        canonical_code = symbol.upper()
+        symbol = (
+            canonical_code if _KRX_TRADING_SYMBOL.fullmatch(canonical_code) else symbol
+        )
+        if symbol in symbols:
+            raise ClarificationRequired("duplicate_instrument")
+        symbols.add(symbol)
+        orders.append(
+            PaperBasketOrderInput(
+                symbol=symbol,
+                quantity=Decimal(member.group("quantity").replace(",", "")),
+                side=side,
+            )
+        )
+
+    consumed_spans = [
+        (0, list_end),
+        action.span(),
+        *(match.span() for match in market_markers),
+    ]
+    remaining = list(normalized)
+    for start, end in consumed_spans:
+        remaining[start:end] = " " * (end - start)
+    residual = " ".join("".join(remaining).strip(" ,.!?").split())
+    if residual or "?" in normalized:
+        return None
+    return _basket_payload(PaperBasketInput(orders=tuple(orders)))
+
+
 def parse_user_order_query(query: str) -> tuple[DirectiveAction, dict[str, Any]]:
     """Parse a narrow Korean order grammar; ambiguity is never guessed by an LLM."""
 
@@ -371,6 +681,18 @@ def parse_user_order_query(query: str) -> tuple[DirectiveAction, dict[str, Any]]
         return DirectiveAction.SELL_ALL, {}
     if _CANCEL_ALL_PATTERN.fullmatch(normalized):
         return DirectiveAction.CANCEL_ALL, {}
+
+    basket_payload = _basket_payload_from_query(normalized)
+    if basket_payload is not None:
+        return DirectiveAction.PLACE_BASKET, basket_payload
+    member_notional_basket_payload = _member_notional_basket_payload_from_query(
+        normalized
+    )
+    if member_notional_basket_payload is not None:
+        return DirectiveAction.PLACE_BASKET, member_notional_basket_payload
+    quantity_basket_payload = _quantity_basket_payload_from_query(normalized)
+    if quantity_basket_payload is not None:
+        return DirectiveAction.PLACE_BASKET, quantity_basket_payload
 
     buy_matches = list(_BUY_PATTERN.finditer(normalized))
     sell_matches = list(_SELL_PATTERN.finditer(normalized))
@@ -489,6 +811,33 @@ def _order_payload(order: PaperOrderInput) -> dict[str, Any]:
     }
 
 
+def _basket_payload(basket: PaperBasketInput) -> dict[str, Any]:
+    return {
+        "orders": [
+            {
+                "instrument_id": (
+                    str(order.instrument_id) if order.instrument_id else None
+                ),
+                "symbol": order.symbol,
+                "notional_krw": (
+                    _decimal_text(order.notional_krw)
+                    if order.notional_krw is not None
+                    else None
+                ),
+                "quantity": (
+                    _decimal_text(order.quantity)
+                    if order.quantity is not None
+                    else None
+                ),
+                "side": order.side.value,
+                "order_type": order.order_type.value,
+                "time_in_force": order.time_in_force,
+            }
+            for order in basket.orders
+        ]
+    }
+
+
 def _idempotency_key(value: str | None) -> str:
     key = (value or "").strip()
     if not key:
@@ -594,6 +943,32 @@ def _submit(
             }
         )
         normalized_payload = _order_payload(normalized_order)
+    elif action == DirectiveAction.PLACE_BASKET:
+        basket = PaperBasketInput.model_validate(payload)
+        resolved_ids: set[str] = set()
+        normalized_orders: list[PaperBasketOrderInput] = []
+        for order in basket.orders:
+            resolved = resolve_active_trading_instrument(
+                order.symbol,
+                str(order.instrument_id) if order.instrument_id is not None else None,
+            )
+            resolved_id = str(resolved["instrument_id"])
+            if resolved_id in resolved_ids:
+                raise HTTPException(
+                    status_code=422, detail="paper_basket_duplicate_instrument"
+                )
+            resolved_ids.add(resolved_id)
+            normalized_orders.append(
+                order.model_copy(
+                    update={
+                        "instrument_id": UUID(resolved_id),
+                        "symbol": resolved["symbol"],
+                    }
+                )
+            )
+        normalized_payload = _basket_payload(
+            PaperBasketInput(orders=tuple(normalized_orders))
+        )
     else:
         normalized_payload = {}
     payload_hash = payload_sha256(normalized_payload)
@@ -664,6 +1039,28 @@ def submit_verified_paper_directive(
         if instrument_mention is None or "symbol" in normalized_payload:
             raise HTTPException(status_code=422, detail="paper_order_payload_invalid")
         normalized_payload["symbol"] = instrument_mention
+    elif directive_action is DirectiveAction.PLACE_BASKET:
+        orders = normalized_payload.get("orders")
+        if (
+            not isinstance(orders, list)
+            or set(normalized_payload) != {"orders"}
+        ):
+            raise HTTPException(status_code=422, detail="paper_order_payload_invalid")
+        translated_orders: list[dict[str, Any]] = []
+        for order in orders:
+            if not isinstance(order, dict):
+                raise HTTPException(
+                    status_code=422, detail="paper_order_payload_invalid"
+                )
+            translated = dict(order)
+            instrument_mention = translated.pop("instrument_mention", None)
+            if instrument_mention is None or "symbol" in translated:
+                raise HTTPException(
+                    status_code=422, detail="paper_order_payload_invalid"
+                )
+            translated["symbol"] = instrument_mention
+            translated_orders.append(translated)
+        normalized_payload = {"orders": translated_orders}
     elif normalized_payload:
         raise HTTPException(status_code=422, detail="paper_order_payload_invalid")
     return _submit(
@@ -736,7 +1133,11 @@ def place_paper_order(
         action, payload = (
             parse_user_order_query(request.query)
             if request.query is not None
-            else (DirectiveAction.PLACE_ORDER, _order_payload(request.order))
+            else (
+                (DirectiveAction.PLACE_ORDER, _order_payload(request.order))
+                if request.order is not None
+                else (DirectiveAction.PLACE_BASKET, _basket_payload(request.basket))
+            )
         )
     except ClarificationRequired as exc:
         raise HTTPException(
@@ -883,6 +1284,28 @@ def _conditional_rule_outcomes(record: Any) -> list[ConditionalRuleOutcome] | No
         return None
     digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:48]
     prefix = f"conditional-set:{digest}:"
+    compound_rule_ids: set[str] = set()
+    immediate_order_request_id = str(
+        getattr(record, "order_request_id", "") or ""
+    ).strip()
+    if immediate_order_request_id:
+        try:
+            bundle = paper_order_bundle_repository().get_by_immediate_order_request(
+                user_id=record.user_id,
+                immediate_order_request_id=immediate_order_request_id,
+            )
+            if bundle is not None and bundle.conditional_rule_id:
+                compound_rule_ids.add(str(bundle.conditional_rule_id))
+        except (PaperOrderBundleError, ValueError):
+            # This auxiliary read must not make the request status unavailable;
+            # direct conditional request links are still reported below.
+            logger.warning(
+                "compound bundle lookup failed request=%s", immediate_order_request_id
+            )
+        except Exception:  # pragma: no cover - status endpoint remains readable
+            logger.exception(
+                "compound bundle lookup failed request=%s", immediate_order_request_id
+            )
     try:
         rules = conditional_rule_repository().list_for_user(record.user_id)
     except ConditionalRuleUnavailable:
@@ -893,7 +1316,11 @@ def _conditional_rule_outcomes(record: Any) -> list[ConditionalRuleOutcome] | No
     linked = [
         rule
         for rule in rules
-        if rule.client_request_id == base or rule.client_request_id.startswith(prefix)
+        if (
+            rule.client_request_id == base
+            or rule.client_request_id.startswith(prefix)
+            or str(rule.rule_id) in compound_rule_ids
+        )
     ]
     if not linked:
         return None
@@ -907,6 +1334,12 @@ def _conditional_rule_outcomes(record: Any) -> list[ConditionalRuleOutcome] | No
             status_message=conditional_status_message(
                 last_error_code=rule.last_error_code,
                 last_guard_code=rule.last_guard_code,
+                state=rule.state,
+            ),
+            effective_expires_at=getattr(
+                rule,
+                "effective_expires_at",
+                None,
             ),
         )
         for rule in linked
@@ -1004,6 +1437,8 @@ __all__ = [
     "OrderSide",
     "OrderType",
     "PaperAggregateRequest",
+    "PaperBasketInput",
+    "PaperBasketOrderInput",
     "PaperOrderInput",
     "PaperOrderRequest",
     "PaperOrderWorkflowStatusResponse",

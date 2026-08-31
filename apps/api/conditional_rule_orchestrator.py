@@ -13,6 +13,7 @@ import hashlib
 from collections.abc import Mapping
 from datetime import timedelta, timezone
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import HTTPException
 
@@ -26,6 +27,7 @@ try:
         extract_code,
         should_ask,
     )
+    from .conditional_rule_language import condition_overview
     from .conditional_rule_status import build_conditional_execution_status
     from .conditional_rule_workflow import (
         ConditionalRuleConflict,
@@ -62,6 +64,7 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
         extract_code,
         should_ask,
     )
+    from conditional_rule_language import condition_overview  # type: ignore[no-redef]
     from conditional_rule_status import (
         build_conditional_execution_status,  # type: ignore[no-redef]
     )
@@ -104,6 +107,14 @@ _MAX_RULES_PER_REQUEST = 4
 
 def _reject(code: str) -> None:
     raise PaperOrderOrchestrationRejected(code)
+
+
+class OcoExitBracketInvalid(ValueError):
+    """A pair marked as OCO is not a safe existing-position exit bracket."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 def _validate_task_states(
@@ -152,13 +163,19 @@ def _clarification_message(
 
 def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[str, Any]:
     spec = record.spec
+    overview = condition_overview(spec)
+    time_window = ", ".join(
+        str(value) for value in overview.get("time_window_kst", [])
+    )
+    trailing_stop = overview.get("trailing_stop")
     sizing = spec.action.sizing
     sizing_text = (
         "전량"
         if sizing.type.value == "ALL"
+        else f"최대 {sizing.value:,}원어치 (실행 시 수량 산정)"
+        if sizing.type.value == "NOTIONAL_KRW"
         else f"{sizing.value} ({sizing.type.value})"
     )
-    timeframe_fallback = "TIMEFRAME_FALLBACK_3M_TO_5M" in assumptions
     expiry_kst = spec.expires_at.astimezone(timezone(timedelta(hours=9)))
     trigger_at = relative_time_trigger_at(spec.condition)
     trigger_kst = (
@@ -167,13 +184,6 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
         else None
     )
     user_message = (
-        (
-            "요청한 3분봉 기능이 없어 5분봉 완성봉 기준으로 대체했습니다. "
-            "이 안내는 조건주문 요약에도 기록됩니다. "
-        )
-        if timeframe_fallback
-        else ""
-    ) + (
         (
             "PAPER 예약 조건주문이 ACTIVE 전환되었습니다. "
             f"실행 기준 시각은 {trigger_kst:%Y-%m-%d %H:%M:%S} KST이며, "
@@ -192,7 +202,25 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
         )
         + ", 1회 실행 규칙입니다. 조건 충족 시 deterministic guard를 통과한 "
         "경우에만 PAPER OMS로 제출됩니다. "
-        f"추적 만료는 {expiry_kst:%Y-%m-%d %H:%M} KST입니다."
+        + (
+            (
+                f"평가 기준은 {spec.evaluation.primary_timeframe.value} 완성봉이고, "
+                f"참조 봉은 {', '.join(overview['referenced_timeframes']) or spec.evaluation.primary_timeframe.value}입니다. "
+                "느린 봉은 기준 봉 마감 시점까지 확정된 값만 사용합니다. "
+            )
+            if spec.evaluation.clock.value == "BAR_CLOSE"
+            else "평가 기준은 신선한 현재가입니다. "
+        )
+        + (
+            f"실행 시간창(KST)은 {time_window}입니다. " if time_window else ""
+        )
+        + (
+            "트레일링 기준 최고가는 ACTIVE 이후 받은 신선한 현재가로만 DB에 보존하며, "
+            "늦게 도착한 과거 시세는 무시합니다. "
+            if trailing_stop is not None
+            else ""
+        )
+        + f"추적 만료는 {expiry_kst:%Y-%m-%d %H:%M} KST입니다."
     )
     return {
         "schema_version": RESULT_SCHEMA_VERSION,
@@ -222,17 +250,10 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
             "expires_at": spec.expires_at.isoformat(),
             "repeat_policy": "ONCE",
             "trigger_at": trigger_at.isoformat() if trigger_at is not None else None,
-            **(
-                {
-                    "timeframe_fallback": {
-                        "requested": "3M",
-                        "used": "5M",
-                        "reason": "3M_UNSUPPORTED",
-                    }
-                }
-                if timeframe_fallback
-                else {}
+            "oco_policy": (
+                "ONE_CANCELS_OTHER" if spec.oco_group_id is not None else None
             ),
+            "condition_overview": overview,
         },
         "assumptions": list(assumptions),
         "user_message": user_message,
@@ -252,6 +273,41 @@ def _candidate_batch(
     if len(batch) > _MAX_RULES_PER_REQUEST:
         _reject("TOO_MANY_CONDITIONAL_ACTIONS")
     return batch
+
+
+def _bind_oco_exit_bracket(
+    batch: tuple[ConditionalRuleCandidate, ...], *, order_request_id: str
+) -> tuple[ConditionalRuleCandidate, ...]:
+    """Bind a natural-language exit bracket to one server-derived OCO group.
+
+    Hermes may say that two exits are alternatives, but it must never mint an
+    identifier that can accidentally join a rule from another request.  This
+    boundary validates the paired sell intent and derives the UUID from the
+    admitted request only after the user/Fund/Book scope is durable.
+    """
+
+    bracket_modes = [item.oco_mode for item in batch]
+    if not any(bracket_modes):
+        return batch
+    if len(batch) != 2 or any(mode != "EXIT_BRACKET" for mode in bracket_modes):
+        raise OcoExitBracketInvalid("OCO_EXIT_BRACKET_REQUIRES_EXACTLY_TWO_LEGS")
+    if any(item.oco_group_id is not None for item in batch):
+        raise OcoExitBracketInvalid("OCO_GROUP_ID_SERVER_MANAGED")
+    first, second = batch
+    if first.action.side.value != "SELL" or second.action.side.value != "SELL":
+        raise OcoExitBracketInvalid("OCO_EXIT_BRACKET_SELL_ONLY")
+    if first.symbol.strip().upper() != second.symbol.strip().upper():
+        raise OcoExitBracketInvalid("OCO_EXIT_BRACKET_SYMBOL_MISMATCH")
+    if first.action.sizing != second.action.sizing:
+        raise OcoExitBracketInvalid("OCO_EXIT_BRACKET_SIZING_MISMATCH")
+    if first.expires_at != second.expires_at:
+        raise OcoExitBracketInvalid("OCO_EXIT_BRACKET_EXPIRY_MISMATCH")
+    group_id = uuid5(
+        NAMESPACE_URL, f"hgfinance:conditional-oco-exit:{order_request_id}"
+    )
+    return tuple(
+        item.model_copy(update={"oco_group_id": group_id}) for item in batch
+    )
 
 
 def _rule_client_request_id(base: str, *, index: int, count: int) -> str:
@@ -288,6 +344,10 @@ def _active_batch_result(
         _active_result(record, assumptions=item_assumptions)
         for record, item_assumptions in zip(records, assumptions, strict=True)
     ]
+    oco_group_ids = {record.spec.oco_group_id for record in records}
+    is_oco_exit_bracket = (
+        len(records) == 2 and len(oco_group_ids) == 1 and None not in oco_group_ids
+    )
     return {
         "schema_version": RESULT_SCHEMA_VERSION,
         "binding": True,
@@ -296,11 +356,26 @@ def _active_batch_result(
         "rule_ids": [record.rule_id for record in records],
         "state": "ACTIVE",
         "rules": [item["summary"] for item in items],
+        **(
+            {
+                "oco": {
+                    "policy": "ONE_CANCELS_OTHER",
+                    "leg_count": 2,
+                }
+            }
+            if is_oco_exit_bracket
+            else {}
+        ),
         "assumptions": [item["assumptions"] for item in items],
         "user_message": (
-            f"서로 독립적인 PAPER 조건주문 {len(records)}개는 접수 처리 시점에 "
-            "ACTIVE 전환이 완료되었습니다. 이 문구는 생성 영수증이며 현재 상태 "
-            "조회 결과가 아닙니다. "
+            (
+                "PAPER 익절·손절 OCO 브래킷 2개가 원자적으로 ACTIVE 전환되었습니다. "
+                "한 다리가 PAPER OMS 제출 슬롯을 획득하면 다른 다리는 취소되어 "
+                "같은 보유분을 중복 매도하지 않습니다. "
+                if is_oco_exit_bracket
+                else f"서로 독립적인 PAPER 조건주문 {len(records)}개는 접수 처리 시점에 ACTIVE 전환이 완료되었습니다. "
+            )
+            + "이 문구는 생성 영수증이며 현재 상태 조회 결과가 아닙니다. "
             "각 규칙은 1회만 실행되며, 각 조건 충족 시 deterministic guard를 "
             "통과한 경우에만 PAPER OMS로 제출됩니다. 규칙별 추적 만료 시각은 "
             "요약의 expires_at에 기록했습니다."
@@ -392,6 +467,32 @@ def process_user_conditional_paper_rule(
         raise PaperOrderOrchestrationRejected(
             "CONDITIONAL_INTERPRETATION_REPLAY_CONFLICT"
         ) from exc
+
+    try:
+        batch = _bind_oco_exit_bracket(
+            batch, order_request_id=admission.order_request_id
+        )
+    except OcoExitBracketInvalid as exc:
+        orders.mark_outcome(
+            admission.order_request_id,
+            state="CLARIFICATION_REQUIRED",
+            clarification_code=exc.code,
+        )
+        return {
+            "schema_version": RESULT_SCHEMA_VERSION,
+            "binding": False,
+            "mode": "PAPER",
+            "rule_active": False,
+            "reason_codes": [exc.code],
+            "awaiting_user_reply": should_ask(
+                (exc.code,), source=ClarificationSource.SEMANTIC_REJECTION
+            ),
+            "user_message": _clarification_message(
+                (exc.code,),
+                source=ClarificationSource.SEMANTIC_REJECTION,
+                raw_instruction=admission.raw_instruction,
+            ),
+        }
 
     try:
         # Anchor default expiry to durable admission time. Replaying the exact
@@ -514,20 +615,32 @@ def process_user_conditional_paper_rule(
                     parser_source=source,
                 )
             )
-        activated: list[Any] = []
-        for rule in created:
-            if rule.state is RuleState.PENDING_CONFIRMATION:
-                rule = rules.activate(
-                    rule.rule_id,
-                    user_id=admission.user_id,
-                    confirmation_sha256=rule.spec_sha256,
-                )
-            elif rule.state is not RuleState.ACTIVE:
-                raise ConditionalRuleConflict(
-                    "conditional rule is not immediately activatable from "
-                    f"{rule.state.value}"
-                )
-            activated.append(rule)
+        oco_group_ids = {rule.spec.oco_group_id for rule in created}
+        is_oco_exit_bracket = (
+            len(created) == 2
+            and len(oco_group_ids) == 1
+            and None not in oco_group_ids
+        )
+        if is_oco_exit_bracket:
+            activated = rules.activate_group(
+                tuple((rule.rule_id, rule.spec_sha256) for rule in created),
+                user_id=admission.user_id,
+            )
+        else:
+            activated = []
+            for rule in created:
+                if rule.state is RuleState.PENDING_CONFIRMATION:
+                    rule = rules.activate(
+                        rule.rule_id,
+                        user_id=admission.user_id,
+                        confirmation_sha256=rule.spec_sha256,
+                    )
+                elif rule.state is not RuleState.ACTIVE:
+                    raise ConditionalRuleConflict(
+                        "conditional rule is not immediately activatable from "
+                        f"{rule.state.value}"
+                    )
+                activated.append(rule)
     except (ConditionalRuleUnavailable, ConditionalRuleConflict) as exc:
         compensated = (
             _cancel_created_rules(rules, created, user_id=admission.user_id)

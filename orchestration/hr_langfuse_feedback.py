@@ -147,7 +147,9 @@ def build_hr_langfuse_evaluation(
     elif "LANGFUSE_OBSERVABILITY_UNAVAILABLE" in findings:
         decision = "REVIEW_REQUIRED"
     else:
-        decision = "IMPROVEMENT_CANDIDATE"
+        # A Workforce window proves that operations deserve review.  It does
+        # not, by itself, prove that a Skill or prompt change is the remedy.
+        decision = "REVIEW_WORTHY"
 
     window_start = getattr(observability, "window_start", None)
     window_end = getattr(observability, "window_end", None)
@@ -186,6 +188,12 @@ def build_hr_langfuse_evaluation(
         "max_error_rate": max_error_rate,
         "max_retry_rate": max_retry_rate,
         "langfuse_queries": _safe_int(getattr(observability, "langfuse_queries", 0)) or 0,
+        "review_class": (
+            "PERFORMANCE_EVENT"
+            if "LATENCY_ABOVE_THRESHOLD" in findings
+            else "QUALITY_OR_WORKFLOW_REVIEW"
+        ),
+        "sample_count": 1,
         "raw_payloads_sent": False,
     }
     return EvaluationResult(

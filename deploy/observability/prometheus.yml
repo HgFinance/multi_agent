@@ -9,6 +9,10 @@
 
 global:
   scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/gpu-resource-savings.yml
 
 scrape_configs:
   # 배선 확인용. 앱도 GPU 도 없이 즉시 그래프가 그려지는 유일한 타겟이라

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, DivisionByZero, InvalidOperation, localcontext
 from typing import Mapping
 
@@ -34,6 +34,7 @@ from .semantic import (
 ZERO = Decimal("0")
 ONE = Decimal("1")
 HUNDRED = Decimal("100")
+KST = timezone(timedelta(hours=9))
 
 
 class EvaluationError(RuntimeError):
@@ -499,7 +500,10 @@ def _evaluate(node: ExpressionNode, frame: EvaluationFrame) -> Decimal | bool:
         return node.value  # type: ignore[return-value]
     if node.type is ExpressionType.TIME:
         if node.field != "OBSERVED_AT_EPOCH_SECONDS":
-            raise EvaluationError("TIME_FIELD_INVALID", f"unsupported {node.field}")
+            if node.field != "KST_SECONDS_SINCE_MIDNIGHT":
+                raise EvaluationError("TIME_FIELD_INVALID", f"unsupported {node.field}")
+            local = frame.observed_at.astimezone(KST)
+            return Decimal(local.hour * 3600 + local.minute * 60 + local.second)
         return Decimal(str(frame.observed_at.timestamp()))
     if node.type is ExpressionType.MARKET:
         try:
@@ -518,6 +522,11 @@ def _evaluate(node: ExpressionNode, frame: EvaluationFrame) -> Decimal | bool:
             ]
         except KeyError as exc:
             raise EvaluationError("INDICATOR_VALUE_MISSING", f"missing {node.name}") from exc
+    if node.type is ExpressionType.TRAILING_STOP:
+        raise EvaluationError(
+            "TRAILING_STOP_STATE_REQUIRED",
+            "trailing stop must be evaluated by the durable worker state store",
+        )
     if node.type is ExpressionType.ARITHMETIC:
         left = _numeric(_evaluate(node.left, frame), code="ARITHMETIC_TYPE_ERROR")  # type: ignore[arg-type]
         right = _numeric(_evaluate(node.right, frame), code="ARITHMETIC_TYPE_ERROR")  # type: ignore[arg-type]

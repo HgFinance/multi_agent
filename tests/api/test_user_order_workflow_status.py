@@ -491,6 +491,115 @@ def test_conditional_rule_failure_travels_with_the_completed_request(
     assert "MARKET_QUOTE_STALE" not in outcomes[0].status_message
 
 
+def test_compound_trailing_stop_failure_travels_with_its_immediate_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from apps.api import user_orders
+
+    record = SimpleNamespace(
+        order_request_id="77777777-7777-4777-8777-777777777777",
+        client_request_id="compound-buy-request-0001",
+        user_id=OWNER_ID,
+    )
+    rule = SimpleNamespace(
+        rule_id="b1a19294-d41b-43bc-9442-90cb1a6d4534",
+        client_request_id="derived-sell-rule-request",
+        state="CANCELLED",
+        last_execution_state=None,
+        last_guard_code=None,
+        last_error_code="ENTRY_POSITION_QUANTITY_MISMATCH",
+    )
+    monkeypatch.setattr(
+        user_orders,
+        "conditional_rule_repository",
+        lambda: SimpleNamespace(list_for_user=lambda _user: [rule]),
+    )
+    monkeypatch.setattr(
+        user_orders,
+        "paper_order_bundle_repository",
+        lambda: SimpleNamespace(
+            get_by_immediate_order_request=lambda **_kwargs: SimpleNamespace(
+                conditional_rule_id=rule.rule_id
+            )
+        ),
+    )
+
+    outcomes = user_orders._conditional_rule_outcomes(record)
+
+    assert outcomes is not None
+    assert len(outcomes) == 1
+    assert outcomes[0].state == "CANCELLED"
+    assert outcomes[0].last_error_code == "ENTRY_POSITION_QUANTITY_MISMATCH"
+    assert "자동 매도를 안전하게 중단" in str(outcomes[0].status_message)
+
+
+def test_expired_rule_status_says_that_no_more_paper_order_is_submitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from apps.api import user_orders
+
+    record = SimpleNamespace(
+        client_request_id="expired-condition-request-0001",
+        user_id=OWNER_ID,
+    )
+    rule = SimpleNamespace(
+        rule_id="b1a19294-d41b-43bc-9442-90cb1a6d4534",
+        client_request_id="expired-condition-request-0001",
+        state="EXPIRED",
+        last_execution_state=None,
+        last_guard_code=None,
+        last_error_code=None,
+        effective_expires_at=datetime(2026, 8, 29, 6, 30, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        user_orders,
+        "conditional_rule_repository",
+        lambda: SimpleNamespace(list_for_user=lambda _user: [rule]),
+    )
+
+    outcomes = user_orders._conditional_rule_outcomes(record)
+
+    assert outcomes is not None
+    assert outcomes[0].effective_expires_at == rule.effective_expires_at
+    assert "추가 PAPER 주문을 제출하지 않았습니다" in str(outcomes[0].status_message)
+
+
+def test_failed_rule_status_says_that_no_more_paper_order_is_submitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from apps.api import user_orders
+
+    record = SimpleNamespace(
+        client_request_id="blocked-condition-request-0001",
+        user_id=OWNER_ID,
+    )
+    rule = SimpleNamespace(
+        rule_id="b1a19294-d41b-43bc-9442-90cb1a6d4534",
+        client_request_id="blocked-condition-request-0001",
+        state="FAILED",
+        last_execution_state=None,
+        last_guard_code=None,
+        last_error_code=None,
+        effective_expires_at=None,
+    )
+    monkeypatch.setattr(
+        user_orders,
+        "conditional_rule_repository",
+        lambda: SimpleNamespace(list_for_user=lambda _user: [rule]),
+    )
+
+    outcomes = user_orders._conditional_rule_outcomes(record)
+
+    assert outcomes is not None
+    assert "안전하게 중단" in str(outcomes[0].status_message)
+
+
 def test_rule_lookup_failure_never_breaks_the_request_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

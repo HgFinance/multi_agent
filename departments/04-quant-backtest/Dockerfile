@@ -43,6 +43,9 @@ COPY departments/01-research/collectors/source_registry.py \
 # forward-confirmation sweep does; omitting them made the worker look healthy
 # while logging ModuleNotFoundError on every sweep.
 COPY departments/01-research/contracts ./departments/01-research/contracts
+# Shared read-only readiness coordination; use one implementation across
+# Research, Quant, Risk, and QA.
+COPY orchestration/readiness_cache.py ./orchestration/readiness_cache.py
 
 ENV PYTHONPATH=/app/departments/04-quant-backtest/pipeline:/app/departments/04-quant-backtest/contracts:/app/departments/01-research/contracts:/app/departments/01-research/collectors
 

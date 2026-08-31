@@ -1059,6 +1059,16 @@ class StrategyReportNotifier:
     def __init__(self, lab_root: Path, state_root: Path) -> None:
         self.lab_root = lab_root
         self.state_path = state_root / "sent.json"
+        try:
+            legacy_retry_seconds = float(
+                os.getenv("STRATEGY_DISCORD_LEGACY_RESOLUTION_RETRY_SECONDS", "60")
+            )
+        except ValueError:
+            legacy_retry_seconds = 60.0
+        self._legacy_resolution_retry_seconds = max(
+            30.0, min(legacy_retry_seconds, 900.0)
+        )
+        self._legacy_resolution_retry_at: dict[str, float] = {}
 
     def _state(self) -> dict[str, Any]:
         payload = _read_object(self.state_path)
@@ -1151,15 +1161,29 @@ class StrategyReportNotifier:
         for lab_path in sorted(path for path in labs_dir.iterdir() if path.is_dir()):
             current_lab_names.add(lab_path.name)
             signature = _lab_signature(lab_path)
-            if lab_signatures.get(lab_path.name) == signature:
+            previous_signature = lab_signatures.get(lab_path.name)
+            if previous_signature == signature:
                 scanned += int(lab_counts.get(lab_path.name) or 0)
                 continue
+            if previous_signature is not None and previous_signature != signature:
+                self._legacy_resolution_retry_at.pop(lab_path.name, None)
             request = _read_object(lab_path / "request.json")
             if not request or str(request.get("source") or "").casefold() not in {"discord", "web"}:
                 lab_signatures[lab_path.name] = signature
                 lab_counts[lab_path.name] = 0
                 state_dirty = True
                 continue
+            legacy_resolution_required = (
+                str(request.get("source") or "").casefold() == "discord"
+                and not str(request.get("discord_message_id") or "").strip()
+                and not str(request.get("request_id") or "")
+                .strip()
+                .startswith("discord:")
+            )
+            if legacy_resolution_required:
+                retry_at = self._legacy_resolution_retry_at.get(lab_path.name, 0.0)
+                if time.monotonic() < retry_at:
+                    continue
             correlation, recent_messages = _correlation(
                 request,
                 token=token,
@@ -1167,7 +1191,18 @@ class StrategyReportNotifier:
                 recent_messages=recent_messages,
             )
             if correlation is None:
+                if legacy_resolution_required:
+                    self._legacy_resolution_retry_at[lab_path.name] = (
+                        time.monotonic() + self._legacy_resolution_retry_seconds
+                    )
+                    _LOGGER.debug(
+                        "strategy-discord-report status=legacy_resolution_deferred "
+                        "lab_id=%s retry_seconds=%.1f",
+                        lab_path.name,
+                        self._legacy_resolution_retry_seconds,
+                    )
                 continue
+            self._legacy_resolution_retry_at.pop(lab_path.name, None)
             events = _events(lab_path / "events.jsonl")
             result_paths = sorted((lab_path / "results").glob("*.json"))
             decision_plan_ids: set[str] = set()

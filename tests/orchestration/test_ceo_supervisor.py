@@ -40,6 +40,7 @@ from orchestration.adapters.ceo_supervisor import (
     _recover_compact_ceo_synthesis,
     _remove_research_duplicate_section,
     _research_answer_is_complete,
+    _research_primary_template_child,
     _single_primary_passthrough_child,
     _synthesis_handoff_payload,
     _terminal_payload_mapping,
@@ -903,6 +904,113 @@ def test_research_answer_completeness_rejects_corrupted_synthesis() -> None:
 
     assert _research_answer_is_complete(complete)
     assert not _research_answer_is_complete(complete[:80] + '{"error":""}')
+
+
+def test_fast_research_primary_uses_one_deterministic_synthesis_card() -> None:
+    answer = (
+        "### 핵심 판단\n삼성전자 사업 방향을 확인했지만 투자 판단은 아닙니다.\n"
+        "### 긍정 근거\n1. 출처: https://news.example/positive\n"
+        "### 반대 근거\n1. 출처: https://news.example/counter\n"
+        "### 관찰할 촉매·무효화 조건\n공식 발표와 고객 인증을 관찰합니다.\n"
+        "### 자료 기준과 확인하지 못한 자료\n공식 원문은 확인하지 못했습니다."
+    )
+    state = SupervisorState(
+        "root",
+        (
+            ChildTaskState(
+                task_id="research",
+                profile="research-department",
+                status="done",
+                result=answer,
+                body=(
+                    "workflow_root_task_id=root\n"
+                    "workflow_role=primary\n"
+                    "analysis_mode=fast_advisory"
+                ),
+            ),
+        ),
+        root_body=(
+            "workflow_mode=analysis\n"
+            "origin=user-query\n"
+            "analysis_mode=fast_advisory"
+        ),
+        workflow_mode="analysis",
+        selected_primary_profiles=("research-department",),
+        root_is_user_query=True,
+    )
+
+    assert _research_primary_template_child(state) is not None
+    decision = decide_supervisor(state)
+    assert decision is not None
+    assert decision.action is SupervisorAction.SYNTHESIZE
+    assert decision.reason == "research_primary_template"
+    assert decision.parent_task_ids == ("research",)
+    assert decision.initial_status == "blocked"
+
+
+def test_fast_research_primary_preserves_explicit_unverified_answer() -> None:
+    answer = (
+        "### 핵심 판단\n공식 자료와 뉴스를 검증하지 못했습니다.\n"
+        "### 긍정 근거\n검증된 근거가 없습니다.\n"
+        "### 반대 근거\n검증된 반대 근거가 없습니다.\n"
+        "### 관찰할 촉매·무효화 조건\n공식 원문이 확인될 때 재검토합니다.\n"
+        "### 자료 기준과 확인하지 못한 자료\n뉴스 원문을 확인하지 못했습니다."
+    )
+    state = SupervisorState(
+        "root",
+        (
+            ChildTaskState(
+                task_id="research",
+                profile="research-department",
+                status="done",
+                result=answer,
+                body="workflow_root_task_id=root\nworkflow_role=primary",
+                metadata={"evidence_status": "unverified"},
+            ),
+        ),
+        root_body=(
+            "workflow_mode=analysis\n"
+            "origin=user-query\n"
+            "analysis_mode=fast_advisory"
+        ),
+        workflow_mode="analysis",
+        selected_primary_profiles=("research-department",),
+        root_is_user_query=True,
+    )
+
+    assert _research_primary_template_child(state) is not None
+
+
+def test_fast_research_primary_rejects_unsourced_answer_without_unverified_status() -> None:
+    answer = (
+        "### 핵심 판단\n확인했습니다.\n"
+        "### 긍정 근거\n근거를 정리합니다.\n"
+        "### 반대 근거\n반대 근거를 정리합니다.\n"
+        "### 관찰할 촉매·무효화 조건\n계속 관찰합니다.\n"
+        "### 자료 기준과 확인하지 못한 자료\n자료를 확인했습니다."
+    )
+    state = SupervisorState(
+        "root",
+        (
+            ChildTaskState(
+                task_id="research",
+                profile="research-department",
+                status="done",
+                result=answer,
+                body="workflow_root_task_id=root\nworkflow_role=primary",
+            ),
+        ),
+        root_body=(
+            "workflow_mode=analysis\n"
+            "origin=user-query\n"
+            "analysis_mode=fast_advisory"
+        ),
+        workflow_mode="analysis",
+        selected_primary_profiles=("research-department",),
+        root_is_user_query=True,
+    )
+
+    assert _research_primary_template_child(state) is None
 
 
 def test_hr_handoff_preserves_timeout_receipt_status_and_error() -> None:

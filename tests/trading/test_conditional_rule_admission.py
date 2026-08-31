@@ -114,6 +114,30 @@ def test_position_percent_is_recomputed_from_canonical_sellable_quantity() -> No
         _assert_confirmed_rule_quantity(_admission(spec, "21"), _Repository())
 
 
+def test_krw_notional_is_capped_against_trading_executable_quote() -> None:
+    spec = _spec(sizing_type="NOTIONAL_KRW", sizing_value="1000000")
+    instrument = SimpleNamespace(lot_size=Decimal("2"))
+    quote = SimpleNamespace(bid=Decimal("123000"), ask=Decimal("124000"))
+
+    # SELL uses the Trading-owned executable bid: floor(1,000,000 / 123,000)
+    # to the configured two-share lot is 8 shares.
+    _assert_confirmed_rule_quantity(
+        _admission(spec, "8"),
+        _Repository(),
+        instrument=instrument,
+        trusted_quote=quote,
+    )
+    with pytest.raises(DirectiveServiceError) as raised:
+        _assert_confirmed_rule_quantity(
+            _admission(spec, "10"),
+            _Repository(),
+            instrument=instrument,
+            trusted_quote=quote,
+        )
+
+    assert raised.value.code == "TRADING_CONDITIONAL_RULE_QUANTITY_MISMATCH"
+
+
 def test_confirmed_limit_price_is_passed_to_the_paper_directive() -> None:
     base = _spec(sizing_type="FIXED_SHARES", sizing_value="1")
     spec = ConditionalRuleSpec.model_validate(

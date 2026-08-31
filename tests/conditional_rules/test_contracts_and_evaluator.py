@@ -120,6 +120,100 @@ def test_explicit_limit_action_preserves_exact_krw_price() -> None:
         )
 
 
+def test_trailing_stop_is_a_quote_only_existing_position_sell_rule() -> None:
+    spec = rule(
+        {
+            "type": "TRAILING_STOP",
+            "parameters": {"drawdown": "0.03", "activation_return": "0.02"},
+        },
+        action={"side": "SELL", "sizing": {"type": "ALL"}},
+        evaluation={"clock": "QUOTE"},
+    )
+
+    assert validate_rule_spec(spec) is spec
+
+    with pytest.raises(RuleSemanticError) as buy_rejected:
+        validate_rule_spec(
+            rule(
+                {"type": "TRAILING_STOP", "parameters": {"DRAWDOWN": "0.03"}},
+                evaluation={"clock": "QUOTE"},
+            )
+        )
+    assert buy_rejected.value.code == "TRAILING_STOP_SELL_ONLY"
+
+    with pytest.raises(RuleSemanticError) as bar_rejected:
+        validate_rule_spec(
+            rule(
+                {"type": "TRAILING_STOP", "parameters": {"DRAWDOWN": "0.03"}},
+                action={"side": "SELL", "sizing": {"type": "ALL"}},
+            )
+        )
+    assert bar_rejected.value.code == "TRAILING_STOP_REQUIRES_QUOTE"
+
+
+def test_trailing_stop_rejects_unsafe_parameters_and_boolean_composition() -> None:
+    with pytest.raises(RuleSemanticError) as invalid_parameter:
+        validate_rule_spec(
+            rule(
+                {"type": "TRAILING_STOP", "parameters": {"DRAWDOWN": "1"}},
+                action={"side": "SELL", "sizing": {"type": "ALL"}},
+                evaluation={"clock": "QUOTE"},
+            )
+        )
+    assert invalid_parameter.value.code == "INVALID_TRAILING_STOP_PARAMETER"
+
+    with pytest.raises(RuleSemanticError) as composed:
+        validate_rule_spec(
+            rule(
+                {
+                    "type": "LOGICAL",
+                    "operator": "AND",
+                    "children": [
+                        {
+                            "type": "TRAILING_STOP",
+                            "parameters": {"DRAWDOWN": "0.03"},
+                        },
+                        {
+                            "type": "COMPARISON",
+                            "operator": "GT",
+                            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                            "right": literal("100", "PRICE"),
+                        },
+                    ],
+                },
+                action={"side": "SELL", "sizing": {"type": "ALL"}},
+                evaluation={"clock": "QUOTE"},
+            )
+        )
+    assert composed.value.code == "TRAILING_STOP_COMPOSITION_UNSUPPORTED"
+
+
+def test_trailing_stop_expected_position_quantity_must_be_a_positive_integer() -> None:
+    valid = rule(
+        {"type": "TRAILING_STOP", "parameters": {
+            "DRAWDOWN": "0.01",
+            "EXPECTED_POSITION_QUANTITY": "5",
+        }},
+        action={"side": "SELL", "sizing": {"type": "FIXED_SHARES", "value": "5"}},
+        evaluation={"clock": "QUOTE"},
+    )
+
+    assert validate_rule_spec(valid) is valid
+    with pytest.raises(RuleSemanticError) as rejected:
+        validate_rule_spec(
+            rule(
+                {"type": "TRAILING_STOP", "parameters": {
+                    "DRAWDOWN": "0.01",
+                    "EXPECTED_POSITION_QUANTITY": "5.5",
+                }},
+                action={"side": "SELL", "sizing": {"type": "FIXED_SHARES", "value": "5"}},
+                evaluation={"clock": "QUOTE"},
+            )
+        )
+
+    assert rejected.value.code == "INVALID_TRAILING_STOP_PARAMETER"
+
+
 
 def test_matching_market_unit_hint_is_removed_before_strict_shape_check() -> None:
     node = ExpressionNode.model_validate(
@@ -203,6 +297,63 @@ def test_time_condition_rejects_unknown_clock_field() -> None:
     assert raised.value.code == "UNSUPPORTED_TIME_FIELD"
 
 
+def test_kst_time_window_uses_authoritative_observation_clock() -> None:
+    spec = rule(
+        {
+            "type": "LOGICAL",
+            "operator": "AND",
+            "children": [
+                {
+                    "type": "COMPARISON",
+                    "operator": "GTE",
+                    "left": {"type": "TIME", "field": "KST_SECONDS_SINCE_MIDNIGHT"},
+                    "right": literal("36000"),
+                },
+                {
+                    "type": "COMPARISON",
+                    "operator": "LTE",
+                    "left": {"type": "TIME", "field": "KST_SECONDS_SINCE_MIDNIGHT"},
+                    "right": literal("52200"),
+                },
+            ],
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+    assert validate_rule_spec(spec) is spec
+    frame = EvaluationFrame(
+        market={"LAST_PRICE": Decimal("100")},
+        portfolio={},
+        indicators={},
+        # 01:00 UTC is 10:00 KST.
+        observed_at=datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc),
+    )
+    after_window = EvaluationFrame(
+        market=frame.market,
+        portfolio=frame.portfolio,
+        indicators=frame.indicators,
+        observed_at=datetime(2026, 8, 20, 6, 0, tzinfo=timezone.utc),
+    )
+
+    assert evaluate_condition(spec, EvaluationContext(current=frame)) is True
+    assert evaluate_condition(spec, EvaluationContext(current=after_window)) is False
+
+
+def test_kst_time_window_rejects_equality_and_non_time_range_shapes() -> None:
+    spec = rule(
+        {
+            "type": "COMPARISON",
+            "operator": "EQ",
+            "left": {"type": "TIME", "field": "KST_SECONDS_SINCE_MIDNIGHT"},
+            "right": literal("36000"),
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+
+    with pytest.raises(RuleSemanticError) as raised:
+        validate_rule_spec(spec)
+    assert raised.value.code == "TIME_WINDOW_OPERATOR_UNSUPPORTED"
+
+
 def test_quote_clock_rejects_indicator_and_non_last_price_fields() -> None:
     with pytest.raises(RuleSemanticError, match="completed bars"):
         validate_rule_spec(
@@ -220,6 +371,73 @@ def test_quote_clock_rejects_indicator_and_non_last_price_fields() -> None:
                 evaluation={"clock": "QUOTE"},
             )
         )
+
+
+def test_cross_rejects_mixed_timeframes_and_requires_logical_confirmation() -> None:
+    spec = rule(
+        {
+            "type": "CROSS",
+            "operator": "ABOVE",
+            "left": {
+                "type": "INDICATOR",
+                "name": "SMA",
+                "timeframe": "3M",
+                "parameters": {"PERIOD": 5},
+            },
+            "right": {
+                "type": "INDICATOR",
+                "name": "SMA",
+                "timeframe": "15M",
+                "parameters": {"PERIOD": 20},
+            },
+        },
+        evaluation={"clock": "BAR_CLOSE", "primary_timeframe": "3M"},
+    )
+
+    with pytest.raises(RuleSemanticError) as raised:
+        validate_rule_spec(spec)
+    assert raised.value.code == "CROSS_TIMEFRAME_MISMATCH"
+
+
+def test_primary_timeframe_cannot_be_slower_than_an_explicit_indicator() -> None:
+    spec = rule(
+        {
+            "type": "COMPARISON",
+            "operator": "LT",
+            "left": {
+                "type": "INDICATOR",
+                "name": "RSI",
+                "timeframe": "3M",
+            },
+            "right": literal("70"),
+        },
+        evaluation={"clock": "BAR_CLOSE", "primary_timeframe": "5M"},
+    )
+
+    with pytest.raises(RuleSemanticError) as raised:
+        validate_rule_spec(spec)
+    assert raised.value.code == "PRIMARY_TIMEFRAME_TOO_SLOW"
+
+
+def test_intraday_warmup_that_exceeds_chart_continuation_limit_is_rejected() -> None:
+    spec = rule(
+        {
+            "type": "COMPARISON",
+            "operator": "GT",
+            "left": {
+                "type": "INDICATOR",
+                "name": "SMA",
+                "timeframe": "1H",
+                "parameters": {"PERIOD": 100},
+            },
+            "right": literal("1", "PRICE"),
+        },
+        evaluation={"clock": "BAR_CLOSE", "primary_timeframe": "1H"},
+    )
+
+    with pytest.raises(RuleSemanticError) as raised:
+        validate_rule_spec(spec)
+    assert raised.value.code == "INDICATOR_HISTORY_UNAVAILABLE"
 
 
 def test_unit_mismatch_is_rejected_before_evaluation() -> None:
@@ -456,6 +674,69 @@ def test_position_percent_sizing_is_computed_at_trigger_time() -> None:
 
     assert decision.allowed is True
     assert decision.quantity == Decimal("20")
+
+
+def test_krw_notional_sizing_is_price_capped_and_lot_floored_at_trigger_time() -> None:
+    spec = rule(
+        {
+            "type": "COMPARISON",
+            "operator": "GT",
+            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+            "right": literal("100000", "PRICE"),
+        },
+        action={
+            "side": "BUY",
+            "sizing": {"type": "NOTIONAL_KRW", "value": "1000000"},
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+
+    allowed = guard_rule_execution(
+        spec,
+        guard_input(current_price="123000", lot_size="2"),
+    )
+    insufficient_cash = guard_rule_execution(
+        spec,
+        guard_input(
+            current_price="123000",
+            lot_size="2",
+            available_cash="900000",
+        ),
+    )
+
+    # 1,000,000 / 123,000 = 8.13...; KRX quantity must be a 2-share lot.
+    assert allowed.allowed is True
+    assert allowed.quantity == Decimal("8")
+    assert insufficient_cash.code == "INSUFFICIENT_CASH"
+
+
+def test_krw_notional_requires_whole_krw_market_order() -> None:
+    condition = {
+        "type": "COMPARISON",
+        "operator": "GT",
+        "left": {"type": "MARKET", "field": "LAST_PRICE"},
+        "right": literal("1", "PRICE"),
+    }
+    with pytest.raises(ValueError, match="NOTIONAL_KRW must be an integer"):
+        rule(
+            condition,
+            action={
+                "side": "BUY",
+                "sizing": {"type": "NOTIONAL_KRW", "value": "1000000.5"},
+            },
+            evaluation={"clock": "QUOTE"},
+        )
+    with pytest.raises(ValueError, match="NOTIONAL_KRW supports MARKET only"):
+        rule(
+            condition,
+            action={
+                "side": "BUY",
+                "sizing": {"type": "NOTIONAL_KRW", "value": "1000000"},
+                "order_type": "LIMIT",
+                "limit_price": "100000",
+            },
+            evaluation={"clock": "QUOTE"},
+        )
 
 
 def test_market_closed_and_duplicate_trigger_fail_closed() -> None:

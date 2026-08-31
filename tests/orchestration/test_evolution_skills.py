@@ -106,7 +106,9 @@ def test_resolved_skill_review_card_retention_keeps_proposal_history(tmp_path: P
         status="DELIVERED",
         message_id="123456791",
     )
-    store.approve(proposal_id, approved_by="qa-owner", qa_verdict="PASS")
+    store.approve(
+        proposal_id, approved_by="discord:382384727245455360", qa_verdict="PASS"
+    )
     state_path = store.proposal_dir(proposal_id) / "state.json"
     raw = json.loads(state_path.read_text(encoding="utf-8"))
     raw["updated_at"] = "2026-08-01T00:00:00+00:00"
@@ -170,7 +172,7 @@ def _approved_proposal(store: EvolutionSkillStore, *, candidate=None) -> dict:
     assert (store.proposal_dir(state["proposal_id"]) / "diff.patch").is_file()
     return store.approve(
         state["proposal_id"],
-        approved_by="qa-owner@example.com",
+        approved_by="discord:382384727245455360",
         qa_verdict="PASS",
     )
 
@@ -234,7 +236,7 @@ def test_proposal_state_mutations_share_one_cross_process_fence(
         approval = pool.submit(
             store.approve,
             proposal_id,
-            approved_by="qa",
+            approved_by="discord:382384727245455360",
             qa_verdict="PASS",
         )
         assert delivery.result() is True
@@ -260,7 +262,11 @@ def test_pending_proposal_is_not_an_active_version_and_rejected_evidence_stays_c
     assert open_slugs == {candidate.slug}
     assert consumed[candidate.slug] == set(candidate.runs)
 
-    store.approve(state["proposal_id"], approved_by="qa", qa_verdict="FAIL")
+    store.approve(
+        state["proposal_id"],
+        approved_by="discord:382384727245455360",
+        qa_verdict="FAIL",
+    )
     open_slugs, consumed = _proposal_history(store)
     assert open_slugs == set()
     assert consumed[candidate.slug] == set(candidate.runs)
@@ -338,7 +344,11 @@ def test_approval_requires_validation_qa_pass_and_named_approver(
         model_metadata=_metadata(),
     )
 
-    rejected = store.approve(state["proposal_id"], approved_by="qa", qa_verdict="FAIL")
+    rejected = store.approve(
+        state["proposal_id"],
+        approved_by="discord:382384727245455360",
+        qa_verdict="FAIL",
+    )
     assert rejected["status"] == "REJECTED"
 
     second_store = EvolutionSkillStore(tmp_path / "second")
@@ -353,7 +363,9 @@ def test_approval_requires_validation_qa_pass_and_named_approver(
         )
 
     approved = second_store.approve(
-        second_state["proposal_id"], approved_by="qa", qa_verdict="PASS"
+        second_state["proposal_id"],
+        approved_by="discord:382384727245455360",
+        qa_verdict="PASS",
     )
     assert approved["status"] == "APPROVED"
 
@@ -381,7 +393,7 @@ def test_promotion_registers_and_activates_without_runtime_writes(
     assert source.is_file() and provenance.is_file()
     assert (
         json.loads(provenance.read_text(encoding="utf-8"))["approved_by"]
-        == "qa-owner@example.com"
+        == "discord:382384727245455360"
     )
     active, owners = active_registry_bindings(registry)
     assert active == {"repeated-quote-timeout"}

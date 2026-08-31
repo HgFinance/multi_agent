@@ -63,7 +63,7 @@ def test_only_first_approved_and_benchmark_passed_skill_findings_are_admitted(
         assert ledger.approve(
             artifact_id,
             "APPROVED",
-            "discord:manager",
+            "discord:382384727245455360",
             "repeatable risk failure",
             improvement_type="SKILL_CREATE",
         )
@@ -90,7 +90,7 @@ def test_non_skill_classification_never_enters_evolution(tmp_path: Path) -> None
     assert ledger.approve(
         artifact_id,
         "APPROVED",
-        "discord:manager",
+        "discord:382384727245455360",
         "implementation defect",
         improvement_type="CODE_FIX",
     )
@@ -132,7 +132,7 @@ def test_duplicate_traces_for_one_request_count_as_one_evidence(tmp_path: Path) 
     assert ledger.approve(
         artifact_ids[0],
         "APPROVED",
-        "discord:manager",
+        "discord:382384727245455360",
         "one request emitted duplicate traces",
         improvement_type="SKILL_CREATE",
     )
@@ -172,7 +172,7 @@ def test_unattributed_end_to_end_latency_cannot_become_skill_evidence(
     assert ledger.approve(
         artifact_id,
         "APPROVED",
-        "discord:manager",
+        "discord:382384727245455360",
         "slow root request",
         improvement_type="SKILL_CREATE",
     )
@@ -213,7 +213,7 @@ def test_unattributed_root_failure_cannot_become_department_skill(
     assert ledger.approve(
         artifact_id,
         "APPROVED",
-        "discord:manager",
+        "discord:382384727245455360",
         "root failed without an attributable owner",
         improvement_type="SKILL_CREATE",
     )
@@ -235,7 +235,7 @@ def test_approved_qa_evidence_reaches_canonical_skill_activation(
         assert ledger.approve(
             artifact_id,
             "APPROVED",
-            "discord:first-reviewer",
+            "discord:382384727245455360",
             "independent risk failures",
             improvement_type="SKILL_CREATE",
         )
@@ -258,7 +258,7 @@ def test_approved_qa_evidence_reaches_canonical_skill_activation(
     )
     approved = store.approve(
         state["proposal_id"],
-        approved_by="discord:second-reviewer",
+        approved_by="discord:382384727245455360",
         qa_verdict="PASS",
         reason="exact hashes and validation reviewed",
     )

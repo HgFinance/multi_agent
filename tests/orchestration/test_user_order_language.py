@@ -148,6 +148,151 @@ def test_deterministic_candidate_builds_exact_verified_order_evidence(
         assert raw[evidence.start : evidence.end] == evidence.text
 
 
+def test_deterministic_candidate_builds_exact_verified_same_notional_basket() -> None:
+    raw = "@홍진표 대표 삼성전자, SK하이닉스, LG 100만원씩 매수해"
+
+    candidate = deterministic_order_candidate(raw)
+
+    assert candidate is not None
+    assert candidate.action is DirectiveAction.PLACE_BASKET
+    assert candidate.basket_instrument_mentions == ("삼성전자", "SK하이닉스", "LG")
+    assert candidate.notional_krw == "1000000"
+    assert candidate.basket_quantities == ()
+    verified = verify_order_candidate(raw, candidate)
+    assert isinstance(verified, VerifiedPaperDirective)
+    assert verified.action is DirectiveAction.PLACE_BASKET
+    assert verified.canonical_payload() == {
+        "orders": [
+            {
+                "instrument_mention": "삼성전자",
+                "notional_krw": "1000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+            {
+                "instrument_mention": "SK하이닉스",
+                "notional_krw": "1000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+            {
+                "instrument_mention": "LG",
+                "notional_krw": "1000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw", "side"),
+    [
+        ("삼성전자 3주, SK하이닉스 2주 시장가 매수해", "BUY"),
+        ("삼성전자 3주, SK하이닉스 2주 시장가 매도해", "SELL"),
+    ],
+)
+def test_deterministic_candidate_builds_exact_verified_quantity_basket(
+    raw: str, side: str
+) -> None:
+    candidate = deterministic_order_candidate(raw)
+
+    assert candidate is not None
+    assert candidate.action is DirectiveAction.PLACE_BASKET
+    assert candidate.basket_instrument_mentions == ("삼성전자", "SK하이닉스")
+    assert candidate.basket_quantities == ("3", "2")
+    assert candidate.notional_krw is None
+    assert candidate.side.value == side
+    verified = verify_order_candidate(raw, candidate)
+    assert isinstance(verified, VerifiedPaperDirective)
+    assert verified.canonical_payload() == {
+        "orders": [
+            {
+                "instrument_mention": "삼성전자",
+                "notional_krw": None,
+                "quantity": "3",
+                "side": side,
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+            {
+                "instrument_mention": "SK하이닉스",
+                "notional_krw": None,
+                "quantity": "2",
+                "side": side,
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "삼성전자 100만원, SK하이닉스 50만원 시장가 매수해",
+        "삼성전자 100만원어치, SK하이닉스 50만원어치 매수해",
+    ],
+)
+def test_deterministic_candidate_builds_exact_verified_member_notional_basket(
+    raw: str,
+) -> None:
+    candidate = deterministic_order_candidate(raw)
+
+    assert candidate is not None
+    assert candidate.action is DirectiveAction.PLACE_BASKET
+    assert candidate.basket_instrument_mentions == ("삼성전자", "SK하이닉스")
+    assert candidate.basket_notionals_krw == ("1000000", "500000")
+    assert candidate.basket_quantities == ()
+    assert candidate.notional_krw is None
+    assert candidate.side is OrderSide.BUY
+    verified = verify_order_candidate(raw, candidate)
+    assert isinstance(verified, VerifiedPaperDirective)
+    assert verified.canonical_payload() == {
+        "orders": [
+            {
+                "instrument_mention": "삼성전자",
+                "notional_krw": "1000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+            {
+                "instrument_mention": "SK하이닉스",
+                "notional_krw": "500000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "삼성전자, SK하이닉스 100만원씩 매수해?",
+        "삼성전자, SK하이닉스 100만원씩 매수하지 마",
+        "삼성전자, 삼성전자 100만원씩 매수해",
+        "삼성전자, SK하이닉스 100만원씩 매수하고 LG도 사",
+        "삼성전자 3주, SK하이닉스 2주 매수하고 매도해",
+        "삼성전자 3주, SK하이닉스 2주 각각 매수해",
+        "삼성전자 100만원, SK하이닉스 50만원 매도해",
+        "삼성전자 100만원, SK하이닉스 50만원 각각 매수해",
+    ],
+)
+def test_deterministic_basket_rejects_unsafe_or_ambiguous_language(raw: str) -> None:
+    assert deterministic_order_candidate(raw) is None
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -656,6 +801,26 @@ def test_noncanonical_and_out_of_scope_integer_forms_are_rejected(token: str) ->
         ("내 계좌 주식 모두 팔아줘", DirectiveAction.SELL_ALL, "팔아줘", "모두"),
         ("미체결 주문 전부 취소해", DirectiveAction.CANCEL_ALL, "취소해", "전부"),
         ("모든 열린 주문 철회해줘", DirectiveAction.CANCEL_ALL, "철회해줘", "모든"),
+        # Korean routinely omits the space between the scope word and the verb.
+        # The sentence gate always accepted these; the span scanners did not.
+        ("보유종목 전량매도", DirectiveAction.SELL_ALL, "매도", "전량"),
+        ("전량매도해줘", DirectiveAction.SELL_ALL, "매도해줘", "전량"),
+        ("모두팔아", DirectiveAction.SELL_ALL, "팔아", "모두"),
+        ("주문 전량취소", DirectiveAction.CANCEL_ALL, "취소", "전량"),
+        ("계좌에 있는 종목 일괄매도", DirectiveAction.SELL_ALL, "매도", "일괄"),
+        ("계좌에 있는 종목 일괄 매도", DirectiveAction.SELL_ALL, "매도", "일괄"),
+        ("일괄 주문 취소", DirectiveAction.CANCEL_ALL, "취소", "일괄"),
+        # Scope words stack for emphasis.  The run is one redundant scope, not
+        # a second command, so it is a single AGGREGATE_SCOPE span.
+        ("보유종목 전량 일괄매도", DirectiveAction.SELL_ALL, "매도", "전량 일괄"),
+        ("보유종목 전량 일괄 매도", DirectiveAction.SELL_ALL, "매도", "전량 일괄"),
+        ("전부 다 매도해", DirectiveAction.SELL_ALL, "매도해", "전부 다"),
+        (
+            "미체결 주문 전량 일괄 취소해",
+            DirectiveAction.CANCEL_ALL,
+            "취소해",
+            "전량 일괄",
+        ),
     ],
 )
 def test_clear_aggregate_commands_compile(
@@ -1053,6 +1218,89 @@ def test_explicit_live_request_is_never_silently_converted_to_paper(prefix: str)
     result = verify_order_candidate(raw, candidate)
     assert isinstance(result, OrderClarification)
     assert result.reason_codes == (OrderReasonCode.LIVE_MODE_FORBIDDEN,)
+
+
+def test_aggregate_candidate_carrying_order_fields_is_rejected() -> None:
+    # Hermes must not infer side/order_type from an aggregate sell verb: the
+    # account, not the sentence, sizes the command.  A candidate that carries
+    # them is a schema violation, not a directive.
+    raw = "계좌에 있는 종목 일괄매도"
+    payload = _aggregate_candidate(
+        raw,
+        action=DirectiveAction.SELL_ALL,
+        action_text="매도",
+        scope_text="일괄",
+    ).model_dump(mode="json")
+    payload["side"] = "SELL"
+    payload["order_type"] = "MARKET"
+    result = verify_order_candidate(raw, payload)
+    assert isinstance(result, OrderClarification)
+    assert result.reason_codes == (OrderReasonCode.INVALID_CANDIDATE_SCHEMA,)
+
+
+def test_aggregate_evidence_must_slice_the_source_exactly() -> None:
+    # Regression for a production clarification: Hermes spanned the whole
+    # sentence as ACTION, used the holdings noun as the scope, invented
+    # ``ALL_HOLDINGS``, and ran the scope one character onto the trailing
+    # space.  Only the last defect is reachable before the field check, so the
+    # verifier must reject on the exact-slice rule and never execute.
+    raw = "보유종목 전량 일괄매도"
+    result = verify_order_candidate(
+        raw,
+        {
+            "schema_version": "user-paper-order-interpretation.v1",
+            "mode": "PAPER",
+            "binding": False,
+            "raw_text_sha256": raw_text_sha256(raw),
+            "decision": "EXECUTE",
+            "action": "SELL_ALL",
+            "evidence": [
+                {
+                    "field": "ACTION",
+                    "start": 0,
+                    "end": 12,
+                    "text": raw,
+                    "normalized": "SELL_ALL",
+                },
+                {
+                    "field": "AGGREGATE_SCOPE",
+                    "start": 0,
+                    "end": 5,
+                    "text": "보유종목",
+                    "normalized": "ALL_HOLDINGS",
+                },
+            ],
+        },
+    )
+    assert isinstance(result, OrderClarification)
+    assert result.reason_codes == (OrderReasonCode.EVIDENCE_TEXT_MISMATCH,)
+
+
+def test_aggregate_scope_span_must_cover_the_whole_stacked_run() -> None:
+    # Half of a stacked scope is not the scope the sentence gate matched.
+    raw = "보유종목 전량 일괄매도"
+    candidate = _aggregate_candidate(
+        raw,
+        action=DirectiveAction.SELL_ALL,
+        action_text="매도",
+        scope_text="일괄",
+    )
+    result = verify_order_candidate(raw, candidate)
+    assert isinstance(result, OrderClarification)
+    assert OrderReasonCode.EVIDENCE_FIELD_MISMATCH in result.reason_codes
+
+
+def test_partial_scope_is_never_an_aggregate_command() -> None:
+    for raw in ("보유종목 일부 매도해", "보유종목 절반 매도해"):
+        candidate = _aggregate_candidate(
+            raw,
+            action=DirectiveAction.SELL_ALL,
+            action_text="매도해",
+            scope_text=raw.split()[1],
+        )
+        assert not isinstance(
+            verify_order_candidate(raw, candidate), VerifiedPaperDirective
+        )
 
 
 def test_invalid_candidate_shape_is_fail_closed_not_an_exception() -> None:

@@ -317,6 +317,15 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # t1444 current ranking is persisted as forward-only PIT
                  # membership snapshots; raw ranking rows are not archived.
                  "20260828000100_research_t1444_universe_collector_role.sql",
+                 # Conditional PAPER intraday OCO, trailing-state, activation
+                 # lifetime, basket sizing, and quantity contracts.
+                 "20260829000100_conditional_rule_intraday_oco_contract.sql",
+                 "20260829000200_conditional_rule_trailing_stop_state.sql",
+                 "20260829000300_conditional_rule_activation_lifetime.sql",
+                 "20260829000400_paper_user_directive_basket.sql",
+                 "20260829000500_paper_basket_quantity_contract.sql",
+                 "20260830000100_accounting_portfolio_snapshot_book_read_path.sql",
+                 "20260830000200_audit_reproduction_empty_queue_probe.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -1145,7 +1154,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # +1: 20260824000600_compound_paper_order_bundles.sql — 복합
             # PAPER 요청은 기존 즉시주문/조건부규칙의 합성이며 두 번째
             # 주문 원장이 아니다.
-            "execution": 31,
+            # +1: 20260829000200_conditional_rule_trailing_stop_state.sql
+            "execution": 32,
             "governance": 20,
             # +1 (재일, 2026-08-10): 공장 재편으로 실험 사전등록/결과 원장 확장
             # +1 (재일, 2026-08-16): 사전 데이터 타당성 점검을 trial에서 분리

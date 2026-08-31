@@ -3093,6 +3093,7 @@ def _trading_value_label(value: Any, *, kind: str = "") -> str:
         "MARKET": "시장가",
         "LIMIT": "지정가",
         "ALL": "전량",
+        "NOTIONAL_KRW": "금액 상한(KRW)",
         "ONCE": "1회",
         "ACTIVE": "활성",
         "PENDING": "대기",

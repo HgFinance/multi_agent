@@ -714,6 +714,17 @@ def _scoped_planning_projection(
     root_id = str(root.get("id") or root.get("task_id") or "").strip()
     if not root_id:
         return dict(root)
+    # Current BFF roots carry explicit parent/child links.  Their child rows
+    # are already in ``kanban show``; rediscovering the same scope through a
+    # full-board ``kanban list`` only adds a subprocess and can dominate a
+    # status/result poll.  Keep the board scan for legacy marker-only roots,
+    # whose parent links are precisely what this projection repairs.
+    if (
+        read_marker(str(root.get("body") or ""), "producer")
+        == "portfolio-bff-deterministic"
+        and _child_records(root.get("children"))
+    ):
+        return dict(root)
     rows = hermes_boundary.list_kanban_tasks(timeout=timeout)
     if rows is None:
         return dict(root)
@@ -1123,6 +1134,16 @@ def _paper_order_child_body(
             "market/limit marker, apply the managed omission default: order_type=MARKET,",
             "limit_price=null, and no ORDER_TYPE evidence. A limit marker without exactly",
             "one valid price, or conflicting market/limit language, must CLARIFY.",
+            "For strict PAPER baskets, support only '종목A, 종목B N만원씩 매수',",
+            "'종목A N주, 종목B M주 [시장가] 매수/매도', or",
+            "'종목A N만원, 종목B M만원 [시장가] 매수'. Preserve every listed",
+            "instrument mention in order. The equal-notional form is BUY only with",
+            "notional_krw=N*10000 and empty basket arrays; the quantity form has one",
+            "exact side and aligned positive integer basket_quantities; the member",
+            "notional BUY form has aligned positive basket_notionals_krw. Both set",
+            "notional_krw=null. All basket forms are MARKET only and non-atomic;",
+            "members are catalog-resolved and tracked individually. Never infer a",
+            "missing member, mixed side, or price/limit basket.",
             "Questions, examples, negations, conditions, ambiguity, multiple commands,",
             "and any LIVE/real-account request must not execute.",
             "The tool result, not your interpretation, is the execution authority.",
@@ -1269,7 +1290,14 @@ def _conditional_rule_child_body(
             "a different symbol. Each candidate must preserve its own comparator,",
             "threshold, side, and sizing. Never collapse branches with different actions",
             "into one LOGICAL OR rule.",
-            "Supported expression node types are LITERAL, MARKET, PORTFOLIO, INDICATOR,",
+            "For an existing-position take-profit/stop-loss request that explicitly says",
+            "OCO or that one execution cancels the other, pass exactly two candidates in",
+            "source-text order and set oco_mode=EXIT_BRACKET on both. Both candidates must",
+            "be SELL for the exact same symbol, with identical sizing and expiry. Do not set",
+            "oco_group_id: the trusted boundary derives it from the admitted request. If the",
+            "user did not explicitly request OCO/cancellation, leave oco_mode unset.",
+            "Supported expression node types are LITERAL, TIME, MARKET, PORTFOLIO, INDICATOR,",
+            "TRAILING_STOP,",
             "ARITHMETIC, COMPARISON, LOGICAL, NOT, and CROSS.",
             "Supported indicators follow, each as NAME(PARAMETER=default,...)->OUTPUT|OUTPUT.",
             "Use only these exact parameter names and outputs; never invent, rename,",
@@ -1302,25 +1330,53 @@ def _conditional_rule_child_body(
             "parameters:{PERIOD:5}}}, evaluation={clock:BAR_CLOSE,primary_timeframe:1D}.",
             "Canonical Bollinger upper example uses name=BOLLINGER, output=UPPER,",
             "timeframe=1D, parameters={PERIOD:20,STDDEV:2} and compares MARKET CLOSE.",
-            "Use comparison operators GT/GTE/LT/LTE/EQ, cross ABOVE/BELOW, logical",
-            "AND/OR, and only 1M/5M/15M/1H/1D executable timeframes. 3분봉",
-            "is not a supported market-data capability: do not derive it from 1M",
-            "candles. For an explicit 3분봉 request, preserve the condition and",
-            "use the existing 5M feed; the trusted boundary records",
-            "TIMEFRAME_FALLBACK_3M_TO_5M and tells the user that 5분봉 was used.",
-            "For 3분봉 60일선 or N선/N일선, use PERIOD=N on the requested chart",
-            "timeframe before the boundary fallback; CROSS ABOVE compares completed",
+            "Use comparison operators GT/GTE/LT/LTE/EQ, cross ABOVE/BELOW, and logical",
+            "AND/OR. Executable completed-bar timeframes are 1M/3M/5M/10M/15M/30M/1H/1D.",
+            "Never rewrite an explicit timeframe. In a multi-timeframe BAR_CLOSE rule,",
+            "primary_timeframe is the fastest trigger cadence and every indicator carries",
+            "its own explicit timeframe. The worker uses only each timeframe's latest",
+            "completed candle whose close is at or before the primary candle close.",
+            "CROSS operands must have the same timeframe; use LOGICAL AND for a faster",
+            "entry cross plus a slower trend/momentum confirmation. For 3분봉 60일선",
+            "or N선/N일선, use PERIOD=N on timeframe=3M; CROSS ABOVE compares completed",
             "MARKET CLOSE against INDICATOR SMA. If the buy rule omits a quantity,",
             "return candidate=null with clarification_reason=QUANTITY_REQUIRED;",
             "never assume 1주.",
             "If an indicator timeframe is omitted, use 1D completed bars and BAR_CLOSE; never",
             "default an explicit intraday phrase to another timeframe. Portfolio/last-price-only rules use",
             "QUOTE. POSITION_PERCENT is a ratio in (0,1], FIXED_SHARES is an integer,",
-            "and ALL is sell-only. Omit expires_at to use the trusted KRX regular-session close default; do not claim the rule lasts until cancelled.",
+            "and ALL is sell-only. NOTIONAL_KRW is a positive whole-KRW maximum order",
+            "amount for MARKET only: use it only when the user explicitly binds an",
+            "amount to the order verb, such as '100만원 시장가 매수', '100만원어치',",
+            "or '50만원만큼'. At trigger time the server floors that amount by the",
+            "fresh price and lot size; it must never invent a share",
+            "quantity. BUY supports FIXED_SHARES or NOTIONAL_KRW. Omit expires_at to use",
+            "the trusted KRX regular-session close default; do not claim the rule lasts until cancelled.",
             "Use the trusted max_data_age_seconds=30 default; never reduce it unless the user explicitly asks.",
             "CROSS always requires BAR_CLOSE and an explicit primary_timeframe; when the",
             "instruction gives no timeframe for a price-only cross, return candidate=null",
             "with clarification_reason=TIMEFRAME_REQUIRED_FOR_CROSS instead of guessing.",
+            "Example: '하이닉스 3분봉 5선이 20선 상향 돌파하고 15분봉 RSI(14)가 70",
+            "미만이면 2주 시장가 매수' is one LOGICAL AND: CROSS ABOVE of SMA(5,3M)",
+            "and SMA(20,3M), plus RSI(14,15M) LT 70; evaluation={clock:BAR_CLOSE,",
+            "primary_timeframe:3M}. Do not use CROSS between a 3M value and a 15M value.",
+            "An explicit KST intraday time window may be combined with either BAR_CLOSE",
+            "or QUOTE conditions. For a clear 24-hour window such as '10:00~14:30에만',",
+            "add LOGICAL AND children {type:COMPARISON,operator:GTE,left:{type:TIME,",
+            "field:KST_SECONDS_SINCE_MIDNIGHT},right:{type:LITERAL,value:36000,unit:NUMBER}}",
+            "and the same TIME node with operator=LTE, value=52200. The time field may",
+            "only be directly compared to an integer seconds literal; never use arithmetic",
+            "or CROSS. '오전 10시부터 오후 2시 30분까지' is equivalent. Do not infer AM/PM",
+            "from an ambiguous '2시'; return candidate=null with TIME_WINDOW_AM_PM_REQUIRED.",
+            "The worker still rejects a closed/unavailable market even if the window is true.",
+            "For an explicit existing-position trailing exit such as '평균 매입가 대비 2%",
+            "수익이 난 뒤 고점 대비 1% 하락하면 전량 매도', use the complete root condition",
+            "{type:TRAILING_STOP,parameters:{DRAWDOWN:0.01,ACTIVATION_RETURN:0.02}},",
+            "action SELL, and evaluation={clock:QUOTE}. DRAWDOWN is required; ratios are",
+            "decimal fractions. The server, not Hermes, persists the highest fresh quote after",
+            "ACTIVE and ignores late quotes. Do not combine TRAILING_STOP with AND/OR, a time",
+            "window, or a BAR_CLOSE condition in this version. Do not infer a trailing stop",
+            "from an ordinary fixed-price stop-loss request.",
             "For an explicit 지정가/limit order, preserve order_type=LIMIT and the exact user-provided limit_price; never calculate or invent a price. Without explicit limit evidence, use the default MARKET action.",
             "The trusted tool resolves the symbol, validates authority, units, semantics,",
             "idempotency, and activates the exact rule. Do not claim ACTIVE unless the",
@@ -1767,6 +1823,27 @@ def _route_compound_user_paper_order(
             "PAPER 매수 주문을 기존 Trading 경로로 접수했습니다. 매수 수량이 전량 "
             f"체결된 뒤 기존 조건주문 worker가 {plan.conditional_instruction} 규칙을 "
             "자동 활성화합니다. 부분체결·실패 시 조건주문은 활성화하지 않습니다."
+            + (
+                " 전량 체결 시점부터 공식 KRX 정규장 캘린더 기준 "
+                f"{plan.exit_lifetime_trading_days}거래일째 마감까지 추적합니다."
+                if plan.exit_lifetime_trading_days is not None
+                else ""
+            )
+            + (
+                " 익절·손절은 두 개의 독립 매도 주문이 아니라 하나의 OR 청산 규칙이므로, "
+                "둘 중 먼저 충족한 조건에서만 1회 PAPER 시장가 청산을 시도합니다. "
+                "기존 같은 종목 보유분과 섞여 보유수량이 이번 매수 수량과 다르면 "
+                "기준가 왜곡을 막기 위해 청산하지 않습니다."
+                if plan.is_entry_exit_bracket
+                else (
+                    " 수익 활성 구간에 도달한 뒤의 신선한 현재가 최고가만 DB에 보존하고, "
+                    "그 고점 대비 지정한 비율만큼 하락할 때 1회 PAPER 시장가 청산을 "
+                    "시도합니다. 기존 같은 종목 보유분과 섞여 보유수량이 이번 매수 수량과 "
+                    "다르면 고점 추적과 청산을 시작하지 않습니다."
+                    if plan.is_entry_trailing_stop
+                    else ""
+                )
+            )
         ),
         "planning": {
             "schema_version": "ceo.planning.v1",
@@ -1774,7 +1851,15 @@ def _route_compound_user_paper_order(
             "steps": [
                 "Existing PAPER buy directive",
                 "Wait for full fill",
-                "Activate existing conditional rule",
+                (
+                    "Activate one atomic take-profit/stop-loss exit rule"
+                    if plan.is_entry_exit_bracket
+                    else (
+                        "Activate one durable entry-relative trailing exit rule"
+                        if plan.is_entry_trailing_stop
+                        else "Activate existing conditional rule"
+                    )
+                ),
             ],
             "qa_required": False,
             "summary": "기존 PAPER 주문과 조건주문 경로를 하나의 durable bundle로 연결했습니다.",
@@ -1784,6 +1869,8 @@ def _route_compound_user_paper_order(
         "order_state": bundle.state,
         "order_mode": "PAPER",
         "compound_paper_order": True,
+        "entry_exit_bracket": plan.is_entry_exit_bracket,
+        "entry_trailing_stop": plan.is_entry_trailing_stop,
         "bundle_id": bundle.bundle_id,
         "conditional_rule_id": rule.rule_id,
         "trading_task_id": immediate_response.get("trading_task_id"),
@@ -2447,6 +2534,11 @@ def ceo_query(
         if workflow_mode == "analysis" and not read_only_risk_e2e
         else None
     )
+    deterministic_operational_status = bool(
+        isinstance(bff_routing_plan, Mapping)
+        and bff_routing_plan.get("mode") == "operational_status"
+        and bff_routing_plan.get("category") == "SYSTEM_STATUS"
+    )
     selected_bff_profiles = {
         str(profile).strip()
         for profile in (
@@ -2583,6 +2675,16 @@ def ceo_query(
                 ),
             ),
             idempotency_key=req.request_id,
+            # The operational status lane has no LLM primary. Keep its root
+            # blocked until the existing deterministic completion boundary
+            # records the planning result, so the dispatcher cannot claim it
+            # and spend a CEO model turn rediscovering the same route. Omit
+            # the optional argument entirely for normal user-query roots.
+            **(
+                {"initial_status": "blocked"}
+                if deterministic_operational_status
+                else {}
+            ),
         )
     except Exception as exc:
         if root_trace is not None:
@@ -2733,6 +2835,39 @@ def ceo_query(
             status_code=503,
             detail="CEO root Kanban scope를 기록하지 못했습니다. 재시도하세요.",
         )
+    if deterministic_operational_status:
+        root_id = str(task["task_id"])
+        completed = hermes_boundary.complete_kanban_task(
+            task_id=root_id,
+            result=(
+                "운영 상태 조회를 결정론적 read-only 경로로 접수했습니다. "
+                "시장 Research/Risk LLM primary는 호출하지 않습니다."
+            ),
+        )
+        if completed:
+            logger.info(
+                "ceo-operational-status-deterministic-completed root=%s",
+                root_id,
+            )
+        else:
+            # A CLI timeout has unknown commit status. The completion helper
+            # already verifies terminal state; only reopen a positively
+            # observed blocked root so a transient CLI failure cannot strand
+            # the user request forever.
+            current = hermes_boundary.show_kanban_task(
+                root_id, timeout=_planning_read_timeout()
+            )
+            current_status = (
+                str(current.get("status") or "").casefold()
+                if isinstance(current, Mapping)
+                else ""
+            )
+            if current_status not in {"done", "completed", "archived"}:
+                if not hermes_boundary.unblock_kanban_task(task_id=root_id):
+                    logger.warning(
+                        "ceo-operational-status-root-release-failed root=%s",
+                        root_id,
+                    )
     return _accepted_response(task, _wait_for_planning(str(task["task_id"])))
 
 
@@ -2978,16 +3113,28 @@ def ceo_task_status(
         }
     _require_ceo_workflow_owner(workflow, authenticated_owner_id)
     payload = _status_payload(workflow)
-    try:
-        raw = hermes_boundary.show_kanban_task(
-            task_id, timeout=_planning_read_timeout()
-        )
-        if raw:
-            payload["planning"] = _planning_acknowledgement(
-                _scoped_planning_projection(raw, timeout=_planning_read_timeout())
-            )["planning"]
-    except (KanbanTaskNotFound, KanbanUnavailable):
-        pass
+    # ``load_workflow`` already hydrated the root and keeps its authoritative
+    # raw projection. Reusing it avoids a second identical ``kanban show`` on
+    # every status poll. Older test/fixture readers may not expose it, so keep
+    # the bounded CLI fallback for that compatibility boundary only.
+    raw = workflow.root_payload
+    if isinstance(raw, Mapping):
+        payload["planning"] = _planning_acknowledgement(
+            _scoped_planning_projection(raw, timeout=_planning_read_timeout())
+        )["planning"]
+    else:
+        try:
+            raw = hermes_boundary.show_kanban_task(
+                task_id, timeout=_planning_read_timeout()
+            )
+            if raw:
+                payload["planning"] = _planning_acknowledgement(
+                    _scoped_planning_projection(
+                        raw, timeout=_planning_read_timeout()
+                    )
+                )["planning"]
+        except (KanbanTaskNotFound, KanbanUnavailable):
+            pass
     return payload
 
 

@@ -63,7 +63,7 @@ def test_qa_discord_retention_deletes_only_old_resolved_cards(tmp_path) -> None:
     assert ledger.approve(
         artifact_id,
         "APPROVED",
-        "qa-user",
+        "discord:382384727245455360",
         "reviewed",
         improvement_type="CODE_FIX",
     )
@@ -149,6 +149,26 @@ def test_qa_discord_retention_preserves_pending_cards(tmp_path) -> None:
     assert summary.attempted == 0
     assert summary.deleted == 0
     assert opener.requests == []
+
+
+def test_ledger_derived_index_maintenance_is_one_time(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "feedback.sqlite3"
+    FeedbackLedger(str(path))
+
+    with sqlite3.connect(path) as database:
+        assert database.execute(
+            "SELECT 1 FROM langsmith_feedback_maintenance WHERE name=?",
+            ("derived_indexes_v1",),
+        ).fetchone() == (1,)
+
+    def unexpected_legacy_scan(_database):
+        raise AssertionError("legacy derived-index scan repeated")
+
+    monkeypatch.setattr(
+        "orchestration.langsmith_feedback._deduplicate_legacy_uncorrelated_artifacts",
+        unexpected_legacy_scan,
+    )
+    FeedbackLedger(str(path))
 
 
 class _Run:
@@ -300,7 +320,7 @@ def test_evaluator_creates_bounded_improvement_findings() -> None:
     )
     result = evaluate_observation(observation, latency_warn_ms=60_000)
 
-    assert result.decision == "IMPROVEMENT_CANDIDATE"
+    assert result.decision == "REVIEW_WORTHY"
     assert "WORKER_OR_WORKFLOW_DEGRADED" in result.finding_codes
     assert "LATENCY_ABOVE_THRESHOLD" in result.finding_codes
     assert "CORRELATION_METADATA_MISSING" in result.finding_codes
@@ -435,7 +455,7 @@ def test_semantic_failure_becomes_qa_review_signal_without_answer_text() -> None
             },
         )
     )
-    assert result.decision == "IMPROVEMENT_CANDIDATE"
+    assert result.decision == "REVIEW_WORTHY"
     assert "SEMANTIC_QA_FAILED" in result.finding_codes
     assert "짧은 답" not in str(result.metadata)
 
@@ -559,7 +579,7 @@ def test_ledger_is_idempotent_and_approval_creates_bounded_hint(tmp_path) -> Non
         ledger.approve(
             artifact_id,
             "APPROVED",
-            "qa-user",
+            "discord:382384727245455360",
             "reviewed",
             improvement_type="PROMPT_POLICY",
         )
@@ -569,7 +589,7 @@ def test_ledger_is_idempotent_and_approval_creates_bounded_hint(tmp_path) -> Non
         ledger.approve(
             artifact_id,
             "APPROVED",
-            "qa-user",
+            "discord:382384727245455360",
             "duplicate",
             improvement_type="PROMPT_POLICY",
         )
@@ -618,7 +638,7 @@ def test_privacy_safe_runner_executes_registered_code_fix_suite(tmp_path) -> Non
     assert ledger.approve(
         artifact_id,
         "APPROVED",
-        "discord:manager",
+        "discord:382384727245455360",
         "latency attribution fix",
         improvement_type="CODE_FIX",
     )
@@ -714,7 +734,7 @@ def test_pass_or_no_action_cannot_enter_approved_feedback(tmp_path) -> None:
     assert not ledger.approve(
         pass_artifact,
         "APPROVED",
-        "qa-user",
+        "discord:382384727245455360",
         "nothing to improve",
         improvement_type="PROMPT_POLICY",
     )
@@ -729,7 +749,7 @@ def test_pass_or_no_action_cannot_enter_approved_feedback(tmp_path) -> None:
     assert not ledger.approve(
         actionable_artifact,
         "APPROVED",
-        "qa-user",
+        "discord:382384727245455360",
         "no action classification",
     )
 
@@ -843,7 +863,7 @@ def test_active_hint_is_local_only_and_requires_passed_benchmark(
         ledger.approve(
             artifact_id,
             "APPROVED",
-            "qa-user",
+            "discord:382384727245455360",
             "reviewed",
             improvement_type="PROMPT_POLICY",
         )
@@ -892,7 +912,7 @@ def test_ledger_cleanup_removes_expired_artifacts_and_decisions(tmp_path) -> Non
         ledger.approve(
             artifact_id,
             "APPROVED",
-            "qa-user",
+            "discord:382384727245455360",
             "reviewed",
             improvement_type="PROMPT_POLICY",
         )
@@ -917,13 +937,14 @@ def test_unanswered_artifact_expires_without_becoming_rejected(tmp_path) -> None
     ledger = FeedbackLedger(str(path))
     ledger.enqueue("source-unanswered", "First")
     assert ledger.claim() is not None
-    ledger.complete(
+    artifact_id = ledger.complete(
         "source-unanswered",
         "eval-unanswered",
         evaluate_observation(observation_from_run(_Run())),
     )
 
-    assert len(ledger.pending(10)) == 1
+    assert ledger.get_artifact(artifact_id)["decision"] == "OBSERVED_PASS"
+    assert ledger.pending(10) == []
     with sqlite3.connect(path) as db:
         assert db.execute(
             "SELECT COUNT(*) FROM langsmith_feedback_decisions"
@@ -1159,6 +1180,60 @@ def test_service_is_noop_when_langsmith_is_disabled(tmp_path, monkeypatch) -> No
         "failed": 0,
         "dropped": 0,
     }
+
+
+def test_active_service_requeues_persisted_review_backlog_before_provider_poll(
+    tmp_path, monkeypatch
+) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    source_run = "persisted-review-run"
+    assert ledger.enqueue(source_run, "First")
+    assert ledger.claim() is not None
+    result = evaluate_observation(
+        TraceObservation(
+            source_run_id=source_run,
+            name="worker.risk",
+            status="error",
+            started_at=None,
+            ended_at=None,
+            metadata={
+                "request_id": "persisted-review-request",
+                "stage": "risk",
+                "status": "DEGRADED",
+                "error_count": 1,
+                "raw_payloads_sent": False,
+            },
+        )
+    )
+    artifact_id = ledger.complete(source_run, "eval-persisted-review", result)
+    service = LangSmithFeedbackService(
+        config=FeedbackConfig(
+            mode="active",
+            workflow_project="First",
+            metrics_project="HgFinance-Metrics",
+            evals_project="HgFinance-Evals",
+            state_path=str(tmp_path / "feedback.sqlite3"),
+            poll_seconds=5,
+            lookback_seconds=60,
+            batch_size=10,
+            max_pending=50,
+            retention_days=30,
+            latency_warn_ms=60_000,
+            max_feedback_items=3,
+            max_feedback_chars=1200,
+            metrics_window_seconds=300,
+            metrics_max_runs=500,
+        ),
+        ledger=ledger,
+    )
+    published: list[str] = []
+    monkeypatch.setattr(
+        "orchestration.langsmith_feedback._publish_qa_discord_request",
+        lambda _ledger, artifact, _result: published.append(artifact) or True,
+    )
+
+    assert service._publish_pending_qa_reviews() == 1
+    assert published == [artifact_id]
 
 
 def test_feedback_poll_backoff_recovers_after_success(tmp_path) -> None:

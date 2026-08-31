@@ -70,6 +70,11 @@ class FakePool:
         pass
 
 
+class ExhaustedPool:
+    def getconn(self):
+        raise RuntimeError("connection pool exhausted")
+
+
 def assessment():
     return SimpleNamespace(
         risk_request_id=uuid4(),
@@ -107,3 +112,8 @@ def test_risk_persistence_failure_is_not_swallowed():
         repo.save(assessment())
     assert connection.commits == 0
     assert connection.rollbacks == 1
+
+
+def test_pool_exhaustion_is_normalized_to_risk_persistence_error():
+    with pytest.raises(RiskDecisionPersistenceError, match="connection pool is unavailable"):
+        RiskDecisionRepository(ExhaustedPool()).save(assessment())

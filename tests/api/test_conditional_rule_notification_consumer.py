@@ -52,10 +52,24 @@ class Projection:
 
 
 class RuleStore:
-    def __init__(self, record, *, linked: bool = True) -> None:
+    def __init__(
+        self,
+        record,
+        *,
+        linked: bool = True,
+        activation_state: str = "ACTIVE",
+        trigger_state: str = "TRIGGERED",
+    ) -> None:
         self.record = record
         self.linked = linked
+        self.activation_state = activation_state
+        self.trigger_state = trigger_state
         self.calls = []
+        self.lifecycle_calls = []
+        self.expiry_calls = []
+        self.activation_blocked_calls = []
+        self.activated_calls = []
+        self.trigger_calls = []
 
     def notification_context(self, *, rule_id, directive_id):
         self.calls.append((rule_id, directive_id))
@@ -63,6 +77,101 @@ class RuleStore:
             rule_id=rule_id,
             rule_execution_id="99999999-9999-4999-8999-999999999999",
             directive_id=directive_id,
+            user_id=self.record.user_id,
+            fund_id=self.record.fund_id,
+            book_id=self.record.book_id,
+            client_request_id=self.record.client_request_id,
+            order_request_id=(self.record.order_request_id if self.linked else None),
+            ceo_root_task_id=self.record.ceo_root_task_id,
+            trading_task_id=self.record.trading_task_id,
+        )
+
+    def entry_position_mismatch_notification_context(self, *, rule_id):
+        self.lifecycle_calls.append(rule_id)
+        return SimpleNamespace(
+            rule_id=rule_id,
+            symbol="000660",
+            user_id=self.record.user_id,
+            fund_id=self.record.fund_id,
+            book_id=self.record.book_id,
+            client_request_id=self.record.client_request_id,
+            order_request_id=(self.record.order_request_id if self.linked else None),
+            ceo_root_task_id=self.record.ceo_root_task_id,
+            trading_task_id=self.record.trading_task_id,
+            expected_position_quantity="5",
+            actual_position_quantity="3",
+            occurred_at=datetime(2026, 8, 29, 1, 2, 3, tzinfo=timezone.utc),
+            lifecycle_event_id="trail_abcdef0123456789abcdef0123456789abcdef0123456789",
+        )
+
+    def expired_rule_notification_context(self, *, rule_id):
+        self.expiry_calls.append(rule_id)
+        return SimpleNamespace(
+            rule_id=rule_id,
+            symbol="000660",
+            action_side="SELL",
+            prior_state="ACTIVE",
+            expires_at=datetime(2026, 8, 29, 6, 30, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 8, 29, 6, 31, tzinfo=timezone.utc),
+            lifecycle_event_id="exp_abcdef0123456789abcdef0123456789abcdef0123456789",
+            user_id=self.record.user_id,
+            fund_id=self.record.fund_id,
+            book_id=self.record.book_id,
+            client_request_id=self.record.client_request_id,
+            order_request_id=(self.record.order_request_id if self.linked else None),
+            ceo_root_task_id=self.record.ceo_root_task_id,
+            trading_task_id=self.record.trading_task_id,
+            is_compound_entry_exit=True,
+        )
+
+    def activation_blocked_notification_context(self, *, rule_id):
+        self.activation_blocked_calls.append(rule_id)
+        return SimpleNamespace(
+            rule_id=rule_id,
+            symbol="000660",
+            user_id=self.record.user_id,
+            fund_id=self.record.fund_id,
+            book_id=self.record.book_id,
+            client_request_id=self.record.client_request_id,
+            order_request_id=(self.record.order_request_id if self.linked else None),
+            ceo_root_task_id=self.record.ceo_root_task_id,
+            trading_task_id=self.record.trading_task_id,
+            failure_code="ENTRY_EXIT_ACTIVATION_KRX_CALENDAR_UNAVAILABLE",
+            occurred_at=datetime(2026, 8, 29, 1, 2, 3, tzinfo=timezone.utc),
+            lifecycle_event_id="blk_abcdef0123456789abcdef0123456789abcdef0123456789",
+        )
+
+    def bundle_activated_notification_context(self, *, rule_id):
+        self.activated_calls.append(rule_id)
+        return SimpleNamespace(
+            rule_id=rule_id,
+            symbol="000660",
+            action_side="SELL",
+            current_state=self.activation_state,
+            expires_at=datetime(2026, 9, 4, 6, 30, tzinfo=timezone.utc),
+            activation_lifetime_trading_days=5,
+            occurred_at=datetime(2026, 8, 29, 1, 2, 3, tzinfo=timezone.utc),
+            lifecycle_event_id="dep_abcdef0123456789abcdef0123456789abcdef0123456789",
+            user_id=self.record.user_id,
+            fund_id=self.record.fund_id,
+            book_id=self.record.book_id,
+            client_request_id=self.record.client_request_id,
+            order_request_id=(self.record.order_request_id if self.linked else None),
+            ceo_root_task_id=self.record.ceo_root_task_id,
+            trading_task_id=self.record.trading_task_id,
+        )
+
+    def trigger_claimed_notification_context(self, *, rule_id):
+        self.trigger_calls.append(rule_id)
+        return SimpleNamespace(
+            rule_id=rule_id,
+            symbol="000660",
+            action_side="SELL",
+            current_state=self.trigger_state,
+            trigger_id="trg_abcdef0123456789abcdef0123456789abcdef0123456789",
+            data_watermark=datetime(2026, 8, 29, 1, 2, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 8, 29, 1, 2, 3, tzinfo=timezone.utc),
+            lifecycle_event_id="cre_abcdef0123456789abcdef0123456789abcdef0123456789",
             user_id=self.record.user_id,
             fund_id=self.record.fund_id,
             book_id=self.record.book_id,
@@ -226,6 +335,352 @@ def test_consumer_uses_authoritative_context_and_acks_unlinked_rule() -> None:
     ) is True
     assert len(rules.calls) == 1
     assert status_calls == []
+
+
+def test_entry_position_mismatch_notifies_from_durable_context_without_order_submit() -> None:
+    record = UserOrderRequestRecord(
+        order_request_id="77777777-7777-4777-8777-777777777777",
+        user_id="11111111-1111-4111-8111-111111111111",
+        fund_id="22222222-2222-4222-8222-222222222222",
+        book_id="33333333-3333-4333-8333-333333333333",
+        client_request_id="discord:guild:channel:123456789",
+        raw_instruction="하이닉스 5주 매수 뒤 트레일링 매도",
+        normalized_instruction="하이닉스 5주 매수 뒤 트레일링 매도",
+        raw_instruction_sha256="0" * 64,
+        ceo_root_task_id="t_root1",
+        trading_task_id="t_trade1",
+    )
+    orders = OrderStore(record)
+    rules = RuleStore(record)
+    discord = Discord()
+    consumer = ConditionalRuleNotificationConsumer(
+        rule_store=rules,
+        order_store=orders,
+        status_reader=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("safety stop must not read or submit a directive")
+        ),
+        kanban_client=Kanban(),
+        discord_delivery=discord,
+        discord_store=object(),
+        ceo_projection=Projection(),
+        department_projection=Projection(),
+        mode="delivery",
+    )
+
+    assert consumer.handle_event(
+        {
+            "event_id": "cro_mismatch",
+            "aggregate_id": "88888888-8888-4888-8888-888888888888",
+            "event_type": "ENTRY_POSITION_MISMATCH",
+            "payload": {
+                "expected_position_quantity": "999",  # Redis is untrusted.
+                "actual_position_quantity": "1",
+            },
+        }
+    ) is True
+    assert rules.lifecycle_calls == ["88888888-8888-4888-8888-888888888888"]
+    assert orders.transitions == []
+    assert len(discord.calls) == 1
+    content = discord.calls[0]["content"]
+    assert "최초 진입 수량 5주" in content
+    assert "현재 보유 수량 3주" in content
+    assert "999" not in content
+    assert "추가 매도 주문 : 없음" in content
+    assert "QA 검증 : PASS" in content
+    assert "entry-position-mismatch-v1:cro_mismatch" in discord.calls[0]["response_key_suffix"]
+
+
+def test_expired_compound_exit_notifies_without_inferring_a_fill_or_submitting_order() -> None:
+    record = UserOrderRequestRecord(
+        order_request_id="77777777-7777-4777-8777-777777777777",
+        user_id="11111111-1111-4111-8111-111111111111",
+        fund_id="22222222-2222-4222-8222-222222222222",
+        book_id="33333333-3333-4333-8333-333333333333",
+        client_request_id="discord:guild:channel:123456789",
+        raw_instruction="하이닉스 5주 매수 뒤 5거래일 트레일링 매도",
+        normalized_instruction="하이닉스 5주 매수 뒤 5거래일 트레일링 매도",
+        raw_instruction_sha256="0" * 64,
+        ceo_root_task_id="t_root1",
+        trading_task_id="t_trade1",
+    )
+    orders = OrderStore(record)
+    rules = RuleStore(record)
+    discord = Discord()
+    consumer = ConditionalRuleNotificationConsumer(
+        rule_store=rules,
+        order_store=orders,
+        status_reader=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("expiry report must not read or submit a directive")
+        ),
+        kanban_client=Kanban(),
+        discord_delivery=discord,
+        discord_store=object(),
+        ceo_projection=Projection(),
+        department_projection=Projection(),
+        mode="delivery",
+    )
+
+    assert consumer.handle_event(
+        {
+            "event_id": "cro_expired",
+            "aggregate_id": "88888888-8888-4888-8888-888888888888",
+            "event_type": "CONDITIONAL_RULE_EXPIRED",
+            "payload": {"order_submitted": True},  # Redis payload is untrusted.
+        }
+    ) is True
+    assert rules.expiry_calls == ["88888888-8888-4888-8888-888888888888"]
+    assert orders.transitions == []
+    assert len(discord.calls) == 1
+    content = discord.calls[0]["content"]
+    assert "조건 규칙 상태 : EXPIRED" in content
+    assert "추가 주문 생성 : 없음" in content
+    assert "보유분이 남아 있을 수 있으나 자동 매도는 실행하지 않습니다." in content
+    assert "order_submitted" not in content
+    assert "QA 검증 : PASS" in content
+    assert "conditional-rule-expired-v1:cro_expired" in discord.calls[0]["response_key_suffix"]
+
+
+def test_activation_blocked_exit_notifies_without_submitting_a_compensating_order() -> None:
+    record = UserOrderRequestRecord(
+        order_request_id="77777777-7777-4777-8777-777777777777",
+        user_id="11111111-1111-4111-8111-111111111111",
+        fund_id="22222222-2222-4222-8222-222222222222",
+        book_id="33333333-3333-4333-8333-333333333333",
+        client_request_id="discord:guild:channel:123456789",
+        raw_instruction="하이닉스 5주 매수 뒤 5거래일 트레일링 매도",
+        normalized_instruction="하이닉스 5주 매수 뒤 5거래일 트레일링 매도",
+        raw_instruction_sha256="0" * 64,
+        ceo_root_task_id="t_root1",
+        trading_task_id="t_trade1",
+    )
+    orders = OrderStore(record)
+    rules = RuleStore(record)
+    discord = Discord()
+    consumer = ConditionalRuleNotificationConsumer(
+        rule_store=rules,
+        order_store=orders,
+        status_reader=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("activation-blocked report must not read or submit a directive")
+        ),
+        kanban_client=Kanban(),
+        discord_delivery=discord,
+        discord_store=object(),
+        ceo_projection=Projection(),
+        department_projection=Projection(),
+        mode="delivery",
+    )
+
+    assert consumer.handle_event(
+        {
+            "event_id": "cro_activation_blocked",
+            "aggregate_id": "88888888-8888-4888-8888-888888888888",
+            "event_type": "BUNDLE_ACTIVATION_BLOCKED",
+            "payload": {"code": "spoofed"},
+        }
+    ) is True
+    assert rules.activation_blocked_calls == ["88888888-8888-4888-8888-888888888888"]
+    assert orders.transitions == []
+    assert len(discord.calls) == 1
+    content = discord.calls[0]["content"]
+    assert "조건 규칙 상태 : FAILED" in content
+    assert "보호 청산 규칙 : 활성화하지 않음" in content
+    assert "추가 주문 생성 : 없음" in content
+    assert "spoofed" not in content
+    assert "QA 검증 : PASS" in content
+    assert "bundle-activation-blocked-v1:cro_activation_blocked" in discord.calls[0]["response_key_suffix"]
+
+
+def test_activated_compound_exit_confirms_actual_expiry_without_submitting_an_order() -> None:
+    record = UserOrderRequestRecord(
+        order_request_id="77777777-7777-4777-8777-777777777777",
+        user_id="11111111-1111-4111-8111-111111111111",
+        fund_id="22222222-2222-4222-8222-222222222222",
+        book_id="33333333-3333-4333-8333-333333333333",
+        client_request_id="discord:guild:channel:123456789",
+        raw_instruction="하이닉스 5주 매수 뒤 5거래일 트레일링 매도",
+        normalized_instruction="하이닉스 5주 매수 뒤 5거래일 트레일링 매도",
+        raw_instruction_sha256="0" * 64,
+        ceo_root_task_id="t_root1",
+        trading_task_id="t_trade1",
+    )
+    orders = OrderStore(record)
+    rules = RuleStore(record)
+    discord = Discord()
+    consumer = ConditionalRuleNotificationConsumer(
+        rule_store=rules,
+        order_store=orders,
+        status_reader=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("activation report must not read or submit a directive")
+        ),
+        kanban_client=Kanban(),
+        discord_delivery=discord,
+        discord_store=object(),
+        ceo_projection=Projection(),
+        department_projection=Projection(),
+        mode="delivery",
+    )
+
+    assert consumer.handle_event(
+        {
+            "event_id": "cro_activated",
+            "aggregate_id": "88888888-8888-4888-8888-888888888888",
+            "event_type": "BUNDLE_ACTIVATED",
+            "payload": {
+                "active_expires_at": "spoofed",
+                "activation_lifetime_trading_days": 99,
+                "order_submitted": True,
+            },
+        }
+    ) is True
+    assert rules.activated_calls == ["88888888-8888-4888-8888-888888888888"]
+    assert orders.transitions == []
+    assert len(discord.calls) == 1
+    content = discord.calls[0]["content"]
+    assert "조건 규칙 상태 : ACTIVE" in content
+    assert "보호 청산 : SELL 조건 감시 중" in content
+    assert "추적 기간 : 전량 체결 뒤 5거래일" in content
+    assert "보호 만료 시각 : 2026-09-04T06:30:00+00:00" in content
+    assert "추가 주문 생성 : 없음 (조건 충족 전)" in content
+    assert "spoofed" not in content
+    assert "99" not in content
+    assert "QA 검증 : PASS" in content
+    assert "bundle-activated-v1:cro_activated" in discord.calls[0]["response_key_suffix"]
+
+
+def test_stale_activated_event_is_suppressed_without_order_or_discord_side_effect() -> None:
+    record = UserOrderRequestRecord(
+        order_request_id="77777777-7777-4777-8777-777777777777",
+        user_id="11111111-1111-4111-8111-111111111111",
+        fund_id="22222222-2222-4222-8222-222222222222",
+        book_id="33333333-3333-4333-8333-333333333333",
+        client_request_id="discord:guild:channel:123456789",
+        raw_instruction="하이닉스 5주 매수 뒤 5거래일 트레일링 매도",
+        normalized_instruction="하이닉스 5주 매수 뒤 5거래일 트레일링 매도",
+        raw_instruction_sha256="0" * 64,
+        ceo_root_task_id="t_root1",
+        trading_task_id="t_trade1",
+    )
+    orders = OrderStore(record)
+    rules = RuleStore(record, activation_state="EXPIRED")
+    discord = Discord()
+    consumer = ConditionalRuleNotificationConsumer(
+        rule_store=rules,
+        order_store=orders,
+        status_reader=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale activation report must not read a directive")
+        ),
+        kanban_client=Kanban(),
+        discord_delivery=discord,
+        discord_store=object(),
+        ceo_projection=Projection(),
+        department_projection=Projection(),
+        mode="delivery",
+    )
+
+    assert consumer.handle_event(
+        {
+            "event_id": "cro_stale_activated",
+            "aggregate_id": "88888888-8888-4888-8888-888888888888",
+            "event_type": "BUNDLE_ACTIVATED",
+        }
+    ) is True
+    assert rules.activated_calls == ["88888888-8888-4888-8888-888888888888"]
+    assert orders.transitions == []
+    assert discord.calls == []
+
+
+def test_true_condition_reports_pending_paper_submission_without_submitting_an_order() -> None:
+    record = UserOrderRequestRecord(
+        order_request_id="77777777-7777-4777-8777-777777777777",
+        user_id="11111111-1111-4111-8111-111111111111",
+        fund_id="22222222-2222-4222-8222-222222222222",
+        book_id="33333333-3333-4333-8333-333333333333",
+        client_request_id="discord:guild:channel:123456789",
+        raw_instruction="하이닉스 5주 매수 뒤 2% 상승하면 매도",
+        normalized_instruction="하이닉스 5주 매수 뒤 2% 상승하면 매도",
+        raw_instruction_sha256="0" * 64,
+        ceo_root_task_id="t_root1",
+        trading_task_id="t_trade1",
+    )
+    orders = OrderStore(record)
+    rules = RuleStore(record, trigger_state="EXECUTION_PENDING")
+    discord = Discord()
+    consumer = ConditionalRuleNotificationConsumer(
+        rule_store=rules,
+        order_store=orders,
+        status_reader=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("trigger report must not read or submit a directive")
+        ),
+        kanban_client=Kanban(),
+        discord_delivery=discord,
+        discord_store=object(),
+        ceo_projection=Projection(),
+        department_projection=Projection(),
+        mode="delivery",
+    )
+
+    assert consumer.handle_event(
+        {
+            "event_id": "cro_triggered",
+            "aggregate_id": "88888888-8888-4888-8888-888888888888",
+            "event_type": "TRIGGER_CLAIMED",
+            "payload": {"trigger_id": "spoofed", "order_submitted": True},
+        }
+    ) is True
+    assert rules.trigger_calls == ["88888888-8888-4888-8888-888888888888"]
+    assert orders.transitions == []
+    assert len(discord.calls) == 1
+    content = discord.calls[0]["content"]
+    assert "조건 규칙 상태 : EXECUTION_PENDING" in content
+    assert "감지된 실행 방향 : SELL" in content
+    assert "조건 데이터 시각 : 2026-08-29T01:02:00+00:00" in content
+    assert "후속 처리 : PAPER 주문 제출 준비 중" in content
+    assert "주문 제출 : 아직 확인되지 않음" in content
+    assert "spoofed" not in content
+    assert "QA 검증 : PASS" in content
+    assert "conditional-trigger-claimed-v1:cro_triggered" in discord.calls[0]["response_key_suffix"]
+
+
+def test_stale_true_condition_event_is_suppressed_when_submission_already_completed() -> None:
+    record = UserOrderRequestRecord(
+        order_request_id="77777777-7777-4777-8777-777777777777",
+        user_id="11111111-1111-4111-8111-111111111111",
+        fund_id="22222222-2222-4222-8222-222222222222",
+        book_id="33333333-3333-4333-8333-333333333333",
+        client_request_id="discord:guild:channel:123456789",
+        raw_instruction="하이닉스 5주 매수 뒤 2% 상승하면 매도",
+        normalized_instruction="하이닉스 5주 매수 뒤 2% 상승하면 매도",
+        raw_instruction_sha256="0" * 64,
+        ceo_root_task_id="t_root1",
+        trading_task_id="t_trade1",
+    )
+    orders = OrderStore(record)
+    rules = RuleStore(record, trigger_state="COMPLETED")
+    discord = Discord()
+    consumer = ConditionalRuleNotificationConsumer(
+        rule_store=rules,
+        order_store=orders,
+        status_reader=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale trigger report must not read a directive")
+        ),
+        kanban_client=Kanban(),
+        discord_delivery=discord,
+        discord_store=object(),
+        ceo_projection=Projection(),
+        department_projection=Projection(),
+        mode="delivery",
+    )
+
+    assert consumer.handle_event(
+        {
+            "event_id": "cro_stale_triggered",
+            "aggregate_id": "88888888-8888-4888-8888-888888888888",
+            "event_type": "TRIGGER_CLAIMED",
+        }
+    ) is True
+    assert rules.trigger_calls == ["88888888-8888-4888-8888-888888888888"]
+    assert orders.transitions == []
+    assert discord.calls == []
 
 
 def test_delivery_lane_does_not_wait_for_kanban_notion_or_langsmith() -> None:

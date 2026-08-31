@@ -14,14 +14,7 @@ RISK_INTEGRATIONS_ROOT = Path(__file__).resolve().parents[2] / "departments" / "
 if str(RISK_INTEGRATIONS_ROOT) not in sys.path:
     sys.path.insert(0, str(RISK_INTEGRATIONS_ROOT))
 
-from apps.api import fact_router, ls_account_stream
-
-
-def test_bff_fact_symbol_parser_accepts_exact_alphanumeric_code_only() -> None:
-    match = fact_router._SYMBOL.search("00088k 현재가")
-    assert match is not None
-    assert match.group(1).upper() == "00088K"
-    assert fact_router._SYMBOL.search("prefix00088ksuffix 현재가") is None
+from apps.api import ls_account_stream
 
 
 def test_ls_account_symbol_normalizer_supports_exact_code_and_known_prefix() -> None:
@@ -77,43 +70,6 @@ def test_ls_token_cache_isolated_by_environment_and_app_key(
         ls_account_stream._token_cache.clear()
 
     assert issued == ["LIVE", "PAPER"]
-
-
-def test_direct_market_quote_uses_ls_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    selected: list[bool] = []
-
-    class Client:
-        @classmethod
-        def from_env(cls) -> "Client":
-            selected.append(True)
-            return cls()
-
-        def __enter__(self) -> "Client":
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        @staticmethod
-        def get_quote(symbol: str) -> SimpleNamespace:
-            return SimpleNamespace(
-                symbol=symbol,
-                price="100",
-                bid="99",
-                ask="101",
-                observed_at=SimpleNamespace(isoformat=lambda: "2026-08-20T00:00:00+00:00"),
-                source="ls-openapi",
-            )
-
-    monkeypatch.setenv("LS_ENV", "LIVE")
-    monkeypatch.setitem(sys.modules, "ls_openapi", SimpleNamespace(LSOpenAPIClient=Client))
-
-    fact = fact_router._fetch_market_quote("000660 현재가")
-
-    assert fact.data["symbol"] == "000660"
-    assert selected == [True]
 
 
 def test_ls_realtime_refreshes_rest_projection_before_websocket(

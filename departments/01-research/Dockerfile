@@ -1,4 +1,4 @@
-# 리서치 수집기 Container Image
+# 리서치 Container Image
 #
 # 담당: 재일 (리서치/퀀트)
 # 근거: 재일님 지시(2026-07-31) "수집기들 Docker 컨테이너로 띄워 DB 즉시 적재"
@@ -24,55 +24,63 @@ FROM python:3.12-slim
 # streamable-http 라는 안정된 최소 표면만 쓴다. 깨지면 자체점검이 먼저 잡는다.
 RUN pip install --no-cache-dir psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 websockets==15.0.1 fastapi==0.116.1 "uvicorn[standard]==0.35.0" pyarrow==25.0.0 mcp==1.26.0
 
-# 저장소의 departments/01-research 경로 구조를 그대로 유지한다 - 수집기들이
+# 저장소 루트 build context에서 departments/01-research 경로 구조를 그대로 유지한다 - 수집기들이
 # Path(__file__) 상대로 contracts/repository 를 sys.path 에 넣기 때문이다.
 WORKDIR /app/departments/01-research
 # Runtime collector surface is an explicit allowlist.  Operational drills and
 # destructive retention tools stay in Git but cannot be invoked from this
 # image, and a newly added collector is not shipped until this list is reviewed.
-COPY collectors/collector_scheduler.py \
-     collectors/market_breadth_collector.py \
-     collectors/derivatives_collector.py \
-     collectors/chart_backfill_collector.py \
-     collectors/market_cap_universe_collector.py \
-     collectors/label_snapshot_collector.py \
-     collectors/volatility_index_collector.py \
-     collectors/style_index_collector.py \
-     collectors/calendar_collector.py \
-     collectors/universe_restriction_collector.py \
-     collectors/market_data_steward.py \
-     collectors/market_archive_exporter.py \
-     collectors/retention_enforcer.py \
-     collectors/ls_realtime_service.py \
-     collectors/ls_realtime_worker.py \
-     collectors/ls_realtime_adapter.py \
-     collectors/ls_unified_parser.py \
-     collectors/subscription_plan.py \
-     collectors/ls_client.py \
-     collectors/source_registry.py \
-     collectors/symbol_universe.py \
-     collectors/market_observations.py \
+COPY departments/01-research/collectors/collector_scheduler.py \
+     departments/01-research/collectors/market_breadth_collector.py \
+     departments/01-research/collectors/derivatives_collector.py \
+     departments/01-research/collectors/chart_backfill_collector.py \
+     departments/01-research/collectors/market_cap_universe_collector.py \
+     departments/01-research/collectors/label_snapshot_collector.py \
+     departments/01-research/collectors/volatility_index_collector.py \
+     departments/01-research/collectors/style_index_collector.py \
+     departments/01-research/collectors/calendar_collector.py \
+     departments/01-research/collectors/universe_restriction_collector.py \
+     departments/01-research/collectors/market_data_steward.py \
+     departments/01-research/collectors/market_archive_exporter.py \
+     departments/01-research/collectors/retention_enforcer.py \
+     departments/01-research/collectors/ls_realtime_service.py \
+     departments/01-research/collectors/ls_realtime_worker.py \
+     departments/01-research/collectors/ls_realtime_adapter.py \
+     departments/01-research/collectors/ls_unified_parser.py \
+     departments/01-research/collectors/subscription_plan.py \
+     departments/01-research/collectors/ls_client.py \
+     departments/01-research/collectors/source_registry.py \
+     departments/01-research/collectors/symbol_universe.py \
+     departments/01-research/collectors/market_observations.py \
      ./collectors/
-COPY autonomous/ls_market_data.py ./autonomous/ls_market_data.py
+COPY departments/01-research/autonomous/ls_market_data.py ./autonomous/ls_market_data.py
 # 거래제한 수집기는 이 결정론 모듈의 제한 사유/TR 정의와 pagination 함수만
 # 재사용한다. 전체 agents/ 실행면을 이미지에 되살리지 않고 정확히 한 파일만
 # allowlist에 포함한다.
-COPY agents/universe_manager.py ./agents/universe_manager.py
-COPY agents/sector_regime_analyst.py ./agents/sector_regime_analyst.py
-COPY contracts ./contracts
-COPY repository ./repository
-COPY api ./api
+COPY departments/01-research/agents/universe_manager.py ./agents/universe_manager.py
+COPY departments/01-research/agents/sector_regime_analyst.py ./agents/sector_regime_analyst.py
+COPY departments/01-research/contracts ./contracts
+COPY departments/01-research/repository ./repository
+COPY departments/01-research/api ./api
 # market_api installs the repository's existing Tool Gateway at import time.
 # Package the canonical profile config with the API so the gateway never
 # silently falls back to NOT_INSTALLED in the standalone market-api image.
-COPY hermes ./hermes
+COPY departments/01-research/hermes ./hermes
+# Shared read-only readiness coordination; use one implementation across
+# Research, Quant, Risk, and QA.
+COPY orchestration/readiness_cache.py /app/orchestration/readiness_cache.py
+# Research evidence metrics use the existing credential-free tracing policy;
+# package that canonical module instead of weakening the import or duplicating
+# its redaction and sampling rules in this image.
+COPY orchestration/llm_observability.py ./orchestration/llm_observability.py
 # evidence/ 는 research-api /evidence/stories 가 story_cluster(결정론 군집)를
 # import 하기 위해 필요하다 - 표준 라이브러리만 써서 의존성은 늘지 않는다
-COPY evidence ./evidence
+COPY departments/01-research/evidence ./evidence
 # 나머지 퇴역 종목별 Packet 파이프라인(agents/, scripts.py)은 감사 계보로
 # Git에만 남긴다. 현재 직원 Worker는 별도 MCP 이미지와 명시적
 # employee_workers 마운트로만 실행된다.
 
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app:/app/departments/01-research:/app/departments/01-research/api
 
 CMD ["python", "collectors/collector_scheduler.py", "--check"]

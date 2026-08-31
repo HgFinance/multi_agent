@@ -612,6 +612,20 @@ class PostgresOrderStore:
             rows = cur.fetchall()
         return [self._hydrate_fills(_to_order(r)) for r in rows]
 
+    def readiness_counts(self) -> tuple[int, int]:
+        """Return cheap readiness counts without hydrating orders or fills."""
+
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                select
+                    (select count(*) from execution.order_intents),
+                    (select count(*) from execution.orders)
+                """
+            )
+            row = cur.fetchone()
+        return int(row[0] or 0), int(row[1] or 0)
+
     def find_unknown_order(self, fund_id: UUID) -> BrokerOrder | None:
         """전체 스캔이 아니라 조회 한 방이다(인메모리 구현의 ponytail 주석 참고)."""
         with self.cursor() as cur:

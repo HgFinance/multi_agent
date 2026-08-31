@@ -6,8 +6,24 @@ from apps.api.ceo_mirror_projection_worker import (
     _changed_request_ids,
     _kanban_event_changes,
     _kanban_event_watermark,
+    _same_watermark_noop_is_fresh,
+    _watermark_regressed,
 )
 from apps.api.ceo_mirror import CanonicalIngress, InMemoryMirrorStore
+
+
+def test_zero_row_projection_has_a_bounded_same_watermark_fence() -> None:
+    assert _same_watermark_noop_is_fresh(47955, 47955, 104.0, 100.0, 600.0)
+    assert not _same_watermark_noop_is_fresh(47955, 47955, 701.0, 100.0, 600.0)
+    assert not _same_watermark_noop_is_fresh(47956, 47955, 104.0, 100.0, 600.0)
+    assert not _same_watermark_noop_is_fresh(None, 47955, 104.0, 100.0, 600.0)
+
+
+def test_watermark_regression_is_treated_as_a_cursor_reset() -> None:
+    assert _watermark_regressed(47955, 47977)
+    assert not _watermark_regressed(47977, 47955)
+    assert not _watermark_regressed(47955, 47955)
+    assert not _watermark_regressed(None, 47955)
 
 
 def test_kanban_event_watermark_tracks_task_event_changes(tmp_path, monkeypatch) -> None:

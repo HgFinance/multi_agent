@@ -20,7 +20,11 @@ from .providers import LSBrokerIndicatorProvider, LocalIndicatorProvider
 from .broker.ls_readonly import LSReadOnlyIndicatorResolver
 
 
-_ALL_TIMEFRAMES = frozenset({"1M", "5M", "15M", "1H", "1D"})
+# These are the intervals the PAPER chart resolver can create from final 1M
+# bars (and the daily chart route for 1D).  Keep this registry in lock-step
+# with bar_data.py: the old omission of 3M meant a valid 3-minute request was
+# silently rewritten to 5M even though the resolver already aggregates 3M.
+_ALL_TIMEFRAMES = frozenset({"1M", "3M", "5M", "10M", "15M", "30M", "1H", "1D"})
 _NUMERIC = frozenset({"PERIOD"})
 _OFFSET = "OFFSET"
 

@@ -65,6 +65,40 @@ def _price_candidate(
     )
 
 
+def _oco_exit_candidate(
+    *, multiplier: str, operator: str
+) -> conditional_rules.ConditionalRuleCandidate:
+    return conditional_rules.ConditionalRuleCandidate.model_validate(
+        {
+            "symbol": "하이닉스",
+            "condition": {
+                "type": "COMPARISON",
+                "operator": operator,
+                "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                "right": {
+                    "type": "ARITHMETIC",
+                    "operator": "MUL",
+                    "left": {
+                        "type": "PORTFOLIO",
+                        "field": "AVG_ENTRY_PRICE",
+                    },
+                    "right": {
+                        "type": "LITERAL",
+                        "value": multiplier,
+                        "unit": "RATIO",
+                    },
+                },
+            },
+            "action": {
+                "side": "SELL",
+                "sizing": {"type": "ALL"},
+            },
+            "evaluation": {"clock": "QUOTE"},
+            "oco_mode": "EXIT_BRACKET",
+        }
+    )
+
+
 def _install_workflow(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -344,6 +378,69 @@ def test_multiple_price_actions_activate_as_independent_one_shot_rules(
     assert {item["workflow_state"] for item in status["rules"]} == {
         "WAITING_FOR_TRIGGER"
     }
+
+
+def test_oco_exit_bracket_is_server_bound_and_atomically_activated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = (
+        "하이닉스 보유분 전량을 평균 매입가 대비 2% 상승하면 매도하고 1% 하락하면 "
+        "매도해줘. 한 쪽 실행 시 나머지 취소하는 OCO로 해줘."
+    )
+    orders, rules, _tasks = _install_workflow(monkeypatch, raw_instruction=raw)
+    admission = next(iter(orders._records.values()))
+
+    result = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidates=(
+            _oco_exit_candidate(multiplier="1.02", operator="GTE"),
+            _oco_exit_candidate(multiplier="0.99", operator="LTE"),
+        ),
+    )
+
+    assert result["binding"] is True
+    assert result["oco"] == {"policy": "ONE_CANCELS_OTHER", "leg_count": 2}
+    assert "원자적으로 ACTIVE" in result["user_message"]
+    stored = rules.list_for_user(USER_ID)
+    assert len(stored) == 2
+    assert {item.state for item in stored} == {RuleState.ACTIVE}
+    assert len({item.spec.oco_group_id for item in stored}) == 1
+    assert stored[0].spec.oco_group_id is not None
+    assert {item.confirmed_at for item in stored} == {stored[0].confirmed_at}
+    assert {item.spec.action.side.value for item in stored} == {"SELL"}
+    assert {item.spec.action.sizing.type.value for item in stored} == {"ALL"}
+    outcome = orders.get(admission.order_request_id)
+    assert outcome is not None
+    assert outcome.state == "COMPLETED"
+    assert outcome.canonical_payload is not None
+    assert outcome.canonical_payload["kind"] == "CONDITIONAL_PAPER_RULE_SET"
+
+
+def test_oco_exit_bracket_needs_both_exit_legs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orders, rules, _tasks = _install_workflow(
+        monkeypatch,
+        raw_instruction="하이닉스 보유분을 평균 매입가 대비 2% 상승 시 전량 매도하는 OCO로 해줘",
+    )
+    admission = next(iter(orders._records.values()))
+
+    result = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidate=_oco_exit_candidate(multiplier="1.02", operator="GTE"),
+    )
+
+    assert result["binding"] is False
+    assert result["rule_active"] is False
+    assert result["reason_codes"] == ["OCO_EXIT_BRACKET_REQUIRES_EXACTLY_TWO_LEGS"]
+    assert result["awaiting_user_reply"] is True
+    assert "익절 조건과 손절 조건" in result["user_message"]
+    assert rules.list_for_user(USER_ID) == []
+    outcome = orders.get(admission.order_request_id)
+    assert outcome is not None
+    assert outcome.state == "CLARIFICATION_REQUIRED"
 
 
 def test_rule_repository_never_leaves_pending_confirmation(

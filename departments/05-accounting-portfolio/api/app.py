@@ -41,6 +41,7 @@ Close 승인 절차는 아직 없기 때문이다 - `source_of_record` 필드가
 from __future__ import annotations
 
 import sys
+import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -97,8 +98,15 @@ from reconciliation import (
     reconcile_positions,
 )
 from db_read_model import build_accounting_sections, build_sector_exposure
+from orchestration.readiness_cache import SingleFlightTTLCache
 
 API_VERSION = "v1"
+_ACCOUNTING_READY_CACHE = SingleFlightTTLCache(
+    env_var="ACCOUNTING_HEALTH_READY_CACHE_SECONDS",
+    default_seconds=2.0,
+    minimum_seconds=1.0,
+    maximum_seconds=30.0,
+)
 
 app = FastAPI(title="Accounting/Portfolio Domain API", version=API_VERSION)
 
@@ -1031,17 +1039,38 @@ def health_ready() -> dict:
     """
     if _store_error is not None:
         raise _store_error
-    # 인메모리 모드의 값들이 재시작마다 0으로 돌아간다는 사실을 숨기지 않는다.
-    ledgers, journals = (_repo.counts() if _repo is not None
-                         else (len(_ledgers), sum(len(l.journals) for l in _ledgers.values())))
-    return {
-        "status": "ready",
-        "api_version": API_VERSION,
-        "ledgers": ledgers,
-        "journals": journals,
-        "store": ("control-db accounting.*" if _repo is not None
-                  else "in-memory (accounting.* 미연결)"),
-    }
+
+    # Readiness is a bounded diagnostic, not a transaction path.  Sharing a
+    # successful count query prevents concurrent health probes from exhausting
+    # the ledger pool. Store errors are never cached and remain fail-closed.
+    def load_readiness() -> dict[str, object]:
+        try:
+            # 인메모리 모드의 값들이 재시작마다 0으로 돌아간다는 사실을 숨기지 않는다.
+            ledgers, journals = (
+                _repo.counts()
+                if _repo is not None
+                else (len(_ledgers), sum(len(l.journals) for l in _ledgers.values()))
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=_envelope(
+                    "ACCOUNTING_STORE_UNAVAILABLE",
+                    "Accounting readiness store is unavailable",
+                    action="HOLD",
+                ),
+            ) from exc
+        payload = {
+            "status": "ready",
+            "api_version": API_VERSION,
+            "ledgers": ledgers,
+            "journals": journals,
+            "store": ("control-db accounting.*" if _repo is not None
+                      else "in-memory (accounting.* 미연결)"),
+        }
+        return payload
+
+    return _ACCOUNTING_READY_CACHE.get_or_compute(load_readiness)
 
 
 # ── 자체 점검 ─────────────────────────────────────────────────────────────────
