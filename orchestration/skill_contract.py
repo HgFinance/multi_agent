@@ -58,6 +58,7 @@ STATIC_CANONICAL_SKILLS = frozenset(
         "hermes-memory",
         "ls-accounting-evidence",
         "methodology-scout",
+        "qa-feedback-bottleneck-review",
         "skill-authoring",
         # 2026-08-13: 카탈로그 우선 탐색 - "없다" 선언 전 정보원 4층 검색 규율.
         # KRX 유료 결제를 막은 실측(t3320 발견)이 탄생 계기.
@@ -106,6 +107,7 @@ _STATIC_SKILL_OWNER_BY_NAME = {
         "hermes-memory": frozenset({"ceo-agent"}),
         "ls-accounting-evidence": frozenset({"accounting-portfolio-department"}),
         "methodology-scout": frozenset({"research-department"}),
+        "qa-feedback-bottleneck-review": frozenset({"qa-department"}),
         "skill-authoring": frozenset(
             {"quant-backtest-department", "research-department"}
         ),

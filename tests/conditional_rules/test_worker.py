@@ -14,6 +14,7 @@ from apps.api.conditional_rule_worker import (
     HttpRuntimeClient,
     RuntimeDataError,
     RuntimeInputs,
+    _align_completed_bars,
 )
 from orchestration.conditional_rules.market_data import (
     MarketPriceResolverError,
@@ -21,19 +22,77 @@ from orchestration.conditional_rules.market_data import (
 )
 from orchestration.conditional_rules import (
     ActiveRule,
+    Candle,
     ConditionalRuleSpec,
     EvaluationContext,
     EvaluationFrame,
     EvaluationError,
     SubmitReadyExecution,
+    Timeframe,
+    TrailingStopState,
     TriggerClaim,
+    advance_trailing_stop,
 )
+from orchestration.conditional_rules.semantic import trailing_stop_parameters
+
+
+def _candle(at: datetime, close: str = "100") -> Candle:
+    value = Decimal(close)
+    return Candle(
+        bucket_time=at,
+        open=value,
+        high=value + Decimal("1"),
+        low=value - Decimal("1"),
+        close=value,
+        volume=Decimal("10"),
+    )
+
+
+def test_multi_timeframe_alignment_excludes_bars_newer_than_primary_close() -> None:
+    kst = timezone(timedelta(hours=9))
+    at = lambda hour, minute: datetime(2026, 8, 20, hour, minute, tzinfo=kst)
+    aligned, watermark = _align_completed_bars(
+        {
+            Timeframe.M3: [_candle(at(9, 0))],
+            Timeframe.M1: [_candle(at(9, minute)) for minute in range(4)],
+            Timeframe.M15: [_candle(at(8, 45)), _candle(at(9, 0))],
+        },
+        primary=Timeframe.M3,
+    )
+
+    assert watermark == at(9, 3).astimezone(timezone.utc)
+    assert [item.bucket_time for item in aligned[Timeframe.M1]] == [
+        at(9, 0),
+        at(9, 1),
+        at(9, 2),
+    ]
+    assert [item.bucket_time for item in aligned[Timeframe.M15]] == [at(8, 45)]
 
 
 NOW = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
 
 
-def active_rule(*, threshold: str = "100", side: str = "BUY") -> ActiveRule:
+def active_rule(
+    *,
+    threshold: str = "100",
+    side: str = "BUY",
+    trailing_drawdown: str | None = None,
+    trailing_activation_return: str | None = None,
+    trailing_expected_position_quantity: str | None = None,
+) -> ActiveRule:
+    condition: dict[str, object] = {
+        "type": "COMPARISON",
+        "operator": "GT",
+        "left": {"type": "MARKET", "field": "LAST_PRICE"},
+        "right": {"type": "LITERAL", "value": threshold, "unit": "PRICE"},
+    }
+    if trailing_drawdown is not None:
+        parameters: dict[str, str] = {"DRAWDOWN": trailing_drawdown}
+        if trailing_activation_return is not None:
+            parameters["ACTIVATION_RETURN"] = trailing_activation_return
+        if trailing_expected_position_quantity is not None:
+            parameters["EXPECTED_POSITION_QUANTITY"] = trailing_expected_position_quantity
+        condition = {"type": "TRAILING_STOP", "parameters": parameters}
     spec = ConditionalRuleSpec.model_validate(
         {
             "schema_version": "conditional-trade-rule.v1",
@@ -44,12 +103,7 @@ def active_rule(*, threshold: str = "100", side: str = "BUY") -> ActiveRule:
             },
             "instrument_id": "40000000-0000-0000-0000-000000000001",
             "symbol": "005930",
-            "condition": {
-                "type": "COMPARISON",
-                "operator": "GT",
-                "left": {"type": "MARKET", "field": "LAST_PRICE"},
-                "right": {"type": "LITERAL", "value": threshold, "unit": "PRICE"},
-            },
+            "condition": condition,
             "action": {
                 "side": side,
                 "sizing": {"type": "FIXED_SHARES", "value": "2"},
@@ -70,11 +124,19 @@ def active_rule(*, threshold: str = "100", side: str = "BUY") -> ActiveRule:
     )
 
 
-def inputs(*, price: str, market_open: bool = True) -> RuntimeInputs:
-    observed = datetime.now(timezone.utc)
+def inputs(
+    *,
+    price: str,
+    market_open: bool = True,
+    average_entry_price: str = "100",
+    position_quantity: str = "10",
+    sellable_quantity: str = "10",
+    observed: datetime | None = None,
+) -> RuntimeInputs:
+    observed = observed or datetime.now(timezone.utc)
     frame = EvaluationFrame(
         market={"LAST_PRICE": Decimal(price)},
-        portfolio={},
+        portfolio={"AVG_ENTRY_PRICE": Decimal(average_entry_price)},
         indicators={},
         observed_at=observed,
     )
@@ -92,8 +154,8 @@ def inputs(*, price: str, market_open: bool = True) -> RuntimeInputs:
         quote_fresh=True,
         current_price=Decimal(price),
         available_cash=Decimal("1000000"),
-        position_quantity=Decimal("10"),
-        sellable_quantity=Decimal("10"),
+        position_quantity=Decimal(position_quantity),
+        sellable_quantity=Decimal(sellable_quantity),
         lot_size=Decimal("1"),
     )
 
@@ -110,6 +172,8 @@ class FakeStore:
         self.submitted: list[UUID] = []
         self.submitting: list[UUID] = []
         self.submission_acquired = True
+        self.trailing_state: TrailingStopState | None = None
+        self.entry_trailing_cancellations: list[tuple[Decimal, Decimal]] = []
 
     def expire_due(self) -> int:
         return 0
@@ -133,6 +197,41 @@ class FakeStore:
     def claim_true(self, *args, **kwargs):
         self.claims += 1
         return TriggerClaim("trg_test", "eval_test")
+
+    def observe_trailing_stop(
+        self,
+        rule: ActiveRule,
+        *,
+        last_price: Decimal,
+        average_entry_price: Decimal,
+        observed_at: datetime,
+    ):
+        observation = advance_trailing_stop(
+            self.trailing_state,
+            parameters=trailing_stop_parameters(rule.spec.condition),
+            last_price=last_price,
+            average_entry_price=average_entry_price,
+            observed_at=observed_at,
+        )
+        if not observation.ignored_stale_quote:
+            self.trailing_state = observation.state
+        return observation
+
+    def cancel_entry_trailing_on_position_mismatch(
+        self,
+        rule: ActiveRule,
+        *,
+        expected_position_quantity: Decimal,
+        actual_position_quantity: Decimal,
+        **_kwargs,
+    ) -> bool:
+        if self.trailing_state is None:
+            return False
+        self.entry_trailing_cancellations.append(
+            (expected_position_quantity, actual_position_quantity)
+        )
+        self.active = []
+        return True
 
     def create_execution(
         self, rule, claim, *, allowed: bool, guard_code: str, quantity
@@ -339,6 +438,38 @@ def test_active_rules_are_evaluated_with_bounded_parallelism() -> None:
     assert client.max_active_loads == 2
 
 
+def test_single_worker_isolates_one_unexpected_rule_failure_from_later_rules() -> None:
+    """A constrained worker must make progress after one malformed runtime call."""
+
+    rule = active_rule(threshold="100")
+    store = FakeStore(rule)
+    store.active = [rule, rule]
+
+    class OneBadThenHealthyClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__(inputs(price="90"))
+            self.loads = 0
+
+        def load_inputs(self, received_rule: ActiveRule) -> RuntimeInputs:
+            del received_rule
+            self.loads += 1
+            if self.loads == 1:
+                raise RuntimeError("synthetic malformed provider response")
+            return self.runtime_inputs
+
+    client = OneBadThenHealthyClient()
+    result = ConditionalRuleWorker(
+        store,
+        client,
+        max_workers=1,
+    ).process_once()
+
+    assert result["errors"] == 1
+    assert result["evaluated"] == 1
+    assert store.false == 1
+    assert client.loads == 2
+
+
 def test_insufficient_history_is_backed_off_without_submitting() -> None:
     rule = active_rule()
     store = FakeStore(rule)
@@ -393,6 +524,135 @@ def test_true_condition_rechecks_guard_and_submits_existing_paper_lane() -> None
     assert store.execution_decisions == [(True, "READY_FOR_PAPER_DIRECTIVE", Decimal("2"))]
     assert client.submit_calls == 1
     assert store.submitted == [UUID("70000000-0000-0000-0000-000000000001")]
+
+
+def test_trailing_stop_arms_after_profit_and_exits_from_durable_high_watermark() -> None:
+    rule = active_rule(
+        side="SELL",
+        trailing_drawdown="0.01",
+        trailing_activation_return="0.02",
+    )
+    store = FakeStore(rule)
+    start = datetime.now(timezone.utc)
+    client = FakeClient(inputs(price="100", observed=start))
+    worker = ConditionalRuleWorker(store, client)
+
+    first = worker.process_once()
+    client.runtime_inputs = inputs(price="102", observed=start + timedelta(seconds=1))
+    armed = worker.process_once()
+    client.runtime_inputs = inputs(price="100.98", observed=start + timedelta(seconds=2))
+    exit_result = worker.process_once()
+
+    assert first["triggered"] == 0
+    assert armed["triggered"] == 0
+    assert exit_result["triggered"] == 1
+    assert exit_result["submitted"] == 1
+    assert store.trailing_state is not None
+    assert store.trailing_state.high_price == Decimal("102")
+    assert store.trailing_state.armed_at == start + timedelta(seconds=1)
+    assert client.submit_calls == 1
+
+
+def test_trailing_stop_ignores_late_quote_after_a_newer_high_watermark() -> None:
+    rule = active_rule(
+        side="SELL",
+        trailing_drawdown="0.01",
+        trailing_activation_return="0.02",
+    )
+    start = datetime.now(timezone.utc)
+    parameters = trailing_stop_parameters(rule.spec.condition)
+    high = advance_trailing_stop(
+        None,
+        parameters=parameters,
+        last_price=Decimal("103"),
+        average_entry_price=Decimal("100"),
+        observed_at=start,
+    )
+    newer = advance_trailing_stop(
+        high.state,
+        parameters=parameters,
+        last_price=Decimal("105"),
+        average_entry_price=Decimal("100"),
+        observed_at=start + timedelta(seconds=1),
+    )
+    late = advance_trailing_stop(
+        newer.state,
+        parameters=parameters,
+        last_price=Decimal("90"),
+        average_entry_price=Decimal("100"),
+        observed_at=start,
+    )
+
+    assert late.ignored_stale_quote is True
+    assert late.condition_result is False
+    assert late.state.high_price == Decimal("105")
+
+
+def test_trailing_stop_does_not_track_before_a_sellable_position_exists() -> None:
+    rule = active_rule(side="SELL", trailing_drawdown="0.01")
+    store = FakeStore(rule)
+    client = FakeClient(
+        inputs(price="105", position_quantity="0", sellable_quantity="0")
+    )
+
+    result = ConditionalRuleWorker(store, client).process_once()
+
+    assert result["triggered"] == 0
+    assert store.false == 1
+    assert store.trailing_state is None
+
+
+def test_trailing_stop_entry_quantity_guard_blocks_mixed_existing_position() -> None:
+    rule = active_rule(
+        side="SELL",
+        trailing_drawdown="0.01",
+        trailing_expected_position_quantity="2",
+    )
+    store = FakeStore(rule)
+    client = FakeClient(
+        inputs(price="105", position_quantity="4", sellable_quantity="4")
+    )
+
+    result = ConditionalRuleWorker(store, client).process_once()
+
+    assert result["triggered"] == 0
+    assert store.false == 1
+    assert store.trailing_state is None
+
+
+def test_entry_trailing_stop_cancels_after_started_position_quantity_drift() -> None:
+    rule = active_rule(
+        side="SELL",
+        trailing_drawdown="0.01",
+        trailing_activation_return="0.02",
+        trailing_expected_position_quantity="2",
+    )
+    store = FakeStore(rule)
+    start = datetime.now(timezone.utc)
+    client = FakeClient(inputs(price="103", position_quantity="2", sellable_quantity="2", observed=start))
+    worker = ConditionalRuleWorker(store, client)
+
+    started = worker.process_once()
+    client.runtime_inputs = inputs(
+        price="104",
+        position_quantity="3",
+        sellable_quantity="3",
+        observed=start + timedelta(seconds=1),
+    )
+    drifted = worker.process_once()
+    client.runtime_inputs = inputs(
+        price="100",
+        position_quantity="2",
+        sellable_quantity="2",
+        observed=start + timedelta(seconds=2),
+    )
+    later_match = worker.process_once()
+
+    assert started["cancelled"] == 0
+    assert drifted["cancelled"] == 1
+    assert store.entry_trailing_cancellations == [(Decimal("2"), Decimal("3"))]
+    assert later_match["evaluated"] == 0
+    assert client.submit_calls == 0
 
 
 def test_oco_submission_slot_loser_never_calls_external_trading_api() -> None:

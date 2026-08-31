@@ -16,6 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from engine.risk_engine import RiskAssessment
+from orchestration.connection_pool import create_blocking_connection_pool
 
 
 class RiskDecisionPersistenceError(RuntimeError):
@@ -69,15 +70,33 @@ class RiskDecisionRepository:
     def connect(cls, dsn: str) -> RiskDecisionRepository:
         _, ThreadedConnectionPool = _load_postgres_driver()
         # minconn=0 - 유휴 커넥션을 잡지 않는다
-        return cls(ThreadedConnectionPool(0, 4, dsn))
+        return cls(
+            create_blocking_connection_pool(
+                ThreadedConnectionPool,
+                dsn,
+                minconn=0,
+                default_maxconn=4,
+                env_prefix="RISK_QA",
+            )
+        )
 
     def close(self) -> None:
         self._pool.closeall()
 
+    def _get_connection(self) -> Any:
+        """Normalize pool acquisition failures for the API error envelope."""
+
+        try:
+            return self._pool.getconn()
+        except Exception as exc:  # noqa: BLE001 - pool errors vary by driver
+            raise RiskDecisionPersistenceError(
+                "Risk decision connection pool is unavailable"
+            ) from exc
+
     def save(self, assessment: RiskAssessment) -> UUID:
         Json, _ = _load_postgres_driver()
         decision = assessment.decision
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(

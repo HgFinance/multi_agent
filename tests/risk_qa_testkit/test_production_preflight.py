@@ -59,8 +59,6 @@ def test_production_preflight_is_fail_closed_and_does_not_echo_secrets() -> None
         "QA_CHECK_CONTRACT_APPROVED": "true",
         "QA_TRACE_PERSIST": "true",
         "QA_INCIDENT_PERSIST": "true",
-        "QA_INGEST_MODE": "disabled",
-        "QA_ENABLE_LEGACY_EVIDENCE_INGESTION": "false",
         "RISK_REQUIRE_P1_ANALYTICS": "true",
         "RISK_CONTEXT_SOURCE": "database",
         "RISK_BROKER_ADAPTER": "paper",
@@ -88,24 +86,12 @@ def test_production_preflight_is_fail_closed_and_does_not_echo_secrets() -> None
     )
 
 
-def test_production_configuration_blocks_legacy_evidence_writes() -> None:
+def test_production_configuration_has_no_legacy_evidence_writer_flags() -> None:
     checks = {
         item["name"]: item
-        for item in _check_configuration(
-            {
-                "QA_INGEST_MODE": "legacy-manual",
-                "QA_ENABLE_LEGACY_EVIDENCE_INGESTION": "true",
-            }
-        )
+        for item in _check_configuration({})
     }
 
-    assert checks["QA_INGEST_MODE"]["status"] == "FAIL"
-    assert checks["QA_INGEST_MODE"]["reason"] == "EXPECTED_DISABLED"
-    assert checks["QA_ENABLE_LEGACY_EVIDENCE_INGESTION"]["status"] == "FAIL"
-    assert (
-        checks["QA_ENABLE_LEGACY_EVIDENCE_INGESTION"]["reason"]
-        == "EXPECTED_FALSE"
-    )
-    assert "QA_POLICY_SOURCE_ID" not in checks
-    assert "OPENAI_API_KEY" not in checks
+    assert "QA_INGEST_MODE" not in checks
+    assert "QA_ENABLE_LEGACY_EVIDENCE_INGESTION" not in checks
     assert "qa_policy_corpus" not in checks

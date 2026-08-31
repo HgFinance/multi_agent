@@ -29,6 +29,7 @@ class ExpressionType(StrEnum):
     LOGICAL = "LOGICAL"
     NOT = "NOT"
     CROSS = "CROSS"
+    TRAILING_STOP = "TRAILING_STOP"
 
 
 class IndicatorSource(StrEnum):
@@ -53,7 +54,9 @@ class Timeframe(StrEnum):
     M1 = "1M"
     M3 = "3M"
     M5 = "5M"
+    M10 = "10M"
     M15 = "15M"
+    M30 = "30M"
     H1 = "1H"
     D1 = "1D"
 
@@ -97,6 +100,7 @@ class ActionSide(StrEnum):
 
 class SizingType(StrEnum):
     FIXED_SHARES = "FIXED_SHARES"
+    NOTIONAL_KRW = "NOTIONAL_KRW"
     POSITION_PERCENT = "POSITION_PERCENT"
     ALL = "ALL"
 
@@ -176,6 +180,7 @@ class ExpressionNode(BaseModel):
             ExpressionType.LOGICAL: {"operator", "children"},
             ExpressionType.NOT: {"operand"},
             ExpressionType.CROSS: {"operator", "left", "right"},
+            ExpressionType.TRAILING_STOP: {"parameters"},
         }
         required: dict[ExpressionType, set[str]] = {
             ExpressionType.LITERAL: {"value", "unit"},
@@ -188,6 +193,7 @@ class ExpressionNode(BaseModel):
             ExpressionType.LOGICAL: {"operator", "children"},
             ExpressionType.NOT: {"operand"},
             ExpressionType.CROSS: {"operator", "left", "right"},
+            ExpressionType.TRAILING_STOP: {"parameters"},
         }
         if not required[self.type].issubset(populated):
             missing = sorted(required[self.type] - populated)
@@ -228,8 +234,10 @@ class SizingPolicy(BaseModel):
             return self
         if self.value is None or not self.value.is_finite() or self.value <= 0:
             raise ValueError(f"{self.type.value} sizing requires a positive value")
-        if self.type is SizingType.FIXED_SHARES and self.value != self.value.to_integral_value():
-            raise ValueError("FIXED_SHARES must be an integer")
+        if self.type in {SizingType.FIXED_SHARES, SizingType.NOTIONAL_KRW} and (
+            self.value != self.value.to_integral_value()
+        ):
+            raise ValueError(f"{self.type.value} must be an integer")
         if self.type is SizingType.POSITION_PERCENT and self.value > 1:
             raise ValueError("POSITION_PERCENT must be within (0, 1]")
         return self
@@ -252,7 +260,12 @@ class RuleAction(BaseModel):
             self.side is ActionSide.BUY
             and self.sizing.type in {SizingType.POSITION_PERCENT, SizingType.ALL}
         ):
-            raise ValueError("BUY supports FIXED_SHARES only in v1")
+            raise ValueError("BUY supports FIXED_SHARES or NOTIONAL_KRW only in v1")
+        if (
+            self.sizing.type is SizingType.NOTIONAL_KRW
+            and self.order_type != "MARKET"
+        ):
+            raise ValueError("NOTIONAL_KRW supports MARKET only in v1")
         if self.order_type == "LIMIT" and self.limit_price is None:
             raise ValueError("LIMIT requires limit_price")
         if self.order_type == "MARKET" and self.limit_price is not None:
@@ -298,6 +311,15 @@ class ConditionalRuleSpec(BaseModel):
     execution_mode: ExecutionMode = ExecutionMode.PAPER
     repeat_policy: RepeatPolicy = RepeatPolicy.ONCE
     expires_at: datetime
+    # A fill-gated compound exit starts its useful lifetime only after the
+    # immediate PAPER entry has fully completed.  ``expires_at`` is kept as a
+    # bounded pending-entry deadline until then; the worker materializes this
+    # duration into the authoritative KRX-session close on activation.
+    #
+    # This is intentionally immutable and fingerprinted with the rest of the
+    # rule.  The worker may choose the calendar date, but cannot invent the
+    # number of sessions the user approved.
+    activation_lifetime_trading_days: int | None = Field(default=None, ge=1, le=20)
     raw_instruction_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     # One-cancels-the-other.  A take-profit and a stop-loss on the same position
     # are alternatives, not two independent orders: once either one actually

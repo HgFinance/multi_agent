@@ -44,6 +44,17 @@ _BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BASE / "pipeline"))
 sys.path.insert(0, str(_BASE / "contracts"))
 sys.path.insert(0, str(_BASE.parent / "01-research" / "collectors"))
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_REPO_ROOT))
+
+from orchestration.readiness_cache import SingleFlightTTLCache
+
+_QUANT_HEALTH_CACHE = SingleFlightTTLCache(
+    env_var="QUANT_HEALTH_CACHE_SECONDS",
+    default_seconds=5.0,
+    minimum_seconds=1.0,
+    maximum_seconds=30.0,
+)
 
 try:  # 자체 점검은 FastAPI 없이도 돈다
     from fastapi import FastAPI, HTTPException, Query
@@ -194,7 +205,9 @@ if _HAS_FASTAPI:
     def health() -> dict:
         """DB 까지 확인한다. **프로세스가 살아 있는 것과 공장이 도는 것은 다르다.**"""
         try:
-            _query("select 1 as ok")
+            # Health is a read-only projection. Submission and experiment
+            # leases never use this cache and remain individually durable.
+            _QUANT_HEALTH_CACHE.get_or_compute(lambda: _query("select 1 as ok"))
             return {"ok": True, "version": API_VERSION}
         except Exception as e:  # noqa: BLE001
             raise HTTPException(503, f"DB 연결 실패: {type(e).__name__}")

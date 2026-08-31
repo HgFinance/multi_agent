@@ -37,8 +37,11 @@ COPY orchestration/canonical_profiles.py ./orchestration/canonical_profiles.py
 COPY orchestration/ceo_workflow_scope.py ./orchestration/ceo_workflow_scope.py
 COPY orchestration/primary_task_idempotency.py ./orchestration/primary_task_idempotency.py
 COPY scripts/evolution_skills.py ./scripts/evolution_skills.py
+COPY scripts/measure_qa_overclassification.py ./scripts/measure_qa_overclassification.py
 COPY orchestration/evolution_skills.py ./orchestration/evolution_skills.py
 COPY orchestration/qa_discord_feedback.py ./orchestration/qa_discord_feedback.py
+COPY orchestration/qa_feedback_contract.py ./orchestration/qa_feedback_contract.py
+COPY orchestration/qa_feedback_labeling.py ./orchestration/qa_feedback_labeling.py
 COPY orchestration/qa_feedback_benchmarks.py ./orchestration/qa_feedback_benchmarks.py
 COPY orchestration/qa_skill_evolution_bridge.py ./orchestration/qa_skill_evolution_bridge.py
 COPY orchestration/langsmith_queries.py ./orchestration/langsmith_queries.py

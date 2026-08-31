@@ -235,6 +235,12 @@ services:
       - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
       - ./skills:/opt/shared-skills:ro
       - portfolio_runtime_data:/var/lib/portfolio
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 && test -r /opt/shared-skills/evolution-registry.json && test -d /var/lib/evolution-skills"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
 
   # Exact-hash approval is consumed by a separate, non-LLM control plane.
   # This is the only Evolution service with a writable canonical skills mount.
@@ -265,3 +271,9 @@ services:
       - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
       - .:/workspace:ro
       - ./skills:/workspace/skills:rw
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 && test -r /workspace/skills/evolution-registry.json && test -d /var/lib/evolution-skills"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

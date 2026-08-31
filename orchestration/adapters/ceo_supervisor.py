@@ -3588,6 +3588,37 @@ def _research_answer_is_complete(content: str) -> bool:
     )
 
 
+def _research_template_answer_is_safe(
+    content: str,
+    child: ChildTaskState,
+) -> bool:
+    """Allow deterministic delivery only for sourced or explicit-unverified memos."""
+
+    if not _research_answer_is_complete(content):
+        return False
+    if _https_urls(content):
+        return True
+
+    # A connector outage must remain visible to the user, but it must not
+    # trigger a second CEO rewrite that adds no evidence.  Require both the
+    # worker's structured status and an explicit limitation in the answer so
+    # an empty or unsupported memo cannot enter the template path.
+    evidence_status = str(child.metadata.get("evidence_status") or "").casefold()
+    if evidence_status not in {"unverified", "unavailable", "not_verified"}:
+        return False
+    return any(
+        marker in content.casefold()
+        for marker in (
+            "확인하지 못",
+            "검증하지 못",
+            "조회하지 못",
+            "검증 불가",
+            "unverified",
+            "unavailable",
+        )
+    )
+
+
 def _remove_research_duplicate_section(content: str) -> str:
     """Drop a repeated department handoff from an already complete answer."""
 
@@ -6393,6 +6424,55 @@ def _binding_paper_template_child(
     return child
 
 
+def _research_primary_template_child(
+    state: SupervisorState,
+) -> ChildTaskState | None:
+    """Return a complete fast Research answer for deterministic synthesis.
+
+    The Research primary already owns source selection and writes the
+    user-facing bounded memo. Rewriting that memo with a second CEO model
+    call adds latency and can accidentally alter source-backed claims. This
+    narrow template is limited to the explicit fast-advisory lane; incomplete
+    or ordinary analysis continues through the normal CEO synthesis path.
+    """
+
+    if (
+        state.workflow_mode != "analysis"
+        or not state.root_is_user_query
+        or state.has_action(SupervisorAction.SYNTHESIZE)
+        or read_marker(state.root_body, "analysis_mode") != "fast_advisory"
+        or state.missing_primary_profiles
+        or state.duplicate_primary_profiles
+        or not state.primary_ready
+        or state.selected_primary_profiles
+        != (canonical_profile_for_department("research"),)
+    ):
+        return None
+    children = state.analysis_children
+    if len(children) != 1:
+        return None
+    child = children[0]
+    if (
+        child.profile != canonical_profile_for_department("research")
+        or not child.done
+        or child.blocked
+        or child.failed
+        or child.error
+        or child.block_reason
+    ):
+        return None
+    answer = _normalize_research_answer_headings(
+        strip_internal_handoff(child.final_answer or child.result)
+    )
+    answer = _canonicalize_research_source_urls(
+        answer,
+        ({"body": state.root_body}, _terminal_payload_mapping(child)),
+    )
+    if not _research_template_answer_is_safe(answer, child):
+        return None
+    return child
+
+
 def _analysis_synthesis_decision(
     state: SupervisorState,
 ) -> SupervisorDecision | None:
@@ -6415,8 +6495,28 @@ def _analysis_synthesis_decision(
     if not state.primary_ready:
         return None
 
-    # A successful single-primary read/analysis that already produced a
-    # user-ready answer does not need a second CEO LLM rewrite.
+    # A complete fast Research memo already is the user-facing answer. Keep
+    # one canonical synthesis card for delivery/audit, but complete it from
+    # the persisted primary answer instead of starting a second CEO model.
+    template_child = _research_primary_template_child(state)
+    if template_child is not None:
+        return SupervisorDecision(
+            SupervisorAction.SYNTHESIZE,
+            state.parent_task_id,
+            assignee=canonical_profile_for_department("ceo"),
+            title="CEO final synthesis",
+            body=(
+                f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
+                "workflow_plane=response\n"
+                "workflow_mode=analysis\n"
+                "synthesis_mode=research_primary_template\n"
+                f"source_task_id={template_child.task_id}\n"
+                "Preserve the complete Research final_answer verbatim."
+            ),
+            parent_task_ids=(template_child.task_id,),
+            reason="research_primary_template",
+            initial_status="blocked",
+        )
     if _single_primary_passthrough_child(state) is not None:
         return None
 
@@ -6505,6 +6605,9 @@ def _binding_partial_defer_result(
 ) -> str:
     """Build a bounded fail-closed response from persisted department state."""
 
+    if read_marker(state.root_body, "routing_category") == "SYSTEM_STATUS":
+        return _operational_status_result(state)
+
     empty_primary = reason == "empty_primary_not_materialized"
     completed: list[str] = []
     unavailable: list[str] = []
@@ -6577,6 +6680,23 @@ def _binding_partial_defer_result(
             "",
             f"- **Fail-closed 사유:** `{reason}`",
             "- **권한 상태:** 이 응답은 새 주문·승격·원장 변경을 승인하지 않습니다.",
+        )
+    )
+
+
+def _operational_status_result(state: SupervisorState) -> str:
+    """Return the existing deterministic response for an operational query."""
+
+    return "\n".join(
+        (
+            "🧠 **CEO 운영 상태 요약**",
+            "",
+            "이 요청은 투자 분석이 아닌 운영 상태 조회로 분류했습니다.",
+            "시장 Research/Risk LLM primary를 호출하지 않고 기존 결정론적 운영 응답 경로로 처리했습니다.",
+            "운영 health·실행 trace·지연 수치는 `/health/ready`, Compose healthcheck, 운영 감사 로그를 기준으로 확인해야 하며 이 응답에서 추정하지 않습니다.",
+            "",
+            "- **권한 상태:** 이 응답은 주문·원장 변경·투자 승인·스킬 승격을 수행하지 않습니다.",
+            "- **근거 경계:** 제공되지 않은 healthcheck나 latency 수치를 만들어내지 않습니다.",
         )
     )
 
@@ -15112,6 +15232,55 @@ class CeoSupervisorService:
                     # Keep one synthesis identity. Releasing this same blocked
                     # card restores the existing CEO LLM behavior.
                     self.client.unblock_task(synthesis_task_id)
+            if decision.reason == "research_primary_template":
+                created_task = (
+                    created.get("task", created) if isinstance(created, Mapping) else {}
+                )
+                synthesis_task_id = (
+                    str(created_task.get("id") or created_task.get("task_id") or "")
+                    if isinstance(created_task, Mapping)
+                    else ""
+                )
+                template_child = _research_primary_template_child(state)
+                if not synthesis_task_id or template_child is None:
+                    raise SupervisorValidationError(
+                        "Research template lost its complete primary answer"
+                    )
+                answer = _normalize_research_answer_headings(
+                    strip_internal_handoff(
+                        template_child.final_answer or template_child.result
+                    )
+                )
+                answer = _canonicalize_research_source_urls(
+                    answer,
+                    (
+                        {"body": state.root_body},
+                        _terminal_payload_mapping(template_child),
+                    ),
+                )
+                if not _research_template_answer_is_safe(answer, template_child):
+                    raise SupervisorValidationError(
+                        "Research template answer no longer satisfies its evidence contract"
+                    )
+                self.client.complete_task(
+                    synthesis_task_id,
+                    result=answer,
+                    summary="Research primary의 완결된 답변을 원문 그대로 전달했습니다.",
+                    metadata={
+                        "source_task_id": template_child.task_id,
+                        "workflow_root_task_id": state.parent_task_id,
+                        "workflow_mode": "analysis",
+                        "synthesis_mode": "research_primary_template",
+                        "preserved_primary_final_answer_verbatim": True,
+                        "final_answer": answer,
+                    },
+                )
+                logger.info(
+                    "research-primary-template-complete root=%s source=%s task=%s",
+                    state.parent_task_id,
+                    template_child.task_id,
+                    synthesis_task_id,
+                )
             if decision.reason in {
                 "binding_partial_defer_template",
                 "empty_primary_defer_template",

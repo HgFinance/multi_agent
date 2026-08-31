@@ -36,6 +36,7 @@ DEPARTMENTS: tuple[str, ...] = (
 PORTFOLIO_WORKFLOW = "portfolio-recommendation"
 STRATEGY_WORKFLOW = "strategy-research"
 ACCOUNT_STATUS_CATEGORY = "ACCOUNT_STATUS"
+SYSTEM_STATUS_CATEGORY = "SYSTEM_STATUS"
 HR_E2E_CATEGORY = "HR_E2E_READONLY"
 HR_E2E_WORKFLOW = "hr-workforce-e2e"
 HR_READONLY_CATEGORY = "HR_WORKFORCE_READONLY"
@@ -50,6 +51,7 @@ CATEGORY_WORKFLOWS: dict[str, str] = {
     "REBALANCING_PROPOSAL": PORTFOLIO_WORKFLOW,
     "STRATEGY_PROPOSAL": STRATEGY_WORKFLOW,
     ACCOUNT_STATUS_CATEGORY: PORTFOLIO_WORKFLOW,
+    SYSTEM_STATUS_CATEGORY: PORTFOLIO_WORKFLOW,
     HR_E2E_CATEGORY: HR_E2E_WORKFLOW,
     HR_READONLY_CATEGORY: HR_READONLY_WORKFLOW,
 }
@@ -75,6 +77,10 @@ CATEGORY_DEPARTMENTS: dict[str, tuple[str, ...]] = {
     # report. Research and Risk may be added only when the user explicitly
     # asks for market or risk analysis in the same request.
     ACCOUNT_STATUS_CATEGORY: ("accounting", "ceo"),
+    # Operational status is served by the existing deterministic CEO control
+    # path. It must not fan out to market Research/Risk workers that cannot
+    # observe Compose health or supervisor traces.
+    SYSTEM_STATUS_CATEGORY: ("ceo",),
     HR_E2E_CATEGORY: ("hr",),
     HR_READONLY_CATEGORY: ("hr",),
 }
@@ -119,6 +125,32 @@ _ACCOUNT_STATUS_QUERY_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bholdings?\s+(?:status|summary|overview)\b", "holdings_status"),
     (r"\bnav\b", "nav"),
 )
+
+# Operational status questions do not need a full investment-analysis pass.
+# Keep this predicate deliberately narrow: words such as "시장 상태" belong
+# to Research evidence, while system/service/latency status can use the
+# existing bounded fast-advisory execution contract.
+_OPERATIONAL_STATUS_QUERY_RE = re.compile(
+    r"(?:시스템|서비스|런타임|인프라|워크플로|병목|지연|헬스|health|"
+    r"readiness|healthy|workflow|latency)",
+    re.IGNORECASE,
+)
+_STATUS_INTENT_RE = re.compile(
+    r"(?:상태|현황|점검|검사|검증|요약|브리핑|health|readiness|healthy|"
+    r"status|summary|latency|병목|지연)",
+    re.IGNORECASE,
+)
+
+
+def is_operational_status_query(query: str) -> bool:
+    """Recognize a bounded runtime/status report without changing routing."""
+
+    normalized = " ".join(str(query or "").split())
+    return bool(
+        _OPERATIONAL_STATUS_QUERY_RE.search(normalized)
+        and _STATUS_INTENT_RE.search(normalized)
+    )
+
 
 # Safety instructions such as "주문은 하지 마" describe a prohibition, not a
 # Trading request.  The router must not fan out to an execution-adjacent
@@ -687,6 +719,22 @@ def build_deterministic_bff_plan(
                 "previous_question_context_source": "discord_thread_starter",
             }
     if selected_departments is None:
+        if is_operational_status_query(query) and not plan.get("matched_terms"):
+            # A system/latency/health report is an operational read request,
+            # not a financial analysis. Keep it on the existing deterministic
+            # empty-primary response path; no second parser or worker is
+            # introduced and the normal post-response QA contract remains
+            # available to the supervisor.
+            plan = {
+                **plan,
+                "mode": "operational_status",
+                "category": SYSTEM_STATUS_CATEGORY,
+                "workflow": CATEGORY_WORKFLOWS[SYSTEM_STATUS_CATEGORY],
+                "category_recognized": True,
+                "requested_departments": ["ceo"],
+                "routing_basis": "operational_status_intent",
+                "matched_terms": {"ceo": ["operational_status"]},
+            }
         selected = [
             str(department)
             for department in plan.get("requested_departments", [])
@@ -735,6 +783,11 @@ def build_deterministic_bff_plan(
         # Research SOUL already defines the bounded fast-advisory contract.
         # Select it only for an explicitly scoped Research request so broad
         # portfolio/strategy workflows keep their existing operator setting.
+        analysis_mode = "fast_advisory"
+    elif is_operational_status_query(query) and analysis_mode == "standard_analysis":
+        # Keep the plan's explicit operational-status category on the existing
+        # deterministic empty-primary path. This branch only supplies the
+        # allowed mode marker; it never creates a Research/Risk worker.
         analysis_mode = "fast_advisory"
     return {
         **plan,
@@ -798,6 +851,7 @@ __all__ = [
     "HR_READONLY_CATEGORY",
     "HR_READONLY_WORKFLOW",
     "PORTFOLIO_WORKFLOW",
+    "SYSTEM_STATUS_CATEGORY",
     "STRATEGY_WORKFLOW",
     "RouteVerification",
     "build_ceo_task_plan",

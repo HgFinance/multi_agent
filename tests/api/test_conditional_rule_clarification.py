@@ -81,6 +81,14 @@ def test_ambiguity_labels_never_propose_a_value_of_their_own() -> None:
         assert "하시겠" not in label, code
 
 
+def test_notional_text_accepts_the_direct_amount_plus_order_verb_form() -> None:
+    assert classify_code("NOTIONAL_AMOUNT_NOT_IN_INSTRUCTION") is ClarificationClass.USER_AMBIGUITY
+    assert "100만원 매수" in clarification_message(
+        ("NOTIONAL_AMOUNT_NOT_IN_INSTRUCTION",)
+    )
+    assert classify_code("NOTIONAL_AMOUNT_MISMATCH") is ClarificationClass.INTERPRETER_DEFECT
+
+
 def test_interpreter_defect_does_not_blame_the_sentence() -> None:
     assert classify_code("UNIT_MISMATCH") is ClarificationClass.INTERPRETER_DEFECT
     assert should_ask(("UNIT_MISMATCH",)) is False

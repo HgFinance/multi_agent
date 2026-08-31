@@ -42,9 +42,13 @@ QUANT_FAST_ADVISORY_TOOLSETS = "kanban,ls-securities"
 QUANT_LIAISON_FAST_ADVISORY_TOOLSETS = "kanban,research"
 _TASK_ID_RE = re.compile(r"\bt_[A-Za-z0-9_-]+\b")
 FAST_ADVISORY_MODE = "analysis_mode=fast_advisory"
+# Fast advisory completes after the bounded evidence pass and terminal
+# handoff. Keep the existing eight-turn floor because provider/model latency
+# varies; the prompt and terminal contract stop unnecessary follow-up work.
 DEFAULT_FAST_ADVISORY_MAX_TURNS = 8
 MIN_FAST_ADVISORY_MAX_TURNS = 8
 MAX_FAST_ADVISORY_MAX_TURNS = 64
+DEFAULT_FAST_ADVISORY_REASONING = "low"
 DEFAULT_QA_PRIMARY_MAX_TURNS = 6
 MIN_QA_PRIMARY_MAX_TURNS = 6
 MAX_QA_PRIMARY_MAX_TURNS = 16
@@ -218,6 +222,19 @@ def _user_response_reasoning() -> str:
     )
 
 
+def _fast_advisory_reasoning(*, env: Mapping[str, str] | None = None) -> str:
+    """Use a bounded reasoning floor for evidence-limited advisory passes."""
+
+    runtime_env = os.environ if env is None else env
+    configured = runtime_env.get(
+        "HGFINANCE_FAST_ADVISORY_REASONING",
+        DEFAULT_FAST_ADVISORY_REASONING,
+    ).strip().casefold()
+    return (
+        configured
+        if configured in _REASONING_LEVELS
+        else DEFAULT_FAST_ADVISORY_REASONING
+    )
 def _qa_audit_max_turns(*, env: Mapping[str, str] | None = None) -> int:
     runtime_env = os.environ if env is None else env
     raw = runtime_env.get(
@@ -465,6 +482,8 @@ def _bounded_worker_argv(
                 if task_kind == "qa_primary"
                 else _qa_audit_reasoning()
                 if task_kind == "qa_audit"
+                else _fast_advisory_reasoning()
+                if task_kind == "fast_advisory"
                 else _user_response_reasoning(),
             ]
         )
@@ -614,7 +633,10 @@ def _research_fast_advisory_worker_argv(
         "request in workflow_root_task_id below. Read that root task exactly "
         "once with kanban_show, and do not inspect unrelated tasks, skills, "
         "files, browser tools, paper tools, or secondary agents. Use only the "
-        "read-only Research MCP evidence path. Make at most two fresh source "
+        "read-only Research MCP evidence path. Do not call tool_describe or "
+        "any connector/schema discovery tool; the only allowed calls are the "
+        "existing kanban_show, news_search, read_url/read_sources, and "
+        "kanban_complete calls. Make at most two fresh source "
         "fetch rounds and make each connector single-attempt; never retry a "
         "failed or empty connector. Stop once the direction, two positive "
         "items, two counter-items, observation triggers/invalidation criteria, "

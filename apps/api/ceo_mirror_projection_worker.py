@@ -124,6 +124,28 @@ def _changed_request_ids(
     return selected
 
 
+def _same_watermark_noop_is_fresh(
+    watermark: int | None,
+    last_noop_watermark: int | None,
+    now: float,
+    last_noop_at: float,
+    full_reconcile: float,
+) -> bool:
+    """Return whether a known zero-row result can be safely suppressed."""
+
+    return (
+        watermark is not None
+        and watermark == last_noop_watermark
+        and now - last_noop_at < full_reconcile
+    )
+
+
+def _watermark_regressed(current: int | None, previous: int | None) -> bool:
+    """Detect a compacted/rebuilt Kanban event log cursor."""
+
+    return current is not None and previous is not None and current < previous
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
@@ -142,6 +164,10 @@ def main() -> int:
         "UI_MIRROR_PROJECTION_FULL_RECONCILE_SECONDS",
         600.0,
     )
+    snapshot_retry_seconds = _positive_float(
+        "UI_MIRROR_PROJECTION_SNAPSHOT_RETRY_SECONDS",
+        15.0,
+    )
 
     if args.healthcheck:
         store.list_request_ids(limit=1)
@@ -150,13 +176,40 @@ def main() -> int:
 
     last_watermark: int | None = None
     last_reconcile_at = 0.0
+    # Defensive no-op fence. The event watermark is the normal gate; this
+    # second fence prevents a zero-row projection from becoming a hot loop if
+    # a compatibility SQLite/CLI path ever fails to retain the local cursor.
+    # A new board event or the periodic full reconcile still opens the gate.
+    last_noop_watermark: int | None = None
+    last_noop_at = 0.0
+    next_snapshot_retry_at = 0.0
     while True:
         try:
             watermark = _kanban_event_watermark()
+            watermark_regressed = _watermark_regressed(watermark, last_watermark)
+            if watermark_regressed:
+                # Retention can compact task_events and lower max(id). A stale
+                # cursor would otherwise make board_changed true forever while
+                # the incremental query returns no rows on every poll.
+                last_watermark = watermark
+                last_noop_watermark = None
+                last_noop_at = 0.0
             now = time.monotonic()
             board_changed = watermark is None or watermark != last_watermark
-            full_due = now - last_reconcile_at >= full_reconcile
-            if not board_changed and not full_due:
+            full_due = watermark_regressed or now - last_reconcile_at >= full_reconcile
+            if not full_due and now < next_snapshot_retry_at:
+                if args.once:
+                    return 0
+                time.sleep(poll)
+                continue
+            same_noop_watermark = _same_watermark_noop_is_fresh(
+                watermark,
+                last_noop_watermark,
+                now,
+                last_noop_at,
+                full_reconcile,
+            )
+            if (not board_changed and not full_due) or (same_noop_watermark and not full_due):
                 if args.once:
                     return 0
                 time.sleep(poll)
@@ -166,8 +219,25 @@ def main() -> int:
                 # request from spawning its own expensive `kanban list` call.
                 listed_rows = list_tasks(include_archived=False)
             except Exception:  # noqa: BLE001 - a read outage must not stop the reconciler
-                LOG.warning("kanban list snapshot unavailable; using per-workflow reads")
-                listed_rows = None
+                # Do not fall back to one `kanban show` graph per request here.
+                # A full board list can be large, but the per-workflow fallback
+                # multiplies that cost and can starve the user-facing daemon.
+                # Defer until the bounded retry window; the next board event or
+                # periodic full pass will retry without inventing UI state.
+                LOG.warning(
+                    "kanban list snapshot unavailable; projection deferred "
+                    "retry_seconds=%.1f",
+                    snapshot_retry_seconds,
+                )
+                next_snapshot_retry_at = time.monotonic() + snapshot_retry_seconds
+                if watermark is not None:
+                    last_watermark = watermark
+                last_reconcile_at = time.monotonic()
+                if args.once:
+                    return 0
+                time.sleep(poll)
+                continue
+            next_snapshot_retry_at = 0.0
             request_ids = None
             effective_watermark = watermark
             if (
@@ -198,6 +268,17 @@ def main() -> int:
             if effective_watermark is not None:
                 last_watermark = effective_watermark
             last_reconcile_at = time.monotonic()
+            if (
+                result["scanned"] == 0
+                and result["projected"] == 0
+                and result["failed"] == 0
+                and effective_watermark is not None
+            ):
+                last_noop_watermark = effective_watermark
+                last_noop_at = last_reconcile_at
+            else:
+                last_noop_watermark = None
+                last_noop_at = 0.0
         except Exception:
             LOG.exception("ceo mirror projection cycle failed")
         if args.once:
@@ -213,5 +294,7 @@ __all__ = [
     "_changed_request_ids",
     "_kanban_event_changes",
     "_kanban_event_watermark",
+    "_same_watermark_noop_is_fresh",
+    "_watermark_regressed",
     "main",
 ]

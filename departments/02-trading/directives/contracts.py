@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 class DirectiveAction(StrEnum):
     PLACE_ORDER = "PLACE_ORDER"
+    PLACE_BASKET = "PLACE_BASKET"
     CANCEL_ALL = "CANCEL_ALL"
     SELL_ALL = "SELL_ALL"
 
@@ -46,6 +47,7 @@ class DirectiveLegState(StrEnum):
 
 DIRECTIVE_PRIORITIES: dict[DirectiveAction, int] = {
     DirectiveAction.PLACE_ORDER: 1000,
+    DirectiveAction.PLACE_BASKET: 1000,
     DirectiveAction.CANCEL_ALL: 2000,
     DirectiveAction.SELL_ALL: 2000,
 }
@@ -80,6 +82,68 @@ class PlaceOrderPayload(BaseModel):
         return self
 
 
+class BasketOrderItem(BaseModel):
+    """One market leg in a bounded PAPER basket.
+
+    A KRW notional member is a BUY allocation and Trading derives its integer
+    share quantity from a fresh executable ask.  An explicit quantity member
+    instead preserves the user's concrete same-direction BUY or SELL size.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    instrument_id: UUID | None = None
+    symbol: str = Field(pattern=r"^[0-9A-Z]{6}$")
+    # Exactly one sizing policy is allowed. NOTIONAL_KRW is a maximum BUY
+    # allocation; explicit quantity is available for a same-direction basket
+    # of concrete BUY or SELL legs.
+    notional_krw: Decimal | None = Field(
+        default=None, gt=0, max_digits=30, decimal_places=0
+    )
+    quantity: Decimal | None = Field(
+        default=None, gt=0, max_digits=30, decimal_places=10
+    )
+    side: str = Field(default="BUY", pattern=r"^(BUY|SELL)$")
+    order_type: str = Field(default="MARKET", pattern=r"^MARKET$")
+    time_in_force: str = Field(default="DAY", pattern=r"^DAY$")
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def _canonical_symbol(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
+
+    @model_validator(mode="after")
+    def _sizing_policy(self) -> "BasketOrderItem":
+        if (self.notional_krw is None) == (self.quantity is None):
+            raise ValueError("basket member requires exactly one sizing policy")
+        if self.notional_krw is not None and self.side != "BUY":
+            raise ValueError("notional basket member must be BUY")
+        return self
+
+
+class PlaceBasketPayload(BaseModel):
+    """A bounded collection of independently executable same-side PAPER legs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    orders: tuple[BasketOrderItem, ...] = Field(min_length=2, max_length=20)
+
+    @model_validator(mode="after")
+    def _unique_symbols(self) -> "PlaceBasketPayload":
+        symbols = [item.symbol for item in self.orders]
+        if len(set(symbols)) != len(symbols):
+            raise ValueError("basket cannot contain a duplicate symbol")
+        ids = [item.instrument_id for item in self.orders if item.instrument_id]
+        if len(set(ids)) != len(ids):
+            raise ValueError("basket cannot contain a duplicate instrument_id")
+        sides = {item.side for item in self.orders}
+        if len(sides) != 1:
+            raise ValueError("basket members must have one shared side")
+        return self
+
+
 class UserDirectiveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -100,6 +164,8 @@ class UserDirectiveRequest(BaseModel):
             # Validation here makes the canonical object identical on both the
             # proof and execution paths, including explicit null instrument_id.
             PlaceOrderPayload.model_validate(self.payload)
+        elif self.action is DirectiveAction.PLACE_BASKET:
+            PlaceBasketPayload.model_validate(self.payload)
         elif self.payload:
             raise ValueError(f"{self.action.value} payload must be an empty object")
         return self
@@ -109,9 +175,16 @@ class UserDirectiveRequest(BaseModel):
             raise ValueError("directive is not PLACE_ORDER")
         return PlaceOrderPayload.model_validate(self.payload)
 
+    def place_basket(self) -> PlaceBasketPayload:
+        if self.action is not DirectiveAction.PLACE_BASKET:
+            raise ValueError("directive is not PLACE_BASKET")
+        return PlaceBasketPayload.model_validate(self.payload)
+
     def canonical_payload(self) -> dict[str, Any]:
         if self.action is DirectiveAction.PLACE_ORDER:
             return self.place_order().model_dump(mode="json", exclude_none=False)
+        if self.action is DirectiveAction.PLACE_BASKET:
+            return self.place_basket().model_dump(mode="json", exclude_none=False)
         return {}
 
     def payload_sha256(self) -> str:
@@ -130,9 +203,11 @@ class UserDirectiveRequest(BaseModel):
 
 __all__ = [
     "DIRECTIVE_PRIORITIES",
+    "BasketOrderItem",
     "DirectiveAction",
     "DirectiveLegState",
     "DirectiveState",
     "PlaceOrderPayload",
+    "PlaceBasketPayload",
     "UserDirectiveRequest",
 ]

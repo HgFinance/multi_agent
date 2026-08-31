@@ -71,6 +71,14 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
         _ASK,
         "매도 비중의 기준(보유수량 기준)을 명시해 주세요",
     ),
+    "NOTIONAL_AMOUNT_NOT_IN_INSTRUCTION": (
+        _ASK,
+        "최대 주문금액을 '100만원 매수'처럼 금액과 주문 동사를 함께 명시해 주세요",
+    ),
+    "NOTIONAL_AMOUNT_MISMATCH": (
+        _DEFECT,
+        "원문에 적힌 최대 주문금액과 조건주문 해석값이 달라 시스템 결함으로 기록했습니다",
+    ),
     "AMBIGUOUS_RETURN_BASELINE": (
         _ASK,
         "상승·하락률의 기준(평균 매입가 등)을 명시해 주세요",
@@ -80,10 +88,42 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
         _ASK,
         "돌파·이탈 조건의 봉 주기를 명시해 주세요",
     ),
+    "TIME_WINDOW_AM_PM_REQUIRED": (
+        _ASK,
+        "시간대의 오전·오후 또는 24시간 표기(예: 14:00)를 명시해 주세요",
+    ),
     "QUANTITY_REQUIRED": (_ASK, "매수 수량을 명시해 주세요(예: 1주)"),
     "CONDITIONAL_RULE_AST_REQUIRED": (
         _ASK,
         "조건을 한 가지 의미로 확정할 수 없습니다. 종목·조건·수량을 한 문장으로 다시 말씀해 주세요",
+    ),
+    "OCO_EXIT_BRACKET_REQUIRES_EXACTLY_TWO_LEGS": (
+        _ASK,
+        "OCO 청산은 같은 보유분에 대한 익절 조건과 손절 조건 두 가지를 모두 명시해 주세요",
+    ),
+    "OCO_EXIT_BRACKET_SYMBOL_MISMATCH": (
+        _ASK,
+        "OCO의 익절·손절 조건은 같은 종목이어야 합니다. 대상 종목을 하나로 명시해 주세요",
+    ),
+    "OCO_EXIT_BRACKET_SIZING_MISMATCH": (
+        _ASK,
+        "OCO의 익절·손절 조건은 같은 매도 수량 또는 비율이어야 합니다. 청산 수량을 하나로 명시해 주세요",
+    ),
+    "OCO_EXIT_BRACKET_EXPIRY_MISMATCH": (
+        _ASK,
+        "OCO의 익절·손절 조건은 같은 추적 만료 시각이어야 합니다. 만료 조건을 하나로 명시해 주세요",
+    ),
+    "MISSING_TRAILING_STOP_PARAMETER": (
+        _DEFECT,
+        "트레일링 손절의 고점 대비 하락률이 조건식에 들어가지 않았습니다",
+    ),
+    "TRAILING_STOP_NODE_REQUIRED": (
+        _DEFECT,
+        "트레일링 손절 노드가 올바르게 구성되지 않았습니다",
+    ),
+    "INVALID_TRAILING_STOP_PARAMETER": (
+        _DEFECT,
+        "트레일링 손절 비율이 올바른 범위로 해석되지 않았습니다",
     ),
     # -- the platform cannot express it -----------------------------------
     "UNSUPPORTED_INDICATOR": (_GAP, "요청하신 지표를 지원하지 않습니다"),
@@ -109,6 +149,18 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
         "요청하신 계좌·보유 항목을 지원하지 않습니다",
     ),
     "UNSUPPORTED_TIME_FIELD": (_GAP, "요청하신 시간 항목을 지원하지 않습니다"),
+    "TIME_WINDOW_OPERATOR_UNSUPPORTED": (
+        _GAP,
+        "시간창은 이전·이후·사이 범위 비교로만 지정할 수 있습니다",
+    ),
+    "TIME_WINDOW_LITERAL_INVALID": (
+        _DEFECT,
+        "시간창 기준값이 올바른 KST 시각으로 해석되지 않았습니다",
+    ),
+    "TIME_WINDOW_SHAPE_INVALID": (
+        _DEFECT,
+        "시간창 조건이 허용된 직접 비교 형태로 해석되지 않았습니다",
+    ),
     "UNSUPPORTED_EXPRESSION": (_GAP, "조건식에 지원하지 않는 형태가 있습니다"),
     "UNSUPPORTED_ARITHMETIC_OPERATOR": (
         _GAP,
@@ -155,9 +207,37 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
         _GAP,
         "지표 기간이 지원 한도(500봉)를 넘습니다",
     ),
-    "TIMEFRAME_3M_UNSUPPORTED": (
+    "INDICATOR_HISTORY_UNAVAILABLE": (
         _GAP,
-        "3분봉 데이터는 지원하지 않습니다. 5분봉으로 수행하려면 5분봉으로 다시 요청해 주세요",
+        "요청하신 지표 기간은 해당 봉 주기에서 PAPER 데이터 조회 한도를 넘습니다",
+    ),
+    "CROSS_TIMEFRAME_MISMATCH": (
+        _GAP,
+        "돌파·이탈의 양쪽 값은 같은 봉 주기여야 합니다. 다른 주기는 AND 조건으로 함께 확인해 주세요",
+    ),
+    "PRIMARY_TIMEFRAME_TOO_SLOW": (
+        _DEFECT,
+        "기준 봉 주기가 조건에 포함된 더 빠른 봉보다 느리게 해석되었습니다",
+    ),
+    "OCO_EXIT_BRACKET_SELL_ONLY": (
+        _GAP,
+        "현재 OCO는 이미 보유한 동일 종목을 청산하는 매도 익절·손절 브래킷만 지원합니다",
+    ),
+    "TRAILING_STOP_REQUIRES_QUOTE": (
+        _GAP,
+        "트레일링 손절은 신선한 현재가 기준에서만 지원합니다",
+    ),
+    "TRAILING_STOP_SELL_ONLY": (
+        _GAP,
+        "트레일링 손절은 이미 보유한 종목을 청산하는 매도 조건만 지원합니다",
+    ),
+    "TRAILING_STOP_COMPOSITION_UNSUPPORTED": (
+        _GAP,
+        "트레일링 손절은 현재 다른 AND·OR 조건이나 시간창과 결합할 수 없습니다",
+    ),
+    "TRAILING_STOP_PARAMETER_UNSUPPORTED": (
+        _GAP,
+        "트레일링 손절에는 고점 대비 하락률과 선택적 활성 수익률만 지정할 수 있습니다",
     ),
     # -- the interpreter built a malformed AST ----------------------------
     "INVALID_INDICATOR_PARAMETER": (_DEFECT, "지표 설정값이 올바르지 않습니다"),
@@ -178,6 +258,10 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
     "INDICATOR_PROVIDER_MISMATCH": (
         _DEFECT,
         "지표의 제공자 지정이 맞지 않습니다",
+    ),
+    "OCO_GROUP_ID_SERVER_MANAGED": (
+        _DEFECT,
+        "OCO 그룹 식별자는 시스템이 요청 단위로 생성해야 합니다",
     ),
 }
 

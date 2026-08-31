@@ -56,8 +56,15 @@ services:
       ACCOUNTING_MODE: ${ACCOUNTING_MODE:-PAPER_DB}
       DATABASE_URL: *accounting-database-url
       ACCOUNTING_DATABASE_ROLE: *accounting-database-role
+      ACCOUNTING_HEALTH_READY_CACHE_SECONDS: ${ACCOUNTING_HEALTH_READY_CACHE_SECONDS:-2}
     ports:
       - "127.0.0.1:8046:8000"   # 로컬 전용 - 외부 노출 금지 (8041~8045 사용 중)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
@@ -187,6 +194,14 @@ services:
       ACCOUNTING_DEFAULT_BOOK_ID: ${ACCOUNTING_DEFAULT_BOOK_ID:-}
       # 부서장 서술용. 없으면 결정론 문장으로 떨어지고 수치는 그대로 나간다.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    healthcheck:
+      # close_scheduler without --serve is its network-free, non-mutating
+      # module self-check. Never run --once from a health probe.
+      test: ["CMD", "python", "departments/05-accounting-portfolio/close_scheduler.py"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 45s
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
@@ -225,6 +240,12 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 && test -r /opt/data/config.yaml && test -d /opt/kanban && test -r /opt/kanban/kanban.db"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

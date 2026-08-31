@@ -258,6 +258,144 @@ def test_unambiguous_production_order_uses_deterministic_fast_path(
     assert response["task"]["status"] == "done"
 
 
+def test_same_notional_basket_uses_the_discord_deterministic_paper_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    _install_successful_route(monkeypatch, events=events, repository=repository)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("USER_PAPER_ORDER_WORKFLOW_ENABLED", "true")
+    monkeypatch.setenv(
+        "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "true"
+    )
+    execution = {
+        "decision": "EXECUTE",
+        "mode": "PAPER",
+        "binding": True,
+        "order_submitted": True,
+        "order_request_id": "basket-by-mock",
+        "request_state": "IN_PROGRESS",
+        "user_message": "PAPER 바스켓 주문을 제출했고 종목별 체결을 추적 중입니다.",
+    }
+
+    def process(**kwargs: Any) -> dict[str, Any]:
+        interpretation = kwargs["interpretation"]
+        assert interpretation["action"] == "PLACE_BASKET"
+        assert interpretation["basket_instrument_mentions"] == [
+            "삼성전자",
+            "SK하이닉스",
+            "LG",
+        ]
+        assert interpretation["notional_krw"] == "1000000"
+        return execution
+
+    monkeypatch.setattr(ceo, "process_deterministic_user_paper_order", process)
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query="삼성전자, SK하이닉스, LG 100만원씩 매수해",
+            request_id="request-basket-fast-100",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert response["order_state"] == "IN_PROGRESS"
+    assert response["answer"] == execution["user_message"]
+
+
+def test_quantity_sell_basket_uses_the_discord_deterministic_paper_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    _install_successful_route(monkeypatch, events=events, repository=repository)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("USER_PAPER_ORDER_WORKFLOW_ENABLED", "true")
+    monkeypatch.setenv(
+        "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "true"
+    )
+    execution = {
+        "decision": "EXECUTE",
+        "mode": "PAPER",
+        "binding": True,
+        "order_submitted": True,
+        "order_request_id": "quantity-sell-basket-by-mock",
+        "request_state": "IN_PROGRESS",
+        "user_message": "PAPER 바스켓 매도 주문을 제출했고 종목별 체결을 추적 중입니다.",
+    }
+
+    def process(**kwargs: Any) -> dict[str, Any]:
+        interpretation = kwargs["interpretation"]
+        assert interpretation["action"] == "PLACE_BASKET"
+        assert interpretation["basket_instrument_mentions"] == ["삼성전자", "SK하이닉스"]
+        assert interpretation["basket_quantities"] == ["3", "2"]
+        assert interpretation["side"] == "SELL"
+        assert interpretation["notional_krw"] is None
+        return execution
+
+    monkeypatch.setattr(ceo, "process_deterministic_user_paper_order", process)
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query="삼성전자 3주, SK하이닉스 2주 시장가 매도해",
+            request_id="request-quantity-sell-basket-fast-100",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert response["order_state"] == "IN_PROGRESS"
+    assert response["answer"] == execution["user_message"]
+
+
+def test_member_notional_basket_uses_the_discord_deterministic_paper_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    _install_successful_route(monkeypatch, events=events, repository=repository)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("USER_PAPER_ORDER_WORKFLOW_ENABLED", "true")
+    monkeypatch.setenv(
+        "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "true"
+    )
+    execution = {
+        "decision": "EXECUTE",
+        "mode": "PAPER",
+        "binding": True,
+        "order_submitted": True,
+        "order_request_id": "member-notional-basket-by-mock",
+        "request_state": "IN_PROGRESS",
+        "user_message": "PAPER 바스켓 주문을 제출했고 종목별 체결을 추적 중입니다.",
+    }
+
+    def process(**kwargs: Any) -> dict[str, Any]:
+        interpretation = kwargs["interpretation"]
+        assert interpretation["action"] == "PLACE_BASKET"
+        assert interpretation["basket_instrument_mentions"] == ["삼성전자", "SK하이닉스"]
+        assert interpretation["basket_notionals_krw"] == ["1000000", "500000"]
+        assert interpretation["basket_quantities"] == []
+        assert interpretation["side"] == "BUY"
+        assert interpretation["notional_krw"] is None
+        return execution
+
+    monkeypatch.setattr(ceo, "process_deterministic_user_paper_order", process)
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query="삼성전자 100만원, SK하이닉스 50만원 시장가 매수해",
+            request_id="request-member-notional-basket-fast-100",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert response["order_state"] == "IN_PROGRESS"
+    assert response["answer"] == execution["user_message"]
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -348,6 +486,8 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     assert "trusted KRX regular-session close default" in trading_body
     assert "For 2-4 independent conditional actions" in trading_body
     assert "pass candidates in source-text order" in trading_body
+    assert "oco_mode=EXIT_BRACKET" in trading_body
+    assert "oco_group_id: the trusted boundary derives it" in trading_body
     assert "multiple actions, and LIVE" not in trading_body
     assert raw in trading_body
     assert response["conditional_rule"] is True

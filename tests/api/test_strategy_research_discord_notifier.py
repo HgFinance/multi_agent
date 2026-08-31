@@ -200,6 +200,36 @@ def test_legacy_resolution_requires_one_exact_message(monkeypatch) -> None:
     }
 
 
+def test_notifier_bounded_retries_unresolved_legacy_lookup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "research"
+    lab = root / "labs" / "legacy-discord-1"
+    _write(
+        lab / "request.json",
+        {"request_id": "legacy-1", "goal": "오래된 요청", "source": "discord"},
+    )
+    (lab / "events.jsonl").write_text("", encoding="utf-8")
+    _write(
+        tmp_path / "state" / "sent.json",
+        {"initialized_at": "2026-01-01T00:00:00+00:00", "sent": {}},
+    )
+    monkeypatch.setenv("STRATEGY_DISCORD_REPORT_ENABLED", "true")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN_CEO", "token")
+    monkeypatch.setenv("DISCORD_CEO_CHANNEL_ID", "channel-1")
+    lookups: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        notifier,
+        "_discord_messages",
+        lambda token, channel: lookups.append((token, channel)) or [],
+    )
+
+    worker = notifier.StrategyReportNotifier(root, tmp_path / "state")
+    assert worker.run_once()["posted"] == 0
+    assert worker.run_once()["posted"] == 0
+    assert lookups == [("token", "channel-1")]
+
+
 def test_report_formats_breakout_metrics_and_plan_scope(tmp_path: Path) -> None:
     lab = _lab(tmp_path / "research")
     _write(

@@ -3,21 +3,19 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from orchestration.conditional_rules import (
     ConditionalRuleSpec,
     EvaluationPolicy,
     ExpressionNode,
-    Timeframe,
     RuleAction,
     RuleSemanticError,
     RuleState,
@@ -27,7 +25,11 @@ from orchestration.conditional_rules import (
 from orchestration.user_order_language import DelayedPaperOrderPlan
 
 try:
-    from .conditional_rule_language import clarification_codes, preview_assumptions
+    from .conditional_rule_language import (
+        clarification_codes,
+        condition_overview,
+        preview_assumptions,
+    )
     from .conditional_rule_workflow import (
         ConditionalRuleConflict,
         ConditionalRuleNotFound,
@@ -41,7 +43,11 @@ try:
         resolve_active_trading_instrument,
     )
 except ImportError:  # pragma: no cover - direct module execution compatibility
-    from conditional_rule_language import clarification_codes, preview_assumptions
+    from conditional_rule_language import (  # type: ignore[no-redef]
+        clarification_codes,
+        condition_overview,
+        preview_assumptions,
+    )
     from conditional_rule_workflow import (  # type: ignore[no-redef]
         ConditionalRuleConflict,
         ConditionalRuleNotFound,
@@ -67,8 +73,15 @@ class ConditionalRuleCandidate(BaseModel):
     action: RuleAction
     evaluation: EvaluationPolicy
     expires_at: datetime | None = None
+    # Only the trusted compound-order router can create a pending entry rule
+    # with this field.  The worker then starts this duration on full fill.
+    activation_lifetime_trading_days: int | None = Field(default=None, ge=1, le=20)
     # Rules sharing this id are one-cancels-the-other; see ConditionalRuleSpec.
     oco_group_id: UUID | None = None
+    # Natural-language OCO is a server-managed pair. Hermes states intent;
+    # the trusted orchestrator derives the durable UUID after binding the
+    # authenticated request, so it cannot accidentally join another request.
+    oco_mode: Literal["EXIT_BRACKET"] | None = None
 
     @field_validator("expires_at")
     @classmethod
@@ -77,8 +90,23 @@ class ConditionalRuleCandidate(BaseModel):
             raise ValueError("expires_at must include timezone")
         return value
 
+    @model_validator(mode="after")
+    def _activation_lifetime_has_no_competing_expiry(self) -> "ConditionalRuleCandidate":
+        if (
+            self.activation_lifetime_trading_days is not None
+            and self.expires_at is not None
+        ):
+            raise ValueError(
+                "activation_lifetime_trading_days cannot be combined with expires_at"
+            )
+        return self
+
 
 DELAYED_ORDER_EXECUTION_WINDOW_SECONDS = 5 * 60
+# An entry MARKET order is DAY-only, but the deferred worker may need to catch
+# up after a transient outage.  This is an outer pending-entry deadline, not
+# the requested post-fill lifetime.
+PENDING_ENTRY_ACTIVATION_WINDOW_DAYS = 14
 
 
 def build_delayed_order_candidate(
@@ -209,71 +237,11 @@ class ConditionalRuleView(BaseModel):
     last_error_code: str | None = None
     directive_id: UUID | None = None
     status_message: str | None = None
+    effective_expires_at: datetime | None = None
 
 
-_THREE_MINUTE_BAR = re.compile(r"(?<!\d)3\s*분봉")
 _KST = ZoneInfo("Asia/Seoul")
 _KRX_REGULAR_CLOSE = (15, 30)
-
-
-def _rewrite_three_minute_nodes(node: ExpressionNode) -> tuple[ExpressionNode, bool]:
-    """Map an explicit 3분봉 request to the supported 5분봉 feed.
-
-    The system has no independent 3M market-data capability. This boundary
-    rewrites only the requested timeframe to the existing 5M feed; it never
-    aggregates 1M candles or creates a second market-data path.
-    """
-
-    changed = False
-    updates: dict[str, Any] = {}
-    if node.timeframe is Timeframe.M3:
-        updates["timeframe"] = Timeframe.M5
-        changed = True
-    for field in ("left", "right", "operand"):
-        child = getattr(node, field)
-        if child is None:
-            continue
-        replacement, child_changed = _rewrite_three_minute_nodes(child)
-        if child_changed:
-            updates[field] = replacement
-            changed = True
-    if node.children:
-        children = []
-        children_changed = False
-        for child in node.children:
-            replacement, child_changed = _rewrite_three_minute_nodes(child)
-            children.append(replacement)
-            children_changed = children_changed or child_changed
-        if children_changed:
-            updates["children"] = tuple(children)
-            changed = True
-    return (node.model_copy(update=updates), changed) if changed else (node, False)
-
-
-def _normalize_supported_timeframe(
-    candidate: ConditionalRuleCandidate, raw_instruction: str
-) -> tuple[ConditionalRuleCandidate, bool, bool]:
-    """Return candidate, fallback-notice flag, and interpretation-mismatch flag."""
-
-    if not _THREE_MINUTE_BAR.search(raw_instruction):
-        return candidate, False, False
-    condition, condition_changed = _rewrite_three_minute_nodes(candidate.condition)
-    primary = candidate.evaluation.primary_timeframe
-    evaluation_changed = primary is Timeframe.M3
-    if evaluation_changed:
-        evaluation = candidate.evaluation.model_copy(
-            update={"primary_timeframe": Timeframe.M5}
-        )
-    else:
-        evaluation = candidate.evaluation
-    if condition_changed or evaluation_changed:
-        candidate = candidate.model_copy(
-            update={"condition": condition, "evaluation": evaluation}
-        )
-        return candidate, True, False
-    if primary is Timeframe.M5:
-        return candidate, True, False
-    return candidate, False, True
 
 
 def _subject(value: str | None) -> str:
@@ -323,7 +291,17 @@ def _expiry(value: datetime | None, *, now: datetime) -> datetime:
     return expiry
 
 
+def _pending_entry_expiry(*, now: datetime) -> datetime:
+    """Bound a not-yet-filled entry while deferring its exit lifetime."""
+
+    return now + timedelta(days=PENDING_ENTRY_ACTIVATION_WINDOW_DAYS)
+
+
 GUARD_MESSAGES = {
+    "ENTRY_POSITION_QUANTITY_MISMATCH": (
+        "진입 뒤 보유 수량이 달라져 트레일링 자동 매도를 안전하게 중단했습니다. "
+        "현재 보유 수량 기준으로 새 PAPER 전략을 배포해야 합니다."
+    ),
     "MARKET_CLOSED_NO_ORDER": (
         "현재 장이 열려 있지 않아 주문을 제출하지 않았습니다. "
         "체결·원장 반영도 없습니다."
@@ -355,11 +333,22 @@ GUARD_MESSAGES = {
 
 
 def conditional_status_message(
-    *, last_error_code: str | None, last_guard_code: str | None
+    *,
+    last_error_code: str | None,
+    last_guard_code: str | None,
+    state: RuleState | str | None = None,
 ) -> str | None:
     """One Korean sentence for a rule outcome, shared with the order status."""
 
-    return GUARD_MESSAGES.get(last_error_code or last_guard_code or "")
+    message = GUARD_MESSAGES.get(last_error_code or last_guard_code or "")
+    if message is not None:
+        return message
+    normalized_state = str(getattr(state, "value", state) or "").upper()
+    if normalized_state == RuleState.EXPIRED.value:
+        return "조건 감시 기간이 종료되어 추가 PAPER 주문을 제출하지 않았습니다."
+    if normalized_state == RuleState.FAILED.value:
+        return "조건주문 활성화 또는 실행이 안전하게 중단되어 추가 PAPER 주문을 제출하지 않았습니다."
+    return None
 
 
 def _view(record: ConditionalRuleRecord) -> ConditionalRuleView:
@@ -379,13 +368,15 @@ def _view(record: ConditionalRuleRecord) -> ConditionalRuleView:
         status_message=conditional_status_message(
             last_error_code=record.last_error_code,
             last_guard_code=record.last_guard_code,
+            state=record.state,
+        ),
+        effective_expires_at=(
+            record.effective_expires_at or record.spec.expires_at
         ),
     )
 
 
-def _summary(
-    spec: ConditionalRuleSpec, *, timeframe_fallback: bool = False
-) -> dict[str, Any]:
+def _summary(spec: ConditionalRuleSpec) -> dict[str, Any]:
     result: dict[str, Any] = {
         "symbol": spec.symbol,
         "condition": spec.condition.model_dump(mode="json", exclude_none=True),
@@ -404,13 +395,14 @@ def _summary(
         "execution_mode": "PAPER",
         "repeat_policy": "ONCE",
         "expires_at": spec.expires_at.isoformat(),
+        "activation_lifetime_trading_days": spec.activation_lifetime_trading_days,
+        "expiry_basis": (
+            "KRX_REGULAR_CLOSE_AFTER_FULL_FILL"
+            if spec.activation_lifetime_trading_days is not None
+            else "EXPLICIT_OR_DEFAULT_KRX_REGULAR_CLOSE"
+        ),
+        "condition_overview": condition_overview(spec),
     }
-    if timeframe_fallback:
-        result["timeframe_fallback"] = {
-            "requested": "3M",
-            "used": "5M",
-            "reason": "3M_UNSUPPORTED",
-        }
     return result
 
 
@@ -440,9 +432,9 @@ def _build_preview(
     now: datetime | None = None,
 ) -> ConditionalRulePreviewResponse:
     instant = now or datetime.now(timezone.utc)
-    candidate, timeframe_fallback, timeframe_mismatch = _normalize_supported_timeframe(
-        request.candidate, request.raw_instruction
-    )
+    # All advertised intraday timeframes, including 3M, are executable from
+    # final LS 1-minute bars.  Do not silently reinterpret a user's timeframe.
+    candidate = request.candidate
     access = require_trading_book_access(
         subject, str(request.fund_id), str(request.book_id)
     )
@@ -462,21 +454,24 @@ def _build_preview(
             "evaluation": candidate.evaluation,
             "execution_mode": "PAPER",
             "repeat_policy": "ONCE",
-            "expires_at": _expiry(candidate.expires_at, now=instant),
+            "expires_at": (
+                _pending_entry_expiry(now=instant)
+                if candidate.activation_lifetime_trading_days is not None
+                else _expiry(candidate.expires_at, now=instant)
+            ),
+            "activation_lifetime_trading_days": candidate.activation_lifetime_trading_days,
             "raw_instruction_sha256": _raw_sha256(request.raw_instruction),
             "oco_group_id": candidate.oco_group_id,
         }
     )
     _validate_semantics(spec)
     clarifications = list(clarification_codes(request.raw_instruction, spec))
-    if timeframe_mismatch:
-        clarifications.append("TIMEFRAME_3M_UNSUPPORTED")
     clarifications = tuple(dict.fromkeys(clarifications))
     assumptions = list(preview_assumptions(request.raw_instruction, spec))
-    if candidate.expires_at is None:
+    if candidate.activation_lifetime_trading_days is not None:
+        assumptions.append("ENTRY_EXIT_LIFETIME_STARTS_AFTER_FULL_FILL")
+    elif candidate.expires_at is None:
         assumptions.append("DEFAULT_EXPIRY_KRX_REGULAR_CLOSE")
-    if timeframe_fallback:
-        assumptions.append("TIMEFRAME_FALLBACK_3M_TO_5M")
     digest = rule_fingerprint(spec)
     return ConditionalRulePreviewResponse(
         activatable=not clarifications,
@@ -484,7 +479,7 @@ def _build_preview(
         assumptions=tuple(dict.fromkeys(assumptions)),
         spec_sha256=digest,
         spec=spec,
-        summary=_summary(spec, timeframe_fallback=timeframe_fallback),
+        summary=_summary(spec),
     )
 
 
@@ -492,6 +487,13 @@ def _validate_create(
     request: ConditionalRuleCreateRequest, *, subject: str
 ) -> ConditionalRuleSpec:
     spec = request.spec
+    if spec.activation_lifetime_trading_days is not None:
+        # This public endpoint has no immediate-entry bundle to bind and is
+        # therefore not allowed to create a delayed-start lifetime on its own.
+        raise HTTPException(
+            status_code=422,
+            detail="conditional_rule_activation_lifetime_requires_entry_bundle",
+        )
     digest = rule_fingerprint(spec)
     if digest != request.expected_spec_sha256:
         raise HTTPException(status_code=409, detail="conditional_rule_preview_changed")

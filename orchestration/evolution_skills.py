@@ -23,6 +23,8 @@ from typing import Any
 
 import yaml
 
+from orchestration.qa_feedback_contract import qa_approver_is_allowed
+
 SCHEMA_VERSION = "hgfinance.evolution-skills.v1"
 REGISTRY_VERSION = "hgfinance.evolution-skill-registry.v1"
 _REGISTRY_SECTIONS = (
@@ -847,9 +849,11 @@ class EvolutionSkillStore:
         reason: str = "",
         decision_ref: str = "",
     ) -> dict[str, Any]:
-        if qa_verdict not in {"PASS", "FAIL"} or not approved_by.strip():
+        if qa_verdict not in {"PASS", "FAIL"} or not qa_approver_is_allowed(
+            approved_by
+        ):
             raise EvolutionSkillError(
-                "review requires PASS or FAIL and a named approver"
+                "review requires PASS or FAIL and a Discord human approver"
             )
         target = self.proposal_dir(proposal_id)
         event = "APPROVED" if qa_verdict == "PASS" else "REJECTED"

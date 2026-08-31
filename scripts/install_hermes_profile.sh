@@ -18,20 +18,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROFILE_REGISTRY="$ROOT/scripts/hermes_profile_registry.txt"
 
-# 컨테이너 : 부서 디렉터리 : 프로필 이름
-# 프로필 이름은 docker-compose.yml 의 마운트 경로가 정본이다
-# (orchestration/workflows/*.yaml 은 더 오래된 판이라 이름이 다를 수 있다).
-DEPARTMENTS=(
-  "hedgefund-ceo-hermes:00-ceo-office:ceo-agent"
-  "hedgefund-research-hermes:01-research:research-department"
-  "hedgefund-trading-hermes:02-trading:trading-department"
-  "hedgefund-risk-hermes:03-risk:risk-management"
-  "hedgefund-quant-hermes:04-quant-backtest:quant-backtest-department"
-  "hedgefund-accounting-hermes:05-accounting-portfolio:accounting-portfolio-department"
-  "hedgefund-qa-hermes:06-ai-qa-audit:qa-department"
-  "hedgefund-workforce-hermes:07-agent-workforce:workforce-management"
-)
+if [[ ! -f "$PROFILE_REGISTRY" ]]; then
+  echo "Hermes Profile registry missing: $PROFILE_REGISTRY" >&2
+  exit 1
+fi
+
+# Container/profile mapping is read from the shared registry. The registry is
+# also consumed by sync_hermes_profiles.sh and check_hermes_profiles.py.
 
 install_one() {
   local container="$1" dept="$2" profile="$3"
@@ -119,12 +114,20 @@ PYEOF
 }
 
 if [ "${1:-}" = "--all" ]; then
-  echo "부서 프로필 설치 (${#DEPARTMENTS[@]}개)"
+  department_count=0
   fail=0
-  for entry in "${DEPARTMENTS[@]}"; do
-    IFS=: read -r c d p <<< "$entry"
+  while IFS='|' read -r p d kind c; do
+    [[ -z "$p" || "$p" == \#* ]] && continue
+    [[ "$kind" == "department" ]] || continue
+    if [[ -z "$c" || "$c" == "-" ]]; then
+      echo "  ✗ $p: container_name 없음"
+      fail=$((fail + 1))
+      continue
+    fi
+    department_count=$((department_count + 1))
     install_one "$c" "$d" "$p" || fail=$((fail + 1))
-  done
+  done < "$PROFILE_REGISTRY"
+  echo "부서 프로필 설치 (${department_count}개)"
   echo "완료 - 실패 $fail"
   echo "인증은 따로 한다: docker exec -it <컨테이너> hermes auth add openai-codex"
   exit $((fail > 0))

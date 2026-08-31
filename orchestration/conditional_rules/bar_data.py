@@ -47,6 +47,7 @@ from .indicators.broker.ls_readonly import (
 KST = timezone(timedelta(hours=9))
 
 CHART_PATH = "/stock/chart"
+TR_DAILY = "t8451"           # (통합)주식챠트(일주월년)
 TR_MINUTE = "t8452"          # (통합)주식챠트(N분)
 PAGE_MAX = 500               # 문서: 최대 500 (t8452 는 비압축만)
 MIN_CALL_INTERVAL_SECONDS = 1.05   # 문서 "초당 1" + 여유
@@ -62,7 +63,9 @@ _FRAME_MINUTES: dict[Timeframe, int] = {
     Timeframe.M1: 1,
     Timeframe.M3: 3,
     Timeframe.M5: 5,
+    Timeframe.M10: 10,
     Timeframe.M15: 15,
+    Timeframe.M30: 30,
     Timeframe.H1: 60,
 }
 
@@ -149,6 +152,42 @@ def _start_date_for(needed: int, now: datetime) -> date:
     return now.date() - timedelta(days=min(extra_sessions * 2 + 2, 30))
 
 
+def _start_date_for_daily(needed: int, now: datetime) -> date:
+    """Return a conservative calendar window for ``needed`` final daily bars."""
+
+    # Weekends/holidays mean ``needed * 2`` is occasionally too small.  The
+    # capped three-day multiplier keeps one PAPER request bounded while giving
+    # SMA/RSI enough prior sessions without pretending a missing bar exists.
+    return now.date() - timedelta(days=min(max(needed * 3 + 10, 30), 3650))
+
+
+def timeframe_close_at(bucket_time: datetime, timeframe: Timeframe) -> datetime:
+    """Return the canonical close timestamp for a final domestic-stock bar."""
+
+    if bucket_time.tzinfo is None:
+        raise BarResolverError(
+            "CONDITIONAL_BAR_TIME_INVALID",
+            "candle bucket_time must include timezone",
+            retryable=False,
+        )
+    local = bucket_time.astimezone(KST)
+    if timeframe is Timeframe.D1:
+        return local.replace(
+            hour=MARKET_CLOSE_KST.hour,
+            minute=MARKET_CLOSE_KST.minute,
+            second=0,
+            microsecond=0,
+        ).astimezone(timezone.utc)
+    step = _FRAME_MINUTES.get(timeframe)
+    if step is None:
+        raise BarResolverError(
+            "CONDITIONAL_BAR_TIMEFRAME_UNSUPPORTED",
+            f"{timeframe.value} is not served by the LS chart resolver",
+            retryable=False,
+        )
+    return (local + timedelta(minutes=step)).astimezone(timezone.utc)
+
+
 class LSChartBarResolver:
     """t8452 를 직접 읽어 확정 1분봉을 만들고, 필요하면 상위 프레임으로 묶는다.
 
@@ -188,7 +227,7 @@ class LSChartBarResolver:
     # ------------------------------------------------------------------
     # 전송
     # ------------------------------------------------------------------
-    def _throttled_call(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _throttled_call(self, *, tr_code: str, payload: dict[str, Any]) -> dict[str, Any]:
         last_error: Exception | None = None
         for attempt in range(MAX_ATTEMPTS):
             with self._rate_lock:
@@ -198,7 +237,7 @@ class LSChartBarResolver:
                 self._last_call = time.monotonic()
             try:
                 return self._transport.request_sync(
-                    path=CHART_PATH, tr_code=TR_MINUTE, payload=payload
+                    path=CHART_PATH, tr_code=tr_code, payload=payload
                 )
             except (LSReadOnlyTransportError, TimeoutError) as exc:
                 # 급속 반복에서 실측된 일시적 스로틀. 재시도로 회복된다.
@@ -232,7 +271,9 @@ class LSChartBarResolver:
                 "comp_yn": "N",
                 "exchgubun": "U",
             }
-            response = self._throttled_call({f"{TR_MINUTE}InBlock": block})
+            response = self._throttled_call(
+                tr_code=TR_MINUTE, payload={f"{TR_MINUTE}InBlock": block}
+            )
             code = str(response.get("rsp_cd") or "").strip()
             if code and code != "00000":
                 raise BarResolverError(
@@ -270,6 +311,71 @@ class LSChartBarResolver:
                 break
             cts_date, cts_time = next_date, next_time
 
+        return sorted(collected.values(), key=lambda candle: candle.bucket_time)
+
+    def _fetch_daily_bars(self, symbol: str, needed: int) -> list[Candle]:
+        """Fetch final adjusted daily candles through integrated LS t8451."""
+
+        now = datetime.now(KST)
+        sdate = _start_date_for_daily(needed, now).strftime("%Y%m%d")
+        edate = now.date().strftime("%Y%m%d")
+        collected: dict[datetime, Candle] = {}
+        cts_date = ""
+        for _page in range(MAX_PAGES):
+            block = {
+                "shcode": symbol,
+                "gubun": "2",
+                "qrycnt": PAGE_MAX,
+                "sdate": sdate,
+                "edate": edate,
+                "cts_date": cts_date,
+                "comp_yn": "N",
+                "sujung": "Y",
+                "exchgubun": "U",
+            }
+            response = self._throttled_call(
+                tr_code=TR_DAILY, payload={f"{TR_DAILY}InBlock": block}
+            )
+            code = str(response.get("rsp_cd") or "").strip()
+            if code and code != "00000":
+                raise BarResolverError(
+                    "CONDITIONAL_BAR_PROVIDER_REJECTED",
+                    f"LS daily chart rejected the request: {response.get('rsp_msg') or code}",
+                )
+            rows = response.get(f"{TR_DAILY}OutBlock1") or []
+            for row in rows:
+                if _is_no_trade(row):
+                    continue
+                try:
+                    bucket = datetime.strptime(str(row["date"]), "%Y%m%d").replace(tzinfo=KST)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise BarResolverError(
+                        "CONDITIONAL_BAR_TIME_INVALID",
+                        "LS daily chart row has an invalid date",
+                        retryable=False,
+                    ) from exc
+                # LS returns an in-progress daily row while the session is
+                # open.  A daily indicator must never see that partial bar.
+                if bucket.date() == now.date() and now.time() < MARKET_CLOSE_KST:
+                    continue
+                if bucket in collected:
+                    continue
+                collected[bucket] = Candle(
+                    bucket_time=bucket,
+                    open=_decimal(row["open"]),
+                    high=_decimal(row["high"]),
+                    low=_decimal(row["low"]),
+                    close=_decimal(row["close"]),
+                    volume=_decimal(row.get("jdiff_vol", 0)),
+                    is_final=True,
+                )
+            if len(collected) >= needed:
+                break
+            out_block = response.get(f"{TR_DAILY}OutBlock") or {}
+            next_date = str(out_block.get("cts_date") or "").strip()
+            if not rows or not next_date or next_date == cts_date:
+                break
+            cts_date = next_date
         return sorted(collected.values(), key=lambda candle: candle.bucket_time)
 
     # ------------------------------------------------------------------
@@ -326,7 +432,7 @@ class LSChartBarResolver:
                 retryable=False,
             )
         step = _FRAME_MINUTES.get(timeframe)
-        if step is None:
+        if step is None and timeframe is not Timeframe.D1:
             raise BarResolverError(
                 "CONDITIONAL_BAR_TIMEFRAME_UNSUPPORTED",
                 f"{timeframe.value} is not served by the LS chart resolver",
@@ -337,19 +443,33 @@ class LSChartBarResolver:
         # 워커는 사이클마다 모든 규칙을 도는데, 그때마다 REST 를 열면 초당 1회
         # 한도를 즉시 넘는다.
         now = datetime.now(KST)
-        bucket_key = now.replace(
-            minute=(now.minute // step) * step if step < 60 else 0,
-            second=0,
-            microsecond=0,
-        )
+        if timeframe is Timeframe.D1:
+            # Invalidate the cache when today's daily candle becomes final.
+            bucket_key = now.replace(
+                hour=16 if now.time() >= MARKET_CLOSE_KST else 0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+        else:
+            assert step is not None
+            bucket_key = now.replace(
+                minute=(now.minute // step) * step if step < 60 else 0,
+                second=0,
+                microsecond=0,
+            )
         cache_key = (normalized, timeframe.value)
         with self._cache_lock:
             cached = self._cache.get(cache_key)
             if cached is not None and cached[0] == bucket_key and len(cached[1]) >= required:
                 return list(cached[1])
 
-        minute_bars = self._fetch_minute_bars(normalized, required * step + step)
-        candles = self._aggregate(minute_bars, step)
+        if timeframe is Timeframe.D1:
+            candles = self._fetch_daily_bars(normalized, required + 1)
+        else:
+            assert step is not None
+            minute_bars = self._fetch_minute_bars(normalized, required * step + step)
+            candles = self._aggregate(minute_bars, step)
         with self._cache_lock:
             self._cache[cache_key] = (bucket_key, candles)
         return list(candles)

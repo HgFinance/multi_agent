@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 
 from .contracts import (
@@ -46,7 +47,46 @@ PORTFOLIO_FIELDS: dict[str, ValueUnit] = {
 
 TIME_FIELDS: dict[str, ValueUnit] = {
     "OBSERVED_AT_EPOCH_SECONDS": ValueUnit.NUMBER,
+    # KST wall-clock time of the authoritative quote or completed primary bar.
+    # It is intentionally a scalar rather than a timezone supplied by Hermes:
+    # domestic PAPER rules have one market clock and the worker/guard already
+    # use the KRX session calendar.
+    "KST_SECONDS_SINCE_MIDNIGHT": ValueUnit.NUMBER,
 }
+
+
+# Lower rank means a faster completed-bar cadence.  A BAR_CLOSE rule may use
+# slower confirmation frames (for example 3M entry + 15M trend filter), but
+# its primary clock may never be *slower* than a referenced frame or a stated
+# 3-minute condition would quietly be checked only every five minutes.
+_TIMEFRAME_RANK = {
+    "1M": 1,
+    "3M": 3,
+    "5M": 5,
+    "10M": 10,
+    "15M": 15,
+    "30M": 30,
+    "1H": 60,
+    "1D": 24 * 60,
+}
+
+# The runtime deliberately aggregates intraday frames from final 1M t8452
+# rows, which has a 12 * 500 row guard.  The worker asks for two extra bars
+# and the resolver asks for one aggregation bucket of margin, so validate the
+# warm-up request here instead of creating an ACTIVE rule that can never load
+# enough history.  1D uses t8451 and is bounded separately by the worker's
+# 2,000-bar request ceiling.
+_INTRADAY_FRAME_MINUTES = {
+    "1M": 1,
+    "3M": 3,
+    "5M": 5,
+    "10M": 10,
+    "15M": 15,
+    "30M": 30,
+    "1H": 60,
+}
+_MAX_WORKER_HISTORY = 2000
+_MAX_MINUTE_SOURCE_ROWS = 6000
 
 
 class RuleSemanticError(ValueError):
@@ -57,6 +97,89 @@ class RuleSemanticError(ValueError):
 
 def _error(code: str, message: str) -> RuleSemanticError:
     return RuleSemanticError(code, message)
+
+
+@dataclass(frozen=True)
+class TrailingStopParameters:
+    """Validated durable high-water exit parameters."""
+
+    drawdown: Decimal
+    activation_return: Decimal | None
+    expected_position_quantity: Decimal | None
+
+
+def trailing_stop_parameters(node: ExpressionNode) -> TrailingStopParameters:
+    """Return the bounded high-water rule parameters from a trailing leaf.
+
+    Ratios are decimal fractions: ``0.03`` means 3%.  They stay in the
+    confirmed AST, while the mutable highest observed quote belongs only to
+    the worker's database state.
+    """
+
+    if node.type is not ExpressionType.TRAILING_STOP:
+        raise _error("TRAILING_STOP_NODE_REQUIRED", "trailing stop node required")
+    supplied = {str(key).upper(): value for key, value in (node.parameters or {}).items()}
+    allowed = {"DRAWDOWN", "ACTIVATION_RETURN", "EXPECTED_POSITION_QUANTITY"}
+    unknown = set(supplied) - allowed
+    if unknown:
+        raise _error(
+            "TRAILING_STOP_PARAMETER_UNSUPPORTED",
+            f"trailing stop has unsupported parameters {sorted(unknown)}",
+        )
+    if "DRAWDOWN" not in supplied:
+        raise _error(
+            "MISSING_TRAILING_STOP_PARAMETER",
+            "trailing stop requires DRAWDOWN",
+        )
+
+    def ratio(name: str, *, minimum: Decimal, maximum: Decimal) -> Decimal | None:
+        if name not in supplied:
+            return None
+        try:
+            value = Decimal(str(supplied[name]))
+        except Exception as exc:
+            raise _error(
+                "INVALID_TRAILING_STOP_PARAMETER",
+                f"{name} must be a finite ratio",
+            ) from exc
+        if not value.is_finite() or value < minimum or value >= maximum:
+            raise _error(
+                "INVALID_TRAILING_STOP_PARAMETER",
+                f"{name} must be in [{minimum}, {maximum})",
+            )
+        return value
+
+    drawdown = ratio("DRAWDOWN", minimum=Decimal("0.0001"), maximum=Decimal("1"))
+    assert drawdown is not None
+    activation_return = ratio(
+        "ACTIVATION_RETURN", minimum=Decimal("0"), maximum=Decimal("10")
+    )
+    expected_position_quantity: Decimal | None = None
+    if "EXPECTED_POSITION_QUANTITY" in supplied:
+        try:
+            expected_position_quantity = Decimal(
+                str(supplied["EXPECTED_POSITION_QUANTITY"])
+            )
+        except Exception as exc:
+            raise _error(
+                "INVALID_TRAILING_STOP_PARAMETER",
+                "EXPECTED_POSITION_QUANTITY must be a positive whole-share quantity",
+            ) from exc
+        if (
+            not expected_position_quantity.is_finite()
+            or expected_position_quantity <= 0
+            or expected_position_quantity
+            != expected_position_quantity.to_integral_value()
+        ):
+            raise _error(
+                "INVALID_TRAILING_STOP_PARAMETER",
+                "EXPECTED_POSITION_QUANTITY must be a positive whole-share quantity",
+            )
+    return TrailingStopParameters(
+        drawdown=drawdown,
+        activation_return=activation_return,
+        expected_position_quantity=expected_position_quantity,
+    )
 
 
 def _indicator_parameters(node: ExpressionNode) -> dict[str, Decimal | int | str]:
@@ -143,6 +266,163 @@ def _contains_type(node: ExpressionNode | None, expression_type: ExpressionType)
         _contains_type(child, expression_type)
         for child in (node.left, node.right, node.operand, *(node.children or ()))
     )
+
+
+def _walk_nodes(node: ExpressionNode | None):
+    if node is None:
+        return
+    yield node
+    for child in (node.left, node.right, node.operand, *(node.children or ())):
+        yield from _walk_nodes(child)
+
+
+def _bar_timeframes(node: ExpressionNode | None, *, primary: str) -> set[str]:
+    """Return every completed-bar cadence consumed by an expression.
+
+    MARKET leaves at BAR_CLOSE are the primary candle.  An indicator carries
+    its own cadence.  Literal/portfolio/time leaves carry no candle cadence.
+    This deliberately operates only on the typed AST; it never infers a
+    timeframe from natural-language wording.
+    """
+
+    if node is None:
+        return set()
+    if node.type is ExpressionType.INDICATOR and node.timeframe is not None:
+        return {node.timeframe.value}
+    if node.type is ExpressionType.MARKET:
+        return {primary}
+    result: set[str] = set()
+    for child in (node.left, node.right, node.operand, *(node.children or ())):
+        result.update(_bar_timeframes(child, primary=primary))
+    return result
+
+
+def _validate_bar_timeframes(rule: ConditionalRuleSpec) -> None:
+    """Make multi-timeframe rules explicit and temporally meaningful."""
+
+    if rule.evaluation.clock is not EvaluationClock.BAR_CLOSE:
+        return
+    primary = rule.evaluation.primary_timeframe
+    assert primary is not None  # EvaluationPolicy already enforces this.
+    primary_name = primary.value
+    used = _bar_timeframes(rule.condition, primary=primary_name)
+    if any(_TIMEFRAME_RANK[primary_name] > _TIMEFRAME_RANK[item] for item in used):
+        raise _error(
+            "PRIMARY_TIMEFRAME_TOO_SLOW",
+            "primary_timeframe must be at least as fast as every referenced bar timeframe",
+        )
+
+    def visit(node: ExpressionNode | None) -> None:
+        if node is None:
+            return
+        if node.type is ExpressionType.CROSS:
+            left = _bar_timeframes(node.left, primary=primary_name)
+            right = _bar_timeframes(node.right, primary=primary_name)
+            if len(left | right) > 1:
+                raise _error(
+                    "CROSS_TIMEFRAME_MISMATCH",
+                    "CROSS operands must use one completed-bar timeframe; use LOGICAL AND for multi-timeframe confirmation",
+                )
+        for child in (node.left, node.right, node.operand, *(node.children or ())):
+            visit(child)
+
+    visit(rule.condition)
+
+
+def _validate_runtime_history(rule: ConditionalRuleSpec) -> None:
+    """Reject local-indicator warm-ups the PAPER resolver cannot supply."""
+
+    needs_previous = _contains_type(rule.condition, ExpressionType.CROSS)
+    for node in _walk_nodes(rule.condition):
+        if node.type is not ExpressionType.INDICATOR or node.timeframe is None:
+            continue
+        definition = DEFAULT_REGISTRY.get(node.name)
+        if definition is None or definition.source != "LOCAL":
+            continue
+        required = definition.required_history(normalized_indicator_parameters(node))
+        if needs_previous:
+            required += 1
+        timeframe = node.timeframe.value
+        if timeframe == "1D":
+            maximum = _MAX_WORKER_HISTORY - 2
+        else:
+            step = _INTRADAY_FRAME_MINUTES[timeframe]
+            # resolver needs ``(required + 2) * step + step`` final 1M rows.
+            maximum = min(
+                _MAX_WORKER_HISTORY - 2,
+                _MAX_MINUTE_SOURCE_ROWS // step - 3,
+            )
+        if required > maximum:
+            raise _error(
+                "INDICATOR_HISTORY_UNAVAILABLE",
+                f"{definition.name} on {timeframe} requires {required} completed bars; PAPER resolver limit is {maximum}",
+            )
+
+
+def _validate_time_windows(rule: ConditionalRuleSpec) -> None:
+    """Keep KST wall-clock time as a precise, bounded window predicate.
+
+    A generic epoch timestamp can support the existing one-off delayed-order
+    trigger.  A repeating intraday window is different: it must be an explicit
+    comparison of KST seconds to a bounded numeric literal.  Rejecting CROSS,
+    arithmetic, and unbounded/malformed values prevents a natural-language
+    interpreter from turning "10:00~14:30" into a hidden timestamp formula.
+    """
+
+    valid: set[int] = set()
+    for node in _walk_nodes(rule.condition):
+        if node.type is not ExpressionType.COMPARISON:
+            continue
+        time_node, literal = node.left, node.right
+        if (
+            time_node is None
+            or time_node.type is not ExpressionType.TIME
+            or time_node.field != "KST_SECONDS_SINCE_MIDNIGHT"
+        ):
+            continue
+        if node.operator not in {"GT", "GTE", "LT", "LTE"}:
+            raise _error(
+                "TIME_WINDOW_OPERATOR_UNSUPPORTED",
+                "KST time windows support only GT/GTE/LT/LTE comparisons",
+            )
+        if (
+            literal is None
+            or literal.type is not ExpressionType.LITERAL
+            or literal.unit is not ValueUnit.NUMBER
+            or isinstance(literal.value, bool)
+        ):
+            raise _error(
+                "TIME_WINDOW_LITERAL_INVALID",
+                "KST time window requires a numeric seconds literal",
+            )
+        try:
+            seconds = Decimal(str(literal.value))
+        except Exception as exc:  # pragma: no cover - Pydantic already normalizes Decimal
+            raise _error(
+                "TIME_WINDOW_LITERAL_INVALID",
+                "KST time window requires a numeric seconds literal",
+            ) from exc
+        if (
+            not seconds.is_finite()
+            or seconds != seconds.to_integral_value()
+            or not Decimal("0") <= seconds < Decimal("86400")
+        ):
+            raise _error(
+                "TIME_WINDOW_LITERAL_INVALID",
+                "KST time window seconds must be an integer in [0, 86400)",
+            )
+        valid.add(id(time_node))
+
+    for node in _walk_nodes(rule.condition):
+        if (
+            node.type is ExpressionType.TIME
+            and node.field == "KST_SECONDS_SINCE_MIDNIGHT"
+            and id(node) not in valid
+        ):
+            raise _error(
+                "TIME_WINDOW_SHAPE_INVALID",
+                "KST time must be directly compared with a numeric seconds literal",
+            )
 
 
 def normalized_indicator_parameters(node: ExpressionNode) -> dict[str, Decimal | int | str]:
@@ -235,6 +515,10 @@ def _infer(
             )
         return definition.outputs[output]
 
+    if node.type is ExpressionType.TRAILING_STOP:
+        trailing_stop_parameters(node)
+        return ValueUnit.BOOL
+
     if node.type is ExpressionType.ARITHMETIC:
         left = _infer(node.left, clock=clock, depth=depth + 1, counter=counter)  # type: ignore[arg-type]
         right = _infer(node.right, clock=clock, depth=depth + 1, counter=counter)  # type: ignore[arg-type]
@@ -312,6 +596,29 @@ def validate_rule_spec(rule: ConditionalRuleSpec) -> ConditionalRuleSpec:
     result = _infer(rule.condition, clock=rule.evaluation.clock, depth=1, counter=[0])
     if result is not ValueUnit.BOOL:
         raise _error("CONDITION_NOT_BOOLEAN", "rule condition must evaluate to BOOL")
+    _validate_bar_timeframes(rule)
+    _validate_runtime_history(rule)
+    _validate_time_windows(rule)
+    trailing_nodes = [
+        node for node in _walk_nodes(rule.condition)
+        if node.type is ExpressionType.TRAILING_STOP
+    ]
+    if trailing_nodes:
+        if len(trailing_nodes) != 1 or rule.condition.type is not ExpressionType.TRAILING_STOP:
+            raise _error(
+                "TRAILING_STOP_COMPOSITION_UNSUPPORTED",
+                "trailing stop must be the complete condition in this version",
+            )
+        if rule.evaluation.clock is not EvaluationClock.QUOTE:
+            raise _error(
+                "TRAILING_STOP_REQUIRES_QUOTE",
+                "trailing stop requires the fresh quote clock",
+            )
+        if rule.action.side is not ActionSide.SELL:
+            raise _error(
+                "TRAILING_STOP_SELL_ONLY",
+                "trailing stop is an existing-position SELL exit only",
+            )
     if (
         rule.action.side is ActionSide.SELL
         and rule.action.sizing.type is SizingType.FIXED_SHARES
@@ -330,6 +637,8 @@ __all__ = [
     "PORTFOLIO_FIELDS",
     "IndicatorDefinition",
     "RuleSemanticError",
+    "TrailingStopParameters",
     "normalized_indicator_parameters",
+    "trailing_stop_parameters",
     "validate_rule_spec",
 ]

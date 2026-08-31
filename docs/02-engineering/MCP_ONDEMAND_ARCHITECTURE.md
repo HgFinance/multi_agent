@@ -46,7 +46,7 @@
 | 한국 뉴스 | **[naver-search-mcp](https://github.com/isnow890/naver-search-mcp)** (isnow890) | ★81, v1.0.49, 앱당 25,000회/일 무료. ⚠ 제목·요약·링크만 — 본문은 fetch 단계 필요. 보조: Tavily(기존 키 사용 중) |
 | 거시 (미국) | [fred-mcp-server](https://github.com/stefanoamorelli/fred-mcp-server) | 성숙, 무료 120 req/분. AGPL 주의 |
 | 거시 (한국) | ✅ **ECOS 자작 완료** (2026-08-13, `external_macro.py` — search/items/series 3종, 기준금리 실측). **KOSIS 는 폐기** (재일 결정 2026-08-13: 키 재발급 부담 — 실제로 08-11 만료 실측. 소비자물가 등은 ECOS 로 조회 가능해 능력 손실 없음) | 해소 |
-| 증권사 (LS) | **자작 MCP 래핑** — `fact_router`/`account_snapshot`의 브로커 직행 패턴을 에이전트 도구로 일반화 | 키는 래퍼에 격리(통합계획 6.2 유지), TTL 수십 초 휘발성 캐시로 한도 방어 |
+| 증권사 (LS) | **자작 MCP 래핑** — `account_snapshot`/`ls_account_stream`의 브로커 직행 패턴을 에이전트 도구로 일반화 | 키는 래퍼에 격리(통합계획 6.2 유지), TTL 수십 초 휘발성 캐시로 한도 방어 |
 
 공급망 리스크: 주력 2종이 **개인 유지보수 npm 패키지** — API 키가 서드파티 코드를 통과한다. **버전 고정 + 포크 보관 + 의존성 감사**가 도입 조건.
 

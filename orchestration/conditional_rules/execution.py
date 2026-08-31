@@ -101,6 +101,11 @@ def guard_rule_execution(
     sizing = rule.action.sizing
     if sizing.type is SizingType.FIXED_SHARES:
         requested = sizing.value or Decimal("0")
+    elif sizing.type is SizingType.NOTIONAL_KRW:
+        # A Korean equity order ultimately needs an integral, lot-aligned
+        # quantity.  The user-confirmed KRW value is therefore a ceiling, not
+        # a promise to spend an impossible fractional share amount.
+        requested = (sizing.value or Decimal("0")) / snapshot.current_price
     elif sizing.type is SizingType.POSITION_PERCENT:
         requested = snapshot.sellable_quantity * (sizing.value or Decimal("0"))
     elif sizing.type is SizingType.ALL:

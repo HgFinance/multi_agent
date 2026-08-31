@@ -57,6 +57,9 @@ MAX_LEASE_SECONDS = 7_200
 _CLAIM_SQL = """
     select audit.claim_intraday_forward_reproduction_work(%s, %s)
 """
+_HAS_PENDING_WORK_SQL = """
+    select audit.has_intraday_forward_reproduction_work()
+"""
 _HEARTBEAT_SQL = """
     select audit.heartbeat_intraday_forward_reproduction_work(
       %s::uuid, %s::uuid, %s, %s)
@@ -302,6 +305,22 @@ def _claimed_bundle(row: Any) -> dict[str, Any] | None:
     return bundle
 
 
+def has_pending_work(connection) -> bool:
+    """Avoid the expensive immutable-graph claim when the queue is empty."""
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(_HAS_PENDING_WORK_SQL)
+            row = cursor.fetchone()
+        connection.commit()
+        return bool(row and row[0])
+    except Exception:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        raise
+
+
 def claim_next(connection, *, worker: str,
                lease_seconds: int) -> dict[str, Any] | None:
     try:
@@ -474,6 +493,8 @@ def process_once(
         worker: str, lease_seconds: int = DEFAULT_LEASE_SECONDS,
         heartbeat_seconds: int = DEFAULT_HEARTBEAT_SECONDS,
         monotonic_fn: Callable[[], float] = time.monotonic) -> dict | None:
+    if not has_pending_work(metadata_connection):
+        return None
     bundle = claim_next(
         metadata_connection, worker=worker, lease_seconds=lease_seconds)
     if bundle is None:

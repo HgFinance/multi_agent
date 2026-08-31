@@ -185,24 +185,15 @@ python scripts/run_risk_qa_production_preflight.py \
 - `RISK_SERVICE_AUTH_SECRET`, `RISK_SERVICE_AUTH_ISSUER`, `RISK_SERVICE_AUTH_AUDIENCE`, `QA_SERVICE_AUTH_SECRET`, `QA_SERVICE_AUTH_ISSUER`, `QA_SERVICE_AUTH_AUDIENCE` (Secret Manager 주입; secret은 32자 이상)
 - `RISK_QA_RUNTIME=production`, `RISK_QA_PRODUCTION_ENABLED=true`
 - `QA_CHECK_CONTRACT_APPROVED=true`, `QA_TRACE_PERSIST=true`, `RISK_REQUIRE_P1_ANALYTICS=true`
-- `QA_INGEST_MODE=disabled`, `QA_ENABLE_LEGACY_EVIDENCE_INGESTION=false`
 - `RISK_CONTEXT_SOURCE=database`와 실제 `RISK_BROKER_ADAPTER` 설정
 - Supabase canonical table, RLS policy, active worker profile, PIT Fund/Policy/Portfolio/Market 데이터
 - Redis PING 성공
 
 뉴스·문헌 등 비시장 근거는 MCP로 요청 시점에 조회하며 운영 DB에 지속 적재하지 않는다.
 
-```bash
-# Normal production boundary: request-time MCP, no non-market evidence writer.
-export QA_INGEST_MODE=disabled
-export QA_ENABLE_LEGACY_EVIDENCE_INGESTION=false
-```
-
-`production_ingestion.py` is retained only for an exceptional one-off legacy
-migration. It fails closed unless both
-`QA_ENABLE_LEGACY_EVIDENCE_INGESTION=true` and
-`QA_INGEST_MODE=legacy-manual` are explicitly supplied. Those switches must
-not be set on continuously running services.
+비시장 근거는 request-time MCP로만 조회하며, QA 서비스에는 별도 문서/임베딩
+쓰기 경로가 없다. 운영 DB의 근거 데이터는 Research 소유 경로로 관리하고
+QA는 `api.match_evidence_chunks(...)`를 읽기 전용으로 사용한다.
 
 Risk/QA의 실제 DB write-through와 Redis 중복·재시작 검증은 별도 smoke에서 수행한다. 이 검증도 Broker 주문과 Ledger Posting은 호출하지 않는다.
 

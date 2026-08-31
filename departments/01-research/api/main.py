@@ -31,17 +31,21 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_REPO_ROOT))
 
 from evidence.story_cluster import build_stories
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from source_registry import load_project_env
+from orchestration.readiness_cache import SingleFlightTTLCache
 
 API_VERSION = "research-api-v1"
 KST = timezone(timedelta(hours=9))
@@ -60,9 +64,82 @@ SEARCH_K_DEFAULT = 5
 SEARCH_K_MAX = 20          # 청크 발췌 k건이면 충분하다 - 큰 k 는 DB 부하만 늘린다
 SEARCH_EXCERPT_CHARS = 300
 
-app = FastAPI(title="Research Evidence API", version="0.1.0")
+# Compose, operators, and dependent workers can probe at the same time. Share
+# one successful diagnostic read so health checks cannot create a DB stampede.
+# The shared cache never stores failures, so recovery remains visible.
+_RESEARCH_READY_CACHE = SingleFlightTTLCache(
+    env_var="RESEARCH_HEALTH_READY_CACHE_SECONDS",
+    default_seconds=30.0,
+    minimum_seconds=1.0,
+    maximum_seconds=300.0,
+)
+_RESEARCH_DIAGNOSTIC_CACHE = SingleFlightTTLCache(
+    env_var="RESEARCH_HEALTH_CACHE_SECONDS",
+    default_seconds=30.0,
+    minimum_seconds=1.0,
+    maximum_seconds=300.0,
+)
 
 _conn = None
+
+
+def _research_readiness_probe() -> dict[str, object]:
+    """Check canonical research relations and read privileges in one fast query."""
+
+    rows = _query(
+        """
+        select
+          to_regclass('research.documents') is not null
+            and has_table_privilege(current_user, 'research.documents', 'select')
+            as documents_ready,
+          to_regclass('research.financial_facts') is not null
+            and has_table_privilege(current_user, 'research.financial_facts', 'select')
+            as financial_facts_ready,
+          to_regclass('research.macro_observations') is not null
+            and has_table_privilege(current_user, 'research.macro_observations', 'select')
+            as macro_observations_ready
+        """,
+        (),
+    )
+    if not rows or not all(
+        bool(rows[0].get(key))
+        for key in (
+            "documents_ready",
+            "financial_facts_ready",
+            "macro_observations_ready",
+        )
+    ):
+        raise RuntimeError("RESEARCH_SCHEMA_INCOMPLETE")
+    return {
+        "version": API_VERSION,
+        "service": "research-api",
+        "status": "ready",
+        "read_only": True,
+        "canonical_db": "READY",
+        "tool_gateway": GATEWAY_STATUS,
+    }
+
+
+@asynccontextmanager
+async def _research_lifespan(_app: FastAPI):
+    """Warm the reusable read-only connection before accepting traffic."""
+
+    try:
+        get_conn()
+        _RESEARCH_READY_CACHE.get_or_compute(_research_readiness_probe)
+    except Exception as exc:  # noqa: BLE001 - readiness still fails closed.
+        print(
+            f"research-api readiness warm-up deferred: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+    yield
+
+
+app = FastAPI(
+    title="Research Evidence API",
+    version="0.1.0",
+    lifespan=_research_lifespan,
+)
 
 
 def get_conn():
@@ -182,50 +259,63 @@ except Exception as _e:
 
 @app.get("/health/ready")
 def health_ready() -> dict:
-    """Readiness. 전 부서 공통 규격(통합계획 8.1)을 채운다.
+    """Readiness. Verify the research relations without running diagnostics.
 
-    ⚠ 이 서비스의 `/health` 는 **이미 DB 를 조회한다** - 이름은 liveness 인데 하는
-    일은 readiness 다. DB 순단이면 500 이 나서 오케스트레이터가 멀쩡한 인스턴스를
-    교체할 수 있다(trading-api 주석이 경고하는 바로 그 상황).
-    지금은 `/health` 를 부르는 소비자(collector_health 등)를 깨뜨리지 않으려고
-    의미를 바꾸지 않고 규격 경로만 더한다. `/health` 를 순수 liveness 로 바꾸는
-    것은 소비자 정리와 함께 따로 한다.
+    Readiness is polled concurrently by orchestration and dependent services.
+    It must prove that the canonical schema is available, but it must not run
+    the human-facing exact row-count aggregation from ``health`` on every
+    cold burst. The catalog probe is bounded and the successful result is
+    shared briefly; failures are never cached.
     """
-    return health()
+
+    try:
+        return _RESEARCH_READY_CACHE.get_or_compute(_research_readiness_probe)
+    except Exception as exc:  # noqa: BLE001 - readiness must fail closed.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "not_ready",
+                "service": "research-api",
+                "error_code": type(exc).__name__,
+            },
+        ) from exc
 
 
 @app.get("/health")
 def health() -> dict:
-    rows = _query(
-        """
-        select s.source_code as domain, count(*) as rows,
-               to_char(max(d.observed_at) at time zone 'Asia/Seoul', 'MM-DD HH24:MI') as last
-        from research.documents d join reference.data_sources s using (source_id)
-        group by 1
-        union all
-        select 'financial_facts', count(*),
-               to_char(max(observed_at) at time zone 'Asia/Seoul', 'MM-DD HH24:MI')
-        from research.financial_facts
-        union all
-        select 'macro_observations', count(*),
-               to_char(max(observed_at) at time zone 'Asia/Seoul', 'MM-DD HH24:MI')
-        from research.macro_observations
-        """,
-        (),
-    )
-    return {
-        "version": API_VERSION,
-        "read_only": True,
-        # 게이트웨이 상태를 드러낸다 - /health 는 OPEN_PATHS 라 X-Tool-Gateway
-        # 헤더가 안 붙는다(정상일 때와 부재일 때가 원리적으로 같아 보였다).
-        # 강제 모드에서는 애초에 기동이 막히므로 여기서 NOT_INSTALLED 가 보이면
-        # 관측 모드로 떠 있다는 뜻이고, 그 자체가 degraded 다.
-        "tool_gateway": GATEWAY_STATUS,
-        "status": "degraded" if GATEWAY_STATUS == "NOT_INSTALLED" else "ok",
-        "domains": [HealthDomain(domain=r["domain"], rows=r["rows"],
-                                 last_observed_kst=r["last"]).model_dump()
-                    for r in rows],
-    }
+    def load_diagnostics() -> dict[str, object]:
+        rows = _query(
+            """
+            select s.source_code as domain, count(*) as rows,
+                   to_char(max(d.observed_at) at time zone 'Asia/Seoul', 'MM-DD HH24:MI') as last
+            from research.documents d join reference.data_sources s using (source_id)
+            group by 1
+            union all
+            select 'financial_facts', count(*),
+                   to_char(max(observed_at) at time zone 'Asia/Seoul', 'MM-DD HH24:MI')
+            from research.financial_facts
+            union all
+            select 'macro_observations', count(*),
+                   to_char(max(observed_at) at time zone 'Asia/Seoul', 'MM-DD HH24:MI')
+            from research.macro_observations
+            """,
+            (),
+        )
+        return {
+            "version": API_VERSION,
+            "read_only": True,
+            # 게이트웨이 상태를 드러낸다 - /health 는 OPEN_PATHS 라 X-Tool-Gateway
+            # 헤더가 안 붙는다(정상일 때와 부재일 때가 원리적으로 같아 보였다).
+            # 강제 모드에서는 애초에 기동이 막히므로 여기서 NOT_INSTALLED 가 보이면
+            # 관측 모드로 떠 있다는 뜻이고, 그 자체가 degraded 다.
+            "tool_gateway": GATEWAY_STATUS,
+            "status": "degraded" if GATEWAY_STATUS == "NOT_INSTALLED" else "ok",
+            "domains": [HealthDomain(domain=r["domain"], rows=r["rows"],
+                                     last_observed_kst=r["last"]).model_dump()
+                        for r in rows],
+        }
+
+    return _RESEARCH_DIAGNOSTIC_CACHE.get_or_compute(load_diagnostics)
 
 
 @app.get("/evidence/news", response_model=list[NewsEvidence])

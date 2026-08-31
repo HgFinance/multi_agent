@@ -15,10 +15,16 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 SRC_ROOT="$REPO_ROOT/departments"
+PROFILE_REGISTRY="$REPO_ROOT/scripts/hermes_profile_registry.txt"
 # Hermes Profile runtime root는 ~/.hermes/profiles다. 다른 루트를 써야 할 때만
 # HERMES_HOME으로 명시적으로 override한다.
 DEST_ROOT="${HERMES_HOME:-$HOME/.hermes}/profiles"
 SKILL_BACKUP_ROOT="${HERMES_SKILL_BACKUP_ROOT:-${HOME}/.hermes/skill-backups}"
+
+if [[ ! -f "$PROFILE_REGISTRY" ]]; then
+  echo "Hermes Profile registry missing: $PROFILE_REGISTRY" >&2
+  exit 1
+fi
 
 # 2026-08-02 (재일): 당시 docker-compose.yml 은 부서별로 ~/.hermes-<부서> 를
 # 따로 마운트했다. 2026-08-10 부로 docker-compose.yml 은 통일된
@@ -31,50 +37,61 @@ dest_for() {
   echo "$DEST_ROOT/$dept"
 }
 
-# dept -> departments/<n>/hermes 매핑. 순서는 CLAUDE.md 담당자 표와 무관하며
-# REPOSITORY_DEPARTMENT_STRUCTURE.md 2절 조직 번호를 따른다.
-DEPARTMENTS=(
-  "ceo-agent:00-ceo-office"
-  "hr-department:07-agent-workforce"
-  "research-department:01-research"
-  "trading-department:02-trading"
-  "risk-management:03-risk"
-  "quant-backtest-department:04-quant-backtest"
-  "accounting-portfolio-department:05-accounting-portfolio"
-  "qa-department:06-ai-qa-audit"
-)
-
-LIAISONS=(
-  "research-liaison:01-research"
-  "quant-liaison:04-quant-backtest"
-)
-
 MODE="${1:-push}"   # push (repo -> ~/.hermes, default) | pull (~/.hermes -> repo)
 
 sync_one() {
-  local dept="$1" src_dir="$2" dest_dir="$3"
+  local profile="$1" src_dir="$2" dest_dir="$3"
 
   if [[ ! -d "$src_dir" ]]; then
     echo "  skip: $src_dir not found"
     return
   fi
   if [[ ! -d "$dest_dir" ]]; then
-    echo "  skip: $dest_dir not found (run: hermes profile create $dept)"
+    echo "  skip: $dest_dir not found (run: hermes profile create $profile)"
     return
   fi
 
   for f in config.yaml SOUL.md; do
     if [[ -f "$src_dir/$f" ]]; then
       cp "$src_dir/$f" "$dest_dir/$f"
-      echo "  synced: $dept/$f"
+      echo "  synced: $profile/$f"
     fi
   done
 }
 
+sync_repository_profiles() {
+  local direction="$1"
+  local profile folder kind container source_dir source_path target_path
+
+  while IFS='|' read -r profile folder kind container; do
+    [[ -z "$profile" || "$profile" == \#* ]] && continue
+    case "$kind" in
+      department) source_dir="$SRC_ROOT/$folder/hermes" ;;
+      liaison) source_dir="$SRC_ROOT/$folder/hermes-liaison" ;;
+      *)
+        echo "invalid Hermes Profile registry kind '$kind' for '$profile'" >&2
+        return 1
+        ;;
+    esac
+
+    if [[ "$direction" == "push" ]]; then
+      source_path="$source_dir"
+      target_path="$(dest_for "$profile")"
+    elif [[ "$direction" == "pull" ]]; then
+      source_path="$(dest_for "$profile")"
+      target_path="$source_dir"
+    else
+      echo "invalid sync direction '$direction'" >&2
+      return 1
+    fi
+    sync_one "$profile" "$source_path" "$target_path"
+  done < "$PROFILE_REGISTRY"
+}
+
 # Only repository-owned, profile-specific skills are copied into a profile.
-# Shared skills (agentic-rag and financial-portfolio-assessment) stay on their
-# existing shared roots. This keeps profile memory/config/SOUL isolation intact
-# and prevents a runtime profile from becoming the canonical source.
+# Shared skills (including QA's feedback-review skill) stay on their existing
+# shared roots. This keeps profile memory/config/SOUL isolation intact and
+# prevents a runtime profile from becoming the canonical source.
 sync_local_skill() {
   local dept="$1"
   local source_rel="$2"
@@ -131,20 +148,18 @@ retire_duplicate_skill_if_identical() {
 case "$MODE" in
   push)
     echo "Syncing repo -> ~/.hermes/profiles (config.yaml, SOUL.md, owned skills)"
-    for entry in "${DEPARTMENTS[@]}"; do
-      dept="${entry%%:*}"; folder="${entry##*:}"
-      sync_one "$dept" "$SRC_ROOT/$folder/hermes" "$(dest_for "$dept")"
-    done
-    for entry in "${LIAISONS[@]}"; do
-      dept="${entry%%:*}"; folder="${entry##*:}"
-      sync_one "$dept" "$SRC_ROOT/$folder/hermes-liaison" "$(dest_for "$dept")"
-    done
+    sync_repository_profiles push
     sync_local_skill "ceo-agent" "ceo/hermes-multi-agent-pipelines" "orchestration/hermes-multi-agent-pipelines"
     sync_local_skill "ceo-agent" "ceo/hermes-memory" "orchestration/hermes-memory"
     # autonomous-quant-research belongs to the direct strategy-hermes runtime,
     # not the Research HQ profile. Strategy Hermes receives it from the shared
     # /opt/shared-skills mount; do not copy it into research-department.
     sync_local_skill "research-department" "methodology-scout" "research/methodology-scout"
+    # QA feedback review is a single shared skill. Retire the two old,
+    # profile-local trigger matches so Hermes cannot choose an obsolete
+    # duplicate instead of /opt/shared-skills/qa-feedback-bottleneck-review.
+    retire_legacy_skill "qa-department" "qa/metadata-only-qa-feedback-review"
+    retire_legacy_skill "qa-department" "qa/skill-create-latency-control"
     # Shared /opt/shared-skills is the canonical copy for this byte-identical
     # research skill; retire only an identical profile duplicate so qualified
     # and categorized skill_view names do not become ambiguous.
@@ -159,14 +174,7 @@ case "$MODE" in
   ;;
   pull)
     echo "Syncing ~/.hermes/profiles -> repo (config.yaml, SOUL.md only)"
-    for entry in "${DEPARTMENTS[@]}"; do
-      dept="${entry%%:*}"; folder="${entry##*:}"
-      sync_one "$dept" "$(dest_for "$dept")" "$SRC_ROOT/$folder/hermes"
-    done
-    for entry in "${LIAISONS[@]}"; do
-      dept="${entry%%:*}"; folder="${entry##*:}"
-      sync_one "$dept" "$(dest_for "$dept")" "$SRC_ROOT/$folder/hermes-liaison"
-    done
+    sync_repository_profiles pull
     echo "Review with 'git diff' before committing."
     ;;
   *)

@@ -94,6 +94,25 @@ instead of submitting an immediate order.
    independently supplies an unambiguous condition and action. Preserve each
    comparator, threshold, side, and sizing; never merge different actions into
    one `LOGICAL OR` rule.
+   An explicit existing-position 익절/손절 OCO (or "한 쪽 실행 시 나머지 취소")
+   is the only exception to independent action grouping: pass exactly two
+   source-order candidates, both `oco_mode=EXIT_BRACKET`, both `SELL` for the
+   exact same symbol and identical sizing/expiry. Never set `oco_group_id`;
+   the trusted boundary derives it from the admitted request. Do not infer OCO
+   merely because two sell clauses appear together.
+   An explicit 고점 대비 하락/트레일링/추적 손절 is a separate, stateful SELL
+   exit: use one root `TRAILING_STOP` candidate with required
+   `parameters.DRAWDOWN` as a decimal ratio (for example `0.01` for 1%), and
+   optional `ACTIVATION_RETURN` only when the user explicitly says the profit
+   level at which tracking starts. It requires `evaluation.clock=QUOTE` and
+   cannot be combined with AND/OR, a time window, or a completed-bar condition
+   in this version. Hermes never stores or computes the high-water price.
+   An explicit amount tied directly to the order verb, such as `100만원 시장가
+   매수`, `100만원어치`, or `50만원만큼`, may use
+   `action.sizing={type:NOTIONAL_KRW,value:<whole KRW>}` for a MARKET order.
+   It is a maximum KRW amount, not a share count: Hermes must preserve the
+   exact whole-KRW amount, never calculate shares, and must not select this
+   policy for a price phrase or an amount without an order verb.
 3. Call `process_user_conditional_paper_rule` exactly once with the workflow
    root ID, this Trading task ID, and the candidate. Do not call
    `process_user_paper_order` for this marker and do not create any other task.
@@ -131,12 +150,14 @@ allowed tool call, recursively check each node against this field ownership:
 Use these canonical patterns:
 
 For intraday Korean chart shorthand, `3분봉 60일선 돌파시` is parsed as
-`CROSS ABOVE` of completed MARKET CLOSE over SMA(60). The market-data
-capability is 5M; there is no independent 3M feed and no 1M-derived 3M path.
-The trusted boundary maps an explicit 3분봉 request to 5M and reports
-`TIMEFRAME_FALLBACK_3M_TO_5M` to the user. A BUY rule must include an
-explicit quantity; if omitted, use `candidate=null` with `QUANTITY_REQUIRED`
-rather than inventing a share count.
+`CROSS ABOVE` of completed MARKET CLOSE over SMA(60) on `3M`. The PAPER
+chart resolver canonically aggregates final 1-minute candles into
+`1M/3M/5M/10M/15M/30M/1H`; never rewrite an explicit timeframe. In a
+multi-timeframe rule, set `primary_timeframe` to the fastest trigger cadence
+and use only the latest completed candle in each slower timeframe whose close
+is at or before that primary close. A BUY rule must include an explicit
+quantity; if omitted, use `candidate=null` with `QUANTITY_REQUIRED` rather
+than inventing a share count.
 
 ```json
 {"condition":{"type":"COMPARISON","operator":"GTE","left":{"type":"MARKET","field":"LAST_PRICE"},"right":{"type":"LITERAL","value":"70000","unit":"PRICE"}},"evaluation":{"clock":"QUOTE"}}
@@ -169,8 +190,9 @@ source returns `candidate=null` with
 trigger and is not a touch.
 
 An explicit `3분봉` plus `N선` or `N일선` means SMA with
-`parameters={"PERIOD":N}` before the trusted 3M-to-5M compatibility fallback;
-do not derive a new timeframe. For a BUY rule without quantity, return
+`parameters={"PERIOD":N}` and `timeframe="3M"`; do not derive or rewrite a
+new timeframe. A cross requires both operands to use that one timeframe; use
+`LOGICAL AND` for a 3M cross plus a 15M/1H confirmation. For a BUY rule without quantity, return
 `candidate=null` with `QUANTITY_REQUIRED` and never assume one share.
 
 `CROSS` is edge-triggered and always uses `BAR_CLOSE` plus an explicit
@@ -180,8 +202,15 @@ interval. Perform this field/units/clock self-check before calling the tool.
 The tool may be called exactly once, so do not send a draft AST as a probe.
 Use the trusted `max_data_age_seconds=30` default and never reduce it unless the
 user explicitly asks for a stricter freshness window.
-Rules with no explicit expiry remain active for 10 minutes. The independent worker
-checks them every 30 seconds and stops after trigger or expiry.
+For an explicit KST time window such as `10:00~14:30에만` or `오전 10시부터
+오후 2시 30분까지`, add direct TIME comparisons inside the same `LOGICAL AND`:
+`KST_SECONDS_SINCE_MIDNIGHT GTE 36000` and `LTE 52200`, both with NUMBER
+literals. Never use TIME arithmetic or CROSS. Do not infer AM/PM from `2시`;
+return `candidate=null` with `TIME_WINDOW_AM_PM_REQUIRED`. The window never
+overrides the market-session guard.
+Rules with no explicit expiry remain active only until the current or next KRX
+regular-session close (15:30 KST). The independent worker checks them every
+30 seconds and stops after trigger or expiry.
 
 For the immediate-order marker:
 
@@ -189,8 +218,10 @@ For the immediate-order marker:
    this task/root. Do not fill a field from memory, market opinion, or context.
 2. Build one `interpretation` object with exactly these keys and no extras:
    `schema_version`, `mode`, `binding`, `raw_text_sha256`, `decision`, `action`,
-   `instrument_mention`, `side`, `quantity`, `order_type`, `limit_price`,
-   `evidence`, and `reason_codes`. Use schema version
+   `instrument_mention`, `basket_instrument_mentions`, `basket_quantities`,
+   `basket_notionals_krw`, `side`, `quantity`, `notional_krw`, `order_type`,
+   `limit_price`, `evidence`, and
+   `reason_codes`. Use schema version
    `user-paper-order-interpretation.v1`, mode `PAPER`, binding `false`, decimal
    strings for quantity/price, and exact code-point evidence spans copied from
    the raw instruction.
@@ -211,11 +242,62 @@ For the immediate-order marker:
    Do not add `ACTION` evidence: the trusted verifier derives PLACE_ORDER from
    the validated side/order fields. `ACTION` evidence is reserved for aggregate
    actions such as sell-all or cancel-all.
+   The supported multi-instrument execution grammars are strictly bounded to:
+   (a) a comma-separated same-notional PAPER buy such as
+   `삼성전자, SK하이닉스, LG 100만원씩 매수해`, (b) a comma-separated,
+   same-direction explicit-quantity market basket such as
+   `삼성전자 3주, SK하이닉스 2주 시장가 매도해`, and (c) a comma-separated,
+   per-member KRW BUY allocation such as
+   `삼성전자 100만원, SK하이닉스 50만원 시장가 매수해`. Emit `PLACE_BASKET`
+   only for two to twenty exact source mentions in source order, no single
+   `instrument_mention`, no single `quantity`, and no `limit_price`.
+   For grammar (a), set `side="BUY"`, `notional_krw` to the KRW integer,
+   `basket_quantities=[]`, `basket_notionals_krw=[]`, and `order_type="MARKET"`.
+   For grammar (b), set
+   `side` to the one exact `BUY` or `SELL` verb, `notional_krw=null`, and
+   `basket_quantities` to the positive integer quantities aligned one-for-one
+   with `basket_instrument_mentions`, with `basket_notionals_krw=[]`; order
+   type remains `MARKET`. For grammar (c), set `side="BUY"`,
+   `notional_krw=null`, `basket_quantities=[]`, and `basket_notionals_krw` to
+   the aligned positive KRW integers. It is MARKET-only.
+   Evidence must be `BASKET_INSTRUMENTS` over the complete comma-separated
+   source list with `normalized="LIST"`, `NOTIONAL` only for grammar (a),
+   `SIDE`, and explicit `ORDER_TYPE` only when the user wrote `시장가`. Do not
+   turn a theme, a portfolio name, `각각`, a mixed BUY/SELL list, a price/limit
+   basket, or a missing list member into this command.
+   The supported account-wide grammars are `SELL_ALL` (sell every held
+   position, e.g. `보유종목 전량매도`, `계좌에 있는 종목 일괄매도`) and
+   `CANCEL_ALL` (cancel every open order, e.g. `미체결 주문 전부 취소해`). An
+   aggregate command sizes itself from the account, so it carries no order
+   fields at all: set `instrument_mention`, `side`, `quantity`,
+   `notional_krw`, `order_type`, and `limit_price` to `null` and
+   `basket_instrument_mentions`, `basket_quantities`, and
+   `basket_notionals_krw` to empty lists. Do not infer `side="SELL"` from the
+   sell verb and do not add the `MARKET` default; either one makes the
+   candidate fail schema validation as `INVALID_CANDIDATE_SCHEMA`. Evidence is
+   exactly two spans: `ACTION` over the verb with `normalized="SELL_ALL"` or
+   `"CANCEL_ALL"`, and `AGGREGATE_SCOPE` over the scope word with
+   `normalized="ALL"`. The scope vocabulary is exactly `전량`, `전부`, `모두`,
+   `모든`, `전체`, `일괄`, `다`; when several are stacked for emphasis
+   (`전량 일괄매도`), the one `AGGREGATE_SCOPE` span covers the whole
+   contiguous run (`전량 일괄`). The `ACTION` span covers only the verb
+   (`매도`, `팔아줘`, `취소해`) — never the whole sentence — and the
+   `AGGREGATE_SCOPE` span covers only the scope word, never the holdings noun
+   (`보유종목`, `계좌`, `주문`). `normalized` takes the listed constant only:
+   `"ALL"`, not an invented value such as `ALL_HOLDINGS`. `end` is exclusive
+   and `text` must equal the raw instruction sliced `[start:end]` character for
+   character, so never let a span run one past the word onto a following space.
+   When the scope word and verb are written without a space (`일괄매도`), the
+   two spans are adjacent and must not overlap. A scope word alone, a partial
+   scope (`일부`, `절반`), a named instrument, or a liquidation verb the grammar
+   does not list (`청산`) is not an aggregate command and must clarify.
    For `CLARIFY` or `NOT_ORDER`, set `action`, `instrument_mention`, `side`,
-   `quantity`, `order_type`, and `limit_price` to `null`, set `evidence` to an
-   empty list, and include at least one exact `reason_codes` value. Partial facts
-   observed in the sentence are not execution fields until every required fact
-   is present and the decision is `EXECUTE`.
+   `quantity`, `notional_krw`, `order_type`, and `limit_price` to `null`, set
+   `basket_instrument_mentions`, `basket_quantities`, `basket_notionals_krw`,
+   and `evidence` to empty lists, and include at
+   least one exact `reason_codes` value. Partial facts observed in the sentence
+   are not execution fields until every required fact is present and the
+   decision is `EXECUTE`.
 4. Call only `process_user_paper_order` exactly once, with
    `root_task_id=<workflow root>`, `trading_task_id=<this task>`, and that
    `interpretation`. Never pass a user, fund, book, mode override, API token,

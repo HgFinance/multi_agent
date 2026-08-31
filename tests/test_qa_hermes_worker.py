@@ -194,10 +194,34 @@ def test_fast_advisory_gets_task_scoped_turn_budget(tmp_path, monkeypatch):
         "--max-turns",
         "18",
         "--reasoning",
-        "medium",
+        "low",
         "-q",
         "work",
     ]
+
+
+def test_fast_advisory_default_budget_stops_after_bounded_terminal_pass(
+    tmp_path, monkeypatch
+):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("analysis_mode=fast_advisory\nquestion",),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.delenv("HGFINANCE_FAST_ADVISORY_MAX_TURNS", raising=False)
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["chat", "-q", "work"],
+        db_path=db,
+        task_id="t_qa",
+        profile="research-department",
+    )
+
+    assert bounded[bounded.index("--max-turns") + 1] == "8"
 
 
 def test_hr_e2e_uses_one_bounded_read_only_helper_pass(tmp_path, monkeypatch):

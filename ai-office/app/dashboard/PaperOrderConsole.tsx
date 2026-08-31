@@ -3,6 +3,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
+  browserSessionStorage,
   clearPendingPaperDirective,
   clearRetryablePaperOrderAction,
   getPaperDirective,
@@ -19,7 +20,6 @@ import {
   shouldPollPaperDirective,
   submitPaperOrderSubmission,
   type PaperDirective,
-  type PaperOrderStorage,
   type PaperOrderStorageScope,
   type RetryablePaperOrderAction,
 } from "../lib/paperOrderClient";
@@ -37,6 +37,7 @@ const STATE_LABEL: Record<PaperDirective["state"], string> = {
 
 const ACTION_LABEL: Record<PaperDirective["action"], string> = {
   PLACE_ORDER: "개별 주문",
+  PLACE_BASKET: "복수 종목 바스켓 주문",
   SELL_ALL: "보유 종목 전량 매도",
   CANCEL_ALL: "미체결 주문 전체 취소",
 };
@@ -209,7 +210,7 @@ export function PaperOrderConsole({
                 submit();
               }
             }}
-            placeholder="예: 삼성전자 2주 시장가 매수 / 보유계좌 종목 전량 매도 / 미체결 주문 전부 취소"
+            placeholder="예: 삼성전자 2주 시장가 매수 / 삼성전자, SK하이닉스 100만원씩 매수해 / 보유계좌 종목 전량 매도 / 미체결 주문 전부 취소"
             className="mt-1 w-full resize-none rounded border border-outline-variant bg-surface p-3 text-sm font-normal text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
           />
         </label>
@@ -319,15 +320,6 @@ function DirectiveResult({ directive, polling }: { directive: PaperDirective; po
       )}
     </section>
   );
-}
-
-function browserSessionStorage(): PaperOrderStorage | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.sessionStorage;
-  } catch {
-    return null;
-  }
 }
 
 function storageScope(

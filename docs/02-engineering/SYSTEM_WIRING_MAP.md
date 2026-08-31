@@ -214,7 +214,7 @@ CEO·QA·HR는 저장소 패치 이미지, 나머지는 upstream 이미지다. *
 사용자 ← ai-office ← GET /ui/ceo/tasks/{id} 폴링(2~5초) ← ceo_kanban_read (CLI 경유, DB 직접 안 염)
 ```
 
-- **잔고·시세 같은 결정론 사실은 이 길을 안 탄다** — `fact_router`/`account_snapshot` 직행. ("내 잔고" 를 CEO 라우팅에 태웠더니 4분 걸리고 답도 못 낸 2026-08-11 실측이 근거)
+- **잔고·시세 같은 결정론 사실은 이 길을 안 탄다** — `account_snapshot`/`ls_account_stream` 직행. ("내 잔고" 를 CEO 라우팅에 태웠더니 4분 걸리고 답도 못 낸 2026-08-11 실측이 근거)
 - 유효 assignee 정본 8개: `ceo-agent` `research-department` `quant-backtest-department` `trading-department` `accounting-portfolio-department` `risk-management` `qa-department` `hr-department`. 이 밖의 이름은 카드 생성 시점에 거부된다(`CanonicalKanbanTaskRequest`).
 - 고장 대비: 부모가 죽으면 `card-watchdog` 이 "산출 없음"을 명시하고 자식을 풀어준다. DELETE 는 없다 — 감사 추적, 정리는 `/archive` 뿐.
 

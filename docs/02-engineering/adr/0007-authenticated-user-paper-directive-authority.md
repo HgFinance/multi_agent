@@ -56,9 +56,16 @@
 
 ### 3. 사용자 PAPER 지시의 admission 계약
 
-공개 BFF 경로는 다음 세 동작만 받는다.
+공개 BFF 경로는 다음 네 동작만 받는다.
 
 - `PLACE_ORDER`: 명시된 단일 PAPER 주문
+- `PLACE_BASKET`: 두~스무 개의 명시 종목을 하나의 추적 지시로 처리하는 PAPER
+  market 바스켓. 자연어 문법은 (a) `종목A, 종목B 100만원씩 매수해`인 동일 최대 KRW
+  금액 BUY, (b) `종목A 3주, 종목B 2주 시장가 매수해/매도해`인 동일 방향 명시 수량,
+  (c) `종목A 100만원, 종목B 50만원 시장가 매수해`인 종목별 명시 KRW 금액 BUY다.
+  (a)와 (c)는 Trading이 book lock 안에서 최신 매도호가와 lot size로
+  `floor(금액 / ask, lot size)` 수량을 산정하므로 종목별 실제 주문금액이 명시 금액
+  이하이다. (b)는 각 종목의 명시 수량을 보존하며 SELL인 경우 `reduce_only`다.
 - `SELL_ALL`: 해당 Fund/Book의 canonical PAPER 보유분을 다시 읽어 매도 가능한
   수량만 `reduce_only` 자식 주문으로 전개
 - `CANCEL_ALL`: 해당 Fund/Book의 canonical 미종료 PAPER 주문을 다시 읽어 취소
@@ -79,13 +86,22 @@ directive와 대상 snapshot이 durable PAPER store에 기록된 뒤에만 반�
 - canonical PAPER cash/position, sellable quantity와 미종료 주문 reservation
 - durable store readiness, payload hash와 idempotency conflict
 
+`PLACE_BASKET`은 Broker 수준의 원자 주문이 아니다. 모든 member의 catalog 해석,
+KRW 통화, 최신 quote, lot 수량과 BUY 총 cash reservation 또는 SELL 전 member의
+sellable quantity를 **첫 broker 호출 전에 모두** 확정한다. 그 뒤 한 member가
+reject·cancel·UNKNOWN이면 남은 미제출 member를 자동으로 더 제출하지 않는다. 이미
+제출된 leg는 같은 `directive_id` 아래서 계속 대사하고, 결과는
+`IN_PROGRESS`·`PARTIAL`·`FAILED`·`UNKNOWN` 중 사실에 맞는 상태로 남긴다. Theme
+expansion, ambiguous ticker, `각각`, mixed BUY/SELL, limit/price basket, 또는 빠진 list
+member 같은 복합문은 이 release에서 추정 실행하지 않고 clarification으로 끝낸다.
+
 이 검사는 요청을 시장/계정 상태에 맞는 주문으로 **접수할 수 있는지** 확인하는
 기계적 제약이다. alpha 점수, 목표 비중, rebalancing 선호 또는 Risk budget을 근거로
 사용자의 명시적 PAPER 결정을 뒤집는 별도 투자 판단이 아니다.
 
 ### 4. 일괄 명령의 완료와 부분 실패를 숨기지 않는다
 
-`SELL_ALL`과 `CANCEL_ALL`은 하나의 원자적 성공으로 가장하지 않는다. parent
+`PLACE_BASKET`, `SELL_ALL`, `CANCEL_ALL`은 하나의 원자적 성공으로 가장하지 않는다. parent
 directive는 고정된 대상 snapshot과 자식별 결과를 보존하며 다음 원칙을 따른다.
 
 - 상태 집합은 `RECEIVED | RUNNING | IN_PROGRESS | PARTIAL | COMPLETED | FAILED |

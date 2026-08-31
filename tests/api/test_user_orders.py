@@ -83,6 +83,133 @@ def test_deterministic_parser_classifies_supported_korean_orders(
         assert payload == {}
 
 
+def test_deterministic_parser_accepts_exact_same_notional_buy_basket() -> None:
+    action, payload = user_orders.parse_user_order_query(
+        "삼성전자, SK하이닉스, LG 100만원씩 매수해"
+    )
+
+    assert action is user_orders.DirectiveAction.PLACE_BASKET
+    assert payload == {
+        "orders": [
+            {
+                "instrument_id": None,
+                "symbol": "삼성전자",
+                "notional_krw": "1000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+            {
+                "instrument_id": None,
+                "symbol": "SK하이닉스",
+                "notional_krw": "1000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+            {
+                "instrument_id": None,
+                "symbol": "LG",
+                "notional_krw": "1000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    ("query", "side"),
+    [
+        ("삼성전자 3주, SK하이닉스 2주 시장가 매수해", "BUY"),
+        ("삼성전자 3주, SK하이닉스 2주 시장가 매도해", "SELL"),
+    ],
+)
+def test_deterministic_parser_accepts_exact_same_direction_quantity_basket(
+    query: str, side: str
+) -> None:
+    action, payload = user_orders.parse_user_order_query(query)
+
+    assert action is user_orders.DirectiveAction.PLACE_BASKET
+    assert payload == {
+        "orders": [
+            {
+                "instrument_id": None,
+                "symbol": "삼성전자",
+                "notional_krw": None,
+                "quantity": "3",
+                "side": side,
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+            {
+                "instrument_id": None,
+                "symbol": "SK하이닉스",
+                "notional_krw": None,
+                "quantity": "2",
+                "side": side,
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "삼성전자 100만원, SK하이닉스 50만원 시장가 매수해",
+        "삼성전자 100만원어치, SK하이닉스 50만원어치 매수해",
+    ],
+)
+def test_deterministic_parser_accepts_exact_member_notional_buy_basket(
+    query: str,
+) -> None:
+    action, payload = user_orders.parse_user_order_query(query)
+
+    assert action is user_orders.DirectiveAction.PLACE_BASKET
+    assert payload == {
+        "orders": [
+            {
+                "instrument_id": None,
+                "symbol": "삼성전자",
+                "notional_krw": "1000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+            {
+                "instrument_id": None,
+                "symbol": "SK하이닉스",
+                "notional_krw": "500000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "삼성전자, SK하이닉스 100만원씩 매수해?",
+        "삼성전자, SK하이닉스 100만원씩 매수하지 마",
+        "삼성전자, SK하이닉스 100만원씩 매수하고 알려줘",
+        "삼성전자, 삼성전자 100만원씩 매수해",
+    ],
+)
+def test_basket_parser_does_not_guess_unsafe_or_duplicate_members(query: str) -> None:
+    with pytest.raises(user_orders.ClarificationRequired):
+        user_orders.parse_user_order_query(query)
+
+
 def test_bff_canonicalizes_exact_alphanumeric_krx_codes_but_preserves_names() -> None:
     action, payload = user_orders.parse_user_order_query("00088k 5주 시장가 매수")
     assert action is user_orders.DirectiveAction.PLACE_ORDER
@@ -573,6 +700,77 @@ def test_place_order_resolves_canonical_symbol_and_never_calls_risk() -> None:
         for alias in node.names
     }
     assert not any("risk" in name.casefold() for name in imports)
+
+
+def test_place_basket_resolves_each_member_before_one_signed_submission() -> None:
+    captured: dict[str, object] = {}
+    raw = _directive_response(action="PLACE_BASKET", priority=1000)
+    raw["idempotency_key"] = "basket-request-0001"
+    second_id = uuid4()
+
+    def resolve(mention: str, _instrument_id: str | None):
+        resolved = {
+            "삼성전자": {"instrument_id": str(INSTRUMENT_ID), "symbol": "005930"},
+            "SK하이닉스": {"instrument_id": str(second_id), "symbol": "000660"},
+        }.get(mention)
+        assert resolved is not None
+        return resolved
+
+    def submit(**kwargs):
+        captured.update(kwargs)
+        raw["payload_sha256"] = service_token.payload_sha256(kwargs["body"]["payload"])
+        raw["instruction_ref"] = kwargs["body"]["instruction_ref"]
+        return raw
+
+    with (
+        patch.object(
+            user_orders,
+            "require_trading_book_access",
+            return_value={
+                "user_id": str(SUBJECT),
+                "fund_id": str(FUND_ID),
+                "book_id": str(BOOK_ID),
+                "role": "CIO",
+            },
+        ),
+        patch.object(user_orders, "resolve_active_trading_instrument", side_effect=resolve),
+        patch.object(user_orders, "issue_trading_directive_proof", return_value="proof"),
+        patch.object(user_orders, "submit_user_directive", side_effect=submit),
+    ):
+        response = TestClient(_app()).post(
+            "/ui/paper-orders",
+            headers={"Idempotency-Key": "basket-request-0001"},
+            json={
+                "fund_id": str(FUND_ID),
+                "book_id": str(BOOK_ID),
+                "query": "삼성전자, SK하이닉스 100만원씩 매수해",
+            },
+        )
+
+    assert response.status_code == 202
+    assert captured["body"]["action"] == "PLACE_BASKET"
+    assert captured["body"]["payload"] == {
+        "orders": [
+            {
+                "instrument_id": str(INSTRUMENT_ID),
+                "symbol": "005930",
+                "notional_krw": "1000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+            {
+                "instrument_id": str(second_id),
+                "symbol": "000660",
+                "notional_krw": "1000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+        ]
+    }
 
 
 def test_upstream_idempotency_conflict_is_preserved() -> None:

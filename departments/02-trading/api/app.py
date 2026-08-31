@@ -90,8 +90,15 @@ from internal_service_auth import (
 from oms import OMS, BrokerOrder, OMSError, OrderIntentRecord, OrderStore
 from paper_broker import PaperBroker, Quote
 from store_postgres import OrderStorePersistenceError, PostgresOrderStore
+from orchestration.readiness_cache import SingleFlightTTLCache
 
 API_VERSION = "v1"
+_TRADING_READY_CACHE = SingleFlightTTLCache(
+    env_var="TRADING_HEALTH_READY_CACHE_SECONDS",
+    default_seconds=2.0,
+    minimum_seconds=1.0,
+    maximum_seconds=30.0,
+)
 
 def _validate_trading_runtime() -> None:
     """Fail startup unless the authenticated order plane is strictly PAPER."""
@@ -814,21 +821,48 @@ def health_ready() -> dict:
     Load Balancer 가 트래픽을 끊을 판단은 이쪽을 본다(`apps/api/main.py` 와 같은 규약).
     """
     _require_paper_store()
-    return {
-        "status": "ready",
-        "api_version": API_VERSION,
-        "user_directive_adapter": os.environ.get(
-            "TRADING_BROKER_ADAPTER", "paper"
-        ).strip().lower(),
-        "store": (
-            "private operational PostgreSQL execution.*"
-            if _paper_db_durable
-            else "in-memory (offline/test)"
-        ),
-        "intents": len(_oms.store.list_intents()),
-        "orders": len(_oms.store.list_orders()),
-        "authoritative": _paper_db_durable,
-    }
+
+    # Readiness must prove the durable store, but it must not hydrate up to 200
+    # orders and all fills on every health probe. A short single-flight cache
+    # also prevents concurrent probes from exhausting the four-connection OMS
+    # pool and starving authenticated PAPER requests.
+    def load_readiness() -> dict[str, object]:
+        try:
+            readiness_counts = getattr(_oms.store, "readiness_counts", None)
+            if callable(readiness_counts):
+                intents, orders = readiness_counts()
+            else:
+                # The in-memory fixture store is retained for the local
+                # self-check; production durable stores use the cheap method.
+                intents = len(_oms.store.list_intents())
+                orders = len(_oms.store.list_orders())
+        except Exception as exc:  # noqa: BLE001 - readiness must fail closed
+            raise HTTPException(
+                status_code=503,
+                detail=_envelope(
+                    "TRADING_PAPER_DB_UNAVAILABLE",
+                    "Trading readiness store is unavailable",
+                    action="HOLD",
+                ),
+            ) from exc
+        payload = {
+            "status": "ready",
+            "api_version": API_VERSION,
+            "user_directive_adapter": os.environ.get(
+                "TRADING_BROKER_ADAPTER", "paper"
+            ).strip().lower(),
+            "store": (
+                "private operational PostgreSQL execution.*"
+                if _paper_db_durable
+                else "in-memory (offline/test)"
+            ),
+            "intents": intents,
+            "orders": orders,
+            "authoritative": _paper_db_durable,
+        }
+        return payload
+
+    return _TRADING_READY_CACHE.get_or_compute(load_readiness)
 
 
 # ── 자체 점검 ─────────────────────────────────────────────────────────────────

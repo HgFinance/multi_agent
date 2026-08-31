@@ -28,8 +28,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from fastapi import FastAPI, HTTPException, Query
+from orchestration.readiness_cache import SingleFlightTTLCache
 from source_registry import load_project_env
 
 API_VERSION = "research-market-api-v1"
@@ -72,6 +74,18 @@ except Exception as _e:
 _ts = None  # TimescaleDB 연결 (read-only)
 _sym2iid: dict = {}  # symbol -> instrument_id (기동 시 1회)
 _iid2sym: dict = {}
+_HEALTH_READY_CACHE = SingleFlightTTLCache(
+    env_var="MARKET_HEALTH_READY_CACHE_SECONDS",
+    default_seconds=30.0,
+    minimum_seconds=5.0,
+    maximum_seconds=300.0,
+)
+_MARKET_READY_CACHE = SingleFlightTTLCache(
+    env_var="MARKET_DEEP_READY_CACHE_SECONDS",
+    default_seconds=2.0,
+    minimum_seconds=1.0,
+    maximum_seconds=30.0,
+)
 
 
 def get_ts():
@@ -211,7 +225,7 @@ def health_freshness() -> dict:
 
 
 def _deep_readiness() -> dict[str, object]:
-    """Probe both authoritative read paths with bounded, index-free queries."""
+    """Probe both authoritative read paths without expanding hypertable chunks."""
     import psycopg2
 
     settings = load_project_env()
@@ -244,10 +258,10 @@ def _deep_readiness() -> dict[str, object]:
             cur.execute("set transaction read only")
             cur.execute("set local statement_timeout = '3000ms'")
             # Relation access is part of readiness; current market data is not.
-            # A stale or empty session must remain queryable and be reported by
-            # domain endpoints rather than turning process readiness into OOM-prone
-            # hypertable aggregation.
-            cur.execute("select 1 from market.market_bars limit 1")
+            # ONLY keeps this probe on the hypertable parent.  A normal SELECT
+            # expands every historical chunk and can consume thousands of
+            # relation locks when several readiness callers arrive together.
+            cur.execute("select 1 from only market.market_bars limit 1")
             cur.fetchone()
         market.rollback()
     finally:
@@ -264,16 +278,23 @@ def _deep_readiness() -> dict[str, object]:
 @app.get("/ready")
 def ready() -> dict[str, object]:
     """Deep, bounded readiness for orchestration and dependent workers."""
-    try:
-        return _deep_readiness()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "status": "not_ready",
-                "error_code": type(exc).__name__,
-            },
-        ) from exc
+    # Docker and dependent workers can probe at the same time.  Share one
+    # bounded deep probe instead of opening two DB connections per caller.
+    # Failures are deliberately not cached: recovery becomes visible on the
+    # next probe and readiness never reports stale success.
+    def load_readiness() -> dict[str, object]:
+        try:
+            return _deep_readiness()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "status": "not_ready",
+                    "error_code": type(exc).__name__,
+                },
+            ) from exc
+
+    return _MARKET_READY_CACHE.get_or_compute(load_readiness)
 
 
 @app.get("/health/ready")
@@ -283,26 +304,33 @@ def health_ready() -> dict:
     ⚠ 대용량 hypertable 집계라 **느리다.** 오케스트레이터 healthcheck 는 이쪽이
       아니라 `/health` 를 찔러야 한다. 이 경로는 사람이 상태를 확인할 때 쓴다.
     """
-    rows = _query(
-        """
-        select 'ticks' as domain, count(*) as rows,
-               max(event_time) as last_event
-        from market.market_ticks where event_time > now() - interval '2 days'
-        union all
-        select 'quotes', count(*), max(event_time)
-        from market.market_quotes where event_time > now() - interval '2 days'
-        union all
-        select 'bars_1d', count(*), max(bucket_time)
-        from market.market_bars where interval_code = '1D'
-        union all
-        select 'bars_1m', count(*), max(bucket_time)
-        from market.market_bars where interval_code = '1M'
-        union all
-        select 'breadth', count(*), max(event_time) from market.market_breadth
-    """,
-        (),
-    )
-    return {"version": API_VERSION, "read_only": True, "domains": rows}
+    # The detailed counts are intentionally retained for human diagnostics,
+    # but must not run once per dashboard/client poll.  The lock also makes
+    # concurrent cache misses share one bounded database read instead of
+    # creating an aggregate-query stampede on TimescaleDB.
+    def load_readiness() -> dict:
+        rows = _query(
+            """
+            select 'ticks' as domain, count(*) as rows,
+                   max(event_time) as last_event
+            from market.market_ticks where event_time > now() - interval '2 days'
+            union all
+            select 'quotes', count(*), max(event_time)
+            from market.market_quotes where event_time > now() - interval '2 days'
+            union all
+            select 'bars_1d', count(*), max(bucket_time)
+            from market.market_bars where interval_code = '1D'
+            union all
+            select 'bars_1m', count(*), max(bucket_time)
+            from market.market_bars where interval_code = '1M'
+            union all
+            select 'breadth', count(*), max(event_time) from market.market_breadth
+        """,
+            (),
+        )
+        return {"version": API_VERSION, "read_only": True, "domains": rows}
+
+    return _HEALTH_READY_CACHE.get_or_compute(load_readiness)
 
 
 @app.get("/snapshot/{symbol}")

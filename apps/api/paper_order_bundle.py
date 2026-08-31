@@ -155,6 +155,27 @@ class PostgresPaperOrderBundleRepository:
         except (psycopg2.Error, TypeError, ValueError) as exc:
             raise PaperOrderBundleError("could not bind compound PAPER rule") from exc
 
+    def get_by_immediate_order_request(
+        self, *, user_id: str, immediate_order_request_id: str
+    ) -> PaperOrderBundle | None:
+        """Read the bundle owned by an admitted immediate PAPER request."""
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    f"""select {self._COLUMNS}
+                           from execution.user_paper_order_bundles
+                          where user_id=%s and immediate_order_request_id=%s
+                          limit 1""",
+                    (UUID(str(user_id)), UUID(str(immediate_order_request_id))),
+                )
+                return self._row(cursor.fetchone())
+        except (psycopg2.Error, TypeError, ValueError) as exc:
+            raise PaperOrderBundleError(
+                "could not read compound PAPER bundle"
+            ) from exc
+
     def mark_failed(self, bundle_id: str, *, code: str, message: str) -> None:
         try:
             with self._connect() as connection, connection.cursor() as cursor:

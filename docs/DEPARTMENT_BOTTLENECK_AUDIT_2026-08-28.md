@@ -19,6 +19,34 @@
 
 이 문서는 “운영 병목이 모두 해소됐다”는 선언이 아니다. Stress p95/p99, 처리량, 복구시간, 전체 E2E와 일부 데이터 계약은 아직 증명되지 않았으며 아래 미충족 표에 남긴다.
 
+## 최신 병목 재검증 부록 — 2026-08-30 UTC
+
+Risk/Audit의 이전 32-way 실패는 캐시 소스가 있어도 실행 이미지가 이전 버전인
+배포 불일치가 원인이었다. 두 이미지를 재빌드·재기동한 뒤 Risk observability와
+Audit readiness는 각각 32/32 HTTP 200, 오류율 0%로 회복됐다. Research와 Quant도
+동일한 canonical readiness cache를 이미지에 반영했고 Market deep readiness는
+15초 성공 cache로 healthcheck 주기와 정렬했다.
+
+`scripts/stress_test.py --scenario read_only --requests 32 --concurrency 32`의
+최신 read-only 결과는 9개 시나리오 모두 32/32 성공·오류율 0%였다. p95 범위는
+11.220–362.539ms이다. Research `/health/ready`는 relation/권한만 확인하는
+bounded probe이고 컨테이너 내부 SQL은 약 0.2–1ms였으므로, 362.539ms는 상세
+집계 시간이 아니라 첫 32-way 신규 연결/콜드 런타임 fan-out을 포함한 값으로
+분리 기록한다. Quant 32-way p95는 23.751ms, Risk는 31.701ms, Audit은
+44.572ms였다. 모두 32/32 성공이며 Risk/Audit은 pool exhaustion 500/503이
+재발하지 않았다.
+
+현재 정적 garbage 재검증에서는 `fact_router.py`, `ceo_hermes_client.py`,
+`packet_gate.py` 세 후보가 모두 파일·운영 참조·테스트 참조 0의 `REMOVED`다.
+
+PDF의 10개를 자동 실행·기록할 bounded runner와 수동 CI job을 추가했다.
+장애주입·복구·rollback은 `NOT_INJECTED`/미검증이다. 실제 CEO 사용자-query
+E2E `t_100f5be4`도 terminal `completed`와 최종 결과 HTTP 200을 확인했지만
+전체 157,929ms(서버 workflow 약 128초)로 120초 SLA를 넘었다. Risk 약
+84초, Research 약 91초의 Hermes worker 실행 시간이 현재 최장 부서 구간이다.
+따라서 이 부록은 pool 경합 해소와 read-only 9개 시나리오의 오류율 0% 증거이지
+전체 릴리스 stress PASS 선언이 아니다.
+
 ## 수집 증거
 
 ### 런타임·로컬 로그
@@ -71,10 +99,10 @@ Discord 봇 8개는 현재 동일한 CEO 공유 채널을 읽는다. 최근 100�
 | Research MCP 401 probe | IMPROVED | configured Bearer 재사용; 401/5xx는 실패, 404/406은 server response로만 허용 |
 | DB schema/role drift | PASS (local audit) | canonical bootstrap 통과, outbox lease·compression runtime 복구, Trading 3개 capability SET ROLE 연결 검증 |
 | conditional rule v1 전체 상태머신 | PARTIAL | dynamic sizing, 순차 조건, trailing/high-water, staged exit 증거 부족 |
-| Stress 10 scenarios | BLOCKED | 부하량·동시성·지속시간·SLA·pass/fail 결과와 전용 CI job 없음 |
+| Stress 10 scenarios | NOT VERIFIED | bounded runner/CI는 추가됐고 read-only 9개 결과는 기록했지만 사용자 E2E·장애복구 증거가 없음 |
 | p50/p95/p99 latency/throughput/error rate | NOT VERIFIED | 현재 로그는 일부 duration만 있고 전체 경로 percentile 집계 없음 |
 | 장애복구/rollback | NOT VERIFIED | 서비스 health는 확인했지만 장애주입·복구시간·rollback acceptance 없음 |
-| 전 부서 E2E | NOT VERIFIED | Notion/Discord 리포트에 primary 누락·timeout·관측 미기록 반복 |
+| 전 부서 E2E | PARTIAL | 조건주문/Evolution 격리 E2E와 실제 CEO workflow terminal/delivery는 통과했지만 사용자 E2E가 120초 SLA를 초과 |
 
 ## 검증 명령
 
@@ -104,8 +132,8 @@ docker compose ps
 
 ## 다음 승인 게이트
 
-1. LangSmith를 사용하지 않고 Hermes/Compose 구조화 로그만으로 worker latency p50/p95/p99, queue wait, error/retry, throughput을 수집한다.
-2. PDF p.64의 10개 시나리오에 부하량·동시성·지속시간·SLA·복구 기준을 부여하고 dedicated stress runner와 CI job을 추가한다.
-3. 별도 pinned Dockerfile은 root lock을 무리하게 공유하지 말고 각 image의 SBOM/CVE scan을 추가한다.
+1. 사용자 query-to-result runtime을 격리된 환경에서 실행해 submit/queue/workflow/final-result 단계별 p50/p95/p99를 수집한다.
+2. PDF p.64의 10개 runner에 장애주입·복구·rollback acceptance를 연결하고, 결과 artifact와 image digest를 함께 보존한다.
+3. 별도 pinned Dockerfile은 root lock을 무리하게 공유하지 말고 각 image의 SBOM/CVE scan을 CI에서 실행한다.
 4. HR 비용 측정은 token이 실제로 관측된 경우에만 기록하고, 미측정은 `UNKNOWN`으로 유지한다. local boundary latency를 cost 대용으로 쓰지 않는다.
 5. 부서별 Notion/Discord report에는 `department`, `run_id`, `source`, `observed_at`, `latency_ms`를 필수로 묶어 공통 CEO 채널의 혼합 로그를 부서별 수치처럼 집계하지 않는다.

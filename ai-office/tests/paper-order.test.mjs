@@ -14,6 +14,7 @@ import {
   paperDirectiveIsComplete,
   paperDirectivePollInterval,
   paperDirectiveStatusPath,
+  parsePaperDirective,
   persistPendingPaperDirective,
   persistRetryablePaperOrderAction,
   preparePaperOrderAction,
@@ -277,4 +278,74 @@ test("CEO chat unifies advice and PAPER commands while keeping book scope explic
   assert.match(ceoClient, /fundId\?: string/);
   assert.match(ceoClient, /bookId\?: string/);
   assert.match(ceoClient, /bookId \? \{ book_id: bookId \} : \{\}/);
+});
+
+test("모든 백엔드 directive action을 파싱한다", () => {
+  // PLACE_BASKET이 허용목록에서 빠져 있으면 백엔드가 성공시킨 바스켓 주문을
+  // UI가 paper_order_invalid_response로 던져버린다. 백엔드 계약
+  // (orchestration/contracts/user_paper_order.py DirectiveAction)과 어긋나지
+  // 않도록 네 액션을 모두 고정한다.
+  for (const action of [
+    "PLACE_ORDER",
+    "PLACE_BASKET",
+    "SELL_ALL",
+    "CANCEL_ALL",
+  ]) {
+    const parsed = parsePaperDirective(directive({ action }));
+    assert.equal(parsed.action, action);
+  }
+});
+
+test("계약에 없는 action은 계속 거부한다", () => {
+  assert.throws(
+    () => parsePaperDirective(directive({ action: "LIQUIDATE_ALL" })),
+    /paper_order_invalid_response/,
+  );
+});
+
+test("결말이 불확실한 재전송은 같은 키를, 확인된 뒤 같은 주문은 새 키를 쓴다", () => {
+  // CEO 채팅이 의존하는 안전장치의 전 생애주기. 이 순서가 깨지면 타임아웃 뒤
+  // 재전송이 두 번째 주문이 되거나(키가 안 살아남음), 사용자가 의도적으로 같은
+  // 주문을 한 번 더 낼 수 없게 된다(키를 안 버림).
+  const storage = new MemoryStorage();
+  const scope = { accountId: "user-1", fundId: "fund-1", bookId: "book-2" };
+  const input = { fundId: "fund-1", bookId: "book-2", query: "보유종목 전량 일괄매도" };
+  let sequence = 0;
+  const uuid = () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`;
+
+  // 1) 최초 전송: 키를 만들고 전송 *전에* 저장한다.
+  const first = preparePaperOrderAction(input, loadRetryablePaperOrderAction(storage, scope), uuid);
+  assert.equal(first.reused, false);
+  assert.equal(persistRetryablePaperOrderAction(storage, scope, first), true);
+
+  // 2) 결말 모름(타임아웃) 후 새로고침 + 같은 지시 재전송 -> 같은 키.
+  const afterReload = preparePaperOrderAction(input, loadRetryablePaperOrderAction(storage, scope), uuid);
+  assert.equal(afterReload.reused, true);
+  assert.equal(
+    afterReload.submission.idempotencyKey,
+    first.submission.idempotencyKey,
+    "재전송이 새 키를 뽑으면 서버 중복 방지를 통과해 주문이 두 번 들어간다",
+  );
+
+  // 3) 결말 확인 -> 키를 버린다.
+  clearRetryablePaperOrderAction(storage, scope);
+  assert.equal(loadRetryablePaperOrderAction(storage, scope), null);
+
+  // 4) 이제 같은 주문을 한 번 더 내는 것은 정상적으로 새 주문이다.
+  const deliberateSecond = preparePaperOrderAction(input, loadRetryablePaperOrderAction(storage, scope), uuid);
+  assert.equal(deliberateSecond.reused, false);
+  assert.notEqual(deliberateSecond.submission.idempotencyKey, first.submission.idempotencyKey);
+});
+
+test("안전장치 키는 CEO ask의 request_id 제약(8~128자)을 만족한다", () => {
+  // 채팅은 이 키를 `askCeo`의 request_id로 보낸다. AgentAsk.request_id는
+  // min_length=8, max_length=128의 자유 문자열이다(hermes_boundary.py).
+  const prepared = preparePaperOrderAction(
+    { fundId: "fund-1", bookId: "book-2", query: "보유종목 전량 일괄매도" },
+    null,
+    () => "00000000-0000-4000-8000-000000000001",
+  );
+  const key = prepared.submission.idempotencyKey;
+  assert.ok(key.length >= 8 && key.length <= 128, `키 길이 ${key.length}`);
+  assert.match(key, /^paper-order:/);
 });

@@ -133,7 +133,7 @@ def test_unavailable_langfuse_signal_is_approvable_as_an_actionable_finding(
     assert ledger.approve(
         artifact_id,
         "APPROVED",
-        "hr-admin",
+        "discord:382384727245455360",
         "재현 가능한 관측 장애",
         improvement_type="RUNTIME_CONFIG",
     )

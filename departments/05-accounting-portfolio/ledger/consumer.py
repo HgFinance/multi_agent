@@ -94,12 +94,40 @@ def held_instruments(repo: LedgerRepository, fund_id: UUID, book_id: UUID) -> li
 #           복구되면 다시 적는다. 프로세스 로컬이라 재시작하면 한 번은 다시 나온다.
 _LAST_MISS: dict[tuple[UUID, UUID], str] = {}
 
+# NAV can remain unavailable for many one-second polls while market-api has no
+# current mark. Keep the first failure and a bounded reminder, rather than
+# writing the same long position list to the container log every tick. This is
+# observability-only: valuation remains fail-closed and fills still run.
+try:
+    _NAV_HOLD_LOG_INTERVAL_SECONDS = max(
+        float(os.environ.get("LEDGER_NAV_HOLD_LOG_INTERVAL_SECONDS", "60")),
+        1.0,
+    )
+except (TypeError, ValueError):
+    _NAV_HOLD_LOG_INTERVAL_SECONDS = 60.0
+_LAST_NAV_HOLD: dict[UUID, tuple[str, float]] = {}
+
 
 def _log_miss(book_id: UUID, instrument_id: UUID, why: str) -> None:
     if _LAST_MISS.get((book_id, instrument_id)) == why:
         return
     _LAST_MISS[(book_id, instrument_id)] = why
     _log(f"Mark 없음 book={book_id} instrument={instrument_id}: {why}")
+
+
+def _log_nav_hold(book_id: UUID, why: str) -> None:
+    """Log a NAV hold once, then at a bounded reminder interval."""
+
+    now = time.monotonic()
+    previous = _LAST_NAV_HOLD.get(book_id)
+    if (
+        previous is not None
+        and previous[0] == why
+        and now - previous[1] < _NAV_HOLD_LOG_INTERVAL_SECONDS
+    ):
+        return
+    _LAST_NAV_HOLD[book_id] = (why, now)
+    _log(f"NAV 보류 book={book_id}: {why}")
 
 
 def resolve_marks(repo: LedgerRepository, fund_id: UUID, book_id: UUID,
@@ -145,16 +173,18 @@ def poll(repo: LedgerRepository, as_of: datetime, *,
             marks = {}
         try:
             fill_consumer.run_once(repo, fund_id, book_id, marks, as_of)
-            valued += 1
         except ValuationError as exc:
             # 분개와 Position은 커밋됐고 스냅샷만 없다. 파일 상단 참고.
-            _log(f"NAV 보류 book={book_id}: {exc}")
+            _log_nav_hold(book_id, str(exc))
         except Exception as exc:  # noqa: BLE001
             # **장부 하나의 실패가 다른 장부를 막지 않는다.** 봉투 하나가 깨졌거나
             # 한 장부만 잠겨 있을 때 뒤 장부까지 굶기면 장애 범위가 넓어진다.
             # 삼켜도 유실이 아니다 - ack는 분개 뒤에 찍히므로 그 SENT 행은 그대로
             # 남아 다음 주기에 다시 잡힌다. 대신 어느 장부인지 로그에 남긴다.
             _log(f"분개 실패 book={book_id}: {type(exc).__name__}: {exc}")
+        else:
+            valued += 1
+            _LAST_NAV_HOLD.pop(book_id, None)
     return seen, valued
 
 
@@ -291,11 +321,18 @@ def _self_check() -> None:
         _LAST_MISS.pop((book, inst))            # 복구된 경우
         _log_miss(book, inst, "/snapshot HTTP 500")
         assert len(lines) == 3, "복구 후 재발을 안 적었다"
+        _LAST_NAV_HOLD.clear()
+        _log_nav_hold(book, "가격 없음 1건")
+        _log_nav_hold(book, "가격 없음 1건")
+        assert len(lines) == 4, "같은 NAV 보류를 매 주기 다시 적었다"
+        _log_nav_hold(book, "가격 없음 2건")
+        assert len(lines) == 5, "NAV 보류 사유가 바뀌었는데 안 적었다"
     finally:
         globals()["_log"] = real_log
         _LAST_MISS.clear()
+        _LAST_NAV_HOLD.clear()
 
-    print("ok - Ledger Consumer 7개 점검 통과")
+    print("ok - Ledger Consumer 8개 점검 통과")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
+from uuid import uuid4
 
 import pytest
 
@@ -11,6 +11,10 @@ from apps.api.conditional_rule_language import looks_like_conditional_paper_rule
 from apps.api.conditional_rule_workflow import (
     ConditionalRuleConflict,
     InMemoryConditionalRuleRepository,
+)
+from orchestration.compound_paper_orders import (
+    build_compound_conditional_candidate,
+    parse_compound_paper_order,
 )
 from orchestration.conditional_rules import RuleState
 
@@ -164,7 +168,7 @@ def test_non_conditional_requests_stay_off_the_conditional_lane(raw: str) -> Non
     assert looks_like_conditional_paper_rule(raw) is False
 
 
-def test_three_minute_request_uses_supported_five_minute_feed_and_discloses_fallback(monkeypatch) -> None:
+def test_three_minute_request_preserves_the_requested_completed_bar_feed(monkeypatch) -> None:
     install_scope(monkeypatch)
     candidate = {
         "symbol": "삼성전자",
@@ -190,14 +194,203 @@ def test_three_minute_request_uses_supported_five_minute_feed_and_discloses_fall
     )
 
     assert preview.activatable is True
-    assert preview.spec.evaluation.primary_timeframe.value == "5M"
-    assert preview.spec.condition.right.timeframe.value == "5M"
-    assert "TIMEFRAME_FALLBACK_3M_TO_5M" in preview.assumptions
-    assert preview.summary["timeframe_fallback"] == {
-        "requested": "3M",
-        "used": "5M",
-        "reason": "3M_UNSUPPORTED",
+    assert preview.spec.evaluation.primary_timeframe.value == "3M"
+    assert preview.spec.condition.right.timeframe.value == "3M"
+    assert "TIMEFRAME_FALLBACK_3M_TO_5M" not in preview.assumptions
+    assert preview.summary["condition_overview"] == {
+        "trigger_style": "EDGE",
+        "referenced_timeframes": ["3M"],
+        "indicators": [
+            {
+                "name": "SMA",
+                "output": "VALUE",
+                "timeframe": "3M",
+                "parameters": {"PERIOD": "60"},
+            }
+        ],
+        "evaluation_boundary": "LATEST_COMPLETED_BAR_AT_OR_BEFORE_PRIMARY_CLOSE",
+        "time_window_kst": [],
     }
+
+
+def test_trailing_stop_preview_explains_its_durable_high_watermark(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    raw = "하이닉스 평균 매입가 대비 2% 수익이 난 뒤 고점 대비 1% 하락하면 전량 매도해줘"
+    assert looks_like_conditional_paper_rule(raw) is True
+    candidate = {
+        "symbol": "하이닉스",
+        "condition": {
+            "type": "TRAILING_STOP",
+            "parameters": {"DRAWDOWN": "0.01", "ACTIVATION_RETURN": "0.02"},
+        },
+        "action": {"side": "SELL", "sizing": {"type": "ALL"}},
+        "evaluation": {"clock": "QUOTE"},
+    }
+
+    preview = api._build_preview(
+        preview_request(
+            raw,
+            candidate,
+        ),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is True
+    assert {
+        "DURABLE_HIGH_WATERMARK",
+        "TRAILING_STOP_SELL_ONLY",
+        "FRESH_QUOTE_ONLY",
+    } <= set(preview.assumptions)
+    assert preview.summary["condition_overview"]["trailing_stop"] == {
+        "drawdown_ratio": "0.01",
+        "activation_return_ratio": "0.02",
+        "watermark": "HIGHEST_FRESH_QUOTE_SINCE_ACTIVE",
+        "expected_position_quantity": None,
+    }
+
+
+def test_multi_timeframe_indicator_confirmation_is_activatable_and_summarized(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    candidate = {
+        "symbol": "하이닉스",
+        "condition": {
+            "type": "LOGICAL",
+            "operator": "AND",
+            "children": [
+                {
+                    "type": "CROSS",
+                    "operator": "ABOVE",
+                    "left": {
+                        "type": "INDICATOR",
+                        "name": "SMA",
+                        "timeframe": "3M",
+                        "parameters": {"PERIOD": 5},
+                    },
+                    "right": {
+                        "type": "INDICATOR",
+                        "name": "SMA",
+                        "timeframe": "3M",
+                        "parameters": {"PERIOD": 20},
+                    },
+                },
+                {
+                    "type": "COMPARISON",
+                    "operator": "LT",
+                    "left": {
+                        "type": "INDICATOR",
+                        "name": "RSI",
+                        "timeframe": "15M",
+                        "parameters": {"PERIOD": 14},
+                    },
+                    "right": {"type": "LITERAL", "value": "70", "unit": "NUMBER"},
+                },
+            ],
+        },
+        "action": {"side": "BUY", "sizing": {"type": "FIXED_SHARES", "value": "2"}},
+        "evaluation": {"clock": "BAR_CLOSE", "primary_timeframe": "3M"},
+    }
+
+    preview = api._build_preview(
+        preview_request(
+            "하이닉스 3분봉 5선이 20선 상향 돌파하고 15분봉 RSI(14)가 70 미만이면 2주 시장가 매수",
+            candidate,
+        ),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is True
+    assert preview.clarification_codes == ()
+    overview = preview.summary["condition_overview"]
+    assert overview["trigger_style"] == "EDGE"
+    assert overview["referenced_timeframes"] == ["3M", "15M"]
+    assert overview["evaluation_boundary"] == "LATEST_COMPLETED_BAR_AT_OR_BEFORE_PRIMARY_CLOSE"
+    assert overview["time_window_kst"] == []
+
+
+def test_indicator_rule_with_explicit_kst_time_window_is_activatable(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    candidate = {
+        "symbol": "하이닉스",
+        "condition": {
+            "type": "LOGICAL",
+            "operator": "AND",
+            "children": [
+                {
+                    "type": "CROSS",
+                    "operator": "ABOVE",
+                    "left": {
+                        "type": "INDICATOR",
+                        "name": "SMA",
+                        "timeframe": "3M",
+                        "parameters": {"PERIOD": 5},
+                    },
+                    "right": {
+                        "type": "INDICATOR",
+                        "name": "SMA",
+                        "timeframe": "3M",
+                        "parameters": {"PERIOD": 20},
+                    },
+                },
+                {
+                    "type": "COMPARISON",
+                    "operator": "GTE",
+                    "left": {"type": "TIME", "field": "KST_SECONDS_SINCE_MIDNIGHT"},
+                    "right": {"type": "LITERAL", "value": "36000", "unit": "NUMBER"},
+                },
+                {
+                    "type": "COMPARISON",
+                    "operator": "LTE",
+                    "left": {"type": "TIME", "field": "KST_SECONDS_SINCE_MIDNIGHT"},
+                    "right": {"type": "LITERAL", "value": "52200", "unit": "NUMBER"},
+                },
+            ],
+        },
+        "action": {"side": "BUY", "sizing": {"type": "FIXED_SHARES", "value": "2"}},
+        "evaluation": {"clock": "BAR_CLOSE", "primary_timeframe": "3M"},
+    }
+
+    preview = api._build_preview(
+        preview_request(
+            "하이닉스 3분봉 5선이 20선 상향 돌파하고 10:00~14:30에만 2주 시장가 매수",
+            candidate,
+        ),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is True
+    assert preview.clarification_codes == ()
+    assert {"KST_TIME_WINDOW", "MARKET_SESSION_GUARD"} <= set(preview.assumptions)
+    assert preview.summary["condition_overview"]["time_window_kst"] == [
+        "GTE 10:00:00",
+        "LTE 14:30:00",
+    ]
+
+
+def test_one_hour_korean_timeframe_text_is_accepted_as_explicit_evidence(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    candidate = {
+        "symbol": "삼성전자",
+        "condition": {
+            "type": "COMPARISON",
+            "operator": "GT",
+            "left": {"type": "INDICATOR", "name": "ADX", "timeframe": "1H"},
+            "right": {"type": "LITERAL", "value": "25", "unit": "NUMBER"},
+        },
+        "action": {"side": "BUY", "sizing": {"type": "FIXED_SHARES", "value": "1"}},
+        "evaluation": {"clock": "BAR_CLOSE", "primary_timeframe": "1H"},
+    }
+
+    preview = api._build_preview(
+        preview_request("삼성전자 1시간봉 ADX(14)가 25 초과면 1주 매수", candidate),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is True
+    assert preview.clarification_codes == ()
 
 
 def test_ambiguous_return_baseline_and_position_percent_are_blocked(monkeypatch) -> None:
@@ -232,6 +425,183 @@ def test_explicit_average_entry_and_holding_percent_are_activatable(monkeypatch)
         "ONE_SHOT",
         "MARKET_CLOSED_REJECTS_WITHOUT_ORDER",
     )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "삼성전자 현재가가 7만원 이하면 100만원어치 시장가 매수",
+        "삼성전자 현재가가 7만원 이하면 100만원 시장가 매수",
+        "삼성전자 현재가가 7만원 이하면 100만원을 매수",
+    ),
+)
+def test_explicit_krw_notional_is_activatable_and_exposes_execution_boundary(
+    monkeypatch, raw: str
+) -> None:
+    install_scope(monkeypatch)
+    candidate = {
+        "symbol": "삼성전자",
+        "condition": {
+            "type": "COMPARISON",
+            "operator": "LTE",
+            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+            "right": {"type": "LITERAL", "value": "70000", "unit": "PRICE"},
+        },
+        "action": {
+            "side": "BUY",
+            "sizing": {"type": "NOTIONAL_KRW", "value": "1000000"},
+        },
+        "evaluation": {"clock": "QUOTE"},
+    }
+
+    preview = api._build_preview(
+        preview_request(raw, candidate),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is True
+    assert preview.clarification_codes == ()
+    assert preview.summary["sizing"] == {
+        "type": "NOTIONAL_KRW",
+        "value": "1000000",
+    }
+    assert {
+        "KRW_NOTIONAL_MAXIMUM",
+        "FRESH_PRICE_AND_LOT_SIZE_AT_EXECUTION",
+        "TRADING_QUOTE_CAP_RECHECK",
+    } <= set(preview.assumptions)
+
+
+def test_notional_candidate_must_match_the_exact_source_order_amount(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    candidate = {
+        "symbol": "삼성전자",
+        "condition": {
+            "type": "COMPARISON",
+            "operator": "LTE",
+            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+            "right": {"type": "LITERAL", "value": "70000", "unit": "PRICE"},
+        },
+        "action": {
+            "side": "BUY",
+            "sizing": {"type": "NOTIONAL_KRW", "value": "2000000"},
+        },
+        "evaluation": {"clock": "QUOTE"},
+    }
+
+    preview = api._build_preview(
+        preview_request("삼성전자 현재가가 7만원 이하면 100만원 매수", candidate),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is False
+    assert preview.clarification_codes == ("NOTIONAL_AMOUNT_MISMATCH",)
+
+
+def test_deferred_entry_exit_bracket_candidate_is_a_valid_single_sell_rule(
+    monkeypatch,
+) -> None:
+    install_scope(monkeypatch)
+    plan = parse_compound_paper_order(
+        "삼성전자 5주 시장가 매수하고 매수가 대비 3% 상승하면 매도하고 "
+        "2% 하락하면 매도"
+    )
+    assert plan is not None
+
+    preview = api._build_preview(
+        preview_request(plan.conditional_instruction, build_compound_conditional_candidate(plan)),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is True
+    assert preview.clarification_codes == ()
+    assert preview.spec.action.side.value == "SELL"
+    assert preview.spec.condition.type.value == "LOGICAL"
+    assert preview.spec.condition.operator == "AND"
+    assert (preview.spec.condition.children or ())[1].operator == "OR"
+
+
+def test_deferred_entry_trailing_candidate_is_a_valid_position_bound_sell_rule(
+    monkeypatch,
+) -> None:
+    install_scope(monkeypatch)
+    plan = parse_compound_paper_order(
+        "삼성전자 5주 시장가 매수하고 매수가 대비 3% 수익 이후 "
+        "고점 대비 1% 하락하면 매도"
+    )
+    assert plan is not None
+
+    preview = api._build_preview(
+        preview_request(plan.conditional_instruction, build_compound_conditional_candidate(plan)),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is True
+    assert preview.clarification_codes == ()
+    assert preview.spec.condition.type.value == "TRAILING_STOP"
+    assert preview.summary["condition_overview"]["trailing_stop"] == {
+        "drawdown_ratio": "0.01",
+        "activation_return_ratio": "0.03",
+        "watermark": "HIGHEST_FRESH_QUOTE_SINCE_ACTIVE",
+        "expected_position_quantity": "5",
+    }
+
+
+def test_deferred_entry_exit_lifetime_uses_a_pending_outer_deadline(monkeypatch) -> None:
+    """The requested lifetime begins on full fill, not on route admission."""
+
+    install_scope(monkeypatch)
+    plan = parse_compound_paper_order(
+        "하이닉스 5주 시장가 매수하고 매수가 대비 3% 수익 이후 "
+        "고점 대비 1% 하락하면 매도, 최대 5거래일 동안 추적"
+    )
+    assert plan is not None
+
+    preview = api._build_preview(
+        preview_request(
+            plan.conditional_instruction,
+            build_compound_conditional_candidate(plan),
+        ),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is True
+    assert preview.spec.activation_lifetime_trading_days == 5
+    assert preview.spec.expires_at == NOW + timedelta(
+        days=api.PENDING_ENTRY_ACTIVATION_WINDOW_DAYS
+    )
+    assert "ENTRY_EXIT_LIFETIME_STARTS_AFTER_FULL_FILL" in preview.assumptions
+    assert "DEFAULT_EXPIRY_KRX_REGULAR_CLOSE" not in preview.assumptions
+    assert preview.summary["expiry_basis"] == "KRX_REGULAR_CLOSE_AFTER_FULL_FILL"
+
+
+def test_activation_lifetime_cannot_be_smuggled_into_an_unbundled_rule(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    candidate = profit_candidate()
+    candidate.pop("expires_at")
+    candidate["activation_lifetime_trading_days"] = 5
+    preview = api._build_preview(
+        preview_request("삼성전자 평균 매입가 대비 5% 상승시 보유수량의 20% 매도", candidate),
+        subject=USER_ID,
+        now=NOW,
+    )
+    request = api.ConditionalRuleCreateRequest(
+        client_request_id="web:unbundled-lifetime-1",
+        raw_instruction="삼성전자 평균 매입가 대비 5% 상승시 보유수량의 20% 매도",
+        expected_spec_sha256=preview.spec_sha256,
+        spec=preview.spec,
+    )
+
+    with pytest.raises(api.HTTPException) as raised:
+        api._validate_create(request, subject=USER_ID)
+
+    assert raised.value.status_code == 422
+    assert raised.value.detail == "conditional_rule_activation_lifetime_requires_entry_bundle"
 
 
 
@@ -364,6 +734,44 @@ def test_in_memory_repository_cannot_activate_expired_rule(monkeypatch) -> None:
             user_id=USER_ID,
             confirmation_sha256=record.spec_sha256,
         )
+
+
+def test_in_memory_oco_activation_is_all_or_nothing(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    preview = api._build_preview(
+        preview_request("삼성전자 평균 매입가 대비 5% 상승시 보유수량의 20% 매도"),
+        subject=USER_ID,
+        now=NOW,
+    )
+    activeable_spec = preview.spec.model_copy(update={"oco_group_id": uuid4()})
+    expired_spec = activeable_spec.model_copy(
+        update={"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)}
+    )
+    repository = InMemoryConditionalRuleRepository()
+    first = repository.create_pending(
+        spec=activeable_spec,
+        raw_instruction="take profit",
+        client_request_id="discord:conditional:oco:first",
+        parser_source="HERMES",
+    )
+    second = repository.create_pending(
+        spec=expired_spec,
+        raw_instruction="stop loss",
+        client_request_id="discord:conditional:oco:second",
+        parser_source="HERMES",
+    )
+
+    with pytest.raises(ConditionalRuleConflict):
+        repository.activate_group(
+            (
+                (first.rule_id, first.spec_sha256),
+                (second.rule_id, second.spec_sha256),
+            ),
+            user_id=USER_ID,
+        )
+
+    assert repository.get(first.rule_id, user_id=USER_ID).state is RuleState.PENDING_CONFIRMATION
+    assert repository.get(second.rule_id, user_id=USER_ID).state is RuleState.PENDING_CONFIRMATION
 
 
 def test_client_request_replay_cannot_change_rule(monkeypatch) -> None:

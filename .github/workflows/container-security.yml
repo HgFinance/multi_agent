@@ -1,0 +1,40 @@
+name: Container image security
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "departments/**/Dockerfile"
+      - "docker-compose*.yml"
+      - ".github/workflows/container-security.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: research-api
+            dockerfile: departments/01-research/Dockerfile
+          - name: quant-api
+            dockerfile: departments/04-quant-backtest/Dockerfile
+          - name: risk-api
+            dockerfile: departments/03-risk/Dockerfile
+          - name: audit-api
+            dockerfile: departments/06-ai-qa-audit/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.name }} image
+        run: docker build --file "${{ matrix.dockerfile }}" --tag "hgfinance/${{ matrix.name }}:ci" .
+      - name: Scan ${{ matrix.name }} image for high and critical CVEs
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: "hgfinance/${{ matrix.name }}:ci"
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

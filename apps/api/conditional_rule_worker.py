@@ -44,6 +44,7 @@ from orchestration.conditional_rules import (
     RuleState,
     RuleWorkerStoreError,
     SubmitReadyExecution,
+    TrailingStopObservation,
     Timeframe,
     TriggerClaim,
     evaluate_condition,
@@ -53,6 +54,7 @@ from orchestration.conditional_rules.bar_data import (
     BarResolver,
     BarResolverError,
     LSChartBarResolver,
+    timeframe_close_at,
 )
 from orchestration.conditional_rules.indicators import DEFAULT_REGISTRY
 from orchestration.conditional_rules.market_data import (
@@ -62,7 +64,10 @@ from orchestration.conditional_rules.market_data import (
     MarketPriceResolverError,
     MarketPriceSnapshot,
 )
-from orchestration.conditional_rules.semantic import normalized_indicator_parameters
+from orchestration.conditional_rules.semantic import (
+    normalized_indicator_parameters,
+    trailing_stop_parameters,
+)
 
 LOG = logging.getLogger("conditional-rule-worker")
 INTERNAL_SCOPE = "trading.conditional_rule.execute"
@@ -157,6 +162,24 @@ class WorkerStore(Protocol):
         context_sha256: str,
         data_watermark: datetime,
     ) -> TriggerClaim | None: ...
+    def observe_trailing_stop(
+        self,
+        rule: ActiveRule,
+        *,
+        last_price: Decimal,
+        average_entry_price: Decimal,
+        observed_at: datetime,
+    ) -> TrailingStopObservation: ...
+    def cancel_entry_trailing_on_position_mismatch(
+        self,
+        rule: ActiveRule,
+        *,
+        expected_position_quantity: Decimal,
+        actual_position_quantity: Decimal,
+        evaluation_key: str,
+        context_sha256: str,
+        data_watermark: datetime,
+    ) -> bool: ...
     def create_execution(
         self,
         rule: ActiveRule,
@@ -203,19 +226,10 @@ def _required_history(rule: ActiveRule) -> dict[Timeframe, int]:
     )
     result: dict[Timeframe, int] = {}
     primary = rule.spec.evaluation.primary_timeframe
-    needs_bars = any(
-        (
-            node.type is ExpressionType.MARKET
-            and node.field != "LAST_PRICE"
-        )
-        or (
-            node.type is ExpressionType.INDICATOR
-            and (DEFAULT_REGISTRY.get(node.name) is not None)
-            and DEFAULT_REGISTRY.get(node.name).source == "LOCAL"
-        )
-        for node in _walk(rule.spec.condition)
-    )
-    if primary is not None and needs_bars:
+    # A BAR_CLOSE rule always needs its primary candle, including a time-only
+    # or broker-indicator rule.  Without it the evaluator previously used the
+    # Unix epoch as observed_at and could not give a meaningful execution key.
+    if primary is not None:
         result[primary] = 2 if requires_cross else 1
     for node in _walk(rule.spec.condition):
         if node.type is not ExpressionType.INDICATOR or node.timeframe is None:
@@ -231,6 +245,39 @@ def _required_history(rule: ActiveRule) -> dict[Timeframe, int]:
             required += 1
         result[node.timeframe] = max(result.get(node.timeframe, 0), required)
     return result
+
+
+def _align_completed_bars(
+    bars: Mapping[Timeframe, list[Candle]], *, primary: Timeframe
+) -> tuple[dict[Timeframe, list[Candle]], datetime]:
+    """Freeze every timeframe at one primary completed-bar close.
+
+    LS calls are retrieved independently.  If a 3M primary candle closed at
+    09:03 while a 1M request already contains 09:04, using both directly lets
+    future information leak into a multi-timeframe rule.  Trim every series to
+    the latest completed candle whose close is no later than the primary
+    close; slower frames naturally retain their latest prior close.
+    """
+
+    primary_series = sorted(
+        (item for item in bars.get(primary, ()) if item.is_final),
+        key=lambda item: item.bucket_time,
+    )
+    if not primary_series:
+        raise EvaluationError(
+            "PRIMARY_TIMEFRAME_DATA_MISSING",
+            f"{primary.value} has no final candle for BAR_CLOSE evaluation",
+        )
+    watermark = timeframe_close_at(primary_series[-1].bucket_time, primary)
+    aligned: dict[Timeframe, list[Candle]] = {}
+    for timeframe, series in bars.items():
+        aligned[timeframe] = [
+            item
+            for item in sorted(series, key=lambda value: value.bucket_time)
+            if item.is_final
+            and timeframe_close_at(item.bucket_time, timeframe) <= watermark
+        ]
+    return aligned, watermark
 
 
 def _portfolio_fields(node: ExpressionNode) -> frozenset[str]:
@@ -689,6 +736,11 @@ class HttpRuntimeClient:
             )
             for timeframe, required in history.items()
         }
+        bar_watermark: datetime | None = None
+        if rule.spec.evaluation.clock is EvaluationClock.BAR_CLOSE:
+            primary = rule.spec.evaluation.primary_timeframe
+            assert primary is not None
+            bars, bar_watermark = _align_completed_bars(bars, primary=primary)
         for timeframe, required in history.items():
             final_count = sum(1 for candle in bars[timeframe] if candle.is_final)
             if final_count < required:
@@ -723,7 +775,11 @@ class HttpRuntimeClient:
             minimum=Decimal("0.0000000001"),
         )
 
-        requested_fields = _portfolio_fields(rule.spec.condition)
+        requested_fields = set(_portfolio_fields(rule.spec.condition))
+        if rule.spec.condition.type is ExpressionType.TRAILING_STOP:
+            # The activation threshold is evaluated from the canonical current
+            # cost basis, never from an LLM-provided price.
+            requested_fields.add("AVG_ENTRY_PRICE")
         market_value = position_quantity * current_price
         values: dict[str, Decimal] = {
             "POSITION_QUANTITY": position_quantity,
@@ -798,7 +854,7 @@ class HttpRuntimeClient:
             current_observed_at=(
                 quote_at
                 if rule.spec.evaluation.clock is EvaluationClock.QUOTE
-                else None
+                else bar_watermark
             ),
         )
         watermark = (
@@ -918,25 +974,27 @@ class ConditionalRuleWorker:
     def _parallel_map(self, items: list[Any], function: Any) -> list[dict[str, int]]:
         if not items:
             return []
+        def run_isolated(item: Any) -> dict[str, int]:
+            try:
+                return function(item)
+            except Exception:  # noqa: BLE001 - one rule must not starve its batch.
+                candidate = item[0] if isinstance(item, tuple) and item else item
+                rule_id = getattr(candidate, "rule_id", "unknown")
+                LOG.exception(
+                    "conditional rule evaluation failed",
+                    extra={"rule_id": str(rule_id)},
+                )
+                return {"errors": 1}
         if self.max_workers == 1 or len(items) == 1:
-            return [function(item) for item in items]
+            return [run_isolated(item) for item in items]
         results: list[dict[str, int]] = []
         with ThreadPoolExecutor(
             max_workers=min(self.max_workers, len(items)),
             thread_name_prefix="conditional-rule",
         ) as executor:
-            futures = {executor.submit(function, item): item for item in items}
+            futures = [executor.submit(run_isolated, item) for item in items]
             for future in as_completed(futures):
-                item = futures[future]
-                try:
-                    results.append(future.result())
-                except Exception:  # noqa: BLE001 - isolate one rule from the batch.
-                    rule_id = getattr(item, "rule_id", "unknown")
-                    LOG.exception(
-                        "conditional rule parallel evaluation failed",
-                        extra={"rule_id": str(rule_id)},
-                    )
-                    results.append({"errors": 1})
+                results.append(future.result())
         return results
 
     def _submit(self, execution: SubmitReadyExecution) -> bool:
@@ -1020,7 +1078,13 @@ class ConditionalRuleWorker:
         }
 
     def _evaluate_active(self, rule: ActiveRule) -> dict[str, int]:
-        counts = {"evaluated": 0, "triggered": 0, "submitted": 0, "errors": 0}
+        counts = {
+            "evaluated": 0,
+            "triggered": 0,
+            "submitted": 0,
+            "errors": 0,
+            "cancelled": 0,
+        }
         backoff_key = (rule.rule_id, rule.rule_version)
         now = time.monotonic()
         backoff_until = self._history_backoff_until.get(backoff_key)
@@ -1054,7 +1118,67 @@ class ConditionalRuleWorker:
             return counts
         self._history_backoff_until.pop(backoff_key, None)
         try:
-            result = evaluate_condition(rule.spec, inputs.evaluation_context)
+            if rule.spec.condition.type is ExpressionType.TRAILING_STOP:
+                # Do not start tracking a price high before the target holding
+                # exists. Otherwise a later purchase could inherit a stale
+                # watermark and immediately exit on an unrelated pullback.
+                parameters = trailing_stop_parameters(rule.spec.condition)
+                expected_quantity = parameters.expected_position_quantity
+                position_mismatch = (
+                    expected_quantity is not None
+                    and inputs.position_quantity != expected_quantity
+                )
+                # An entry-originated trail may wait for its initial holding to
+                # appear after the full-fill transition.  Once it has already
+                # recorded a high-water mark, however, a quantity change means
+                # another order or a manual trade touched that position.  End
+                # this bundle permanently rather than allowing a later
+                # coincidental quantity match to resume automatic selling.
+                if (
+                    position_mismatch
+                    and inputs.quote_fresh
+                    and inputs.market_session_available
+                    and inputs.market_open
+                ):
+                    assert expected_quantity is not None
+                    if self.store.cancel_entry_trailing_on_position_mismatch(
+                        rule,
+                        expected_position_quantity=expected_quantity,
+                        actual_position_quantity=inputs.position_quantity,
+                        evaluation_key=inputs.evaluation_key,
+                        context_sha256=inputs.context_sha256,
+                        data_watermark=inputs.data_watermark,
+                    ):
+                        counts["evaluated"] += 1
+                        counts["cancelled"] += 1
+                        return counts
+                if (
+                    not inputs.quote_fresh
+                    or not inputs.market_session_available
+                    or not inputs.market_open
+                    or inputs.position_quantity <= 0
+                    or inputs.sellable_quantity <= 0
+                    or position_mismatch
+                ):
+                    result = False
+                else:
+                    average_entry_price = inputs.evaluation_context.current.portfolio.get(
+                        "AVG_ENTRY_PRICE"
+                    )
+                    if average_entry_price is None:
+                        raise EvaluationError(
+                            "TRAILING_STOP_CONTEXT_INVALID",
+                            "trailing stop average entry price is unavailable",
+                        )
+                    observation = self.store.observe_trailing_stop(
+                        rule,
+                        last_price=inputs.current_price,
+                        average_entry_price=average_entry_price,
+                        observed_at=inputs.data_watermark,
+                    )
+                    result = observation.condition_result
+            else:
+                result = evaluate_condition(rule.spec, inputs.evaluation_context)
         except EvaluationError as exc:
             counts["errors"] += 1
             self.store.record_error(
@@ -1064,6 +1188,14 @@ class ConditionalRuleWorker:
                 data_watermark=inputs.data_watermark,
                 error_code=exc.code,
                 error_message=str(exc),
+            )
+            return counts
+        except RuleWorkerStoreError as exc:
+            counts["errors"] += 1
+            LOG.warning(
+                "conditional trailing state unavailable rule=%s code=%s",
+                rule.rule_id,
+                exc.code,
             )
             return counts
         counts["evaluated"] += 1
@@ -1116,6 +1248,7 @@ class ConditionalRuleWorker:
             "submitted": 0,
             "errors": 0,
             "deferred": 0,
+            "cancelled": 0,
         }
         # This is a durable state transition, not a second order path.  The
         # existing conditional-rule worker activates a pending rule only after

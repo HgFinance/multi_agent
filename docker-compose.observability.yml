@@ -50,6 +50,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/gpu-resource-savings.yml:/etc/prometheus/rules/gpu-resource-savings.yml:ro
       - prom_data:/prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -74,6 +75,8 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./deploy/observability/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ./deploy/observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/hgfinance.yml:ro
+      - ./deploy/observability/dashboards:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
 
 volumes:

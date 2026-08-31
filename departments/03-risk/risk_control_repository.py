@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from mandate_limit_compiler import MandateLimitCompilation
+from orchestration.connection_pool import create_blocking_connection_pool
 from position_risk_lifecycle import (
     RiskPlanProjectionRecord,
     RiskPlanTransition,
@@ -55,10 +56,28 @@ class RiskControlRepository:
     def __init__(self, pool: Any) -> None:
         self._pool = pool
 
+    def _get_connection(self) -> Any:
+        """Borrow one connection and normalize pool exhaustion at the boundary."""
+
+        try:
+            return self._pool.getconn()
+        except Exception as exc:  # noqa: BLE001 - pool errors vary by driver
+            raise RiskControlPersistenceError(
+                "Risk control connection pool is unavailable"
+            ) from exc
+
     @classmethod
     def connect(cls, dsn: str) -> RiskControlRepository:
         _, pool_type = _driver()
-        return cls(pool_type(0, 4, dsn))
+        return cls(
+            create_blocking_connection_pool(
+                pool_type,
+                dsn,
+                minconn=0,
+                default_maxconn=4,
+                env_prefix="RISK_QA",
+            )
+        )
 
     def close(self) -> None:
         self._pool.closeall()
@@ -99,7 +118,7 @@ class RiskControlRepository:
             raise RiskControlPersistenceError("run event idempotency key is required")
         event_id = uuid5(_RUN_EVENT_NAMESPACE, idempotency_key)
         Json, _ = _driver()
-        connection = self._pool.getconn()
+        connection = self._get_connection()
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -157,7 +176,7 @@ class RiskControlRepository:
     def runtime_observability(self) -> dict[str, Any]:
         """Return restart-safe counts from the canonical Risk ledger."""
 
-        connection = self._pool.getconn()
+        connection = self._get_connection()
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -237,7 +256,7 @@ class RiskControlRepository:
             raise RiskControlPersistenceError("compiled policy identity is incomplete")
 
         Json, _ = _driver()
-        connection = self._pool.getconn()
+        connection = self._get_connection()
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -351,7 +370,7 @@ class RiskControlRepository:
         if plan.action is not PlanAction.PROPOSE:
             raise RiskControlPersistenceError("only numeric PROPOSE plans are persisted")
         Json, _ = _driver()
-        connection = self._pool.getconn()
+        connection = self._get_connection()
         payload = plan.model_dump(mode="python")
         try:
             with connection.cursor() as cursor:
@@ -447,7 +466,7 @@ class RiskControlRepository:
         """Append one authority event and atomically update the current state."""
 
         validate_transition(transition)
-        connection = self._pool.getconn()
+        connection = self._get_connection()
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -525,7 +544,7 @@ class RiskControlRepository:
     def record_projection(self, record: RiskPlanProjectionRecord) -> UUID:
         """Persist final Discord/Notion delivery and read-back evidence."""
 
-        connection = self._pool.getconn()
+        connection = self._get_connection()
         try:
             with connection.cursor() as cursor:
                 cursor.execute(

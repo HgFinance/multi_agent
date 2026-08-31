@@ -22,6 +22,7 @@ from directives.auth import (  # noqa: E402
     EMPTY_PAYLOAD_SHA256,
     DirectiveAuthError,
     _required_config,
+    decode_directive_proof,
 )
 from directives.contracts import (  # noqa: E402
     DirectiveAction,
@@ -197,6 +198,30 @@ def test_slow_ls_paper_rest_fallback_is_not_rejected_as_stale():
     assert quote.bid == Decimal("8820")
 
 
+def test_trusted_conditional_validator_receives_the_admission_quote() -> None:
+    """Policy-specific sizing validation runs inside the final quote boundary."""
+
+    h = Harness()
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("1000000"))
+    request = h.request(DirectiveAction.PLACE_ORDER, key="conditional-quote-validator")
+    proof = decode_directive_proof(
+        _execute_token(request, h.user), now=NOW.timestamp()
+    )
+    seen: list[tuple[InstrumentRef, TrustedQuote]] = []
+
+    record = h.service.submit_trusted_rule(
+        request,
+        proof,
+        now=NOW,
+        conditional_quantity_validator=lambda instrument, quote: seen.append(
+            (instrument, quote)
+        ),
+    )
+
+    assert record.legs[0].state is DirectiveLegState.FILLED
+    assert seen == [(h.instrument, h.market.quotes["005930"])]
+
+
 class Harness:
     def __init__(self) -> None:
         self.user = uuid4()
@@ -247,6 +272,60 @@ class Harness:
             idempotency_key=key or f"idem-{uuid4()}",
             payload=payload or {},
         )
+
+
+def _basket_payload(*instruments: InstrumentRef, notional_krw: str = "1000000") -> dict:
+    return {
+        "orders": [
+            {
+                "instrument_id": str(instrument.instrument_id),
+                "symbol": instrument.symbol,
+                "notional_krw": notional_krw,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            }
+            for instrument in instruments
+        ]
+    }
+
+
+def _member_notional_basket_payload(
+    *members: tuple[InstrumentRef, str],
+) -> dict:
+    return {
+        "orders": [
+            {
+                "instrument_id": str(instrument.instrument_id),
+                "symbol": instrument.symbol,
+                "notional_krw": notional_krw,
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            }
+            for instrument, notional_krw in members
+        ]
+    }
+
+
+def _quantity_basket_payload(
+    *members: tuple[InstrumentRef, str], side: str = "BUY"
+) -> dict:
+    return {
+        "orders": [
+            {
+                "instrument_id": str(instrument.instrument_id),
+                "symbol": instrument.symbol,
+                "notional_krw": None,
+                "quantity": quantity,
+                "side": side,
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            }
+            for instrument, quantity in members
+        ]
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -324,6 +403,245 @@ def test_execute_binding_one_time_jti_idempotency_and_user_risk_bypass():
     assert record.error_code is None
     assert len(h.repository.state.direct_fills) == 1
     assert run_directive_worker_once(h.service, batch=100, now=NOW)["reconciled"] == 0
+
+
+def test_same_notional_paper_basket_preflights_all_members_and_tracks_all_legs():
+    h = Harness()
+    second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
+    h.repository.add_instrument(second)
+    h.market.set_quote(
+        TrustedQuote(
+            str(second.instrument_id),
+            second.symbol,
+            NOW,
+            Decimal("24900"),
+            Decimal("25000"),
+            Decimal("1000"),
+            Decimal("1000"),
+            "fixture",
+        )
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("3000000"))
+    request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-basket-preflight-0001",
+        payload=_basket_payload(h.instrument, second),
+    )
+
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert record.action is DirectiveAction.PLACE_BASKET
+    assert record.state is DirectiveState.IN_PROGRESS
+    assert record.error_code == "TRADING_FILL_ACCOUNTING_PENDING"
+    assert [(leg.symbol, leg.requested_quantity) for leg in record.legs] == [
+        ("005930", Decimal("14")),
+        ("000660", Decimal("40")),
+    ]
+    assert all(leg.state is DirectiveLegState.FILLED for leg in record.legs)
+    assert len(h.repository.state.direct_fills) == 2
+
+
+def test_member_notionals_preserve_each_buy_ceiling_before_basket_submission():
+    h = Harness()
+    second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
+    h.repository.add_instrument(second)
+    h.market.set_quote(
+        TrustedQuote(
+            str(second.instrument_id),
+            second.symbol,
+            NOW,
+            Decimal("24900"),
+            Decimal("25000"),
+            Decimal("1000"),
+            Decimal("1000"),
+            "fixture",
+        )
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("2000000"))
+    request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-basket-member-notional-0001",
+        payload=_member_notional_basket_payload(
+            (h.instrument, "1000000"),
+            (second, "500000"),
+        ),
+    )
+
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert [(leg.symbol, leg.requested_quantity) for leg in record.legs] == [
+        ("005930", Decimal("14")),
+        ("000660", Decimal("20")),
+    ]
+    assert all(leg.state is DirectiveLegState.FILLED for leg in record.legs)
+
+
+def test_explicit_quantity_sell_basket_preflights_all_positions_and_tracks_legs():
+    h = Harness()
+    second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
+    h.repository.add_instrument(second)
+    h.market.set_quote(
+        TrustedQuote(
+            str(second.instrument_id),
+            second.symbol,
+            NOW,
+            Decimal("24900"),
+            Decimal("25000"),
+            Decimal("1000"),
+            Decimal("1000"),
+            "fixture",
+        )
+    )
+    h.repository.set_position(h.fund, h.book, h.instrument.instrument_id, Decimal("5"))
+    h.repository.set_position(h.fund, h.book, second.instrument_id, Decimal("4"))
+    request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-basket-sell-quantity-0001",
+        payload=_quantity_basket_payload(
+            (h.instrument, "3"), (second, "2"), side="SELL"
+        ),
+    )
+
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert record.action is DirectiveAction.PLACE_BASKET
+    assert [(leg.symbol, leg.side, leg.requested_quantity, leg.reduce_only) for leg in record.legs] == [
+        ("005930", "SELL", Decimal("3"), True),
+        ("000660", "SELL", Decimal("2"), True),
+    ]
+    assert all(leg.state is DirectiveLegState.FILLED for leg in record.legs)
+
+
+def test_quantity_sell_basket_does_not_create_a_first_leg_when_any_member_is_unsellable():
+    h = Harness()
+    second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
+    h.repository.add_instrument(second)
+    h.market.set_quote(
+        TrustedQuote(
+            str(second.instrument_id),
+            second.symbol,
+            NOW,
+            Decimal("24900"),
+            Decimal("25000"),
+            Decimal("1000"),
+            Decimal("1000"),
+            "fixture",
+        )
+    )
+    h.repository.set_position(h.fund, h.book, h.instrument.instrument_id, Decimal("5"))
+    h.repository.set_position(h.fund, h.book, second.instrument_id, Decimal("1"))
+    request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-basket-sell-unsellable-0001",
+        payload=_quantity_basket_payload(
+            (h.instrument, "3"), (second, "2"), side="SELL"
+        ),
+    )
+
+    with pytest.raises(DirectiveServiceError) as denied:
+        h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert denied.value.code == "TRADING_INSUFFICIENT_SELLABLE_POSITION"
+    directive_id = h.repository.state.idempotency[
+        (h.user, h.fund, h.book, request.idempotency_key)
+    ]
+    record = h.repository.get(directive_id)
+    assert record is not None
+    assert record.legs == []
+
+
+def test_basket_rejects_an_unaffordable_member_before_creating_any_leg():
+    h = Harness()
+    second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
+    h.repository.add_instrument(second)
+    h.market.set_quote(
+        TrustedQuote(
+            str(second.instrument_id),
+            second.symbol,
+            NOW,
+            Decimal("1990000"),
+            Decimal("2000000"),
+            Decimal("1000"),
+            Decimal("1000"),
+            "fixture",
+        )
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("5000000"))
+    request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-basket-small-0001",
+        payload=_basket_payload(h.instrument, second),
+    )
+
+    with pytest.raises(DirectiveServiceError) as denied:
+        h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert denied.value.code == "TRADING_BASKET_NOTIONAL_TOO_SMALL"
+    directive_id = h.repository.state.idempotency[
+        (h.user, h.fund, h.book, request.idempotency_key)
+    ]
+    record = h.repository.get(directive_id)
+    assert record is not None
+    assert record.state is DirectiveState.FAILED
+    assert record.legs == []
+
+
+def test_external_basket_stops_before_unattempted_member_after_terminal_result():
+    class Broker:
+        def __init__(self) -> None:
+            self.placements: list[str] = []
+
+        def place_order(self, *, symbol, **_kwargs):
+            self.placements.append(symbol)
+            if symbol == "000660":
+                raise LSPaperBrokerError("LS_PAPER_REJECTED", "broker rejected")
+            return LSPaperOrderAck(symbol + "-order", "111951000", symbol)
+
+        def order_status(self, broker_order_id):
+            symbol = broker_order_id.removesuffix("-order")
+            return LSPaperOrderStatus(
+                broker_order_id=broker_order_id,
+                state="FILLED",
+                requested_quantity=Decimal("14"),
+                filled_quantity=Decimal("14"),
+                fill_price=Decimal("70000"),
+                order_date=NOW.date(),
+            )
+
+    h = Harness()
+    second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
+    third = InstrumentRef(uuid4(), "051910", Decimal(1), None, "KRW")
+    for instrument, ask in ((second, Decimal("25000")), (third, Decimal("300000"))):
+        h.repository.add_instrument(instrument)
+        h.market.set_quote(
+            TrustedQuote(
+                str(instrument.instrument_id),
+                instrument.symbol,
+                NOW,
+                ask - Decimal("100"),
+                ask,
+                Decimal("1000"),
+                Decimal("1000"),
+                "fixture",
+            )
+        )
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository, h.market, external_broker=broker  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("5000000"))
+    request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-basket-stop-0001",
+        payload=_basket_payload(h.instrument, second, third),
+    )
+
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert broker.placements == ["005930", "000660"]
+    assert [leg.symbol for leg in record.legs] == ["005930", "000660"]
+    assert record.state is DirectiveState.PARTIAL
+    assert record.error_code == "TRADING_BASKET_SUBMISSION_STOPPED"
 
 
 def test_ls_paper_adapter_uses_broker_fill_and_never_resubmits() -> None:

@@ -22,7 +22,11 @@ export const PAPER_DIRECTIVE_STATES = [
 ] as const;
 
 export type PaperDirectiveState = (typeof PAPER_DIRECTIVE_STATES)[number];
-export type PaperDirectiveAction = "PLACE_ORDER" | "SELL_ALL" | "CANCEL_ALL";
+export type PaperDirectiveAction =
+  | "PLACE_ORDER"
+  | "PLACE_BASKET"
+  | "SELL_ALL"
+  | "CANCEL_ALL";
 
 export interface PaperDirectiveLeg {
   leg_id: string;
@@ -166,7 +170,9 @@ export function parsePaperDirective(value: unknown): PaperDirective {
   if (
     typeof directive.directive_id !== "string" ||
     !PAPER_DIRECTIVE_STATES.includes(state as PaperDirectiveState) ||
-    !["PLACE_ORDER", "SELL_ALL", "CANCEL_ALL"].includes(String(action)) ||
+    !["PLACE_ORDER", "PLACE_BASKET", "SELL_ALL", "CANCEL_ALL"].includes(
+      String(action),
+    ) ||
     (directive.priority !== 1000 && directive.priority !== 2000) ||
     directive.priority_class !== "USER_DIRECTIVE_HIGHEST" ||
     directive.mode !== "PAPER" ||
@@ -220,6 +226,16 @@ export function selectedAuthorizedBook(
   selectedBookId: string,
 ): AuthorizedBook | null {
   return books.find((book) => book.bookId === selectedBookId) ?? null;
+}
+
+/** SSR과 브라우저 프라이버시 설정 양쪽에서 안전한 sessionStorage 접근. */
+export function browserSessionStorage(): PaperOrderStorage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
 }
 
 export function createPaperOrderSubmission(

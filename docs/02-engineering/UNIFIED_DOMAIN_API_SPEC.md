@@ -301,7 +301,7 @@ PAPER 명령은 다음의 별도 전송 흐름이며 자동 전략과 권한 증
       → current Fund/Book membership + mechanical admission + idempotency
       → durable USER_DIRECTIVE → LS PAPER adapter/OMS
 
-세부 authority, mechanical admission, `SELL_ALL`·`CANCEL_ALL` 의미와 집계 상태는
+세부 authority, mechanical admission, `PLACE_BASKET`·`SELL_ALL`·`CANCEL_ALL` 의미와 집계 상태는
 [ADR-0007](adr/0007-authenticated-user-paper-directive-authority.md)을 따른다.
 
 ### 7.2 실패 폐쇄

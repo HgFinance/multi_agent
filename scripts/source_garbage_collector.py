@@ -144,12 +144,11 @@ def render_markdown(report: dict[str, object]) -> str:
     lines.extend(
         [
             "",
-            "Only candidates with no source or test references are removed. "
-            "`fact_router.py` and `ceo_hermes_client.py` remain under review because their "
-            "behavior is still covered by tests; `packet_gate.py` was removed. This is cleanup "
-            "of the working tree and Git history retains recovery. The scanner cannot prove that "
-            "an external deployment or dynamic import is absent, so future additions must re-run "
-            "the audit before deleting another compatibility surface.",
+            "All registered retired candidates are absent and have no tracked source or test "
+            "references. This is cleanup of the working tree and Git history retains recovery. "
+            "The scanner cannot prove that an external deployment or dynamic import is absent, "
+            "so future additions must re-run the audit before deleting another compatibility "
+            "surface.",
             "",
             "## Re-run",
             "",

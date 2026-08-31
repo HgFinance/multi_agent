@@ -87,6 +87,11 @@ class FakePool:
         pass
 
 
+class ExhaustedPool:
+    def getconn(self):
+        raise RuntimeError("connection pool exhausted")
+
+
 def assessment():
     return SimpleNamespace(
         qa_decision_id=uuid4(),
@@ -210,6 +215,11 @@ def test_repository_discards_connection_when_configuration_fails(monkeypatch):
         repo._get_connection()
 
     assert pool.discarded is True
+
+
+def test_pool_exhaustion_is_normalized_to_qa_persistence_error():
+    with pytest.raises(QaDecisionPersistenceError, match="connection pool is unavailable"):
+        PostgresAuditRepository(ExhaustedPool())._get_connection()
 
 
 def test_repository_runtime_status_proves_writable_role(monkeypatch):
