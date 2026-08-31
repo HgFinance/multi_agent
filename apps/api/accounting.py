@@ -72,13 +72,16 @@ def _enqueue_accounting_via_ceo(req: hermes_boundary.AgentAsk) -> dict[str, obje
         from ceo import CeoAsk, ceo_query
 
     try:
-        from orchestration.ceo_query_routing import build_deterministic_bff_plan
+        from orchestration.ceo_request_classifier import classify_ceo_request
     except ImportError:  # pragma: no cover - direct apps/api script path
-        from ceo_query_routing import build_deterministic_bff_plan
+        from ceo_request_classifier import classify_ceo_request  # type: ignore[no-redef]
 
-    routing_plan = build_deterministic_bff_plan(
-        req.query,
-        selected_departments=("accounting",),
+    # 부서 별칭은 자기 경계에서 이미 인가돼 있으므로 스코프를 고정해서 넘긴다.
+    routing_plan = dict(
+        classify_ceo_request(
+            req.query,
+            selected_departments=("accounting",),
+        ).routing_plan
     )
 
     return ceo_query(

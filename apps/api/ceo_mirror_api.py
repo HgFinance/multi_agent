@@ -127,20 +127,25 @@ def _build_deterministic_bff_plan(
     if not _deterministic_bff_routing_enabled():
         return None
     try:
-        from orchestration.ceo_query_routing import build_deterministic_bff_plan
+        from orchestration.ceo_request_classifier import classify_ceo_request
     except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
-        from ceo_query_routing import (  # type: ignore[no-redef]
-            build_deterministic_bff_plan,
+        from ceo_request_classifier import (  # type: ignore[no-redef]
+            classify_ceo_request,
         )
     started = time.perf_counter()
-    plan = build_deterministic_bff_plan(
+    # 여기서 읽는 것은 플랜뿐이다. `lane`은 읽기 전용 E2E 스코프를 모르는
+    # 질의만의 관점이므로 로그에만 쓰고, 실제 레인 판정은 `ceo_query`가
+    # 그 스코프까지 넣어 다시 확정한다.
+    decision = classify_ceo_request(
         query, previous_question_context=previous_question_context
     )
+    plan = dict(decision.routing_plan)
     logger.info(
-        "ceo-bff-deterministic-route route_ms=%.3f departments=%s basis=%s",
+        "ceo-bff-deterministic-route route_ms=%.3f departments=%s basis=%s lane=%s",
         (time.perf_counter() - started) * 1000,
-        ",".join(str(value) for value in plan.get("selected_primary_profiles", ())),
-        plan.get("routing_basis", ""),
+        ",".join(str(value) for value in decision.selected_primary_profiles),
+        decision.routing_basis,
+        decision.lane,
     )
     return plan
 
