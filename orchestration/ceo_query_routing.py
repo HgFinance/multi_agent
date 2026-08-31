@@ -14,6 +14,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from orchestration.canonical_profiles import canonical_profile_for_department
+from orchestration.query_lexicon import (
+    QUERY_INTENT_TERMS,
+    contains_negation,
+    dominant_negated_keys,
+    is_negated_suffix,
+    negated_spans,
+)
 
 # The response plane. QA is an asynchronous post-response consumer and is not
 # an analysis primary in this list.
@@ -144,41 +151,14 @@ def is_operational_status_query(query: str) -> bool:
         and _STATUS_INTENT_RE.search(normalized)
     )
 
-_QUERY_INTENT_TERMS = (
-    "분석",
-    "검토",
-    "조회",
-    "확인",
-    "알려",
-    "보여",
-    "브리핑",
-    "요약",
-    "추천",
-    "비교",
-    "평가",
-    "설명",
-    "전략",
-    "리스크",
-    "위험",
-    "주문",
-    "매수",
-    "매도",
-    "분류",
-    "analy",
-    "review",
-    "status",
-    "summary",
-    "recommend",
-    "compare",
-    "explain",
-)
 
 # Safety instructions such as "주문은 하지 마" describe a prohibition, not a
 # Trading request.  The router must not fan out to an execution-adjacent
-# department merely because a user explicitly forbade that action.
-_NEGATED_TERM_SUFFIX_RE = re.compile(
-    r"^(?:은|는|이|가|을|를)?\s*(?:하지\s*(?:마|말고|않)|안\s|못\s|금지|불가|없)"
-)
+# department merely because a user explicitly forbade that action.  Both the
+# intent vocabulary and the negation vocabulary now live in
+# ``orchestration.query_lexicon`` so every branch reads the same dictionary.
+_QUERY_INTENT_TERMS = QUERY_INTENT_TERMS
+
 _RESEARCH_SCOPE_RE = re.compile(
     r"(?:리서치|연구|research)\s*(?:부서|팀|본부|department)",
     re.IGNORECASE,
@@ -291,8 +271,18 @@ def _account_status_terms(normalized_query: str) -> list[str]:
     return matched
 
 
-def _query_term_matches(normalized_query: str, term: str) -> bool:
-    """Match Korean phrases by containment and English abbreviations by word."""
+def _query_term_matches(
+    normalized_query: str, term: str, *, extended_negation: bool = True
+) -> bool:
+    """Match Korean phrases by containment and English abbreviations by word.
+
+    ``extended_negation`` selects how wide the prohibition vocabulary is.
+    Department fan-out uses the wide reading: a department the user excluded
+    must not be added.  The clarification gate deliberately uses the narrow
+    one - it asks whether the request names *anything* recognizable, and a
+    prohibition is still a recognizable subject.  Reading it widely there
+    turned ``회계쪽은 건드리지 말고 리서치만 해줘`` into "please rephrase".
+    """
 
     normalized_term = term.casefold()
     if normalized_term.isascii() and any(char.isalnum() for char in normalized_term):
@@ -310,7 +300,9 @@ def _query_term_matches(normalized_query: str, term: str) -> bool:
             and normalized_query[max(0, match.start() - 2) : match.start()] == "가상"
         ):
             continue
-        if _is_negated_suffix(normalized_query[match.end() :]):
+        if _is_negated_suffix(
+            normalized_query[match.end() :], extended=extended_negation
+        ):
             continue
         if _is_prohibited_safety_term(normalized_query, match.start(), match.end()):
             continue
@@ -318,17 +310,45 @@ def _query_term_matches(normalized_query: str, term: str) -> bool:
     return False
 
 
-def _is_negated_suffix(suffix: str) -> bool:
-    """Recognize short safety prohibitions, including joined Korean clauses."""
+def negated_departments(query: str) -> tuple[str, ...]:
+    """Return the response departments the user explicitly excluded.
 
-    if _NEGATED_TERM_SUFFIX_RE.match(suffix):
-        return True
-    return bool(
-        re.match(
-            r"^[^.!?\n]{0,24}(?:하지\s*(?:마|말고|않)|안\s|못\s|금지|불가|없)",
-            suffix,
-        )
+    Only the term a negation directly governs is treated as excluded.  A whole
+    clause is too wide: ``손실 나도 매도하지 마`` forbids selling, and ``손실``
+    is the condition, not a request to drop Risk from the response plane.
+    Removing a department is the dangerous direction, so this errs narrow.
+
+    QA is never a response primary, so its vocabulary cannot exclude anything.
+    """
+
+    normalized_query = " ".join(str(query or "").split()).casefold()
+    occurrences: list[tuple[int, int, str]] = []
+    for stage, terms in _QUERY_STAGE_KEYWORDS.items():
+        if stage == "qa":
+            continue
+        for term in terms:
+            for match in re.finditer(re.escape(term.casefold()), normalized_query):
+                occurrences.append((match.start(), match.end(), stage))
+    if not occurrences:
+        return ()
+    return tuple(
+        stage
+        for stage in DEPARTMENTS
+        if stage != "ceo"
+        and stage in dominant_negated_keys(negated_spans(normalized_query), occurrences)
     )
+
+
+def _is_negated_suffix(suffix: str, *, extended: bool = True) -> bool:
+    """Recognize short safety prohibitions, including joined Korean clauses.
+
+    ``extended`` also covers the exclusion vocabulary (``건드리지 말고``,
+    ``빼고``, ``제외하고``, bare ``말고``).  Without it a request such as
+    ``회계쪽은 건드리지 말고 리서치만 해줘`` was not read as a prohibition at
+    all, so the very department the user excluded was *added* to the fan-out.
+    """
+
+    return is_negated_suffix(suffix, extended=extended)
 
 
 def _is_prohibited_safety_term(normalized_query: str, start: int, end: int) -> bool:
@@ -359,7 +379,7 @@ def _is_prohibited_safety_term(normalized_query: str, start: int, end: int) -> b
         min(clause_end_candidates) if clause_end_candidates else len(normalized_query)
     )
     clause = normalized_query[clause_start:clause_end]
-    return bool(re.search(r"하지\s*(?:마|말고|않)|안\s|못\s|금지|불가|없", clause))
+    return contains_negation(clause)
 
 
 def _explicit_research_scope(normalized_query: str) -> bool:
@@ -424,7 +444,7 @@ def query_requires_clarification(query: str, category: str = "") -> bool:
     if _account_status_terms(normalized_query):
         return False
     if any(
-        _query_term_matches(normalized_query, term)
+        _query_term_matches(normalized_query, term, extended_negation=False)
         for terms in _QUERY_STAGE_KEYWORDS.values()
         for term in terms
     ):
@@ -560,6 +580,20 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
             matched_terms.setdefault(stage, []).extend(
                 term for term in hits if term not in matched_terms.get(stage, [])
             )
+
+    # 사용자가 명시적으로 배제한 부서는 목록에서 **뺀다.** 예전에는 기본값을
+    # 선적재한 뒤 add만 했기 때문에, `"리스크 검토도 하지 말고 뉴스만 정리해줘"`
+    # 라고 해도 risk가 기본값 자리에 그대로 남아 있었다 - 키워드 억제는
+    # 추가를 막을 뿐 이미 들어와 있는 것을 빼지 못한다.
+    excluded = negated_departments(normalized)
+    if not (explicit_accounting_e2e or quant_only or trading_only or research_only):
+        remaining = stages - set(excluded) - {"ceo"}
+        # 응답 부서가 하나도 남지 않는 배제는 받아들이지 않는다. 빈 응답
+        # 평면을 만드는 대신 기본값을 유지하고, 그 사실을 근거에 남긴다.
+        if remaining:
+            stages = remaining | {"ceo"}
+        else:
+            excluded = ()
 
     ordered = [stage for stage in DEPARTMENTS if stage in stages]
     return {
@@ -822,6 +856,7 @@ __all__ = [
     "RouteVerification",
     "build_ceo_task_plan",
     "build_deterministic_bff_plan",
+    "negated_departments",
     "is_hr_read_only_query",
     "is_read_only_hr_e2e_query",
     "query_requires_clarification",

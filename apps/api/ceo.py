@@ -56,7 +56,6 @@ try:
         TaskStatusResponse,
         TaskWorkflow,
     )
-    from .conditional_rule_language import looks_like_conditional_paper_rule
     from .conditional_rule_orchestrator import process_user_conditional_paper_rule
     from .conditional_rules import build_delayed_order_candidate
     from .current_user import (
@@ -99,9 +98,6 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         TaskStatusResponse,
         TaskWorkflow,
     )
-    from conditional_rule_language import (  # type: ignore[no-redef]
-        looks_like_conditional_paper_rule,
-    )
     from conditional_rule_orchestrator import (  # type: ignore[no-redef]
         process_user_conditional_paper_rule,
     )
@@ -133,12 +129,12 @@ from orchestration.canonical_profiles import (
     canonical_profile_for_department,
 )
 from orchestration.ceo_query_routing import is_read_only_hr_e2e_query
+from orchestration.ceo_request_classifier import classify_ceo_request
 from orchestration.ceo_workflow_scope import (
     UserPaperOrderScope,
     build_root_body,
     build_scoped_task_body,
     build_user_paper_order_scope,
-    infer_workflow_mode,
     primary_idempotency_key,
     read_marker,
     requested_by_from_body,
@@ -147,7 +143,6 @@ from orchestration.ceo_workflow_scope import (
 from orchestration.compound_paper_orders import (
     AnalysisThenConditionalPaperOrderPlan,
     build_compound_conditional_candidate,
-    parse_analysis_then_conditional_paper_order,
     parse_compound_paper_order,
 )
 from orchestration.experience_bank import (
@@ -162,8 +157,6 @@ from orchestration.qa_contract import (
 from orchestration.user_order_language import (
     deterministic_delayed_order_plan,
     deterministic_order_candidate,
-    is_clearly_non_executable_order_language,
-    looks_like_user_order_request,
 )
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
@@ -2407,22 +2400,29 @@ def ceo_query(
     fund_id = getattr(req, "fund_id", None)
     mandate = fetch_current_mandate_by_fund(fund_id) if fund_id else None
 
-    if deterministic_routing_plan is None:
-        from orchestration.ceo_query_routing import build_deterministic_bff_plan
-
-        deterministic_routing_plan = build_deterministic_bff_plan(
-            req.query,
-            previous_question_context=getattr(
-                req, "previous_question_context", None
-            ),
-        )
-    # The strict PAPER lane is itself deterministic and fail-closed.  Let its
-    # verifier handle short imperative language such as ``팔아줘`` before the
-    # generic analysis router labels the same request as underspecified.
-    order_route_requested = looks_like_conditional_paper_rule(req.query) or (
-        looks_like_user_order_request(req.query)
+    # 레인 판정은 `classify_ceo_request()` 한 곳이 소유한다.
+    #
+    # 예전에는 이 자리에서 순차 if 체인으로 여섯 가지 검사를 직접 했다.
+    # 순서가 곧 우선순위인데 그 순서가 어디에도 적혀 있지 않았고, 부정 가드가
+    # 즉시 주문 레인에만 걸려 있었다 - `"이평 깨지면 매도하지 마"`가 조건주문
+    # 레인으로 들어갔던 이유다(2026-08-31 실측). 판정이 한 함수에 모여야
+    # 레인 사이의 비대칭이 눈에 보인다.
+    #
+    # 읽기 전용 E2E 스코프는 CEO가 소유한 판정이므로 여기서 계산해 넘긴다.
+    # 이 요청들은 합법적으로 `매도`·`6개월 이내` 같은 어휘를 담고 있어서
+    # 주문 문법이 먼저 집어가면 안 된다.
+    read_only_hr_e2e = _is_read_only_hr_e2e_request(req.query)
+    read_only_risk_e2e = _is_read_only_risk_e2e_request(req.query)
+    route = classify_ceo_request(
+        req.query,
+        previous_question_context=getattr(req, "previous_question_context", None),
+        routing_plan=deterministic_routing_plan,
+        read_only_hr_e2e=read_only_hr_e2e,
+        read_only_risk_e2e=read_only_risk_e2e,
     )
-    workflow_mode = infer_workflow_mode(req.query)
+    deterministic_routing_plan = dict(route.routing_plan)
+    workflow_mode = route.workflow_mode
+
     # Consult D5 before the clarification branch as well.  Ambiguity is a
     # terminal, safe outcome, but its structured failure history is still
     # useful to explain why no department fan-out is being guessed.  This is
@@ -2430,7 +2430,7 @@ def ceo_query(
     # route on its own.
     d5_bank = ExperienceBank.from_env()
     d5_lookup = None
-    if d5_bank.enabled and not order_route_requested:
+    if d5_bank.enabled and not route.order_grammar_detected:
         d5_lookup = d5_bank.lookup(
             case_type=discord_experience_case_type(
                 deterministic_routing_plan.get("category")
@@ -2443,10 +2443,8 @@ def ceo_query(
         if d5_lookup is not None and d5_bank.mode == "active"
         else None
     )
-    if (
-        deterministic_routing_plan.get("mode") == "clarification_required"
-        and not order_route_requested
-    ):
+
+    if route.lane == "clarification":
         return _clarification_required_response(
             req,
             owner_id=owner_id if isinstance(owner_id, str) else None,
@@ -2459,17 +2457,10 @@ def ceo_query(
             failure_memory=d5_failure_memory,
         )
 
-    read_only_hr_e2e = _is_read_only_hr_e2e_request(req.query)
-    read_only_risk_e2e = _is_read_only_risk_e2e_request(req.query)
-    analysis_then_conditional_plan = (
-        None
-        if read_only_hr_e2e or read_only_risk_e2e
-        else parse_analysis_then_conditional_paper_order(req.query)
-    )
-    if analysis_then_conditional_plan is not None:
+    if route.lane == "analysis_then_order":
         return _route_analysis_then_conditional_paper_order(
             req,
-            plan=analysis_then_conditional_plan,
+            plan=route.order_plan,
             owner_id=owner_id if isinstance(owner_id, str) else None,
             mandate=mandate,
             discord_channel_id=discord_channel_id,
@@ -2478,11 +2469,7 @@ def ceo_query(
             discord_thread_id=discord_thread_id,
         )
 
-    if (
-        not read_only_hr_e2e
-        and not read_only_risk_e2e
-        and parse_compound_paper_order(req.query) is not None
-    ):
+    if route.lane == "compound_order":
         return _route_compound_user_paper_order(
             req,
             owner_id=owner_id if isinstance(owner_id, str) else None,
@@ -2493,52 +2480,27 @@ def ceo_query(
             discord_thread_id=discord_thread_id,
         )
 
-    if (
-        not read_only_hr_e2e
-        and not read_only_risk_e2e
-        and looks_like_conditional_paper_rule(req.query)
-    ):
+    if route.lane in {"conditional_order", "immediate_order"}:
         return _route_traced_user_paper_order(
             req,
             owner_id=owner_id if isinstance(owner_id, str) else None,
             mandate=mandate,
-            conditional_rule=True,
+            conditional_rule=route.lane == "conditional_order",
             discord_channel_id=discord_channel_id,
             discord_message_id=discord_message_id,
             discord_guild_id=discord_guild_id,
             discord_thread_id=discord_thread_id,
         )
 
-    if (
-        not read_only_hr_e2e
-        and not read_only_risk_e2e
-        and looks_like_user_order_request(req.query)
-        and not is_clearly_non_executable_order_language(req.query)
-    ):
-        return _route_traced_user_paper_order(
-            req,
-            owner_id=owner_id if isinstance(owner_id, str) else None,
-            mandate=mandate,
-            conditional_rule=False,
-            discord_channel_id=discord_channel_id,
-            discord_message_id=discord_message_id,
-            discord_guild_id=discord_guild_id,
-            discord_thread_id=discord_thread_id,
-        )
-
-    # The BFF may have already supplied the bounded deterministic route.  The
-    # special read-only E2E lanes retain their existing CEO-owned handling;
-    # they must not inherit a generic research/risk fallback from free text.
+    # 결정론 플랜이 그대로 응답 평면이 되는 경우에만 root body에 싣는다.
+    # 읽기 전용 E2E 레인은 CEO가 소유한 처리를 유지하며, 자유 문장에서 온
+    # research/risk 기본값을 물려받지 않는다.
     bff_routing_plan = (
         deterministic_routing_plan
-        if workflow_mode == "analysis" and not read_only_risk_e2e
+        if route.lane in {"department_analysis", "operational_status"}
         else None
     )
-    deterministic_operational_status = bool(
-        isinstance(bff_routing_plan, Mapping)
-        and bff_routing_plan.get("mode") == "operational_status"
-        and bff_routing_plan.get("category") == "SYSTEM_STATUS"
-    )
+    deterministic_operational_status = route.lane == "operational_status"
     selected_bff_profiles = {
         str(profile).strip()
         for profile in (

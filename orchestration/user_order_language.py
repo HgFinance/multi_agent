@@ -37,6 +37,7 @@ from orchestration.contracts.user_paper_order import (
     TextEvidence,
     VerifiedPaperDirective,
 )
+from orchestration.query_lexicon import order_negation_match
 
 MAX_TEXT_LENGTH = 500
 MAX_QUANTITY = 10**18 - 1
@@ -280,10 +281,6 @@ _QUESTION_RE = re.compile(
     r"\?|(?:할까|할까요|해도\s*돼|해도\s*될까|해\s*줄래|해줄래|"
     r"사도\s*돼|팔아도\s*돼|가능(?:해|할까|한가)|어때|될까)(?:요)?[.!]*\s*$"
 )
-_NEGATION_RE = re.compile(
-    r"(?:하지\s*마|하지마|말아(?:\s*줘)?|말(?:아|자)|"
-    r"안\s*(?:사|팔|매수|매도|취소)|(?:매수|매도|취소)\s*안|않(?:아|게|도록)?)"
-)
 _CONDITIONAL_RE = re.compile(
     r"(?:만약|가정(?:하면|해서)?|(?:오르|내리|떨어지|되|한다|간다|온다)면|"
     r"(?:일|인)\s*경우|조건(?:으로|부로)?|때(?:만|에))"
@@ -512,7 +509,7 @@ def _unsafe_language(raw_text: str) -> OrderReasonCode | None:
         return OrderReasonCode.EXAMPLE_OR_QUOTED_TEXT
     if _EXAMPLE_RE.search(raw_text):
         return OrderReasonCode.EXAMPLE_OR_QUOTED_TEXT
-    if _NEGATION_RE.search(raw_text):
+    if order_negation_match(raw_text) is not None:
         return OrderReasonCode.NEGATED_OR_PROHIBITED
     if _CONDITIONAL_RE.search(raw_text):
         return OrderReasonCode.CONDITIONAL_OR_HYPOTHETICAL
