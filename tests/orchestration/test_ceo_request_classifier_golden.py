@@ -20,28 +20,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass
 
-from apps.api.conditional_rule_language import looks_like_conditional_paper_rule
-from orchestration.ceo_query_routing import build_deterministic_bff_plan
-from orchestration.ceo_workflow_scope import infer_workflow_mode
-from orchestration.compound_paper_orders import (
-    parse_analysis_then_conditional_paper_order,
-    parse_compound_paper_order,
-)
-from orchestration.user_order_language import (
-    is_clearly_non_executable_order_language,
-    looks_like_user_order_request,
-)
-
-# 주문 레인 4종. 이 레인에 들어간 질의는 부서 fan-out을 만들지 않고
-# Trading 해석 카드 한 장으로 간다 - 그래서 기대 부서는 빈 튜플이다.
-ORDER_LANES = frozenset(
-    {
-        "immediate_order",
-        "conditional_order",
-        "compound_order",
-        "analysis_then_order",
-    }
-)
+from orchestration.ceo_request_classifier import ORDER_LANES, classify_ceo_request
 
 
 @dataclass(frozen=True)
@@ -55,46 +34,27 @@ class GoldenRoute:
 
 
 def _route(query: str, previous_question_context: str | None = None) -> GoldenRoute:
-    """현재 분기 체인을 그대로 조립한다 (프로덕션 코드 수정 없음).
+    """단일 지시점을 그대로 호출한다.
 
-    순서는 `apps/api/ceo.py`의 순차 if 체인과 동일하다. 순서가 곧 우선순위이므로
-    임의로 바꾸면 같은 질의가 다른 레인으로 간다.
+    이 함수는 처음에 `apps/api/ceo.py`의 순차 if 체인을 손으로 조립한 참조
+    구현이었다. `classify_ceo_request()`로 바꾼 뒤에도 아래 케이스 표가
+    한 줄도 바뀌지 않는 것이 구조 이관의 성공 기준이었다.
     """
 
-    plan = build_deterministic_bff_plan(
+    decision = classify_ceo_request(
         query, previous_question_context=previous_question_context
     )
     departments = tuple(
         str(department)
-        for department in plan.get("requested_departments", ())
+        for department in decision.routing_plan.get("requested_departments", ())
         if str(department) not in {"ceo", "qa"}
     )
-    workflow_mode = infer_workflow_mode(query)
-    basis = str(plan.get("routing_basis") or "")
-    order_route_requested = looks_like_conditional_paper_rule(
-        query
-    ) or looks_like_user_order_request(query)
-
-    def order(lane: str) -> GoldenRoute:
-        return GoldenRoute(lane, (), workflow_mode, basis)
-
-    if plan.get("mode") == "clarification_required" and not order_route_requested:
-        return GoldenRoute("clarification", (), workflow_mode, basis)
-    if parse_analysis_then_conditional_paper_order(query) is not None:
-        return order("analysis_then_order")
-    if parse_compound_paper_order(query) is not None:
-        return order("compound_order")
-    if looks_like_conditional_paper_rule(query):
-        return order("conditional_order")
-    if looks_like_user_order_request(query) and not (
-        is_clearly_non_executable_order_language(query)
-    ):
-        return order("immediate_order")
-    if workflow_mode == "analysis":
-        return GoldenRoute("department_analysis", departments, workflow_mode, basis)
-    # 결정론으로 확정하지 못한 binding 질의. root body에 플랜이 실리지 않고
-    # `ceo-agent` 코멘트를 읽는 LLM 플래너 경로로 넘어간다.
-    return GoldenRoute("llm_planner_required", departments, workflow_mode, basis)
+    return GoldenRoute(
+        decision.lane,
+        () if decision.is_order_lane else departments,
+        decision.workflow_mode,
+        decision.routing_basis,
+    )
 
 
 @dataclass(frozen=True)
