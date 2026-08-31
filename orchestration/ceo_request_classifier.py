@@ -33,7 +33,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from orchestration.ceo_query_routing import build_deterministic_bff_plan
+from orchestration.ceo_query_routing import (
+    build_deterministic_bff_plan,
+    negated_departments,
+)
 from orchestration.ceo_workflow_scope import infer_workflow_mode
 from orchestration.compound_paper_orders import (
     parse_analysis_then_conditional_paper_order,
@@ -149,6 +152,11 @@ def classify_ceo_request(
     # binding 여부. 주문 권한이 아니라 워크플로 등급이다.
     workflow_mode = infer_workflow_mode(text)
 
+    # 사용자가 명시적으로 배제한 부서. 라우터가 이미 목록에서 뺐고, 여기서는
+    # 왜 빠졌는지를 관측 가능하게 남기기 위해 같은 판정을 다시 읽는다.
+    # 플랜 직렬화에는 넣지 않는다 - `PortfolioTaskPlan`이 추가 필드를 금지한다.
+    excluded = negated_departments(text)
+
     def decide(
         lane: CeoLane,
         *reason_codes: str,
@@ -168,7 +176,7 @@ def classify_ceo_request(
             category=str(plan.get("category") or "PORTFOLIO_RECOMMENDATION"),
             routing_basis=str(plan.get("routing_basis") or ""),
             matched_terms=dict(plan.get("matched_terms") or {}),
-            excluded_departments=tuple(plan.get("excluded_departments") or ()),
+            excluded_departments=excluded,
             reason_codes=reason_codes,
             order_plan=order_plan,
             order_grammar_detected=order_grammar_detected,

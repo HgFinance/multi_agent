@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from orchestration.canonical_profiles import canonical_profile_for_department
-from orchestration.query_lexicon import QUERY_INTENT_TERMS, is_negated_suffix
+from orchestration.query_lexicon import (
+    QUERY_INTENT_TERMS,
+    dominant_negated_keys,
+    is_negated_suffix,
+    negated_spans,
+)
 
 # The response plane. QA is an asynchronous post-response consumer and is not
 # an analysis primary in this list.
@@ -272,6 +277,35 @@ def _query_term_matches(
     return False
 
 
+def negated_departments(query: str) -> tuple[str, ...]:
+    """Return the response departments the user explicitly excluded.
+
+    Only the term a negation directly governs is treated as excluded.  A whole
+    clause is too wide: ``손실 나도 매도하지 마`` forbids selling, and ``손실``
+    is the condition, not a request to drop Risk from the response plane.
+    Removing a department is the dangerous direction, so this errs narrow.
+
+    QA is never a response primary, so its vocabulary cannot exclude anything.
+    """
+
+    normalized_query = " ".join(str(query or "").split()).casefold()
+    occurrences: list[tuple[int, int, str]] = []
+    for stage, terms in _QUERY_STAGE_KEYWORDS.items():
+        if stage == "qa":
+            continue
+        for term in terms:
+            for match in re.finditer(re.escape(term.casefold()), normalized_query):
+                occurrences.append((match.start(), match.end(), stage))
+    if not occurrences:
+        return ()
+    return tuple(
+        stage
+        for stage in DEPARTMENTS
+        if stage != "ceo"
+        and stage in dominant_negated_keys(negated_spans(normalized_query), occurrences)
+    )
+
+
 def _is_negated_suffix(suffix: str, *, extended: bool = True) -> bool:
     """Recognize short safety prohibitions, including joined Korean clauses.
 
@@ -514,6 +548,20 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
                 term for term in hits if term not in matched_terms.get(stage, [])
             )
 
+    # 사용자가 명시적으로 배제한 부서는 목록에서 **뺀다.** 예전에는 기본값을
+    # 선적재한 뒤 add만 했기 때문에, `"리스크 검토도 하지 말고 뉴스만 정리해줘"`
+    # 라고 해도 risk가 기본값 자리에 그대로 남아 있었다 - 키워드 억제는
+    # 추가를 막을 뿐 이미 들어와 있는 것을 빼지 못한다.
+    excluded = negated_departments(normalized)
+    if not (explicit_accounting_e2e or quant_only or trading_only or research_only):
+        remaining = stages - set(excluded) - {"ceo"}
+        # 응답 부서가 하나도 남지 않는 배제는 받아들이지 않는다. 빈 응답
+        # 평면을 만드는 대신 기본값을 유지하고, 그 사실을 근거에 남긴다.
+        if remaining:
+            stages = remaining | {"ceo"}
+        else:
+            excluded = ()
+
     ordered = [stage for stage in DEPARTMENTS if stage in stages]
     return {
         "mode": "free_query",
@@ -753,6 +801,7 @@ __all__ = [
     "RouteVerification",
     "build_ceo_task_plan",
     "build_deterministic_bff_plan",
+    "negated_departments",
     "is_hr_read_only_query",
     "is_read_only_hr_e2e_query",
     "query_requires_clarification",

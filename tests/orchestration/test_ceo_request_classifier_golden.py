@@ -271,6 +271,46 @@ class CeoRouteNegationGuardTest(unittest.TestCase):
         )
 
 
+class CeoRouteExclusionTest(unittest.TestCase):
+    """명시적으로 배제한 부서는 목록에서 빠진다.
+
+    예전에는 기본값을 선적재한 뒤 `add`만 했기 때문에, 키워드 억제는
+    추가만 막고 이미 들어와 있는 부서를 빼지 못했다.
+    """
+
+    def test_negated_department_is_excluded(self) -> None:
+        route = _route("리스크 검토도 하지 말고 뉴스만 정리해줘")
+        self.assertEqual(route.lane, "department_analysis")
+        self.assertEqual(route.departments, ("research",))
+
+    def test_exclusion_is_recorded(self) -> None:
+        decision = classify_ceo_request("리스크 검토도 하지 말고 뉴스만 정리해줘")
+        self.assertEqual(decision.excluded_departments, ("risk",))
+
+    def test_condition_words_do_not_exclude_their_department(self) -> None:
+        """부정이 지배하는 것은 행위지 조건이 아니다.
+
+        `"손실 나도 매도하지 마"`에서 사용자가 뺀 것은 매도이고, `손실`은
+        조건이다. Risk를 빼면 안전 부서가 사라진다.
+        """
+
+        decision = classify_ceo_request("손실 나도 매도하지 마")
+        self.assertEqual(decision.excluded_departments, ("trading",))
+        self.assertIn("risk", decision.routing_plan["requested_departments"])
+
+    def test_excluding_every_department_keeps_the_default(self) -> None:
+        """응답 부서가 하나도 남지 않는 배제는 받아들이지 않는다."""
+
+        decision = classify_ceo_request("뉴스도 보지 말고 리스크도 보지 마")
+        self.assertTrue(
+            [
+                department
+                for department in decision.routing_plan["requested_departments"]
+                if department != "ceo"
+            ]
+        )
+
+
 class CeoRouteKnownDefectTest(unittest.TestCase):
     """지금 깨져 있는 판정. 수정 커밋에서 `expectedFailure`를 뗀다."""
 
@@ -284,16 +324,6 @@ class CeoRouteKnownDefectTest(unittest.TestCase):
         self.assertEqual(route.lane, lane, msg=query)
         if lane not in ORDER_LANES:
             self.assertEqual(route.departments, departments, msg=query)
-
-    # 결함 3 - 부정으로 부서를 제거할 수 없다. `stages`가 기본값을 선적재한 뒤
-    # `add`만 하므로 명시적으로 배제한 부서가 그대로 남는다.
-    @unittest.expectedFailure
-    def test_negated_department_is_excluded(self) -> None:
-        self._assert_lane(
-            "리스크 검토도 하지 말고 뉴스만 정리해줘",
-            "department_analysis",
-            ("research",),
-        )
 
     # 계좌 상태 질문인데 상태/보고 어구가 사전에 없어 Research/Risk로 fan-out 된다.
     @unittest.expectedFailure
