@@ -21,6 +21,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass
 
+from orchestration.ceo_query_routing import verify_primary_route
 from orchestration.ceo_request_classifier import ORDER_LANES, classify_ceo_request
 
 
@@ -179,6 +180,32 @@ class CeoRouteGoldenTest(unittest.TestCase):
     def test_previous_question_context_is_recorded(self) -> None:
         route = _route("이어서", "반도체 관련주 전망 분석해줘")
         self.assertEqual(route.routing_basis, "previous_question_context")
+
+
+class CeoRouteVerificationTest(unittest.TestCase):
+    """라우터 결과는 질의만으로 재현·검증할 수 있어야 한다.
+
+    `verify_primary_route`는 이미 만들어진 카드 집합이 정본 경로와 같은지
+    본다. 통합 리팩토링이 이 검증 대상을 좁히면 LLM이 끼어든 라우팅을
+    가려낼 수 없게 된다.
+    """
+
+    def test_department_analysis_routes_stay_verifiable(self) -> None:
+        for case in STABLE_CASES:
+            if case.lane != "department_analysis":
+                continue
+            with self.subTest(query=case.query):
+                decision = classify_ceo_request(
+                    case.query,
+                    previous_question_context=case.previous_question_context,
+                )
+                verification = verify_primary_route(
+                    case.query, decision.selected_primary_profiles
+                )
+                # 이전 질의 승계는 후속 문장만으로는 재현되지 않는다.
+                if case.previous_question_context is not None:
+                    continue
+                self.assertTrue(verification.valid, msg=case.query)
 
 
 class CeoRouteNegationGuardTest(unittest.TestCase):

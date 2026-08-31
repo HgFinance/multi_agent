@@ -16,6 +16,7 @@ from typing import Any
 from orchestration.canonical_profiles import canonical_profile_for_department
 from orchestration.query_lexicon import (
     QUERY_INTENT_TERMS,
+    contains_negation,
     dominant_negated_keys,
     is_negated_suffix,
     negated_spans,
@@ -346,7 +347,7 @@ def _is_prohibited_safety_term(normalized_query: str, start: int, end: int) -> b
         min(clause_end_candidates) if clause_end_candidates else len(normalized_query)
     )
     clause = normalized_query[clause_start:clause_end]
-    return bool(re.search(r"하지\s*(?:마|말고|않)|안\s|못\s|금지|불가|없", clause))
+    return contains_negation(clause)
 
 
 def _explicit_research_scope(normalized_query: str) -> bool:

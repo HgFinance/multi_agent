@@ -109,6 +109,15 @@ def is_negated_suffix(suffix: str, *, extended: bool = False) -> bool:
     return bool(_HARD_SUFFIX_RE.match(text) or _LOOSE_SUFFIX_RE.match(text))
 
 
+def contains_negation(text: str) -> bool:
+    """구간 안 어디든 부정 표지가 있는지 본다.
+
+    절 전체를 이미 잘라 낸 뒤 "이 절이 금지인가"만 묻는 호출부용이다.
+    """
+
+    return _NEGATION_MARKER_RE.search(str(text or "")) is not None
+
+
 def negated_spans(text: str) -> tuple[tuple[int, int], ...]:
     """부정 표지가 지배하는 구간을 앞에서부터 반환한다.
 
@@ -310,6 +319,7 @@ __all__ = [
     "ORDER_ACTION_PATTERN",
     "ORDER_NEGATION_PATTERN",
     "QUERY_INTENT_TERMS",
+    "contains_negation",
     "dominant_negated_keys",
     "is_negated_order_instruction",
     "is_negated_suffix",
