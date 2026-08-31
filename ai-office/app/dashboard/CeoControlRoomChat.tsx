@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import type { UIEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   askCeo,
   approveStrategyDeployment,
@@ -53,6 +54,20 @@ const QUICK_QUESTIONS = [
   "지금 막혀 있는 업무와 이유를 알려줘",
   "리서치팀의 최신 진행 상황을 브리핑해줘",
 ];
+
+/** CEO Control Room의 진행 폴링 간격. 종료 조건은 쿼리마다 따로 본다. */
+const CHAT_POLL_MS = 5_000;
+
+/** PAPER 주문만 예외 — 체결 반영이 늦게 보이면 안 되므로 2초를 유지한다. */
+const ORDER_POLL_MS = 2_000;
+
+/**
+ * 자동 스크롤을 유지할 "바닥" 판정 여유(px).
+ *
+ * 폴링으로 카드가 늘어날 때마다 무조건 내리면 위로 올려 읽던 내용이 튕긴다.
+ * 사용자가 바닥 근처에 있을 때만 따라 내려간다.
+ */
+const AUTOSCROLL_BOTTOM_SLACK_PX = 48;
 
 const PAPER_ORDER_TERMINAL_STATES = new Set([
   "CLARIFICATION_REQUIRED",
@@ -130,15 +145,15 @@ function CeoControlRoomChatSession() {
   const activeResearchRequestId = submitted?.researchRequestId ?? null;
   const activeDeploymentId = submitted?.deploymentId ?? null;
 
-  // 본부별 진행 — 10초 간격. 모든 카드가 끝나면 폴링을 멈춘다.
+  // 본부별 진행 — 모든 카드가 끝나면 폴링을 멈춘다.
   const statusQuery = useQuery({
     queryKey: ["ceo", "status", activeTaskId],
     queryFn: () => ceoWorkflowStatus(activeTaskId as string),
     enabled: Boolean(activeTaskId),
     refetchInterval: (query) => {
       const data = query.state.data;
-      if (!data) return 10_000;
-      return buildCeoProgress(data, null).all_terminal ? false : 10_000;
+      if (!data) return CHAT_POLL_MS;
+      return buildCeoProgress(data, null).all_terminal ? false : CHAT_POLL_MS;
     },
   });
 
@@ -147,7 +162,7 @@ function CeoControlRoomChatSession() {
     queryKey: ["ceo", "result", activeTaskId],
     queryFn: () => ceoWorkflowResult(activeTaskId as string),
     enabled: Boolean(activeTaskId),
-    refetchInterval: (query) => (query.state.data?.result?.summary ? false : 15_000),
+    refetchInterval: (query) => (query.state.data?.result?.summary ? false : CHAT_POLL_MS),
   });
 
   const progress = useMemo(
@@ -162,8 +177,8 @@ function CeoControlRoomChatSession() {
     refetchInterval: (query) => {
       const data = query.state.data;
       const state = data?.state;
-      if (state === "UNKNOWN") return data?.directive ? 10_000 : false;
-      return state && PAPER_ORDER_TERMINAL_STATES.has(state) ? false : 2_000;
+      if (state === "UNKNOWN") return data?.directive ? CHAT_POLL_MS : false;
+      return state && PAPER_ORDER_TERMINAL_STATES.has(state) ? false : ORDER_POLL_MS;
     },
   });
 
@@ -173,7 +188,7 @@ function CeoControlRoomChatSession() {
     enabled: Boolean(activeResearchRequestId),
     refetchInterval: (query) => {
       const data = query.state.data;
-      return data?.status === "CANDIDATE" || data?.status === "COMPLETED" || data?.status === "BLOCKED" ? false : 10_000;
+      return data?.status === "CANDIDATE" || data?.status === "COMPLETED" || data?.status === "BLOCKED" ? false : CHAT_POLL_MS;
     },
   });
 
@@ -183,7 +198,7 @@ function CeoControlRoomChatSession() {
     enabled: Boolean(activeResearchRequestId && activeDeploymentId && ["ACTIVE", "PAUSED", "FAILED"].includes(submitted?.deploymentStatus ?? "")),
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status === "REMOVED" || status === "FAILED" ? false : 5_000;
+      return status === "REMOVED" || status === "FAILED" ? false : CHAT_POLL_MS;
     },
   });
 
@@ -469,6 +484,47 @@ function CeoControlRoomChatSession() {
   const deploymentRuntimeStatus = deploymentView?.runtime_status ?? submitted?.deploymentRuntimeStatus;
   const deploymentExecutionStatus = deploymentView?.execution_status ?? submitted?.deploymentExecutionStatus;
 
+  /**
+   * 새 대화·상태 갱신이 오면 결과 영역을 바닥으로 내린다.
+   *
+   * 답변과 본부별 진행·주문·연구·배포 카드는 폴링으로 뒤늦게 붙어서, 그대로
+   * 두면 새로 온 내용이 320px 스크롤 영역 밖에 쌓인다. 다만 사용자가 위로
+   * 올려 읽는 중이면 따라 내리지 않는다(바닥 근처일 때만 따라간다).
+   * 폴링 카드는 텍스트만 바뀌기도 해서 의존성 배열 대신 MutationObserver로
+   * 실제 DOM 변화를 본다.
+   */
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const pinnedToBottomRef = useRef(true);
+
+  function handleResultsScroll(event: UIEvent<HTMLDivElement>) {
+    const el = event.currentTarget;
+    pinnedToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= AUTOSCROLL_BOTTOM_SLACK_PX;
+  }
+
+  useEffect(() => {
+    const el = resultsRef.current;
+    if (!el) return;
+    const scrollToBottom = () => {
+      if (!pinnedToBottomRef.current) return;
+      el.scrollTop = el.scrollHeight;
+    };
+    scrollToBottom();
+    if (typeof MutationObserver === "undefined") return;
+    const observer = new MutationObserver(scrollToBottom);
+    observer.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+  }, []);
+
+  // 새 질의를 보내면 이전에 위로 올려둔 상태와 관계없이 처음부터 따라간다.
+  const submittedQuery = submitted?.query ?? "";
+  useEffect(() => {
+    if (!submittedQuery) return;
+    pinnedToBottomRef.current = true;
+    const el = resultsRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [activeTaskId, submittedQuery]);
+
   return (
     <section className="lg:col-span-1 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
       <PanelBar icon="terminal" title="CEO Control Room" />
@@ -518,6 +574,8 @@ function CeoControlRoomChatSession() {
 
       {/* 최신 UI의 단발 결과 구조를 유지한다. 내용이 많으면 이 영역 안에서만 스크롤한다. */}
       <div
+        ref={resultsRef}
+        onScroll={handleResultsScroll}
         className="p-4 flex flex-col gap-3 overflow-y-auto h-[320px] min-h-[320px] max-h-[320px]"
         aria-live="polite"
         aria-label="CEO 질의 결과"
