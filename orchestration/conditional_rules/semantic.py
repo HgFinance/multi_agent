@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -482,6 +483,123 @@ def _validate_time_windows(rule: ConditionalRuleSpec) -> None:
             )
 
 
+@dataclass
+class _NumericBounds:
+    """Bounds collected for one identical scalar inside a logical AND."""
+
+    lower: Decimal | None = None
+    lower_inclusive: bool = True
+    upper: Decimal | None = None
+    upper_inclusive: bool = True
+
+    def add(self, operator: str, value: Decimal) -> None:
+        if operator in {"GT", "GTE", "EQ"}:
+            inclusive = operator != "GT"
+            if self.lower is None or value > self.lower:
+                self.lower, self.lower_inclusive = value, inclusive
+            elif value == self.lower:
+                self.lower_inclusive = self.lower_inclusive and inclusive
+        if operator in {"LT", "LTE", "EQ"}:
+            inclusive = operator != "LT"
+            if self.upper is None or value < self.upper:
+                self.upper, self.upper_inclusive = value, inclusive
+            elif value == self.upper:
+                self.upper_inclusive = self.upper_inclusive and inclusive
+
+    @property
+    def impossible(self) -> bool:
+        if self.lower is None or self.upper is None:
+            return False
+        return self.lower > self.upper or (
+            self.lower == self.upper
+            and not (self.lower_inclusive and self.upper_inclusive)
+        )
+
+
+def _scalar_literal_comparison(
+    node: ExpressionNode,
+) -> tuple[str, str, Decimal] | None:
+    """Return a canonical scalar/operator/literal triple when it is exact.
+
+    This is deliberately not a general-purpose solver.  It recognizes only
+    direct numeric comparisons in an AND expression, which is enough to stop
+    an interpreter from activating an obviously impossible instruction such
+    as ``price <= 70000 AND price >= 80000``.  OR, NOT, CROSS and dynamic
+    scalar-vs-scalar expressions are left to runtime evaluation.
+    """
+
+    if node.type is not ExpressionType.COMPARISON:
+        return None
+    left, right = node.left, node.right
+    operator = node.operator or ""
+    if left is None or right is None:
+        return None
+    if right.type is ExpressionType.LITERAL and left.type is not ExpressionType.LITERAL:
+        scalar, literal = left, right
+    elif left.type is ExpressionType.LITERAL and right.type is not ExpressionType.LITERAL:
+        scalar, literal = right, left
+        operator = {
+            "GT": "LT",
+            "GTE": "LTE",
+            "LT": "GT",
+            "LTE": "GTE",
+            "EQ": "EQ",
+        }.get(operator, operator)
+    else:
+        return None
+    if isinstance(literal.value, bool) or literal.value is None:
+        return None
+    try:
+        value = Decimal(str(literal.value))
+    except Exception:
+        return None
+    if not value.is_finite():
+        return None
+    scalar_key = json.dumps(
+        scalar.model_dump(mode="json", exclude_none=True),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return scalar_key, operator, value
+
+
+def _validate_obvious_contradiction(rule: ConditionalRuleSpec) -> None:
+    """Reject an impossible top-level conjunction before it becomes ACTIVE.
+
+    Nested AND nodes are flattened because parentheses around more AND terms
+    do not change their meaning.  Other logical forms are intentionally not
+    flattened: inferring through OR/NOT would require a full constraint solver
+    and risks rejecting a valid rule.
+    """
+
+    if (
+        rule.condition.type is not ExpressionType.LOGICAL
+        or rule.condition.operator != "AND"
+    ):
+        return
+
+    def conjunction_children(node: ExpressionNode):
+        if node.type is ExpressionType.LOGICAL and node.operator == "AND":
+            for child in node.children or ():
+                yield from conjunction_children(child)
+            return
+        yield node
+
+    bounds: dict[str, _NumericBounds] = {}
+    for child in conjunction_children(rule.condition):
+        comparison = _scalar_literal_comparison(child)
+        if comparison is None:
+            continue
+        scalar_key, operator, value = comparison
+        current = bounds.setdefault(scalar_key, _NumericBounds())
+        current.add(operator, value)
+        if current.impossible:
+            raise _error(
+                "CONTRADICTORY_CONDITION",
+                "condition contains mutually exclusive numeric bounds",
+            )
+
+
 def normalized_indicator_parameters(node: ExpressionNode) -> dict[str, Decimal | int | str]:
     """Return defaults plus validated explicit parameters for evaluation."""
 
@@ -676,6 +794,7 @@ def validate_rule_spec(rule: ConditionalRuleSpec) -> ConditionalRuleSpec:
     _validate_bar_timeframes(rule)
     _validate_runtime_history(rule)
     _validate_time_windows(rule)
+    _validate_obvious_contradiction(rule)
     trailing_nodes = [
         node for node in _walk_nodes(rule.condition)
         if node.type is ExpressionType.TRAILING_STOP

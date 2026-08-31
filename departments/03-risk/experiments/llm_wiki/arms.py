@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,7 @@ from grep_seed import grep_seed, keyword_seed
 from src.graph import run_compliance_check
 from src.nodes import MAX_CONTEXT_CHARS, PERSONA_PROMPTS
 from src.resilience import CircuitBreaker, RedisJsonCache, emit_metric
-from wiki_reader import read_bounded
+from wiki_reader import citation_aliases, read_bounded
 
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 WIKI_DIR = Path(__file__).resolve().parent / "data" / "wiki"
@@ -131,7 +132,30 @@ _UNCERTAINTY_MARKERS = (
     "추가적인 사실",
     "추가 근거",
     "확인할 수 없",
+    "명확하지 않",
+    "명확한 규정",
+    "명시되지 않",
+    "제시되지 않",
 )
+_PROHIBITIVE_MARKERS = ("금지", "해서는 안", "하면 안", "위반")
+_NO_BREACH_DENIAL_MARKERS = (
+    "돌려받을 수 없",
+    "반환할 수 없",
+    "청구할 수 없",
+    "대상이 되지",
+    "조건을 충족하지 못",
+    "해당하지 않",
+)
+_CONDUCT_QUESTION_MARKERS = (
+    "안 되는가",
+    "허용되는가",
+    "가능한가",
+    "해도 되는가",
+    "위반인가",
+    "위반되나",
+)
+_PERIOD_RE = re.compile(r"(?P<value>\d+)\s*(?P<unit>일|개월|년)")
+_WITHIN_PERIOD_RE = re.compile(r"(?P<value>\d+)\s*(?P<unit>일|개월|년)\s*이내")
 
 
 def _wrap_query(query: str, mandate: str) -> str:
@@ -278,7 +302,13 @@ def _generate_verdict(query: str, context: str, system: str | None = None) -> di
     return result
 
 
-def _finalize_wiki_answer(answer: object, pages_visited: list[str]) -> dict[str, Any]:
+def _finalize_wiki_answer(
+    answer: object,
+    pages_visited: list[str],
+    *,
+    query: str = "",
+    context: str = "",
+) -> dict[str, Any]:
     """생성 결과를 방문한 근거 페이지에 고정하고 모순 시 fail-closed한다.
 
     모델 응답의 JSON shape는 gateway가 보장하지만, 법률 안전성에 필요한
@@ -293,9 +323,11 @@ def _finalize_wiki_answer(answer: object, pages_visited: list[str]) -> dict[str,
 
     raw_citations = raw.get("cited_documents")
     citations = [item for item in raw_citations if isinstance(item, str)] if isinstance(raw_citations, list) else []
-    valid_pages = set(pages_visited)
-    invalid_citations = [item for item in citations if item not in valid_pages]
-    citations = list(dict.fromkeys(item for item in citations if item in valid_pages))
+    page_aliases = citation_aliases(pages_visited)
+    invalid_citations = [item for item in citations if item not in page_aliases]
+    citations = list(
+        dict.fromkeys(page_aliases[item] for item in citations if item in page_aliases)
+    )
     rationale = str(raw.get("rationale") or "").strip()
     confidence_raw = raw.get("confidence")
     try:
@@ -312,6 +344,34 @@ def _finalize_wiki_answer(answer: object, pages_visited: list[str]) -> dict[str,
         safety_reasons.append("방문한 근거 페이지와 연결되는 인용이 없습니다.")
     if verdict != "ambiguous" and any(marker in rationale for marker in _UNCERTAINTY_MARKERS):
         safety_reasons.append("답변 설명이 판단 유보 또는 추가 근거 필요 상태입니다.")
+    if (
+        verdict == "no_breach"
+        and any(marker in rationale for marker in _PROHIBITIVE_MARKERS)
+        and (
+            any(marker in rationale for marker in _NO_BREACH_DENIAL_MARKERS)
+            or any(marker in query for marker in _CONDUCT_QUESTION_MARKERS)
+        )
+    ):
+        safety_reasons.append("답변 설명이 금지·위반을 말하면서 no_breach를 반환합니다.")
+
+    query_periods = {
+        (match.group("unit"), int(match.group("value")))
+        for match in _PERIOD_RE.finditer(query)
+    }
+    evidence_limits = {
+        (match.group("unit"), int(match.group("value")))
+        for match in _WITHIN_PERIOD_RE.finditer(context)
+    }
+    if (
+        verdict == "no_breach"
+        and any(
+            unit == evidence_unit and query_value <= evidence_value
+            for unit, query_value in query_periods
+            for evidence_unit, evidence_value in evidence_limits
+        )
+        and any(marker in rationale for marker in _NO_BREACH_DENIAL_MARKERS)
+    ):
+        safety_reasons.append("질문의 기간이 근거의 '이내' 한도 안에 있는데 결론이 반대로 적용됐습니다.")
 
     if safety_reasons:
         verdict = "ambiguous"
@@ -346,6 +406,8 @@ def llm_wiki_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str,
         "answer": _finalize_wiki_answer(
             _generate_verdict(full_query, read.context, system=_LLM_WIKI_GENERATE_SYSTEM),
             read.pages_visited,
+            query=query,
+            context=read.context,
         ),
         "context_chars": len(read.context),
         "pages_visited": read.pages_visited,
@@ -384,6 +446,8 @@ def llm_wiki_grep_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict
         "answer": _finalize_wiki_answer(
             _generate_verdict(full_query, read.context, system=_LLM_WIKI_GENERATE_SYSTEM),
             read.pages_visited,
+            query=query,
+            context=read.context,
         ),
         "context_chars": len(read.context),
         "pages_visited": read.pages_visited,

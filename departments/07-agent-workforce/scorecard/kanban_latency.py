@@ -24,7 +24,7 @@ class KanbanLatencyStatus(str, Enum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
-_FAILURE_OUTCOMES = frozenset({"crashed", "reclaimed", "timed_out"})
+_FAILURE_OUTCOMES = frozenset({"crashed", "gave_up", "reclaimed", "timed_out"})
 
 
 def _percentile(values: list[int], fraction: float) -> int | None:
@@ -61,10 +61,14 @@ class KanbanDepartmentLatencyReport:
     completed_tasks: int | None
     queue_p50_ms: int | None
     queue_p95_ms: int | None
+    workflow_p50_ms: int | None
+    workflow_p95_ms: int | None
     execution_p50_ms: int | None
     execution_p95_ms: int | None
+    execution_attributed_tasks: int | None
     failure_count: int | None
     timeout_count: int | None
+    gave_up_count: int | None
     crash_count: int | None
     reclaim_count: int | None
     reason: str | None = None
@@ -79,10 +83,14 @@ class KanbanDepartmentLatencyReport:
             "completed_tasks": self.completed_tasks,
             "queue_p50_ms": self.queue_p50_ms,
             "queue_p95_ms": self.queue_p95_ms,
+            "workflow_p50_ms": self.workflow_p50_ms,
+            "workflow_p95_ms": self.workflow_p95_ms,
             "execution_p50_ms": self.execution_p50_ms,
             "execution_p95_ms": self.execution_p95_ms,
+            "execution_attributed_tasks": self.execution_attributed_tasks,
             "failure_count": self.failure_count,
             "timeout_count": self.timeout_count,
+            "gave_up_count": self.gave_up_count,
             "crash_count": self.crash_count,
             "reclaim_count": self.reclaim_count,
             "reason": self.reason,
@@ -106,10 +114,14 @@ def _unavailable_reports(
             completed_tasks=None,
             queue_p50_ms=None,
             queue_p95_ms=None,
+            workflow_p50_ms=None,
+            workflow_p95_ms=None,
             execution_p50_ms=None,
             execution_p95_ms=None,
+            execution_attributed_tasks=None,
             failure_count=None,
             timeout_count=None,
+            gave_up_count=None,
             crash_count=None,
             reclaim_count=None,
             reason=reason,
@@ -127,10 +139,10 @@ def collect_kanban_department_latency(
 ) -> tuple[KanbanDepartmentLatencyReport, ...]:
     """Summarize completed department tasks from one read-only SQLite query.
 
-    A task is counted once, using the run that started with its current task
-    execution.  This protects retry history from inflating a department's
-    arrival count.  Failure outcomes are retained as tail diagnostics instead
-    of silently dropping them from p95.
+    A task is counted once. Its active execution time is the sum of completed
+    ``task_runs`` attempts, not ``tasks.completed_at - tasks.started_at``:
+    that task-level interval can include an intentional BLOCKED/unblock wait.
+    Workflow wall time remains separately visible for end-user latency.
     """
 
     if window_end <= window_start:
@@ -148,21 +160,24 @@ def collect_kanban_department_latency(
 
     placeholders = ",".join("?" for _ in department_profiles)
     query = f"""
-        select t.assignee, t.created_at, t.started_at, t.completed_at,
-               coalesce(r.status, '')
+        select t.assignee, t.created_at, t.completed_at,
+               (select min(candidate.started_at)
+                  from task_runs candidate
+                 where candidate.task_id = t.id) as first_started_at,
+               (select sum(case when candidate.ended_at >= candidate.started_at
+                                then candidate.ended_at - candidate.started_at
+                                else 0 end)
+                  from task_runs candidate
+                 where candidate.task_id = t.id
+                   and candidate.ended_at is not null) as active_seconds,
+               (select group_concat(lower(candidate.status), ',')
+                  from task_runs candidate
+                 where candidate.task_id = t.id) as run_outcomes
         from tasks t
-        left join task_runs r
-          on r.id = (
-              select max(candidate.id)
-              from task_runs candidate
-              where candidate.task_id = t.id
-                and candidate.started_at = t.started_at
-          )
         where t.assignee in ({placeholders})
           and t.completed_at >= ? and t.completed_at < ?
-          and t.created_at is not null and t.started_at is not null
-          and t.completed_at >= t.started_at
-          and t.started_at >= t.created_at
+          and t.created_at is not null
+          and t.completed_at >= t.created_at
     """
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25) as database:
@@ -179,24 +194,34 @@ def collect_kanban_department_latency(
             reason="kanban_db_read_failed",
         )
 
-    samples: dict[str, list[tuple[int, int, str]]] = {
+    samples: dict[str, list[tuple[int, int, int | None, tuple[str, ...]]]] = {
         profile: [] for profile in department_profiles.values()
     }
-    for profile, created_at, started_at, completed_at, run_status in rows:
+    for profile, created_at, completed_at, first_started_at, active_seconds, run_outcomes in rows:
+        queue_ms = (
+            max(0, (int(first_started_at) - int(created_at)) * 1_000)
+            if first_started_at is not None
+            else None
+        )
+        outcomes = tuple(
+            item for item in str(run_outcomes or "").split(",") if item
+        )
         samples[str(profile)].append(
             (
-                max(0, (int(started_at) - int(created_at)) * 1_000),
-                max(0, (int(completed_at) - int(started_at)) * 1_000),
-                str(run_status).casefold(),
+                max(0, (int(completed_at) - int(created_at)) * 1_000),
+                queue_ms,
+                max(0, int(active_seconds) * 1_000) if active_seconds is not None else None,
+                outcomes,
             )
         )
 
     reports: list[KanbanDepartmentLatencyReport] = []
     for department, profile in department_profiles.items():
         values = samples[profile]
-        queues = [item[0] for item in values]
-        executions = [item[1] for item in values]
-        outcomes = [item[2] for item in values]
+        workflows = [item[0] for item in values]
+        queues = [item[1] for item in values if item[1] is not None]
+        executions = [item[2] for item in values if item[2] is not None]
+        outcomes = [outcome for item in values for outcome in item[3]]
         reports.append(
             KanbanDepartmentLatencyReport(
                 department=department,
@@ -207,10 +232,14 @@ def collect_kanban_department_latency(
                 completed_tasks=len(values),
                 queue_p50_ms=_percentile(queues, 0.50),
                 queue_p95_ms=_percentile(queues, 0.95),
+                workflow_p50_ms=_percentile(workflows, 0.50),
+                workflow_p95_ms=_percentile(workflows, 0.95),
                 execution_p50_ms=_percentile(executions, 0.50),
                 execution_p95_ms=_percentile(executions, 0.95),
+                execution_attributed_tasks=len(executions),
                 failure_count=sum(item in _FAILURE_OUTCOMES for item in outcomes),
                 timeout_count=outcomes.count("timed_out"),
+                gave_up_count=outcomes.count("gave_up"),
                 crash_count=outcomes.count("crashed"),
                 reclaim_count=outcomes.count("reclaimed"),
             )

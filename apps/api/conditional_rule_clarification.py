@@ -271,6 +271,14 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
         _GAP,
         "순차 조건은 완성된 봉 기준에서만 지원합니다",
     ),
+    "TEMPORAL_SEQUENCE_NODE_REQUIRED": (
+        _DEFECT,
+        "순차 조건 노드가 올바르게 구성되지 않았습니다",
+    ),
+    "TEMPORAL_SEQUENCE_REQUIRES_BOOL": (
+        _DEFECT,
+        "순차 조건의 각 단계가 참/거짓 조건으로 해석되지 않았습니다",
+    ),
     "TEMPORAL_SEQUENCE_COMPOSITION_UNSUPPORTED": (
         _GAP,
         "순차 조건은 하나의 최상위 arm·trigger·cancel 규칙으로 구성해야 합니다",
@@ -278,6 +286,10 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
     "TEMPORAL_SEQUENCE_PARAMETER_INVALID": (
         _DEFECT,
         "순차 조건의 봉 개수 범위가 올바르게 해석되지 않았습니다",
+    ),
+    "CONTRADICTORY_CONDITION": (
+        _GAP,
+        "동일 시점에 함께 충족할 수 없는 가격 범위여서 조건주문을 등록하지 않았습니다",
     ),
     # -- the interpreter built a malformed AST ----------------------------
     "INVALID_INDICATOR_PARAMETER": (_DEFECT, "지표 설정값이 올바르지 않습니다"),

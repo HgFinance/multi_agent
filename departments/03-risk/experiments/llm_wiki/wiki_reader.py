@@ -29,7 +29,9 @@ DEFAULT_PATIENCE = 1  # 링크를 따라가도 새 스니펫이 없으면 몇 �
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n\n(.*)$", re.DOTALL)
 _LINK_LINE_RE = re.compile(r"^- \[\[([^\]]+)\]\] \((\w+)\): (.+)$", re.MULTILINE)
-_FRONTMATTER_FIELD_RE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_]*):\s*(?P<value>.*)$", re.MULTILINE)
+_FRONTMATTER_FIELD_RE = re.compile(
+    r"^(?P<key>[A-Za-z_][A-Za-z0-9_]*):[ \t]*(?P<value>[^\r\n]*)$", re.MULTILINE
+)
 
 
 @dataclass(frozen=True)
@@ -155,6 +157,41 @@ def _window_around(body: str, query: str) -> str:
 
 def _outgoing_links(body: str) -> list[tuple[str, str, str]]:
     return [(m.group(1), m.group(2), m.group(3)) for m in _LINK_LINE_RE.finditer(body)]
+
+
+def citation_aliases(
+    page_ids: list[str], wiki_dir: Path = WIKI_DIR
+) -> dict[str, str]:
+    """Return unambiguous page/document/clause aliases for visited pages.
+
+    The model is instructed to cite page_id, but accepting the same page's
+    document_id or clause_id avoids rejecting a grounded answer solely because
+    the model used another identifier printed in the same Wiki frontmatter.
+    Ambiguous aliases are removed rather than guessed.
+    """
+
+    aliases: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for page_id in dict.fromkeys(page_ids):
+        loaded = _load_page(page_id, wiki_dir)
+        values = [page_id]
+        if loaded is not None:
+            frontmatter, _body = loaded
+            values.extend(
+                value
+                for key in ("page_id", "document_id", "clause_id")
+                if (value := _frontmatter_value(frontmatter, key))
+            )
+        for value in dict.fromkeys(values):
+            if value in ambiguous:
+                continue
+            previous = aliases.get(value)
+            if previous is not None and previous != page_id:
+                aliases.pop(value, None)
+                ambiguous.add(value)
+                continue
+            aliases[value] = page_id
+    return aliases
 
 
 def read_bounded(
