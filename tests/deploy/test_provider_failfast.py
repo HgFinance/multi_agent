@@ -77,10 +77,12 @@ def test_transient_429_and_server_errors_are_not_hard_quota() -> None:
     )
 
 
-def test_policy_is_scoped_to_the_three_analysis_profiles() -> None:
+def test_policy_is_scoped_to_provider_backed_analysis_and_liaison_profiles() -> None:
     assert provider_failfast.TARGET_PROFILES == {
         "research-department",
+        "research-liaison",
         "quant-backtest-department",
+        "quant-liaison",
         "risk-management",
     }
 
