@@ -12,6 +12,8 @@ from arms import (
     _LEGAL_VERDICT_SCHEMA,
     _LLM_WIKI_GENERATE_SYSTEM,
     _finalize_wiki_answer,
+    _repair_structured_answer,
+    _canonical_contract_value,
     PERSONA,
     _generate_verdict,
     build_flat_corpus,
@@ -190,6 +192,87 @@ def test_wiki_answer_uses_reader_aliases_without_rereading_pages(monkeypatch) ->
 
 def test_llm_wiki_prompt_requires_numeric_threshold_comparison() -> None:
     assert "M months/days with M less than or equal to N" in _LLM_WIKI_GENERATE_SYSTEM
+    assert "question_type" in _LEGAL_VERDICT_SCHEMA["properties"]
+    assert "rule_application" in _LEGAL_VERDICT_SCHEMA["properties"]
+
+
+def test_structured_application_normalizes_equivalent_korean_labels() -> None:
+    assert _canonical_contract_value("금지됨", {"violates"}) == "violates"
+    assert _canonical_contract_value("준수", {"complies"}) == "complies"
+
+
+def test_wiki_answer_does_not_score_a_remedy_or_rule_question_as_conduct() -> None:
+    result = _finalize_wiki_answer(
+        {
+            "verdict": "no_breach",
+            "question_type": "remedy_entitlement",
+            "cited_documents": ["visited-page"],
+            "rationale": "반환청구권의 요건을 설명한다.",
+            "confidence": 0.8,
+            "escalate": False,
+        },
+        ["visited-page"],
+    )
+
+    assert result["verdict"] == "ambiguous"
+    assert result["escalate"] is True
+
+
+def test_wiki_answer_rejects_structured_application_verdict_conflict() -> None:
+    result = _finalize_wiki_answer(
+        {
+            "verdict": "breach",
+            "question_type": "conduct_assessment",
+            "rule_application": {
+                "comparison": "within",
+                "application": "complies",
+            },
+            "cited_documents": ["visited-page"],
+            "rationale": "조건을 충족하므로 위반이 아니다.",
+            "confidence": 0.8,
+            "escalate": False,
+        },
+        ["visited-page"],
+    )
+
+    assert result["verdict"] == "ambiguous"
+    assert result["escalate"] is True
+
+
+def test_structured_repair_reuses_the_existing_generator_once(monkeypatch) -> None:
+    draft = {
+        "verdict": "no_breach",
+        "cited_documents": ["visited-page"],
+        "rationale": "5개월은 6개월 이내가 아니므로 청구할 수 없다.",
+        "confidence": 0.8,
+        "escalate": False,
+    }
+    repaired = {
+        "verdict": "no_breach",
+        "question_type": "remedy_entitlement",
+        "rule_application": {"comparison": "within", "application": "violates"},
+        "cited_documents": ["visited-page"],
+        "rationale": "5개월은 6개월 이내이므로 반환청구할 수 있다.",
+        "confidence": 0.9,
+        "escalate": True,
+    }
+    calls = []
+    monkeypatch.setattr("arms._CACHE.get", lambda _fingerprint: None)
+    monkeypatch.setattr("arms._CACHE.set", lambda _fingerprint, _value: None)
+    monkeypatch.setattr(
+        "arms._call_generation_model",
+        lambda system, user: calls.append((system, user)) or repaired,
+    )
+
+    result = _repair_structured_answer(
+        draft,
+        "5개월 후 매도했을 때 반환청구할 수 있는가?",
+        "제172조는 6개월 이내에 매도하면 반환을 청구할 수 있다고 정한다.",
+        "same generator prompt",
+    )
+
+    assert result == repaired
+    assert len(calls) == 1
 
 
 def test_wiki_answer_fails_closed_on_numeric_threshold_reversal() -> None:

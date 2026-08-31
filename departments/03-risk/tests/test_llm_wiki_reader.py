@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "llm_wiki"))
 
-from wiki_reader import citation_aliases, read_bounded
+from wiki_reader import citation_aliases, read_bounded, resolve_citation
 
 
 def _write_page(
@@ -155,6 +155,33 @@ def test_read_bounded_returns_aliases_from_the_pages_it_already_loaded(tmp_path:
         "doc-a": "page-a",
         "제1조": "page-a",
     }
+
+
+def test_resolve_citation_accepts_only_exact_or_normalized_aliases() -> None:
+    aliases = {"page-a": "page-a", "doc-a": "page-a", "제1조": "page-a"}
+
+    assert resolve_citation("page_id=page-a", aliases) == "page-a"
+    assert resolve_citation(" doc-a ", aliases) == "page-a"
+    assert resolve_citation("제 1조", aliases) == "page-a"
+    assert resolve_citation("unknown-page", aliases) is None
+
+
+def test_reader_keeps_generation_context_inside_the_model_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wiki_dir = tmp_path / "wiki"
+    _write_page(wiki_dir, "large", effective_from="2026-01-01", body="가" * 5000)
+    monkeypatch.setattr("wiki_reader.GENERATION_CONTEXT_CHAR_BUDGET", 100)
+
+    result = read_bounded(
+        "가",
+        ["large"],
+        wiki_dir=wiki_dir,
+        as_of="2026-08-26",
+    )
+
+    assert len(result.context) <= 100
+    assert result.truncated is True
 
 
 def test_empty_effective_to_does_not_consume_following_frontmatter_fields(tmp_path: Path) -> None:

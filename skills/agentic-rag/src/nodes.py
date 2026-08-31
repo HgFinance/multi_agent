@@ -27,6 +27,9 @@ CHAT_MODEL = os.environ.get("AGENTIC_RAG_CHAT_MODEL", "gpt-4o-mini")
 MAX_ATTEMPTS = 3
 RETRIEVE_TOP_K = 4
 MAX_CONTEXT_CHARS = int(os.environ.get("AGENTIC_RAG_MAX_CONTEXT_CHARS", "6000"))
+WORKER_CONTEXT_CHAR_BUDGET = int(
+    os.environ.get("AGENTIC_RAG_WORKER_CONTEXT_CHAR_BUDGET", "3200")
+)
 _CHAT_BREAKER = CircuitBreaker(
     "agentic-rag-llm",
     failure_threshold=int(os.environ.get("AGENTIC_RAG_LLM_FAILURE_THRESHOLD", "3")),
@@ -36,6 +39,34 @@ _PROMPT_CACHE = RedisJsonCache(
     "risk-qa:rag:prompt",
     ttl_seconds=int(os.environ.get("AGENTIC_RAG_PROMPT_CACHE_TTL_SECONDS", "604800")),
 )
+
+# Compliance only.  This is intentionally shared with the LLM-Wiki evaluation
+# arms so a comparison cannot accidentally give one arm a different answer
+# contract.  The original five fields remain required for backwards
+# compatibility; the semantic fields are optional until all callers are
+# migrated, and are checked deterministically at the existing handoff.
+LEGAL_VERDICT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "verdict": {"type": "string", "enum": ["no_breach", "breach", "ambiguous"]},
+        "cited_documents": {"type": "array", "items": {"type": "string"}},
+        "rationale": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "escalate": {"type": "boolean"},
+        # Kept as strings rather than a nested strict enum so older vLLM
+        # guided-decoding deployments continue to accept the response.
+        "question_type": {"type": "string"},
+        "rule_application": {"type": "object", "additionalProperties": True},
+    },
+    "required": [
+        "verdict",
+        "cited_documents",
+        "rationale",
+        "confidence",
+        "escalate",
+    ],
+}
 
 PERSONA_PROMPTS: dict[str, dict[str, object]] = {
     "compliance-policy-agent": {
@@ -52,7 +83,15 @@ PERSONA_PROMPTS: dict[str, dict[str, object]] = {
             "Never state a rule that is not present in the excerpts. "
             'Return JSON: {"verdict": "no_breach"|"breach"|"ambiguous", '
             '"cited_documents": [doc_id, ...], "rationale": str, '
-            '"confidence": float (0-1), "escalate": bool}. '
+            '"confidence": float (0-1), "escalate": bool, '
+            '"question_type": "conduct_assessment"|"remedy_entitlement"|"rule_lookup"|"scope_assessment", '
+            '"rule_application": {"fact": str, "rule": str, "comparison": str, '
+            '"application": "violates"|"complies"|"not_applicable"|"insufficient_facts"}}. '
+            "Use conduct_assessment only for a concrete act; use remedy_entitlement for a legal "
+            "right or return claim, rule_lookup for a deadline/definition, and scope_assessment "
+            "for applicability or proof questions. For non-conduct questions use ambiguous, "
+            "because a rule explanation is not itself a breach finding. For numeric conditions, "
+            "show the comparison explicitly and remember M <= N satisfies an 'within N' rule. "
             "Set escalate=true whenever verdict is 'ambiguous' or 'breach', or confidence < 0.6."
         ),
         "no_evidence_verdict": "ambiguous",
@@ -119,6 +158,7 @@ PERSONA_PROMPTS: dict[str, dict[str, object]] = {
 class ComplianceState(TypedDict, total=False):
     persona: str
     query: str
+    retrieval_query: str
     as_of: str
     attempt: int
     retrieved: list[ScoredChunk]
@@ -129,6 +169,8 @@ class ComplianceState(TypedDict, total=False):
     fallback: bool
     fallback_reason: str
     telemetry: list[dict[str, object]]
+    generate_system: str
+    generate_schema: dict
 
 
 def _client() -> OpenAI:
@@ -141,9 +183,16 @@ def _model_for(task: str) -> str:
     return os.environ.get(f"AGENTIC_RAG_{task.upper()}_MODEL", CHAT_MODEL)
 
 
-def _chat_json(system: str, user: str, *, task: str) -> dict:
+def _chat_json(
+    system: str,
+    user: str,
+    *,
+    task: str,
+    json_schema: dict | None = None,
+) -> dict:
     model = _model_for(task)
-    fingerprint = _PROMPT_CACHE.fingerprint(model, system, user)
+    schema_fingerprint = json.dumps(json_schema, sort_keys=True) if json_schema else ""
+    fingerprint = _PROMPT_CACHE.fingerprint(model, system, user, schema_fingerprint)
     cached = _PROMPT_CACHE.get(fingerprint)
     if isinstance(cached, dict):
         emit_metric("rag_prompt_cache_hit", task=task, model=model)
@@ -151,18 +200,31 @@ def _chat_json(system: str, user: str, *, task: str) -> dict:
 
     started = dt.datetime.now(dt.timezone.utc)
     try:
-        resp = _CHAT_BREAKER.call(
-            lambda: _client().chat.completions.create(
-                model=model,
-                response_format={"type": "json_object"},
-                temperature=0,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
+        if json_schema is not None and os.environ.get("AGENTIC_RAG_USE_WORKER_GATEWAY", "").lower() == "true":
+            from departments.worker_model_gateway import llm_for_worker
+
+            worker_llm, binding = llm_for_worker("compliance-policy-worker")
+            raw = _CHAT_BREAKER.call(lambda: worker_llm(system, user, json_schema=json_schema))
+            result = json.loads(raw)
+            resp = None
+        else:
+            response_format = (
+                {"type": "json_schema", "json_schema": {"name": "legal_verdict", "schema": json_schema}}
+                if json_schema is not None
+                else {"type": "json_object"}
             )
-        )
-        result = json.loads(resp.choices[0].message.content)
+            resp = _CHAT_BREAKER.call(
+                lambda: _client().chat.completions.create(
+                    model=model,
+                    response_format=response_format,
+                    temperature=0,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                )
+            )
+            result = json.loads(resp.choices[0].message.content)
     except Exception as exc:
         emit_metric(
             "rag_llm_failure",
@@ -173,11 +235,11 @@ def _chat_json(system: str, user: str, *, task: str) -> dict:
         )
         raise
 
-    usage = getattr(resp, "usage", None)
+    usage = getattr(resp, "usage", None) if resp is not None else None
     emit_metric(
         "rag_llm_call",
         task=task,
-        model=model,
+        model=(binding.model if resp is None else model),
         latency_ms=round((dt.datetime.now(dt.timezone.utc) - started).total_seconds() * 1000, 2),
         prompt_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
         completion_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
@@ -186,9 +248,15 @@ def _chat_json(system: str, user: str, *, task: str) -> dict:
     return result
 
 
-def _safe_chat_json(system: str, user: str, *, task: str) -> tuple[dict | None, str | None]:
+def _safe_chat_json(
+    system: str,
+    user: str,
+    *,
+    task: str,
+    json_schema: dict | None = None,
+) -> tuple[dict | None, str | None]:
     try:
-        return _chat_json(system, user, task=task), None
+        return _chat_json(system, user, task=task, json_schema=json_schema), None
     except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         return None, f"{task}:{type(exc).__name__}"
 
@@ -196,7 +264,10 @@ def _safe_chat_json(system: str, user: str, *, task: str) -> tuple[dict | None, 
 def _trim_context(chunks: list[ScoredChunk], *, prefix: str = "") -> str:
     """Keep prompt size bounded without changing deterministic PIT/citation rules."""
 
-    remaining = max(0, MAX_CONTEXT_CHARS - len(prefix))
+    limit = MAX_CONTEXT_CHARS
+    if os.environ.get("AGENTIC_RAG_USE_WORKER_GATEWAY", "").lower() == "true":
+        limit = min(limit, WORKER_CONTEXT_CHAR_BUDGET)
+    remaining = max(0, limit - len(prefix))
     blocks: list[str] = []
     for chunk in chunks:
         block = (
@@ -230,7 +301,7 @@ def _point_in_time_ok(chunk: ScoredChunk, as_of: str) -> bool:
 
 def make_retrieve_node(index: LocalVectorIndex):
     def retrieve_node(state: ComplianceState) -> ComplianceState:
-        query = state["query"]
+        query = state.get("retrieval_query") or state["query"]
         try:
             retrieved = index.search(query, top_k=RETRIEVE_TOP_K)
         except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
@@ -293,15 +364,12 @@ def generate_node(state: ComplianceState) -> ComplianceState:
         }
         return {**state, "answer": answer}
 
-    docs_block = "\n\n".join(
-        f"doc_id={c.chunk.document_id} title={c.chunk.title!r} version={c.chunk.version}\n{c.chunk.text}"
-        for c in relevant
-    )
-    docs_block = docs_block[:MAX_CONTEXT_CHARS]
+    docs_block = _trim_context(relevant)
     result, error = _safe_chat_json(
-        system=prompts["generate_system"],
+        system=state.get("generate_system") or prompts["generate_system"],
         user=f"{prompts['query_label']}:\n{state['query']}\n\n{prompts['docs_label']}:\n{docs_block}",
         task="generate",
+        json_schema=state.get("generate_schema"),
     )
     if result is None:
         fallback_answer = {

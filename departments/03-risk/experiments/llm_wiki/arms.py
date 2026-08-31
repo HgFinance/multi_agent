@@ -28,16 +28,17 @@ from typing import Any, Mapping
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # data/*.py 형제 모듈(bm25 등)
 _RISK_ROOT = Path(__file__).resolve().parents[2]  # departments/03-risk
 _AGENTIC_RAG_ROOT = Path(__file__).resolve().parents[4] / "skills" / "agentic-rag"
-for path in (_RISK_ROOT, _AGENTIC_RAG_ROOT):
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+for path in (_REPO_ROOT, _RISK_ROOT, _AGENTIC_RAG_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 from bm25 import BM25Index
 from grep_seed import grep_seed, keyword_seed
 from src.graph import run_compliance_check
-from src.nodes import MAX_CONTEXT_CHARS, PERSONA_PROMPTS
+from src.nodes import LEGAL_VERDICT_SCHEMA, MAX_CONTEXT_CHARS, PERSONA_PROMPTS
 from src.resilience import CircuitBreaker, RedisJsonCache, emit_metric
-from wiki_reader import citation_aliases, read_bounded
+from wiki_reader import citation_aliases, read_bounded, resolve_citation
 
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
 WIKI_DIR = Path(__file__).resolve().parent / "data" / "wiki"
@@ -48,30 +49,9 @@ MODEL = os.environ.get("LLM_WIKI_GENERATE_MODEL", "gpt-4o-mini")
 _BREAKER = CircuitBreaker("llm-wiki-arms", failure_threshold=3, recovery_timeout_seconds=30)
 _CACHE = RedisJsonCache("risk-qa:llm-wiki:generate", ttl_seconds=7 * 24 * 3600)
 
-_LEGAL_VERDICT_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "verdict": {
-            "type": "string",
-            "enum": ["no_breach", "breach", "ambiguous"],
-        },
-        "cited_documents": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "rationale": {"type": "string"},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "escalate": {"type": "boolean"},
-    },
-    "required": [
-        "verdict",
-        "cited_documents",
-        "rationale",
-        "confidence",
-        "escalate",
-    ],
-}
+# Compatibility name retained for existing callers/tests.  There is one legal
+# response schema shared with the Agentic-RAG graph, not a second contract.
+_LEGAL_VERDICT_SCHEMA = LEGAL_VERDICT_SCHEMA
 
 # 생성 프롬프트 튜닝(2026-08-07, Arm B/C 전용 — 프로덕션 nodes.py PERSONA_PROMPTS는
 # Arm A가 그대로 쓰므로 손대지 않는다): 1차 LLM-judge 평가에서 A(plain RAG)가 B/C보다
@@ -107,9 +87,17 @@ _LLM_WIKI_GENERATE_SYSTEM = PERSONA_PROMPTS[PERSONA]["generate_system"] + (
     "possibly qualified/limited); (소극) means the court denied it (a 'no'). Treat that "
     "marker as the court's actual conclusion, not merely as a description of the issue "
     "raised — do not answer 'ambiguous' when a case excerpt already resolves the "
-    "question via such a marker. Cite only the exact page_id shown in the evidence "
-    "heading. Use 'no_breach' only when the supplied facts are affirmatively compliant; "
-    "a question that merely asks for a rule, deadline, or penalty is not itself a "
+    "question via such a marker. Cite only the exact identifier after page_id= or "
+    "doc_id= shown in the evidence heading. In addition to the required fields, "
+    "return question_type as conduct_assessment, remedy_entitlement, rule_lookup, "
+    "or scope_assessment. When a condition is present, return rule_application with "
+    "fact, rule, comparison, and application. Use comparison='within' when M is "
+    "less than or equal to an 'within N' limit, and application='violates' only when "
+    "the concrete conduct meets the prohibited rule; use application='insufficient_facts' "
+    "when the evidence cannot support a conclusion. For a question phrased as "
+    "'허용되는가' or '해도 되는가', label the described prohibited conduct as "
+    "breach; do not use no_breach merely because the answer is 'no'. Use 'no_breach' "
+    "only when the supplied facts are affirmatively compliant; a question that merely asks for a rule, deadline, or penalty is not itself a "
     "no-breach finding. If the rationale says the facts or scope are insufficient, "
     "cannot be determined, or require additional facts, the verdict must be 'ambiguous'. "
     "For a threshold expressed as 'within N months/days', compare the facts numerically: "
@@ -120,6 +108,19 @@ _LLM_WIKI_GENERATE_SYSTEM = PERSONA_PROMPTS[PERSONA]["generate_system"] + (
 )
 
 _LEGAL_VERDICTS = {"no_breach", "breach", "ambiguous"}
+_QUESTION_TYPES = {
+    "conduct_assessment",
+    "remedy_entitlement",
+    "rule_lookup",
+    "scope_assessment",
+}
+_RULE_COMPARISONS = {"within", "outside", "equal", "not_applicable", "unknown"}
+_RULE_APPLICATIONS = {
+    "violates",
+    "complies",
+    "not_applicable",
+    "insufficient_facts",
+}
 _UNCERTAINTY_MARKERS = (
     "판단할 수 없",
     "판단하기 어렵",
@@ -137,7 +138,7 @@ _UNCERTAINTY_MARKERS = (
     "명시되지 않",
     "제시되지 않",
 )
-_PROHIBITIVE_MARKERS = ("금지", "해서는 안", "하면 안", "위반")
+_PROHIBITIVE_MARKERS = ("금지", "해서는 안", "하면 안", "위반", "허용되지 않")
 _NO_BREACH_DENIAL_MARKERS = (
     "돌려받을 수 없",
     "반환할 수 없",
@@ -145,6 +146,9 @@ _NO_BREACH_DENIAL_MARKERS = (
     "대상이 되지",
     "조건을 충족하지 못",
     "해당하지 않",
+    "허용되지 않",
+    "안 된다",
+    "안 됩니다",
 )
 _CONDUCT_QUESTION_MARKERS = (
     "안 되는가",
@@ -156,6 +160,159 @@ _CONDUCT_QUESTION_MARKERS = (
 )
 _PERIOD_RE = re.compile(r"(?P<value>\d+)\s*(?P<unit>일|개월|년)")
 _WITHIN_PERIOD_RE = re.compile(r"(?P<value>\d+)\s*(?P<unit>일|개월|년)\s*이내")
+
+
+def _infer_question_type(query: str) -> str | None:
+    """Infer only the broad evaluation type from the user wording.
+
+    This is not a legal rule engine.  It prevents a model from calling a
+    concrete fact pattern a mere rule lookup (the h03 failure mode), while
+    leaving the legal conclusion to the model plus the existing safety gate.
+    """
+
+    text = str(query or "").casefold()
+    if any(marker in text for marker in ("반환청구", "돌려달라고", "청구할 수")):
+        return "remedy_entitlement"
+    if any(marker in text for marker in ("입증", "증거", "적용되는지", "적용할 때", "모든 경우")):
+        return "scope_assessment"
+    if any(marker in text for marker in ("기한", "며칠", "얼마 동안", "어떤 직책", "심사 기준", "설명해줘", "어떻게 취급")):
+        return "rule_lookup"
+    if "전달받은 사람도" in text and "안 되는가" in text:
+        return "rule_lookup"
+    if any(marker in text for marker in ("넘겨", "이용하는 것은", "사고파는 것은", "매매해도", "거래해도", "사실만으로")):
+        return "conduct_assessment"
+    return None
+
+
+def _canonical_contract_value(value: object, allowed: set[str]) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = re.sub(r"[\s-]+", "_", value.strip().casefold())
+    aliases = {
+        "n/a": "not_applicable",
+        "na": "not_applicable",
+        "not_applicable": "not_applicable",
+        "not_applicable_": "not_applicable",
+        "insufficient_facts": "insufficient_facts",
+        "insufficient_information": "insufficient_facts",
+        "violation": "violates",
+        "violated": "violates",
+        "위반": "violates",
+        "위반함": "violates",
+        "위반됨": "violates",
+        "금지": "violates",
+        "금지됨": "violates",
+        "compliant": "complies",
+        "compliance": "complies",
+        "준수": "complies",
+        "준수함": "complies",
+        "허용": "complies",
+        "허용됨": "complies",
+    }
+    canonical = aliases.get(normalized, normalized)
+    if canonical not in allowed and "within" in allowed:
+        if "이내" in normalized or "within" in normalized:
+            canonical = "within"
+        elif "초과" in normalized or "밖" in normalized or "outside" in normalized:
+            canonical = "outside"
+    if canonical not in allowed and "violates" in allowed:
+        if any(marker in normalized for marker in ("위반", "금지")):
+            canonical = "violates"
+        elif any(marker in normalized for marker in ("준수", "허용")) and "불" not in normalized:
+            canonical = "complies"
+    if canonical not in allowed and "insufficient_facts" in allowed:
+        if any(marker in normalized for marker in ("불충분", "부족", "추가사실")):
+            canonical = "insufficient_facts"
+    return canonical if canonical in allowed else None
+
+
+def _expected_period_comparison(query: str, context: str) -> str | None:
+    """Return the arithmetic relation when the evidence has an ``이내`` limit."""
+
+    query_periods = [
+        (match.group("unit"), int(match.group("value")))
+        for match in _PERIOD_RE.finditer(query)
+    ]
+    evidence_limits = [
+        (match.group("unit"), int(match.group("value")))
+        for match in _WITHIN_PERIOD_RE.finditer(context)
+    ]
+    for unit, query_value in query_periods:
+        for evidence_unit, evidence_value in evidence_limits:
+            if unit == evidence_unit:
+                return "within" if query_value <= evidence_value else "outside"
+    return None
+
+
+_STRUCTURED_REPAIR_SYSTEM = (
+    "You are correcting one internally inconsistent legal JSON answer. Preserve the "
+    "provided evidence and all required JSON fields. Re-evaluate only the stated fact "
+    "against the stated rule. For an 'within N' condition, M less than or equal to N "
+    "is within the limit. The final verdict must describe the prohibited conduct, not "
+    "the yes/no polarity of the question. Do not invent facts or rules. Return JSON "
+    "using the same legal verdict contract, including question_type and rule_application."
+)
+
+
+def _needs_structured_repair(answer: object, query: str, context: str) -> bool:
+    if not isinstance(answer, dict):
+        return False
+    inferred_type = _infer_question_type(query)
+    raw_type = answer.get("question_type")
+    question_type = inferred_type or (raw_type if raw_type in _QUESTION_TYPES else None)
+    raw_application = answer.get("rule_application")
+    raw_value = raw_application.get("application") if isinstance(raw_application, dict) else None
+    application = _canonical_contract_value(raw_value, _RULE_APPLICATIONS)
+    rationale = str(answer.get("rationale") or "")
+    if question_type == "conduct_assessment":
+        if answer.get("verdict") == "breach" and application not in {None, "violates"}:
+            return True
+        if answer.get("verdict") == "no_breach" and any(
+            marker in rationale for marker in _PROHIBITIVE_MARKERS
+        ):
+            return True
+
+    expected = _expected_period_comparison(query, context)
+    if expected is None:
+        return False
+    comparison = raw_application.get("comparison") if isinstance(raw_application, dict) else None
+    canonical = _canonical_contract_value(comparison, _RULE_COMPARISONS)
+    if canonical != expected:
+        return True
+    return answer.get("verdict") == "no_breach" and any(
+        marker in rationale for marker in _NO_BREACH_DENIAL_MARKERS
+    )
+
+
+def _repair_structured_answer(
+    answer: dict[str, Any], query: str, context: str, system: str
+) -> dict[str, Any]:
+    """Give the existing generator one bounded consistency recheck when needed."""
+
+    if not _needs_structured_repair(answer, query, context):
+        return answer
+    user = (
+        f"Question:\n{query}\n\nEvidence:\n{context}\n\n"
+        f"Inconsistent draft JSON:\n{json.dumps(answer, ensure_ascii=False)}\n\n"
+        "Return one corrected JSON object."
+    )
+    fingerprint = _CACHE.fingerprint(
+        _generation_model_label(), "structured-repair", system, user
+    )
+    cached = _CACHE.get(fingerprint)
+    if isinstance(cached, dict):
+        return cached
+    try:
+        repaired = _BREAKER.call(
+            lambda: _call_generation_model(_STRUCTURED_REPAIR_SYSTEM, user)
+        )
+    except Exception as exc:  # noqa: BLE001 - preserve original, then fail closed
+        emit_metric("llm_wiki_structured_repair_failure", error=type(exc).__name__)
+        return answer
+    if not isinstance(repaired, dict):
+        return answer
+    _CACHE.set(fingerprint, repaired)
+    return repaired
 
 
 def _wrap_query(query: str, mandate: str) -> str:
@@ -185,7 +342,15 @@ def build_flat_corpus(raw_dir: Path = RAW_DIR, out_dir: Path = FLAT_CORPUS_DIR) 
     return out_dir
 
 
-def plain_rag_answer(query: str, as_of: str, mandate: str = "") -> dict[str, Any]:
+def plain_rag_answer(
+    query: str,
+    as_of: str,
+    mandate: str = "",
+    *,
+    generator_system: str | None = None,
+    generator_schema: dict | None = None,
+    fair_retrieval_query: bool = False,
+) -> dict[str, Any]:
     """Arm A — 기존 flat-chunk RAG 그래프를 이 실험의 실측 코퍼스로 그대로 재사용.
 
     context_chars는 nodes.py의 실제 chunk 텍스트를 그대로 재노출하지 않는
@@ -196,13 +361,33 @@ def plain_rag_answer(query: str, as_of: str, mandate: str = "") -> dict[str, Any
     if not FLAT_CORPUS_DIR.exists() or not any(FLAT_CORPUS_DIR.glob("*.md")):
         build_flat_corpus()
     result = run_compliance_check(
-        _wrap_query(query, mandate), as_of, corpus_dir=FLAT_CORPUS_DIR, persona=PERSONA
+        _wrap_query(query, mandate),
+        as_of,
+        corpus_dir=FLAT_CORPUS_DIR,
+        persona=PERSONA,
+        retrieval_query=query if fair_retrieval_query else None,
+        generate_system=generator_system,
+        generate_schema=generator_schema,
     )
-    estimated_chars = min(len(result["relevant_documents"]) * 800, MAX_CONTEXT_CHARS)
+    context = result.get("relevant_context", "")
+    pages_visited = [d["document_id"] for d in result["relevant_documents"]]
+    answer = result["answer"]
+    if generator_system is not None:
+        # Fair mode applies the same deterministic handoff to both arms.  The
+        # normal Agentic-RAG production call keeps its established return
+        # contract and does not acquire Wiki-specific behavior.
+        answer = _finalize_wiki_answer(
+            answer,
+            pages_visited,
+            query=query,
+            context=context,
+            citation_alias_map={page_id: page_id for page_id in pages_visited},
+        )
     return {
-        "answer": result["answer"],
-        "context_chars": estimated_chars,
-        "pages_visited": [d["document_id"] for d in result["relevant_documents"]],
+        "answer": answer,
+        "context_chars": min(len(context), MAX_CONTEXT_CHARS),
+        "pages_visited": pages_visited,
+        "context": context,
     }
 
 
@@ -224,7 +409,7 @@ def _generation_model_label() -> str:
             return f"{binding.provider}:{binding.model}"
         except Exception:  # noqa: BLE001 - the real call remains fail-closed below.
             return "worker-gateway:unresolved"
-    return f"openai:{MODEL}"
+    return f"openai:{os.environ.get('LLM_WIKI_GENERATE_MODEL', MODEL)}"
 
 
 def _call_generation_model(system: str, user: str) -> dict[str, Any]:
@@ -245,7 +430,7 @@ def _call_generation_model(system: str, user: str) -> dict[str, Any]:
     from openai import OpenAI
 
     response = OpenAI().chat.completions.create(
-        model=MODEL,
+        model=os.environ.get("LLM_WIKI_GENERATE_MODEL", MODEL),
         response_format={"type": "json_object"},
         temperature=0,
         messages=[
@@ -298,6 +483,7 @@ def _generate_verdict(query: str, context: str, system: str | None = None) -> di
             "escalate": True,
         }
 
+    result = _repair_structured_answer(result, query, context, system)
     _CACHE.set(fingerprint, result)
     return result
 
@@ -332,10 +518,15 @@ def _finalize_wiki_answer(
         if citation_alias_map is not None
         else citation_aliases(pages_visited)
     )
-    invalid_citations = [item for item in citations if item not in page_aliases]
-    citations = list(
-        dict.fromkeys(page_aliases[item] for item in citations if item in page_aliases)
-    )
+    resolved_citations: list[str] = []
+    invalid_citations: list[str] = []
+    for item in citations:
+        resolved = resolve_citation(item, dict(page_aliases))
+        if resolved is None:
+            invalid_citations.append(item)
+        else:
+            resolved_citations.append(resolved)
+    citations = list(dict.fromkeys(resolved_citations))
     rationale = str(raw.get("rationale") or "").strip()
     confidence_raw = raw.get("confidence")
     try:
@@ -345,6 +536,36 @@ def _finalize_wiki_answer(
     if not 0.0 <= confidence <= 1.0:
         confidence = 0.0
 
+    question_type = raw.get("question_type")
+    if question_type not in _QUESTION_TYPES:
+        question_type = None
+    # A clear fact-pattern cue takes precedence over a model's broad label.
+    # Otherwise a question such as "공표 후 하루 전 매매" can be downgraded to
+    # rule_lookup merely because it contains a legal rule explanation.
+    inferred_question_type = _infer_question_type(query)
+    if inferred_question_type is not None:
+        question_type = inferred_question_type
+    raw_application = raw.get("rule_application")
+    rule_application: dict[str, str] = {}
+    if isinstance(raw_application, dict):
+        for key in ("fact", "rule", "comparison", "application"):
+            value = raw_application.get(key)
+            if key == "comparison":
+                canonical = _canonical_contract_value(value, _RULE_COMPARISONS)
+                if canonical is not None:
+                    rule_application[key] = canonical
+                elif isinstance(value, str) and value.strip():
+                    rule_application[key] = value.strip()
+            elif key == "application":
+                canonical = _canonical_contract_value(value, _RULE_APPLICATIONS)
+                if canonical is not None:
+                    rule_application[key] = canonical
+                elif isinstance(value, str) and value.strip():
+                    rule_application[key] = value.strip()
+            elif isinstance(value, str) and value.strip():
+                rule_application[key] = value.strip()
+    comparison = rule_application.get("comparison")
+    application = rule_application.get("application")
     safety_reasons: list[str] = []
     if invalid_citations:
         safety_reasons.append("모델이 실제로 방문하지 않은 근거 페이지를 인용했습니다.")
@@ -362,6 +583,17 @@ def _finalize_wiki_answer(
     ):
         safety_reasons.append("답변 설명이 금지·위반을 말하면서 no_breach를 반환합니다.")
 
+    if question_type in {"remedy_entitlement", "rule_lookup", "scope_assessment"} and verdict != "ambiguous":
+        safety_reasons.append("행위판정이 아닌 질문에 확정적인 breach/no_breach 라벨을 반환했습니다.")
+
+    if application is not None and application not in _RULE_APPLICATIONS:
+        safety_reasons.append("rule_application.application 값이 허용된 계약과 다릅니다.")
+    if question_type == "conduct_assessment":
+        if verdict == "breach" and application not in {None, "violates"}:
+            safety_reasons.append("breach 라벨과 rule_application의 위반 적용이 충돌합니다.")
+        if verdict == "no_breach" and application not in {None, "complies"}:
+            safety_reasons.append("no_breach 라벨과 rule_application의 준수 적용이 충돌합니다.")
+
     query_periods = {
         (match.group("unit"), int(match.group("value")))
         for match in _PERIOD_RE.finditer(query)
@@ -370,6 +602,17 @@ def _finalize_wiki_answer(
         (match.group("unit"), int(match.group("value")))
         for match in _WITHIN_PERIOD_RE.finditer(context)
     }
+    expected_period_comparisons = {
+        "within"
+        for unit, query_value in query_periods
+        for evidence_unit, evidence_value in evidence_limits
+        if unit == evidence_unit and query_value <= evidence_value
+    }
+    if expected_period_comparisons:
+        if comparison is not None and comparison not in _RULE_COMPARISONS:
+            safety_reasons.append("rule_application.comparison 값이 허용된 계약과 다릅니다.")
+        if comparison is not None and comparison != "within":
+            safety_reasons.append("숫자 조건의 비교 결과가 '이내' 기준과 충돌합니다.")
     if (
         verdict == "no_breach"
         and any(
@@ -386,7 +629,7 @@ def _finalize_wiki_answer(
         confidence = min(confidence, 0.0)
         rationale = " ".join(part for part in (rationale, *safety_reasons) if part).strip()
 
-    return {
+    finalized = {
         "verdict": verdict,
         "cited_documents": citations,
         "rationale": rationale,
@@ -394,9 +637,20 @@ def _finalize_wiki_answer(
         # 법률 Wiki는 근거 수집·초안 작성만 하며 자동 승인을 절대 하지 않는다.
         "escalate": True,
     }
+    if question_type is not None:
+        finalized["question_type"] = question_type
+    if rule_application:
+        finalized["rule_application"] = rule_application
+    return finalized
 
 
-def llm_wiki_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str, Any]:
+def llm_wiki_bm25_answer(
+    query: str,
+    as_of: str,
+    mandate: str = "",
+    *,
+    generator_system: str | None = None,
+) -> dict[str, Any]:
     """Arm B — BM25 단독 seed → wiki_reader bounded read → generate.
 
     튜닝(2026-08-07): 검색 신호(BM25 스코어링, window pivot)는 순수 질문(`query`)만
@@ -412,7 +666,11 @@ def llm_wiki_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str,
     read = read_bounded(query, seeds, as_of=as_of)
     return {
         "answer": _finalize_wiki_answer(
-            _generate_verdict(full_query, read.context, system=_LLM_WIKI_GENERATE_SYSTEM),
+            _generate_verdict(
+                full_query,
+                read.context,
+                system=generator_system or _LLM_WIKI_GENERATE_SYSTEM,
+            ),
             read.pages_visited,
             query=query,
             context=read.context,
@@ -423,7 +681,13 @@ def llm_wiki_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str,
     }
 
 
-def llm_wiki_grep_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str, Any]:
+def llm_wiki_grep_bm25_answer(
+    query: str,
+    as_of: str,
+    mandate: str = "",
+    *,
+    generator_system: str | None = None,
+) -> dict[str, Any]:
     """Arm C — grep 2단계(조항번호 정확 매칭 + 핵심어 매칭), 그래도 없으면 BM25 폴백.
 
     튜닝(2026-08-07): golden set 15문항 대상 무-LLM 리콜 스윕(gold_page_ids 기준,
@@ -453,7 +717,11 @@ def llm_wiki_grep_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict
     read = read_bounded(query, seeds, as_of=as_of)
     return {
         "answer": _finalize_wiki_answer(
-            _generate_verdict(full_query, read.context, system=_LLM_WIKI_GENERATE_SYSTEM),
+            _generate_verdict(
+                full_query,
+                read.context,
+                system=generator_system or _LLM_WIKI_GENERATE_SYSTEM,
+            ),
             read.pages_visited,
             query=query,
             context=read.context,

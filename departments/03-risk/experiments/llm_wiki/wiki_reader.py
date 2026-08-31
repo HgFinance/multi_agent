@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,14 @@ WINDOW_CHARS = 800  # 매칭 지점 앞뒤로 읽는 문자 수 (전체 페이�
 MAX_WINDOW_SNIPPETS = 2  # 서로 떨어진 핵심 일치 구간을 함께 보존하는 상한
 DEFAULT_TMAX = 3  # seed 포함 최대 방문 페이지 수
 DEFAULT_PATIENCE = 1  # 링크를 따라가도 새 스니펫이 없으면 몇 번까지 더 시도할지
+# vLLM is served with a 4096-token window.  The generator prompt, mandate and
+# JSON completion also consume that window, so the Wiki reader must not send a
+# 4K-character context and rely on the server to reject it.  This is a context
+# budget, not a retrieval budget: PIT/link traversal still records all visited
+# pages, while the handoff is bounded and fail-closed.
+GENERATION_CONTEXT_CHAR_BUDGET = int(
+    os.environ.get("LLM_WIKI_GENERATION_CONTEXT_CHAR_BUDGET", "3200")
+)
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n\n(.*)$", re.DOTALL)
 _LINK_LINE_RE = re.compile(r"^- \[\[([^\]]+)\]\] \((\w+)\): (.+)$", re.MULTILINE)
@@ -208,6 +217,29 @@ def citation_aliases(
     return aliases
 
 
+def resolve_citation(value: str, aliases: dict[str, str]) -> str | None:
+    """Resolve one model citation without guessing a document.
+
+    The model sees ``page_id=...`` in the context, but older prompts/models may
+    return the same value with a ``doc_id=`` prefix or surrounding Markdown
+    punctuation.  Only an exact, whitespace-normalized alias is accepted;
+    unknown or ambiguous identifiers remain invalid and are fail-closed by the
+    existing finalizer.
+    """
+
+    candidate = str(value or "").strip().strip("`[]() ")
+    candidate = re.sub(r"^(?:page_id|doc_id|clause_id)\s*=\s*", "", candidate)
+    if candidate in aliases:
+        return aliases[candidate]
+    compact = re.sub(r"\s+", "", candidate)
+    matches = {
+        page_id
+        for alias, page_id in aliases.items()
+        if re.sub(r"\s+", "", alias) == compact
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 def read_bounded(
     query: str,
     seed_page_ids: list[str],
@@ -254,7 +286,9 @@ def read_bounded(
         window = _window_around(body, query)
         links = _outgoing_links(body)
         gained_new_info = bool(window.strip())
-        chunk_lines = [f"### {page_id}", window]
+        # Make provenance copyable by the model.  The finalizer still verifies
+        # it against the aliases returned by this same read.
+        chunk_lines = [f"### page_id={page_id}", window]
         if links:
             chunk_lines.append("관련 조항:")
             for target, relation, snippet in links:
@@ -274,9 +308,14 @@ def read_bounded(
     if queue and len(visited) >= tmax:
         truncated = True
 
+    context = "\n\n".join(chunks)
+    if len(context) > GENERATION_CONTEXT_CHAR_BUDGET:
+        context = context[:GENERATION_CONTEXT_CHAR_BUDGET]
+        truncated = True
+
     return ReadResult(
         pages_visited=visited,
-        context="\n\n".join(chunks),
+        context=context,
         truncated=truncated,
         citation_aliases=aliases,
     )

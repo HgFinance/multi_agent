@@ -23,6 +23,7 @@ from .nodes import (
     hallucination_check_node,
     make_retrieve_node,
     should_retry,
+    _trim_context,
 )
 from .resilience import emit_metric
 from .retriever import LocalVectorIndex
@@ -58,11 +59,24 @@ def run_compliance_check(
     as_of: str,
     corpus_dir: Path | None = None,
     persona: str = "compliance-policy-agent",
+    retrieval_query: str | None = None,
+    generate_system: str | None = None,
+    generate_schema: dict | None = None,
 ) -> dict:
     corpus_dir = corpus_dir or (Path(__file__).resolve().parent.parent / "corpus" / "compliance")
     try:
         app = build_compliance_graph(corpus_dir)
-        final_state = app.invoke({"query": query, "as_of": as_of, "attempt": 1, "persona": persona})
+        final_state = app.invoke(
+            {
+                "query": query,
+                "retrieval_query": retrieval_query,
+                "as_of": as_of,
+                "attempt": 1,
+                "persona": persona,
+                "generate_system": generate_system,
+                "generate_schema": generate_schema,
+            }
+        )
     except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         emit_metric("rag_graph_failure", persona=persona, error=type(exc).__name__)
         fallback_verdict = PERSONA_PROMPTS[persona]["no_evidence_verdict"]
@@ -95,4 +109,11 @@ def run_compliance_check(
             }
             for c in final_state.get("relevant", [])
         ],
+        "relevant_context": _render_relevant_context(final_state),
     }
+
+
+def _render_relevant_context(state: dict) -> str:
+    """Expose the already graded chunks for the evaluation handoff only."""
+
+    return _trim_context(state.get("relevant", []))

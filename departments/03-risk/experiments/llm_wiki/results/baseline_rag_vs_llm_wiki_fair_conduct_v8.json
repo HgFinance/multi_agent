@@ -1,0 +1,179 @@
+[
+  {
+    "arm": "A_plain_rag",
+    "avg_f1": 0.3405,
+    "em_rate": 0.0,
+    "verdict_accuracy": 0.75,
+    "conduct_verdict_accuracy": 0.75,
+    "conduct_verdict_questions": 4,
+    "conduct_abstention_rate": 0.5,
+    "conduct_definitive_coverage": 0.5,
+    "conduct_unsafe_error_rate": 0.0,
+    "avg_context_chars": 2331.0,
+    "avg_elapsed_ms": 18054.4,
+    "per_question": [
+      {
+        "id": "h01",
+        "query": "업무 중 알게 된 공개되지 않은 정보를 지인에게 넘겨 그 사람이 이익을 얻도록 해도 되는가?",
+        "query_kind": "conduct_assessment",
+        "prediction": "제54조(직무관련 정보의 이용 금지) ①항에 따르면, 금융투자업자는 직무상 알게 된 정보로서 외부에 공개되지 않은 정보를 정당한 사유 없이 자기 또는 제삼자의 이익을 위하여 이용해서는 안 됩니다. 따라서, 업무 중 알게 된 공개되지 않은 정보를 지인에게 넘겨 그 사람이 이익을 얻도록 하는 것은 법령을 위반하는 행위입니다.",
+        "gold_answer": "안 된다. 제54조제1항은 금융투자업자가 직무상 알게 된 외부에 공개되지 않은 정보를 정당한 사유 없이 자기 또는 제삼자의 이익을 위하여 이용하는 것을 금지한다.",
+        "f1": 0.5294,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 3200,
+        "pages_visited": [
+          "law-283193-54",
+          "law-283193-174"
+        ],
+        "elapsed_ms": 20768.4
+      },
+      {
+        "id": "h02",
+        "query": "직원이 자기 돈으로 금융투자상품을 거래하면서 배우자 명의 계좌를 이용하는 것은 허용되는가?",
+        "query_kind": "conduct_assessment",
+        "prediction": "제63조(임직원의 금융투자상품 매매) ①항 제1호에 따르면, 금융투자업자의 임직원은 자기의 계산으로 대통령령으로 정하는 금융투자상품을 매매할 때 자기의 명의로 매매해야 합니다. 따라서 직원이 자기 돈으로 금융투자상품을 거래하면서 배우자 명의 계좌를 이용하는 것은 허용되지 않습니다.",
+        "gold_answer": "허용되지 않는다. 제63조제1항제1호는 임직원이 자기 계산으로 금융투자상품을 매매할 때 자기의 명의로 매매하도록 한다.",
+        "f1": 0.3913,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 881,
+        "pages_visited": [
+          "law-283193-63"
+        ],
+        "elapsed_ms": 20113.2
+      },
+      {
+        "id": "h03",
+        "query": "조사분석자료를 공개한 뒤 하루가 지나기 전에 그 대상 상품을 회사 자금으로 사고파는 것은 가능한가?",
+        "query_kind": "conduct_assessment",
+        "prediction": "제공된 자본시장법 제174조에는 미공개중요정보 이용행위 금지에 대한 내용이 명시되어 있지만, 해당 조항은 미공개중요정보를 이용하거나 타인에게 이용하게 하는 행위를 금지하고 있습니다. 그러나 조사분석자료를 공개한 뒤 하루가 지나기 전에 그 대상 상품을 회사 자금으로 사고파는 행위 자체가 미공개중요정보 이용행위에 해당하는지 명확히 판단하기 위해서는 추가적인 정보가 필요합니다.",
+        "gold_answer": "안 된다. 제71조제2호는 조사분석자료의 내용이 사실상 확정된 때부터 공표 후 24시간이 지나기 전까지 그 대상 금융투자상품을 자기 계산으로 매매하는 행위를 금지한다.",
+        "f1": 0.2154,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 3200,
+        "pages_visited": [
+          "law-283193-174"
+        ],
+        "elapsed_ms": 21097.9
+      },
+      {
+        "id": "h15",
+        "query": "제178조 사건에서 공시 직전에 관계자에게 구두로 설명한 사실만으로 그 공시가 반드시 부정거래가 되는가?",
+        "query_kind": "conduct_assessment",
+        "prediction": "제공된 정책 문헌에서는 공시 직전에 관계자에게 구두로 설명한 사실만으로 그 공시가 반드시 부정거래가 되는지에 대한 명확한 답변을 제공하지 않습니다. 제178조 제1항 제1호와 제2호에서 부정행위의 정의와 판단 기준이 나와 있지만, 구체적인 상황에 따라 다르게 적용될 수 있습니다.",
+        "gold_answer": "그 사실만으로 반드시 부정거래라고 확정할 수 없다. 제178조와 2019도12887 판례는 부정한 수단·계획·기교 및 공시의 구체적 내용과 행위 경위를 종합해 판단하므로 추가 사실과 근거가 필요하다.",
+        "f1": 0.2258,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 2043,
+        "pages_visited": [
+          "prec-601495",
+          "law-283193-178",
+          "prec-601495"
+        ],
+        "elapsed_ms": 10237.9
+      }
+    ]
+  },
+  {
+    "arm": "C_llm_wiki_grep_bm25",
+    "avg_f1": 0.3966,
+    "em_rate": 0.0,
+    "verdict_accuracy": 0.75,
+    "conduct_verdict_accuracy": 0.75,
+    "conduct_verdict_questions": 4,
+    "conduct_abstention_rate": 0.5,
+    "conduct_definitive_coverage": 0.5,
+    "conduct_unsafe_error_rate": 0.0,
+    "avg_context_chars": 3090.2,
+    "avg_elapsed_ms": 16701.0,
+    "per_question": [
+      {
+        "id": "h01",
+        "query": "업무 중 알게 된 공개되지 않은 정보를 지인에게 넘겨 그 사람이 이익을 얻도록 해도 되는가?",
+        "query_kind": "conduct_assessment",
+        "prediction": "제54조(직무관련 정보의 이용 금지) ①항에 따르면, 금융투자업자는 직무상 알게 된 정보로서 외부에 공개되지 아니한 정보를 정당한 사유 없이 자기 또는 제삼자의 이익을 위하여 이용하여서는 아니 됩니다. 따라서 업무 중 알게 된 공개되지 않은 정보를 지인에게 넘겨 그 사람이 이익을 얻도록 하는 것은 금지되어 있습니다.",
+        "gold_answer": "안 된다. 제54조제1항은 금융투자업자가 직무상 알게 된 외부에 공개되지 않은 정보를 정당한 사유 없이 자기 또는 제삼자의 이익을 위하여 이용하는 것을 금지한다.",
+        "f1": 0.5075,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 3200,
+        "pages_visited": [
+          "자본시장법_제54조_직무관련정보의이용금지",
+          "금융투자업규정_제4의6조_정보교류의차단",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 20421.7
+      },
+      {
+        "id": "h02",
+        "query": "직원이 자기 돈으로 금융투자상품을 거래하면서 배우자 명의 계좌를 이용하는 것은 허용되는가?",
+        "query_kind": "conduct_assessment",
+        "prediction": "자본시장법 제63조 ①항 1호에 따르면, 금융투자업자의 임직원은 자기의 계산으로 금융투자상품을 거래할 때 자기의 명의로 해야 합니다. 따라서 직원이 자기 돈으로 금융투자상품을 거래하면서 배우자 명의 계좌를 이용하는 것은 허용되지 않습니다.",
+        "gold_answer": "허용되지 않는다. 제63조제1항제1호는 임직원이 자기 계산으로 금융투자상품을 매매할 때 자기의 명의로 매매하도록 한다.",
+        "f1": 0.381,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 2761,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 9303.7
+      },
+      {
+        "id": "h03",
+        "query": "조사분석자료를 공개한 뒤 하루가 지나기 전에 그 대상 상품을 회사 자금으로 사고파는 것은 가능한가?",
+        "query_kind": "conduct_assessment",
+        "prediction": "제71조 제2항에 따르면, 조사분석자료를 공표한 후 공표 후 24시간이 경과하기 전까지 그 조사분석자료의 대상이 된 금융투자상품을 자기의 계산으로 매매하는 행위는 불건전 영업행위로 금지되어 있습니다. rule_application.application 값이 허용된 계약과 다릅니다. breach 라벨과 rule_application의 위반 적용이 충돌합니다.",
+        "gold_answer": "안 된다. 제71조제2호는 조사분석자료의 내용이 사실상 확정된 때부터 공표 후 24시간이 지나기 전까지 그 대상 금융투자상품을 자기 계산으로 매매하는 행위를 금지한다.",
+        "f1": 0.4211,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 3200,
+        "pages_visited": [
+          "자본시장법_제71조_불건전영업행위의금지",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 17460.1
+      },
+      {
+        "id": "h15",
+        "query": "제178조 사건에서 공시 직전에 관계자에게 구두로 설명한 사실만으로 그 공시가 반드시 부정거래가 되는가?",
+        "query_kind": "conduct_assessment",
+        "prediction": "제178조는 부정거래행위를 금지하고 있으며, 부정거래행위에는 미공개중요정보 이용행위, 시세조종행위 등이 포함됩니다. 그러나 제시된 질문에서는 공시 직전에 관계자에게 구두로 설명한 사실만으로 그 공시가 반드시 부정거래가 되는지 묻고 있습니다. 제시된 근거 문서들만으로는 이러한 구두 설명이 부정거래 행위로 간주되는지 명확히 판단할 수 없습니다.",
+        "gold_answer": "그 사실만으로 반드시 부정거래라고 확정할 수 없다. 제178조와 2019도12887 판례는 부정한 수단·계획·기교 및 공시의 구체적 내용과 행위 경위를 종합해 판단하므로 추가 사실과 근거가 필요하다.",
+        "f1": 0.2769,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 3200,
+        "pages_visited": [
+          "자본시장법_제178조_부정거래행위등의금지",
+          "자본시장법_제172조_내부자의단기매매차익반환",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 19618.4
+      }
+    ]
+  }
+]
