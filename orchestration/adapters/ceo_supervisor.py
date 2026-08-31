@@ -116,6 +116,7 @@ from orchestration.primary_task_idempotency import (
     validate_primary_create,
 )
 from orchestration.skill_contract import (
+    CanonicalSkillError,
     active_task_skills_for_profile,
     validate_skills_for_profile,
 )
@@ -7516,7 +7517,23 @@ class HermesKanbanClient:
             raise SupervisorValidationError(primary_rejection)
         args: list[str] = ["kanban", "create", request.title, "--body", request.body]
         args.extend(("--assignee", request.assignee))
-        for skill in validate_skills_for_profile(skills, request.assignee):
+        validation_started = time.perf_counter_ns()
+        try:
+            validated_skills = validate_skills_for_profile(skills, request.assignee)
+        except CanonicalSkillError:
+            logger.error(
+                "event=skill_validation_failure assignee=%s requested_skill_count=%d",
+                request.assignee,
+                len(skills or ()),
+            )
+            raise
+        logger.info(
+            "event=skill_validation_ms assignee=%s skill_count=%d duration_ms=%.3f",
+            request.assignee,
+            len(validated_skills),
+            (time.perf_counter_ns() - validation_started) / 1_000_000,
+        )
+        for skill in validated_skills:
             args.extend(("--skill", skill))
         for parent_task_id in parent_task_ids:
             args.extend(("--parent", str(parent_task_id)))
@@ -15199,6 +15216,15 @@ class CeoSupervisorService:
                 not in task_body
             ):
                 task_body = f"{task_body}\n\n{_RISK_TERMINAL_EXECUTION_GUIDANCE}"
+            try:
+                active_task_skills = active_task_skills_for_profile(decision.assignee)
+            except CanonicalSkillError:
+                logger.error(
+                    "event=active_skill_load_failure assignee=%s root=%s",
+                    decision.assignee,
+                    state.parent_task_id,
+                )
+                raise
             created = self.client.create_task(
                 title=decision.title,
                 body=build_scoped_task_body(
@@ -15218,7 +15244,7 @@ class CeoSupervisorService:
                     dict.fromkeys(
                         (
                             *decision.skills,
-                            *active_task_skills_for_profile(decision.assignee),
+                            *active_task_skills,
                         )
                     )
                 ),

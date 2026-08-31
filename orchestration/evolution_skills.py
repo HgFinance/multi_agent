@@ -203,6 +203,21 @@ class Occurrence:
     benchmark_id: str = ""
     improvement_type: str = ""
     task_activation: str = ""
+    mandatory_controls: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        raw_controls = self.mandatory_controls
+        if isinstance(raw_controls, (str, bytes)):
+            controls: tuple[str, ...] = ()
+        else:
+            controls = tuple(
+                dict.fromkeys(
+                    str(value).strip()[:240]
+                    for value in raw_controls
+                    if str(value).strip()
+                )
+            )
+        object.__setattr__(self, "mandatory_controls", controls[:8])
 
 
 @dataclass(frozen=True)
@@ -218,6 +233,7 @@ class SkillCandidate:
     benchmark_ids: tuple[str, ...] = ()
     improvement_type: str = "SKILL_CREATE"
     task_activation: str = ""
+    mandatory_controls: tuple[str, ...] = ()
 
     @property
     def slug(self) -> str:
@@ -354,7 +370,22 @@ def detect_candidates(
         # accident.
         activation_values = {item.task_activation.strip() for item in usable}
         task_activation = (
-            "owner-task" if activation_values == {"owner-task"} else ""
+            "owner-task"
+            if (
+                activation_values == {"owner-task"}
+                and all(item.source_type == "qa-benchmark" for item in usable)
+            )
+            else ""
+        )
+        mandatory_controls = tuple(
+            sorted(
+                {
+                    str(control).strip()
+                    for item in usable
+                    for control in item.mandatory_controls
+                    if str(control).strip()
+                }
+            )
         )
         if "SKILL_EVOLVE" in requested_types and parent is None:
             # A requested evolution must bind to an active canonical parent;
@@ -383,6 +414,7 @@ def detect_candidates(
                 ),
                 improvement_type=("SKILL_EVOLVE" if parent else "SKILL_CREATE"),
                 task_activation=task_activation,
+                mandatory_controls=mandatory_controls,
             )
         )
     candidates.sort(key=lambda candidate: (-candidate.count, candidate.slug))
@@ -404,11 +436,14 @@ _DRAFT_PROMPT = """아래 반복 사건을 다음 실행에서 재사용할 수 
 서로 다른 실행 수: {count}
 관측 사례:
 {samples}
+QA가 지정한 필수 통제(누락하거나 약화하지 않는다):
+{mandatory_controls}
 
 필수 형식:
 - 첫 제목은 '# {slug}'
 - '## 왜 필요한가', '## 작업 순서', '## 하지 않을 것'을 포함한다
 - 관측된 사실과 재현 가능한 절차만 쓴다
+- QA가 지정한 필수 통제는 의미를 바꾸지 말고 모두 명시한다
 - CEO의 응답 품질 개선 사건이면, 답변 전에 상태·목적·증거를 확인하고,
   필요한 경우에만 소유 부서에 위임하며, 관측되지 않은 사실은 명확히 한 뒤
   최종 답변을 종합하는 순서를 구체적으로 쓴다
@@ -429,6 +464,10 @@ def draft_body(candidate: SkillCandidate, llm: Callable[[str], str]) -> str | No
                 count=candidate.count,
                 samples=samples,
                 slug=candidate.slug,
+                mandatory_controls=(
+                    "\n".join(f"- {control}" for control in candidate.mandatory_controls)
+                    or "- 없음"
+                ),
             )
         )
     except Exception:
@@ -463,11 +502,17 @@ def render_skill(candidate: SkillCandidate, body: str) -> str:
             }
         },
     }
+    required_controls = ""
+    if candidate.mandatory_controls:
+        required_controls = "\n\n## QA 필수 통제\n" + "\n".join(
+            f"- {control}" for control in candidate.mandatory_controls
+        )
     return (
         "---\n"
         + yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
         + "\n---\n\n"
         + body.strip()
+        + required_controls
         + "\n"
     )
 
@@ -491,6 +536,7 @@ def validate_artifacts(
     *,
     expected_slug: str,
     expected_version: int,
+    mandatory_controls: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Validate structure and governance invariants without an LLM."""
 
@@ -518,6 +564,10 @@ def validate_artifacts(
             errors.append(f"required heading missing: {heading}")
     if not body.startswith(f"# {expected_slug}"):
         errors.append("body title does not match the governed slug")
+    for control in mandatory_controls:
+        normalized = str(control).strip()
+        if normalized and normalized not in body:
+            errors.append(f"required QA control missing: {normalized}")
     errors.extend(f"boundary violation: {hit}" for hit in check_boundary(body))
     errors.extend(
         f"unfinished placeholder: {token}"
@@ -684,6 +734,7 @@ class EvolutionSkillStore:
             "source_artifact_ids": list(candidate.source_artifact_ids),
             "benchmark_ids": list(candidate.benchmark_ids),
             "improvement_type": candidate.improvement_type,
+            "mandatory_controls": list(candidate.mandatory_controls),
             "proposal_diff_hash": diff_hash,
             "generated_at": _utcnow(),
         }
@@ -692,6 +743,7 @@ class EvolutionSkillStore:
             provenance,
             expected_slug=candidate.slug,
             expected_version=candidate.version,
+            mandatory_controls=candidate.mandatory_controls,
         )
         validation["stages"] = {
             "structure_and_provenance": "PASS" if validation["ok"] else "FAIL",
@@ -1198,6 +1250,8 @@ def record_qa_feedback_occurrences(
     benchmark_id: str,
     improvement_type: str,
     target_skill_slug: str = "",
+    task_activation: str = "",
+    mandatory_controls: Iterable[str] = (),
     at: str = "",
 ) -> int:
     """Admit only manager-approved, benchmark-passed QA evidence.
@@ -1217,6 +1271,20 @@ def record_qa_feedback_occurrences(
         return 0
     if improvement_type not in {"SKILL_CREATE", "SKILL_EVOLVE"}:
         return 0
+    activation = str(task_activation or "").strip().lower()
+    if activation not in {"", "owner-task"}:
+        raise EvolutionSkillError("QA feedback task activation is invalid")
+    if isinstance(mandatory_controls, (str, bytes)):
+        raise EvolutionSkillError("QA mandatory controls must be an array")
+    controls = tuple(
+        dict.fromkeys(
+            str(value).strip()[:240]
+            for value in mandatory_controls
+            if str(value).strip()
+        )
+    )
+    if len(controls) > 8:
+        raise EvolutionSkillError("QA mandatory controls exceed the bounded limit")
     if not artifact_id.startswith("feedback-") or not benchmark_id.strip():
         raise EvolutionSkillError(
             "QA feedback occurrence requires artifact and passed benchmark IDs"
@@ -1256,6 +1324,8 @@ def record_qa_feedback_occurrences(
                 source_artifact_id=artifact_id,
                 benchmark_id=benchmark_id.strip(),
                 improvement_type=improvement_type,
+                task_activation=activation,
+                mandatory_controls=controls,
             )
         ]
     )
@@ -1402,6 +1472,7 @@ def promote_proposal(
         provenance,
         expected_slug=state["slug"],
         expected_version=int(state["version"]),
+        mandatory_controls=provenance.get("mandatory_controls") or (),
     )
     if not validation["ok"] or validation["content_hash"] != state["validation"].get(
         "content_hash"
@@ -1678,6 +1749,7 @@ def validate_canonical_registry(
                 provenance,
                 expected_slug=slug,
                 expected_version=int(entry.get("current_version") or 0),
+                mandatory_controls=provenance.get("mandatory_controls") or (),
             )
             if not result["ok"]:
                 errors.extend(f"{slug}: {message}" for message in result["errors"])

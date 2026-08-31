@@ -7,9 +7,12 @@ Kanban assignee or a substitute for a department profile.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
-from collections.abc import Iterable
+import threading
+import time
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from types import MappingProxyType
 
@@ -150,6 +153,9 @@ SKILL_OWNER_BY_NAME = MappingProxyType(
 # closed instead of treating a QA-local copy as globally reusable.
 AMBIGUOUS_CUSTOM_SKILLS = frozenset({"hermes-agent-integration"})
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$")
+_ACTIVE_TASK_SKILLS_CACHE: dict[tuple[str, str, str], tuple[float, tuple[str, ...]]] = {}
+_ACTIVE_TASK_SKILLS_CACHE_LOCK = threading.Lock()
+_ACTIVE_TASK_SKILLS_CACHE_MAX_ENTRIES = 512
 
 
 class CanonicalSkillError(ValueError):
@@ -163,6 +169,25 @@ def _live_evolution_contract() -> tuple[frozenset[str], dict[str, frozenset[str]
         return active_registry_bindings(EVOLUTION_SKILL_REGISTRY)
     except EvolutionSkillError as exc:
         raise CanonicalSkillError(f"invalid evolution skill registry: {exc}") from exc
+
+
+def _active_task_skills_cache_seconds() -> float:
+    """Keep activation lookups fresh without rescanning every skill per task."""
+
+    try:
+        configured = float(os.environ.get("ACTIVE_TASK_SKILLS_CACHE_SECONDS", "2"))
+    except (TypeError, ValueError):
+        configured = 2.0
+    return max(0.1, min(configured, 30.0))
+
+
+def _registry_content_hash(path: Path) -> str:
+    """Return a content identity; mtime alone is not an activation boundary."""
+
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise CanonicalSkillError("cannot read evolution skill registry") from exc
 
 
 def _candidate_roots(root: Path | None = None) -> tuple[Path, ...]:
@@ -274,6 +299,15 @@ def active_task_skills_for_profile(
 
     if profile not in CANONICAL_PROFILES | STRATEGY_RUNTIME_PROFILES:
         raise CanonicalSkillError(f"unknown Hermes profile: {profile!r}")
+    registry_hash = _registry_content_hash(EVOLUTION_SKILL_REGISTRY)
+    root_key = str(root.expanduser().resolve()) if root is not None else ""
+    cache_key = (profile, root_key, registry_hash)
+    now = time.monotonic()
+    with _ACTIVE_TASK_SKILLS_CACHE_LOCK:
+        cached = _ACTIVE_TASK_SKILLS_CACHE.get(cache_key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
     active, owners = _live_evolution_contract()
     selected: list[str] = []
     for name in sorted(active):
@@ -287,17 +321,28 @@ def active_task_skills_for_profile(
                 f"cannot load active evolution skill: {name}"
             ) from exc
         metadata = frontmatter.get("metadata") or {}
-        hermes = metadata.get("hermes") if isinstance(metadata, dict) else None
+        hermes = metadata.get("hermes") if isinstance(metadata, Mapping) else None
         if hermes is None:
             continue
-        if not isinstance(hermes, dict):
+        if not isinstance(hermes, Mapping):
             raise CanonicalSkillError(f"invalid Hermes metadata: {name}")
         activation = str(hermes.get("task_activation") or "")
         if activation not in {"", "owner-task"}:
             raise CanonicalSkillError(f"invalid task activation: {name}")
         if activation == "owner-task":
-            selected.append(validate_skill_for_profile(name, profile, root=root))
-    return tuple(selected)
+            # Ownership and active status came from the same registry snapshot.
+            # ``create_task`` performs the one authoritative source/ownership
+            # validation immediately before task creation.
+            selected.append(name)
+    result = tuple(selected)
+    with _ACTIVE_TASK_SKILLS_CACHE_LOCK:
+        if len(_ACTIVE_TASK_SKILLS_CACHE) >= _ACTIVE_TASK_SKILLS_CACHE_MAX_ENTRIES:
+            _ACTIVE_TASK_SKILLS_CACHE.pop(next(iter(_ACTIVE_TASK_SKILLS_CACHE)))
+        _ACTIVE_TASK_SKILLS_CACHE[cache_key] = (
+            now + _active_task_skills_cache_seconds(),
+            result,
+        )
+    return result
 
 
 def validate_skills_for_profiles(

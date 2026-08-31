@@ -66,6 +66,11 @@ def _occurrences(store: EvolutionSkillStore, department: str) -> list[Occurrence
             benchmark_id=str(row.get("benchmark_id") or ""),
             improvement_type=str(row.get("improvement_type") or ""),
             task_activation=str(row.get("task_activation") or ""),
+            mandatory_controls=tuple(
+                str(item)
+                for item in (row.get("mandatory_controls") or [])
+                if str(item).strip()
+            ),
         )
         for row in store.load_occurrences(department=department)
     ]

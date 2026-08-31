@@ -21,7 +21,7 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -1426,6 +1426,8 @@ class FeedbackLedger:
                     reason TEXT NOT NULL,
                     improvement_type TEXT NOT NULL DEFAULT 'NO_ACTION',
                     target_skill_slug TEXT,
+                    task_activation TEXT NOT NULL DEFAULT '',
+                    mandatory_controls TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS langsmith_feedback_benchmarks (
@@ -1541,6 +1543,16 @@ class FeedbackLedger:
                         "ALTER TABLE langsmith_feedback_decisions_legacy "
                         "ADD COLUMN target_skill_slug TEXT"
                     )
+                if "task_activation" not in legacy_columns:
+                    db.execute(
+                        "ALTER TABLE langsmith_feedback_decisions_legacy "
+                        "ADD COLUMN task_activation TEXT NOT NULL DEFAULT ''"
+                    )
+                if "mandatory_controls" not in legacy_columns:
+                    db.execute(
+                        "ALTER TABLE langsmith_feedback_decisions_legacy "
+                        "ADD COLUMN mandatory_controls TEXT NOT NULL DEFAULT '[]'"
+                    )
                 db.execute(
                     """
                     CREATE TABLE langsmith_feedback_decisions (
@@ -1552,6 +1564,8 @@ class FeedbackLedger:
                         reason TEXT NOT NULL,
                         improvement_type TEXT NOT NULL DEFAULT 'NO_ACTION',
                         target_skill_slug TEXT,
+                        task_activation TEXT NOT NULL DEFAULT '',
+                        mandatory_controls TEXT NOT NULL DEFAULT '[]',
                         created_at TEXT NOT NULL
                     )
                     """
@@ -1560,7 +1574,7 @@ class FeedbackLedger:
                     """
                     INSERT INTO langsmith_feedback_decisions
                     (artifact_id, decision, approved_by, reason, improvement_type,
-                     target_skill_slug, created_at)
+                     target_skill_slug, task_activation, mandatory_controls, created_at)
                     SELECT artifact_id,
                            CASE
                                WHEN decision='APPROVED' AND improvement_type='NO_ACTION'
@@ -1568,7 +1582,7 @@ class FeedbackLedger:
                                ELSE decision
                            END,
                            approved_by, reason, improvement_type,
-                           target_skill_slug, created_at
+                           target_skill_slug, task_activation, mandatory_controls, created_at
                     FROM langsmith_feedback_decisions_legacy
                     """
                 )
@@ -1589,6 +1603,16 @@ class FeedbackLedger:
                 db.execute(
                     "ALTER TABLE langsmith_feedback_decisions ADD COLUMN "
                     "target_skill_slug TEXT"
+                )
+            if "task_activation" not in decision_columns:
+                db.execute(
+                    "ALTER TABLE langsmith_feedback_decisions ADD COLUMN "
+                    "task_activation TEXT NOT NULL DEFAULT ''"
+                )
+            if "mandatory_controls" not in decision_columns:
+                db.execute(
+                    "ALTER TABLE langsmith_feedback_decisions ADD COLUMN "
+                    "mandatory_controls TEXT NOT NULL DEFAULT '[]'"
                 )
             delivery_columns = {
                 str(row["name"])
@@ -2038,7 +2062,7 @@ class FeedbackLedger:
             rows = db.execute(
                 f"""SELECT a.*, d.decision AS approval_decision, d.approved_by,
                     d.reason AS approval_reason, d.improvement_type,
-                    d.target_skill_slug
+                    d.target_skill_slug, d.task_activation, d.mandatory_controls
                 FROM langsmith_feedback_artifacts a
                 LEFT JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
                 WHERE d.artifact_id IS NULL
@@ -2057,7 +2081,8 @@ class FeedbackLedger:
             row = db.execute(
                 """SELECT a.*, d.decision AS approval_decision, d.approved_by,
                     d.reason AS approval_reason, d.improvement_type,
-                    d.target_skill_slug, b.status AS benchmark_status,
+                    d.target_skill_slug, d.task_activation, d.mandatory_controls,
+                    b.status AS benchmark_status,
                     b.benchmark_id, b.score AS benchmark_score,
                     b.report_ref, b.result_summary AS benchmark_result_summary
                 FROM langsmith_feedback_artifacts a
@@ -2249,6 +2274,8 @@ class FeedbackLedger:
         *,
         improvement_type: str = "NO_ACTION",
         target_skill_slug: str = "",
+        task_activation: str = "",
+        mandatory_controls: Iterable[str] = (),
     ) -> bool:
         if not qa_approver_is_allowed(approved_by):
             LOGGER.warning("langsmith_feedback_decision_rejected_invalid_approver")
@@ -2268,6 +2295,30 @@ class FeedbackLedger:
             return False
         if normalized_type != "SKILL_EVOLVE":
             normalized_slug = ""
+        normalized_activation = _bounded_text(task_activation, 32).lower()
+        if normalized_activation not in {"", "owner-task"}:
+            return False
+        if normalized_activation and (
+            decision != "APPROVED"
+            or normalized_type not in {"SKILL_CREATE", "SKILL_EVOLVE"}
+        ):
+            return False
+        if isinstance(mandatory_controls, (str, bytes)):
+            return False
+        normalized_controls = tuple(
+            dict.fromkeys(
+                _bounded_text(value, 240)
+                for value in mandatory_controls
+                if _bounded_text(value, 240)
+            )
+        )
+        if len(normalized_controls) > 8:
+            return False
+        if normalized_controls and (
+            decision != "APPROVED"
+            or normalized_type not in {"SKILL_CREATE", "SKILL_EVOLVE"}
+        ):
+            return False
         try:
             with self._connect() as db:
                 artifact = db.execute(
@@ -2300,8 +2351,8 @@ class FeedbackLedger:
                 cursor = db.execute(
                     """INSERT OR IGNORE INTO langsmith_feedback_decisions
                     (artifact_id, decision, approved_by, reason, improvement_type,
-                     target_skill_slug, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                     target_skill_slug, task_activation, mandatory_controls, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         artifact_id,
                         decision,
@@ -2309,6 +2360,8 @@ class FeedbackLedger:
                         _bounded_text(reason, 240),
                         normalized_type,
                         normalized_slug or None,
+                        normalized_activation,
+                        json.dumps(normalized_controls, ensure_ascii=False),
                         now,
                     ),
                 )
@@ -2650,7 +2703,8 @@ class FeedbackLedger:
             rows = db.execute(
                 """SELECT a.*, d.decision AS approval_decision,
                     d.approved_by, d.reason AS approval_reason,
-                    d.improvement_type, d.target_skill_slug,
+                    d.improvement_type, d.target_skill_slug, d.task_activation,
+                    d.mandatory_controls,
                     b.status AS benchmark_status, b.benchmark_id,
                     b.score AS benchmark_score, b.report_ref,
                     b.result_summary AS benchmark_result_summary
@@ -2684,7 +2738,8 @@ class FeedbackLedger:
             rows = db.execute(
                 """SELECT a.*, d.decision AS approval_decision,
                     d.approved_by, d.reason AS approval_reason,
-                    d.improvement_type, d.target_skill_slug,
+                    d.improvement_type, d.target_skill_slug, d.task_activation,
+                    d.mandatory_controls,
                     b.status AS benchmark_status, b.benchmark_id,
                     b.score AS benchmark_score, b.report_ref,
                     b.result_summary AS benchmark_result_summary
@@ -2708,7 +2763,8 @@ class FeedbackLedger:
             rows = db.execute(
                 """SELECT a.*, d.decision AS approval_decision,
                     d.approved_by, d.reason AS approval_reason,
-                    d.improvement_type, d.target_skill_slug,
+                    d.improvement_type, d.target_skill_slug, d.task_activation,
+                    d.mandatory_controls,
                     b.status AS benchmark_status, b.benchmark_id,
                     b.score AS benchmark_score, b.report_ref,
                     b.result_summary AS benchmark_result_summary
@@ -2732,7 +2788,8 @@ class FeedbackLedger:
             rows = db.execute(
                 """SELECT a.*, d.decision AS approval_decision,
                     d.approved_by, d.reason AS approval_reason,
-                    d.improvement_type, d.target_skill_slug,
+                    d.improvement_type, d.target_skill_slug, d.task_activation,
+                    d.mandatory_controls,
                     b.status AS benchmark_status, b.benchmark_id,
                     b.score AS benchmark_score, b.report_ref,
                     b.result_summary AS benchmark_result_summary
@@ -2859,6 +2916,16 @@ class FeedbackLedger:
             ),
             "target_skill_slug": (
                 row["target_skill_slug"] if "target_skill_slug" in keys else None
+            ),
+            "task_activation": (
+                str(row["task_activation"] or "")
+                if "task_activation" in keys
+                else ""
+            ),
+            "mandatory_controls": (
+                json.loads(row["mandatory_controls"] or "[]")
+                if "mandatory_controls" in keys
+                else []
             ),
             "benchmark_status": (
                 row["benchmark_status"] if "benchmark_status" in keys else None

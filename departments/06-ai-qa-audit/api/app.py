@@ -557,6 +557,8 @@ class ObservabilityFeedbackDecisionRequest(BaseModel):
         ),
     )
     target_skill_slug: str = Field(default="", max_length=64)
+    task_activation: str = Field(default="", pattern=r"^(|owner-task)$")
+    mandatory_controls: list[str] = Field(default_factory=list, max_length=8)
 
 
 class ObservabilityBenchmarkStatusRequest(BaseModel):
@@ -1169,6 +1171,8 @@ def decide_observability_feedback(
         body.reason,
         improvement_type=body.improvement_type,
         target_skill_slug=body.target_skill_slug,
+        task_activation=body.task_activation,
+        mandatory_controls=body.mandatory_controls,
     ):
         raise HTTPException(status_code=409, detail={"error_code": "FEEDBACK_DECISION_EXISTS_OR_INVALID"})
     return {
@@ -1177,6 +1181,8 @@ def decide_observability_feedback(
         "approved_by": body.approved_by,
         "improvement_type": body.improvement_type,
         "target_skill_slug": body.target_skill_slug or None,
+        "task_activation": body.task_activation or None,
+        "mandatory_controls": body.mandatory_controls,
         "benchmark_status": "PENDING" if body.decision == "APPROVED" else None,
     }
 

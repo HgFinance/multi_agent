@@ -430,6 +430,14 @@ def test_qa_card_and_commands_keep_only_redacted_contract() -> None:
     assert approved.artifact_id == ARTIFACT_ID
     assert approved.reason == "기준 충족"
     assert approved.improvement_type == "SKILL_CREATE"
+    task_activated = parse_qa_feedback_command(
+        f"승인 {ARTIFACT_ID} 유형=SKILL_CREATE 활성화=owner-task "
+        '필수통제="근거 ID를 보존한다" task-time 절차 검증'
+    )
+    assert task_activated is not None
+    assert task_activated.task_activation == "owner-task"
+    assert task_activated.mandatory_controls == ("근거 ID를 보존한다",)
+    assert task_activated.reason == "task-time 절차 검증"
     missing_reason = parse_qa_feedback_command(f"승인 {ARTIFACT_ID}")
     assert missing_reason is not None and missing_reason.reason == ""
     rejected = parse_qa_feedback_command("반려 재현 실패")

@@ -46,6 +46,13 @@ def _admission_result(candidate: Mapping[str, Any]) -> tuple[bool, str, str]:
         }
     )
     improvement_type = str(candidate.get("improvement_type") or "")
+    task_activation = str(candidate.get("task_activation") or "").strip().lower()
+    raw_controls = candidate.get("mandatory_controls") or ()
+    mandatory_controls = (
+        tuple(str(value).strip() for value in raw_controls if str(value).strip())
+        if not isinstance(raw_controls, (str, bytes))
+        else ()
+    )
     metadata = candidate.get("metadata")
     metadata = metadata if isinstance(metadata, Mapping) else {}
     errors: list[str] = []
@@ -80,6 +87,12 @@ def _admission_result(candidate: Mapping[str, Any]) -> tuple[bool, str, str]:
         candidate.get("target_skill_slug") or ""
     ):
         errors.append("target skill missing")
+    if task_activation not in {"", "owner-task"}:
+        errors.append("task activation is invalid")
+    if task_activation and improvement_type not in {"SKILL_CREATE", "SKILL_EVOLVE"}:
+        errors.append("task activation is not a skill proposal")
+    if isinstance(raw_controls, (str, bytes)) or len(mandatory_controls) > 8:
+        errors.append("mandatory controls are invalid")
     manifest = {
         "schema_version": ADMISSION_BENCHMARK_VERSION,
         "artifact_id": artifact_id,
@@ -87,6 +100,8 @@ def _admission_result(candidate: Mapping[str, Any]) -> tuple[bool, str, str]:
         "finding_codes": finding_codes,
         "improvement_type": improvement_type,
         "target_skill_slug": str(candidate.get("target_skill_slug") or ""),
+        "task_activation": task_activation,
+        "mandatory_controls": list(mandatory_controls),
         "errors": errors,
     }
     digest = hashlib.sha256(
@@ -143,6 +158,8 @@ def reconcile_passed_feedback(
             benchmark_id=str(item.get("benchmark_id") or ""),
             improvement_type=str(item.get("improvement_type") or ""),
             target_skill_slug=str(item.get("target_skill_slug") or ""),
+            task_activation=str(item.get("task_activation") or ""),
+            mandatory_controls=item.get("mandatory_controls") or (),
             at=str(item.get("created_at") or ""),
         )
     return written

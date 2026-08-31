@@ -54,6 +54,31 @@ First/Metrics metadata
 model, Hermes 동작은 바뀌지 않는다. `PASSED` 뒤에도 hint는 비권위 참고자료일
 뿐이며, 자동 prompt/model 배포는 하지 않는다.
 
+### QA 승인 기반 Evolution Skill의 task-time 적용
+
+Evolution Skill은 기본적으로 문서다. QA 관리자가 feedback 결정에
+`task_activation=owner-task`를 **명시**한 경우에도, 즉시 모든 task에 주입하지 않는다.
+아래 네 조건을 모두 만족해야만 해당 owner profile의 새 Hermes task에 `--skill`으로
+포함된다.
+
+1. 사람 QA의 `APPROVED` 결정이 `SKILL_CREATE` 또는 `SKILL_EVOLVE`여야 한다.
+2. feedback admission benchmark가 통과하고, 서로 다른 QA artifact 3건이 같은
+   `owner-task` 요청을 지지해야 한다.
+3. Evolution proposal의 구조 검증·QA 승인·canonical registry 승격이 완료되어
+   status가 `active`여야 한다.
+4. registry의 owner profile과 task assignee가 일치하고, `SKILL.md` frontmatter에도
+   `metadata.hermes.task_activation: owner-task`가 있어야 한다.
+
+Discord 검토 명령은 `승인 <artifact> 유형=SKILL_CREATE 활성화=owner-task <사유>`처럼
+쓴다. 재현 시에도 빠지면 안 되는 규칙은
+`필수통제="근거 ID는 원문 그대로 유지"`처럼 함께 기록하며, proposal 생성·검증·승격 때
+동일 문구가 보존되는지 확인한다. 일반 QA finding, runtime 성능 신호, QA의 자유서술은 task-time activation으로
+추론하지 않는다. 이 설정은 기존 Kanban 위임 권한·Risk/PAPER 권한·router를 바꾸지 않으며,
+skill source 또는 registry를 읽을 수 없으면 task 생성은 fail-closed한다.
+Supervisor는 이 경계를 `active_skill_load_failure`와 `skill_validation_ms`로만
+관측한다. registry 내용 hash가 같을 때는 최대 2초의 bounded cache를 사용해 반복 task
+생성에서 파일 탐색을 줄이며, registry 변경은 즉시 다른 cache key로 분리된다.
+
 ### CEO self-improvement boundary
 
 QA의 역할은 문제를 구조화해 보고하는 것이다. QA가 CEO보다 상위 권한을 갖거나

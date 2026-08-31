@@ -46,6 +46,12 @@ _DISCORD_CONTENT_LIMIT = 1_900
 _SKILL_RE = re.compile(
     r"\b(?:스킬|skill)\s*=\s*([a-z0-9][a-z0-9-]{1,62})\b", re.IGNORECASE
 )
+_TASK_ACTIVATION_RE = re.compile(
+    r"\b(?:활성화|activation)\s*=\s*(owner-task)\b", re.IGNORECASE
+)
+_MANDATORY_CONTROL_RE = re.compile(
+    r"\b(?:필수통제|control)\s*=\s*\"([^\"\n]{1,240})\"", re.IGNORECASE
+)
 _COMMAND_RE = re.compile(
     r"^\s*(승인|거부|반려|미승인|확인|종료|acknowledge|acknowledged|close|closed|"
     r"approve|approved|reject|rejected)\b[\s,:-]*(.*)$",
@@ -1056,6 +1062,8 @@ def format_qa_feedback_request(
         "- 개선안 거부: `거부 <사유 필수>`\n"
         f"- 새 개선안 생성: `승인 {artifact_id} 유형=SKILL_CREATE <사유 필수>`\n"
         "- 기존 개선안 보완: `유형=SKILL_EVOLVE 스킬=<이름>`를 함께 입력\n"
+        "- task-time 적용 요청: `활성화=owner-task`를 명시 (QA 승인·offline benchmark 통과 뒤에도 owner task에만 적용)\n"
+        "- 생성 스킬 필수 통제: `필수통제=\"변경하면 안 되는 검증 규칙\"` (여러 개면 반복)\n"
         "- **보류:** 명령을 입력하지 않으면 `대기` 상태 유지\n\n"
         "QA Hermes는 이 artifact 한 건만 검토하고 승인·거부·설정 변경을 직접 수행하지 마세요."
     )
@@ -1272,6 +1280,8 @@ class QaFeedbackCommand:
     reason: str
     improvement_type: str | None = None
     target_skill_slug: str | None = None
+    task_activation: str | None = None
+    mandatory_controls: tuple[str, ...] = ()
     proposal_id: str | None = None
 
 
@@ -1306,6 +1316,20 @@ def parse_qa_feedback_command(content: object) -> QaFeedbackCommand | None:
         tail = (tail[: skill_match.start()] + " " + tail[skill_match.end() :]).strip(
             " ,:-"
         )
+    activation_match = _TASK_ACTIVATION_RE.search(tail)
+    task_activation = activation_match.group(1).lower() if activation_match else None
+    if activation_match:
+        tail = (
+            tail[: activation_match.start()] + " " + tail[activation_match.end() :]
+        ).strip(" ,:-")
+    mandatory_controls = tuple(
+        dict.fromkeys(
+            match.group(1).strip()
+            for match in _MANDATORY_CONTROL_RE.finditer(tail)
+            if match.group(1).strip()
+        )
+    )
+    tail = _MANDATORY_CONTROL_RE.sub(" ", tail).strip(" ,:-")
     decision = (
         "APPROVED"
         if verb in {"승인", "approve", "approved"}
@@ -1327,6 +1351,8 @@ def parse_qa_feedback_command(content: object) -> QaFeedbackCommand | None:
         reason=reason,
         improvement_type=improvement_type,
         target_skill_slug=target_skill_slug,
+        task_activation=task_activation,
+        mandatory_controls=mandatory_controls,
         proposal_id=proposal_id,
     )
 
@@ -1378,6 +1404,8 @@ def submit_qa_feedback_decision(
             else command.improvement_type or "NO_ACTION"
         ),
         "target_skill_slug": command.target_skill_slug or "",
+        "task_activation": command.task_activation or "",
+        "mandatory_controls": list(command.mandatory_controls),
     }
     return _post_internal_decision(
         f"{base_url}/qa/v1/observability/feedback/{command.artifact_id}/decision",

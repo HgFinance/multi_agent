@@ -24,6 +24,7 @@ from orchestration.evolution_skills import (
     record_trace_occurrences,
     render_skill,
     retire_skill,
+    validate_artifacts,
     validate_canonical_registry,
 )
 from scripts.evolution_skills import _occurrences, _proposal_history
@@ -323,6 +324,24 @@ def test_task_activation_requires_explicit_qa_evidence() -> None:
     )
 
 
+def test_task_activation_is_not_inferred_from_runtime_performance() -> None:
+    rows = [
+        Occurrence(
+            kind="ceo bounded supervision",
+            detail="runtime score below threshold",
+            run_id=f"runtime-run-{number}",
+            department="00-ceo-office",
+            source_type="skill-performance",
+            task_activation="owner-task",
+        )
+        for number in range(1, 4)
+    ]
+
+    candidate = detect_candidates(rows, department="00-ceo-office")[0]
+
+    assert candidate.task_activation == ""
+
+
 def test_cli_occurrence_loader_preserves_explicit_task_activation(tmp_path: Path) -> None:
     store = EvolutionSkillStore(tmp_path)
     store.append_occurrences(
@@ -333,11 +352,40 @@ def test_cli_occurrence_loader_preserves_explicit_task_activation(tmp_path: Path
                 department="00-ceo-office",
                 source_type="qa-benchmark",
                 task_activation="owner-task",
+                mandatory_controls=("keep exact evidence IDs",),
             )
         ]
     )
 
-    assert _occurrences(store, "00-ceo-office")[0].task_activation == "owner-task"
+    loaded = _occurrences(store, "00-ceo-office")[0]
+    assert loaded.task_activation == "owner-task"
+    assert loaded.mandatory_controls == ("keep exact evidence IDs",)
+
+
+def test_qa_mandatory_controls_are_carried_and_validated() -> None:
+    control = "evidence_refs에는 명시된 식별자만 넣는다."
+    rows = [
+        Occurrence(
+            kind="ceo evidence control",
+            run_id=f"qa-run-{number}",
+            department="00-ceo-office",
+            source_type="qa-benchmark",
+            mandatory_controls=(control,),
+        )
+        for number in range(1, 4)
+    ]
+    candidate = detect_candidates(rows, department="00-ceo-office")[0]
+    markdown = render_skill(candidate, _body(candidate.slug))
+
+    assert candidate.mandatory_controls == (control,)
+    assert validate_artifacts(
+        markdown,
+        {"schema_version": "hgfinance.evolution-skills.v1"},
+        expected_slug=candidate.slug,
+        expected_version=1,
+        mandatory_controls=candidate.mandatory_controls,
+    )["ok"] is False  # Missing governed model provenance remains fail-closed.
+    assert control in markdown
 
 
 def test_generation_requires_governed_14b_and_deterministic_structure(

@@ -83,6 +83,54 @@ def test_only_first_approved_and_benchmark_passed_skill_findings_are_admitted(
     assert candidates[0].benchmark_ids == ("qa-evolution-admission-v1",)
 
 
+def test_explicit_qa_owner_task_approval_reaches_evolved_skill_candidate(
+    tmp_path: Path,
+) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    store = EvolutionSkillStore(tmp_path / "evolution")
+    artifacts = [_artifact(ledger, number) for number in range(1, 4)]
+
+    for artifact_id in artifacts:
+        assert ledger.approve(
+            artifact_id,
+            "APPROVED",
+            "discord:382384727245455360",
+            "QA verified this owner procedure for task-time use",
+            improvement_type="SKILL_CREATE",
+            task_activation="owner-task",
+            mandatory_controls=("preserve exact evidence IDs",),
+        )
+
+    result = process_qa_skill_feedback(ledger, store)
+
+    assert result["benchmark_passed"] == 3
+    rows = _occurrences(store)
+    assert {row.task_activation for row in rows} == {"owner-task"}
+    assert {row.mandatory_controls for row in rows} == {
+        ("preserve exact evidence IDs",)
+    }
+    candidate = detect_candidates(rows, department="03-risk")[0]
+    assert candidate.task_activation == "owner-task"
+    assert candidate.mandatory_controls == ("preserve exact evidence IDs",)
+
+
+def test_owner_task_activation_is_rejected_without_an_approved_skill_proposal(
+    tmp_path: Path,
+) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    artifact_id = _artifact(ledger, 1)
+
+    assert not ledger.approve(
+        artifact_id,
+        "APPROVED",
+        "discord:382384727245455360",
+        "cannot activate a non-skill change",
+        improvement_type="CODE_FIX",
+        task_activation="owner-task",
+        mandatory_controls=("not valid for code-only feedback",),
+    )
+
+
 def test_non_skill_classification_never_enters_evolution(tmp_path: Path) -> None:
     ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
     store = EvolutionSkillStore(tmp_path / "evolution")

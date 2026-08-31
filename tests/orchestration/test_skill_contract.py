@@ -93,11 +93,20 @@ class SharedSkillContractTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.object(contract, "EVOLUTION_SKILL_REGISTRY", registry):
+            with patch.object(contract, "EVOLUTION_SKILL_REGISTRY", registry), patch.object(
+                contract,
+                "parse_skill_markdown",
+                wraps=contract.parse_skill_markdown,
+            ) as parser:
                 self.assertEqual(
                     active_task_skills_for_profile("ceo-agent", root=root / "skills"),
                     ("ceo-bounded-react",),
                 )
+                self.assertEqual(
+                    active_task_skills_for_profile("ceo-agent", root=root / "skills"),
+                    ("ceo-bounded-react",),
+                )
+                self.assertEqual(parser.call_count, 1)
                 self.assertEqual(
                     active_task_skills_for_profile(
                         "research-department", root=root / "skills"
