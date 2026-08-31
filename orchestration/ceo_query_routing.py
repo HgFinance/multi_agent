@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from orchestration.canonical_profiles import canonical_profile_for_department
+from orchestration.query_lexicon import QUERY_INTENT_TERMS, is_negated_suffix
 
 # The response plane. QA is an asynchronous post-response consumer and is not
 # an analysis primary in this list.
@@ -113,41 +114,13 @@ _ACCOUNT_STATUS_QUERY_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bnav\b", "nav"),
 )
 
-_QUERY_INTENT_TERMS = (
-    "분석",
-    "검토",
-    "조회",
-    "확인",
-    "알려",
-    "보여",
-    "브리핑",
-    "요약",
-    "추천",
-    "비교",
-    "평가",
-    "설명",
-    "전략",
-    "리스크",
-    "위험",
-    "주문",
-    "매수",
-    "매도",
-    "분류",
-    "analy",
-    "review",
-    "status",
-    "summary",
-    "recommend",
-    "compare",
-    "explain",
-)
-
 # Safety instructions such as "주문은 하지 마" describe a prohibition, not a
 # Trading request.  The router must not fan out to an execution-adjacent
-# department merely because a user explicitly forbade that action.
-_NEGATED_TERM_SUFFIX_RE = re.compile(
-    r"^(?:은|는|이|가|을|를)?\s*(?:하지\s*(?:마|말고|않)|안\s|못\s|금지|불가|없)"
-)
+# department merely because a user explicitly forbade that action.  Both the
+# intent vocabulary and the negation vocabulary now live in
+# ``orchestration.query_lexicon`` so every branch reads the same dictionary.
+_QUERY_INTENT_TERMS = QUERY_INTENT_TERMS
+
 _RESEARCH_SCOPE_RE = re.compile(
     r"(?:리서치|연구|research)\s*(?:부서|팀|본부|department)",
     re.IGNORECASE,
@@ -290,14 +263,7 @@ def _query_term_matches(normalized_query: str, term: str) -> bool:
 def _is_negated_suffix(suffix: str) -> bool:
     """Recognize short safety prohibitions, including joined Korean clauses."""
 
-    if _NEGATED_TERM_SUFFIX_RE.match(suffix):
-        return True
-    return bool(
-        re.match(
-            r"^[^.!?\n]{0,24}(?:하지\s*(?:마|말고|않)|안\s|못\s|금지|불가|없)",
-            suffix,
-        )
-    )
+    return is_negated_suffix(suffix)
 
 
 def _is_prohibited_safety_term(normalized_query: str, start: int, end: int) -> bool:

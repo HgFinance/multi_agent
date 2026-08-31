@@ -16,6 +16,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from orchestration.canonical_profiles import validate_canonical_profile
+from orchestration.query_lexicon import (
+    BINDING_TERMS,
+    NON_BINDING_PHRASES,
+    non_execution_match,
+)
 
 CEO_WORKFLOW_SCOPE_MARKER = "hgfinance.ceo-workflow-scope.v1"
 USER_PAPER_ORDER_SCOPE_MARKER = "hgfinance.user-paper-order-request.v1"
@@ -640,54 +645,14 @@ def infer_workflow_mode(query: str) -> str:
     # order vocabulary such as 매수/매도/주문.
     if _NON_EXECUTION_QUESTION_RE.search(text):
         return "analysis"
-    non_binding_phrases = (
-        "do not place",
-        "don't place",
-        "do not execute",
-        "don't execute",
-        "실제 주문이나 집행은 하지",
-        "주문이나 집행은 하지",
-        "주문하지 말",
-        "집행하지 말",
-        "실행하지 말",
-    )
-    explicit_non_execution = re.search(
-        r"(?:주문(?:\s*제출)?|매매|집행|실행|원장\s*변경|설정\s*변경|"
-        r"외부\s*(?:쓰기|변경))"
-        r"[^.!?\n]{0,80}"
-        r"(?:하지\s*(?:마|말라|마세요|말|않)|"
-        r"수행하지\s*(?:마|말라|마세요|말)|금지)",
-        text,
-    )
-    if any(phrase in text for phrase in non_binding_phrases) or explicit_non_execution:
+    # 어휘 세 벌(비구속 문구·비집행 선언·binding 용어)은
+    # `orchestration.query_lexicon`이 갖고 있다. 부정 판정이 라우터·주문 레인과
+    # 갈리면 같은 문장이 경로마다 다르게 분류된다.
+    if any(phrase in text for phrase in NON_BINDING_PHRASES):
         return "analysis"
-    binding_terms = (
-        "place order",
-        "send order",
-        "execute order",
-        "broker",
-        "buy ",
-        "sell ",
-        "주문",
-        "매수",
-        "매도",
-        "집행",
-        "배분 변경",
-        "리밸런싱",
-        "rebalance",
-        "change nav",
-        "nav 변경",
-        "ledger post",
-        "원장 반영",
-        "promote to production",
-        "production promotion",
-        "프로덕션 승격",
-        "deploy strategy",
-        "전략 배포",
-        "실제 거래",
-        "실행해",
-    )
-    return "binding" if any(term in text for term in binding_terms) else "analysis"
+    if non_execution_match(text) is not None:
+        return "analysis"
+    return "binding" if any(term in text for term in BINDING_TERMS) else "analysis"
 
 
 def workflow_mode_from_body(body: str) -> str:
