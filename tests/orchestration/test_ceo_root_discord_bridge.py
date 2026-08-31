@@ -337,6 +337,29 @@ class CeoRootDiscordBridgeTest(unittest.TestCase):
             )
             self.assertNotIn(root["id"], service._pending_langsmith_root_closures)
 
+    def test_monthly_langsmith_limit_drops_observer_retry_without_touching_workflow(self):
+        with tempfile.TemporaryDirectory() as home:
+            service = self.service(home, DeliverySpy())
+            service.client.environment.update(
+                {
+                    "HGFINANCE_LANGSMITH_PUBLISH_ENABLED": "true",
+                    "LANGSMITH_API_KEY": "key-not-printed",
+                }
+            )
+            with patch(
+                "orchestration.llm_observability.langsmith_usage_limit_exhausted",
+                return_value=True,
+            ):
+                service._schedule_langsmith_root_retry(
+                    root_id="root-monthly-limit",
+                    task_id="task-monthly-limit",
+                )
+
+            self.assertNotIn(
+                "root-monthly-limit",
+                service._pending_langsmith_root_closures,
+            )
+
 
 class CeoRootFastPathTest(unittest.TestCase):
     class FastClient(FakeClient):

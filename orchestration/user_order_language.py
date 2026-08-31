@@ -25,6 +25,7 @@ from orchestration.contracts.user_paper_order import (
     CanonicalBasketOrderItem,
     CanonicalPlaceBasketPayload,
     CanonicalPlaceOrderPayload,
+    CanonicalSellPositionPayload,
     DirectiveAction,
     EvidenceField,
     HermesOrderCandidate,
@@ -264,7 +265,30 @@ _SELL_ALL_RE = re.compile(
     rf"(?:(?:보유\s*)?계좌(?:에|의|에서)?\s*)?"
     rf"(?:(?:보유(?:한|\s*중인)?|있는)\s*)?"
     rf"(?:(?:종목|주식)\s*)?"
-    rf"{_AGGREGATE_SCOPE_PHRASE}\s*{_SELL_VERB}"
+    # SELL_ALL is always a MARKET liquidation, so an explicit 시장가 marker
+    # only restates what the action already means and must not push the
+    # sentence out of the grammar ("보유종목 전량 시장가 매도해줘" clarified
+    # before, 2026-08-31).  지정가 stays out: a limit sell-all is unsupported.
+    rf"{_AGGREGATE_SCOPE_PHRASE}\s*(?:시장가(?:로|에)?\s*)?{_SELL_VERB}"
+    rf"(?:\s*(?:주세요|줘))?[.!]*\s*$"
+)
+# "보유중인 한온시스템 전부 다 시장가 매도해줘" - liquidate ONE named holding.
+# The instrument token must not swallow a scope word or the holdings noun that
+# `_SELL_ALL_RE` owns, so SELL_ALL is always tried first and those words are
+# excluded here.  Like SELL_ALL this is MARKET-only: 지정가 stays unsupported.
+_SELL_POSITION_RE = re.compile(
+    rf"^\s*(?:(?:내|현재)\s*)?"
+    rf"(?:(?:보유\s*)?계좌(?:에|의|에서)?\s*)?"
+    rf"(?:(?:보유(?:한|\s*중인)?|있는)\s*)?"
+    rf"(?!{_AGGREGATE_SCOPE_WORD}{_WORD_RIGHT})(?!(?:종목|주식){_WORD_RIGHT})"
+    # Lazy so a trailing particle stays out of the mention ("삼성전자를" ->
+    # "삼성전자").  No 종목/주식 slot here: allowing one would let the engine
+    # backtrack "보유중인 종목 ..." into instrument="중인" and place a real
+    # order against a fragment of the honorific prefix.
+    rf"(?P<instrument>[가-힣A-Za-z0-9][가-힣A-Za-z0-9.\-]{{0,39}}?)"
+    rf"(?:은|는|을|를)?\s*"
+    rf"{_AGGREGATE_SCOPE_PHRASE}\s*"
+    rf"(?:시장가(?:로|에)?\s*)?{_SELL_VERB}"
     rf"(?:\s*(?:주세요|줘))?[.!]*\s*$"
 )
 _CANCEL_ALL_RE = re.compile(
@@ -350,6 +374,13 @@ _BASKET_NOTIONAL_RE = re.compile(
     rf"(?<![가-힣A-Za-z0-9,.])(?P<token>{_ARABIC_INTEGER})\s*만\s*원\s*씩"
     r"(?![가-힣A-Za-z0-9])"
 )
+# "300주씩" - one share count applied to every listed member.  The KRW form
+# (`100만원씩`) already existed; leaving the share form out made an otherwise
+# identical sentence clarify (2026-08-31).
+_BASKET_SHARE_QUANTITY_RE = re.compile(
+    rf"(?<![가-힣A-Za-z0-9,.])(?P<token>{_ARABIC_INTEGER})\s*(?:주식|주)\s*씩"
+    r"(?![가-힣A-Za-z0-9])"
+)
 _BASKET_QUANTITY_MEMBER_RE = re.compile(
     rf"(?P<instrument>(?:[0-9A-Za-z]{{6}}|[가-힣A-Za-z]"
     rf"[가-힣A-Za-z0-9&+._\- ]{{0,79}}?))\s+"
@@ -360,6 +391,19 @@ _BASKET_MEMBER_NOTIONAL_RE = re.compile(
     rf"[가-힣A-Za-z0-9&+._\- ]{{0,79}}?))\s+"
     rf"(?P<token>{_INTEGER_TOKEN})\s*만\s*원(?:\s*어치)?\s*"
 )
+# In ``A, B 각 300만원씩`` the final ``각`` is an allocation particle, not
+# part of the final instrument mention.  Keep this normalization limited to
+# the final member of a shared-allocation grammar so exact catalog resolution
+# remains fail-closed for every other instrument text.
+_SHARED_ALLOCATION_PARTICLE_RE = re.compile(r"\s+각$")
+
+
+def normalize_shared_allocation_instrument_mention(mention: str) -> str:
+    """Remove only the final ``각`` particle from shared-allocation syntax."""
+
+    return _SHARED_ALLOCATION_PARTICLE_RE.sub("", mention).strip()
+
+
 _LIVE_MODE_RE = re.compile(
     r"(?:(?<![A-Za-z0-9_])live(?![A-Za-z0-9_])|live\s*account|real[-\s]*money|real\s*account|"
     r"production\s*broker|라이브|실\s*계좌|실전\s*(?:투자|거래)?|"
@@ -697,8 +741,8 @@ def _basket_match(raw_text: str) -> _BasketMatch | None:
     market_markers = list(_MARKET_RE.finditer(raw_text))
     if (
         len(amounts) != 1
-        or len(buys) != 1
-        or sells
+        or bool(buys) == bool(sells)
+        or len(buys) + len(sells) != 1
         or len(market_markers) > 1
         or _QUANTITY_RE.search(raw_text)
         or _LIMIT_MARKER_RE.search(raw_text)
@@ -706,7 +750,7 @@ def _basket_match(raw_text: str) -> _BasketMatch | None:
     ):
         return None
     amount_match = amounts[0]
-    action_match = buys[0]
+    action_match = buys[0] if buys else sells[0]
     if action_match.start() < amount_match.end():
         return None
     try:
@@ -733,9 +777,11 @@ def _basket_match(raw_text: str) -> _BasketMatch | None:
         return None
 
     instruments: list[str] = []
-    for index, part in enumerate(list_text.split(",")):
+    parts = list_text.split(",")
+    for index, part in enumerate(parts):
         mention = part.strip()
-        if index == len(list_text.split(",")) - 1:
+        if index == len(parts) - 1:
+            mention = normalize_shared_allocation_instrument_mention(mention)
             mention = mention.rstrip("을를").strip()
         if (
             not mention
@@ -763,7 +809,7 @@ def _basket_match(raw_text: str) -> _BasketMatch | None:
         amount_match=amount_match,
         quantities=(),
         notionals_krw=(),
-        side=OrderSide.BUY,
+        side=OrderSide.BUY if buys else OrderSide.SELL,
         action_match=action_match,
         market_match=market_markers[0] if market_markers else None,
     )
@@ -854,6 +900,96 @@ def _member_notional_basket_match(raw_text: str) -> _BasketMatch | None:
         quantities=(),
         notionals_krw=tuple(notionals_krw),
         side=OrderSide.BUY,
+        action_match=action_match,
+        market_match=market_markers[0] if market_markers else None,
+    )
+
+
+def _shared_quantity_basket_match(raw_text: str) -> _BasketMatch | None:
+    """Return a strict same-direction basket that gives every member N shares.
+
+    This is the share-count twin of ``_basket_match``'s ``N만원씩``: the list is
+    still two to twenty exact catalog mentions and no symbol is resolved here.
+    Unlike the KRW form it allows SELL, because an explicit share count needs
+    no price to be exact.
+    """
+
+    amounts = list(_BASKET_SHARE_QUANTITY_RE.finditer(raw_text))
+    buys = list(_BUY_RE.finditer(raw_text))
+    sells = list(_SELL_RE.finditer(raw_text))
+    market_markers = list(_MARKET_RE.finditer(raw_text))
+    if (
+        len(amounts) != 1
+        or bool(buys) == bool(sells)
+        or len(buys) + len(sells) != 1
+        or len(market_markers) > 1
+        or _LIMIT_MARKER_RE.search(raw_text)
+        or _WON_AMOUNT_RE.search(raw_text)
+        or _BASKET_NOTIONAL_RE.search(raw_text)
+    ):
+        return None
+    amount_match = amounts[0]
+    action_match = buys[0] if buys else sells[0]
+    side = OrderSide.BUY if buys else OrderSide.SELL
+    if action_match.start() < amount_match.end():
+        return None
+    try:
+        quantity = parse_strict_positive_integer(
+            amount_match.group("token"), max_value=MAX_QUANTITY
+        )
+    except ValueError:
+        return None
+
+    leading = _LEADING_ORDER_ADDRESSEE_RE.match(raw_text)
+    list_start = leading.end() if leading is not None else 0
+    while list_start < amount_match.start() and raw_text[list_start].isspace():
+        list_start += 1
+    noun_wrapper = re.match(
+        r"(?:종목|주식)\s+", raw_text[list_start : amount_match.start()]
+    )
+    if noun_wrapper is not None:
+        list_start += noun_wrapper.end()
+    list_end = amount_match.start()
+    while list_end > list_start and raw_text[list_end - 1] in " \t,":
+        list_end -= 1
+    if list_end <= list_start:
+        return None
+    list_text = raw_text[list_start:list_end]
+    if "," not in list_text:
+        return None
+
+    parts = list_text.split(",")
+    instruments: list[str] = []
+    for index, part in enumerate(parts):
+        mention = part.strip()
+        if index == len(parts) - 1:
+            mention = normalize_shared_allocation_instrument_mention(mention)
+            mention = mention.rstrip("을를").strip()
+        if (
+            not mention
+            or len(mention) > 80
+            or _INSTRUMENT_RE.fullmatch(mention) is None
+        ):
+            return None
+        numeric_code_with_name = re.fullmatch(
+            r"(?P<code>\d{6})\s+[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,72}",
+            mention,
+        )
+        instruments.append(
+            numeric_code_with_name.group("code")
+            if numeric_code_with_name is not None
+            else mention
+        )
+    if not 2 <= len(instruments) <= 20 or len(set(instruments)) != len(instruments):
+        return None
+    return _BasketMatch(
+        instruments=tuple(instruments),
+        list_span=(list_start, list_end),
+        amount=None,
+        amount_match=None,
+        quantities=tuple([quantity] * len(instruments)),
+        notionals_krw=(),
+        side=side,
         action_match=action_match,
         market_match=market_markers[0] if market_markers else None,
     )
@@ -1101,6 +1237,80 @@ def _aggregate_match(
     return None
 
 
+def _sell_position_match(
+    raw_text: str,
+) -> tuple[re.Match[str], re.Match[str], re.Match[str]] | None:
+    """Locate a single-holding liquidation: (instrument, action, scope).
+
+    Account-wide sentences win outright: the instrument slot would otherwise
+    capture the holdings noun of a SELL_ALL sentence ("보유종목") and liquidate
+    one imaginary symbol instead of the book.
+    """
+
+    # Keep the two liquidation scopes disjoint even when this helper is
+    # called directly instead of through verify_order_candidate.
+    if _aggregate_match(raw_text) is not None:
+        return None
+    sentence = _SELL_POSITION_RE.fullmatch(raw_text)
+    if sentence is None:
+        return None
+    actions = list(_AGGREGATE_SELL_RE.finditer(raw_text))
+    scopes = list(_AGGREGATE_SCOPE_RE.finditer(raw_text))
+    if len(actions) != 1 or len(scopes) != 1:
+        return None
+    return sentence, actions[0], scopes[0]
+
+
+def _verify_sell_position(
+    raw_text: str,
+    digest: str,
+    candidate: HermesOrderCandidate,
+    evidence: Mapping[EvidenceField, TextEvidence],
+    matched: tuple[re.Match[str], re.Match[str], re.Match[str]],
+) -> OrderLanguageResult:
+    sentence, action_match, scope_match = matched
+    if candidate.action is not DirectiveAction.SELL_POSITION:
+        return _clarify(digest, OrderReasonCode.CANDIDATE_MISMATCH)
+    instrument_span = sentence.span("instrument")
+    mention = raw_text[instrument_span[0] : instrument_span[1]]
+    if candidate.instrument_mention != mention:
+        return _clarify(digest, OrderReasonCode.CANDIDATE_MISMATCH)
+    if set(evidence) != {
+        EvidenceField.ACTION,
+        EvidenceField.AGGREGATE_SCOPE,
+        EvidenceField.INSTRUMENT,
+    }:
+        return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
+    if not _expected_evidence(
+        evidence,
+        field=EvidenceField.ACTION,
+        span=action_match.span(),
+        normalized=DirectiveAction.SELL_POSITION.value,
+        alternative_spans=(
+            _literal_subspan(action_match, "매도", "팔아", "팔", "파"),
+        ),
+    ) or not _expected_evidence(
+        evidence,
+        field=EvidenceField.AGGREGATE_SCOPE,
+        span=scope_match.span(),
+        normalized="ALL",
+        alternative_spans=_scope_word_spans(scope_match),
+    ) or not _expected_evidence(
+        evidence,
+        field=EvidenceField.INSTRUMENT,
+        span=instrument_span,
+        normalized=mention,
+    ):
+        return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
+
+    return VerifiedPaperDirective(
+        raw_text_sha256=digest,
+        action=DirectiveAction.SELL_POSITION,
+        payload=CanonicalSellPositionPayload(instrument_mention=mention),
+        evidence=candidate.evidence,
+    )
+
+
 def _verify_aggregate(
     raw_text: str,
     digest: str,
@@ -1329,7 +1539,12 @@ def _verify_place_order(
         return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
     if candidate.side is not side or candidate.quantity != str(quantity):
         return _clarify(digest, OrderReasonCode.CANDIDATE_MISMATCH)
-    if candidate.order_type is not order_type or candidate.limit_price != (
+    candidate_type_matches = candidate.order_type is order_type or (
+        candidate.order_type is None
+        and order_type is OrderType.MARKET
+        and order_type_span is None
+    )
+    if not candidate_type_matches or candidate.limit_price != (
         str(limit_price) if limit_price is not None else None
     ):
         return _clarify(digest, OrderReasonCode.CANDIDATE_MISMATCH)
@@ -1440,6 +1655,7 @@ def verify_order_candidate(
     basket = (
         _basket_match(raw_text)
         or _member_notional_basket_match(raw_text)
+        or _shared_quantity_basket_match(raw_text)
         or _quantity_basket_match(raw_text)
     )
     if _NOTIONAL_RE.search(raw_text) and basket is None:
@@ -1454,7 +1670,12 @@ def verify_order_candidate(
 
     aggregate = _aggregate_match(raw_text)
     if structured.decision is not CandidateDecision.EXECUTE:
-        if basket or aggregate or _ORDER_CONTEXT_RE.search(raw_text):
+        if (
+            basket
+            or aggregate
+            or _sell_position_match(raw_text) is not None
+            or _ORDER_CONTEXT_RE.search(raw_text)
+        ):
             return _clarify(digest, OrderReasonCode.HERMES_DID_NOT_PROPOSE_EXECUTION)
         return _not_order(digest, OrderReasonCode.NO_ORDER_COMMAND)
 
@@ -1467,6 +1688,11 @@ def verify_order_candidate(
         return _verify_aggregate(raw_text, digest, structured, evidence, aggregate)
     if basket is not None:
         return _verify_basket(raw_text, digest, structured, evidence, basket)
+    sell_position = _sell_position_match(raw_text)
+    if sell_position is not None:
+        return _verify_sell_position(
+            raw_text, digest, structured, evidence, sell_position
+        )
     return _verify_place_order(raw_text, digest, structured, evidence)
 
 
@@ -1560,6 +1786,7 @@ def _deterministic_basket_candidate(raw_text: str) -> HermesOrderCandidate | Non
     basket = (
         _basket_match(raw_text)
         or _member_notional_basket_match(raw_text)
+        or _shared_quantity_basket_match(raw_text)
         or _quantity_basket_match(raw_text)
     )
     if basket is None:
@@ -1621,13 +1848,48 @@ def _deterministic_basket_candidate(raw_text: str) -> HermesOrderCandidate | Non
     )
 
 
+def _deterministic_aggregate_candidate(raw_text: str) -> HermesOrderCandidate | None:
+    """Build exact evidence for one strict account-wide PAPER command."""
+
+    aggregate = _aggregate_match(raw_text)
+    if aggregate is None:
+        return None
+    action, action_match, scope_match = aggregate
+    candidate = HermesOrderCandidate(
+        raw_text_sha256=raw_text_sha256(raw_text),
+        decision=CandidateDecision.EXECUTE,
+        action=action,
+        evidence=(
+            TextEvidence(
+                field=EvidenceField.ACTION,
+                start=action_match.start(),
+                end=action_match.end(),
+                text=action_match.group(0),
+                normalized=action.value,
+            ),
+            TextEvidence(
+                field=EvidenceField.AGGREGATE_SCOPE,
+                start=scope_match.start(),
+                end=scope_match.end(),
+                text=scope_match.group(0),
+                normalized="ALL",
+            ),
+        ),
+    )
+    return (
+        candidate
+        if isinstance(verify_order_candidate(raw_text, candidate), VerifiedPaperDirective)
+        else None
+    )
+
+
 def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
-    """Build exact evidence for one unambiguous place order without an LLM.
+    """Build exact evidence for one unambiguous PAPER command without an LLM.
 
     This helper grants no authority: callers must still pass its output through
     :func:`verify_order_candidate` and the authenticated PAPER admission gate.
-    It intentionally returns ``None`` for aggregates, advice, unsafe language,
-    malformed numbers, and any residual text it cannot account for exactly.
+    It intentionally returns ``None`` for advice, unsafe language, malformed
+    numbers, and any residual text it cannot account for exactly.
     """
 
     if (
@@ -1640,9 +1902,12 @@ def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
         or _APPROXIMATE_RE.search(raw_text)
         or _COMPOUND_RE.search(raw_text)
         or re.search(r"(?<!\d)[.!]\s*\S", raw_text)
-        or _aggregate_match(raw_text) is not None
     ):
         return None
+
+    aggregate_candidate = _deterministic_aggregate_candidate(raw_text)
+    if aggregate_candidate is not None:
+        return aggregate_candidate
 
     basket_candidate = _deterministic_basket_candidate(raw_text)
     if basket_candidate is not None:

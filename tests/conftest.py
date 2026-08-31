@@ -51,6 +51,8 @@ def disable_external_langsmith_tracing(monkeypatch: pytest.MonkeyPatch):
     # exhausted tenant. Tests must clear it between mocked quota scenarios.
     with observability._LANGSMITH_QUOTA_LOCK:
         observability._LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
+        observability._LANGSMITH_USAGE_LIMITED = False
     yield
     with observability._LANGSMITH_QUOTA_LOCK:
         observability._LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
+        observability._LANGSMITH_USAGE_LIMITED = False

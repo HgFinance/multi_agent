@@ -174,6 +174,13 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
         if sizing.type.value == "ALL"
         else f"최대 {sizing.value:,}원어치 (실행 시 수량 산정)"
         if sizing.type.value == "NOTIONAL_KRW"
+        else (
+            f"가용 현금의 {sizing.value * 100}% 이내, "
+            f"최대 {sizing.cap_krw:,}원 (실행 시 수량 산정)"
+        )
+        if sizing.type.value == "AVAILABLE_CASH_PERCENT_CAPPED"
+        else f"종목 비중 {sizing.value * 100}%까지 초과분 매도"
+        if sizing.type.value == "TARGET_POSITION_WEIGHT"
         else f"{sizing.value} ({sizing.type.value})"
     )
     expiry_kst = spec.expires_at.astimezone(timezone(timedelta(hours=9)))
@@ -235,6 +242,9 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
             "side": spec.action.side.value,
             "sizing_type": sizing.type.value,
             "sizing_value": str(sizing.value) if sizing.value is not None else None,
+            "sizing_cap_krw": (
+                str(sizing.cap_krw) if sizing.cap_krw is not None else None
+            ),
             "order_type": spec.action.order_type,
             "limit_price": (
                 str(spec.action.limit_price)

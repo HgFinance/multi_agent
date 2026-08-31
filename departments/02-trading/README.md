@@ -52,10 +52,12 @@ Hermes는 사용자의 authority를 소유하지 않는다. 대화 원문을 자
 상태는 `RECEIVED | RUNNING | IN_PROGRESS | PARTIAL | COMPLETED | FAILED | UNKNOWN`만
 사용한다.
 
-- `SELL_ALL`은 client holdings를 신뢰하지 않는다. LS PAPER에서 대사된 canonical
-  accounting position과 open SELL reservation을 같은 snapshot에서 다시
-  읽고, 양수 sellable quantity만 `reduce_only` SELL 자식 주문으로 만든다. 현재 KRX
-  주식 long-only PAPER 범위이므로 신규/확대 short와 자동 short cover는 하지 않는다.
+- `SELL_ALL`은 client holdings를 신뢰하지 않는다. 먼저 LS PAPER 계좌 `t0424`
+  체결기준 snapshot을 한 번 읽고, 응답의 종목코드로 Fund/Book의 canonical instrument를
+  매칭한다. snapshot에 있는 각 종목의 broker sellable quantity를 lot size에 맞춰
+  확정한 뒤 하나의 directive 안에서 `reduce_only` SELL child를 종목별 순차 제출한다.
+  원장 projection은 체결 반영용이며, 최신 broker 보유종목 목록을 누락시키는 기준으로
+  사용하지 않는다. 현재 KRX 주식 long-only PAPER 범위이므로 신규/확대 short와 자동 short cover는 하지 않는다.
 - `CANCEL_ALL`은 canonical open PAPER orders만 대상으로 한다. snapshot 이후 이미
   체결·취소된 주문은 실제 자식 결과로 드러나며 성공으로 추정하지 않는다.
 - 모든 자식이 성공해야 `COMPLETED`다. 성공과 실패가 섞이면 `PARTIAL`, 전부 실패하면
@@ -63,9 +65,10 @@ Hermes는 사용자의 authority를 소유하지 않는다. 대화 원문을 자
   `COMPLETED`로 표시하지 않는다.
 - PAPER broker `ACKNOWLEDGED`는 active order 접수 사실이므로 parent는
   `IN_PROGRESS`다. ACK만으로 체결·취소 완료를 만들지 않는다.
-- `SELL_ALL`의 빈 `legs`가 no-op `COMPLETED`인 경우는 canonical 양수 position과
-  open SELL reservation이 모두 0일 때뿐이다. `CANCEL_ALL`도 canonical open PAPER
-  order가 0건임을 확인해야 빈 `legs` 완료다.
+- `SELL_ALL`의 빈 `legs`가 no-op `COMPLETED`인 경우는 외부 LS PAPER 모드에서는
+  최신 `t0424`의 양수 매도가능 보유분과 open SELL reservation이 모두 0일 때뿐이다.
+  로컬 PAPER 모드에서는 canonical 양수 position과 open SELL reservation이 모두 0이어야 한다.
+  `CANCEL_ALL`도 canonical open PAPER order가 0건임을 확인해야 빈 `legs` 완료다.
 
 배포된 canonical 경제 계정은 LS증권 모의투자(`LS PAPER`) 계좌다. Trading의
 `ls-paper` adapter만 PAPER 전용 credential로 주문·취소·상태조회를 수행하며 LIVE

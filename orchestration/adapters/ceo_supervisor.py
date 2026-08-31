@@ -8622,6 +8622,17 @@ class CeoSupervisorService:
 
         if not self._langsmith_publisher_configured():
             return
+        # A monthly unique-trace exhaustion cannot be healed by a short retry.
+        # Drop the observer-only recovery request while preserving the durable
+        # workflow result and QA WARN semantics.
+        from orchestration.llm_observability import langsmith_usage_limit_exhausted
+
+        if langsmith_usage_limit_exhausted():
+            logger.warning(
+                "langsmith-root-close-retry-suppressed root=%s reason=monthly_usage_limit",
+                str(root_id or ""),
+            )
+            return
         root_key = str(root_id or "").strip()
         if not root_key:
             return
@@ -8655,6 +8666,18 @@ class CeoSupervisorService:
 
         show = getattr(self.client, "show", None)
         if not callable(show):
+            return 0
+        from orchestration.llm_observability import langsmith_usage_limit_exhausted
+
+        if langsmith_usage_limit_exhausted():
+            with self._pending_langsmith_root_closures_lock:
+                discarded = len(self._pending_langsmith_root_closures)
+                self._pending_langsmith_root_closures.clear()
+            if discarded:
+                logger.warning(
+                    "langsmith-root-close-retries-discarded count=%d reason=monthly_usage_limit",
+                    discarded,
+                )
             return 0
         now = time.monotonic()
         with self._pending_langsmith_root_closures_lock:

@@ -124,7 +124,7 @@ def submit_user_directive(
                 "Content-Type": "application/json",
             },
             follow_redirects=False,
-            timeout=httpx.Timeout(5.0, connect=2.0),
+            timeout=httpx.Timeout(30.0, connect=2.0),
         )
     except httpx.RequestError as exc:
         raise TradingProxyError(
@@ -144,7 +144,7 @@ def get_user_directive(
             f"{TRADING_DIRECTIVE_STATUS_PATH.format(directive_id=directive_id)}",
             headers={"Authorization": f"Bearer {proof}"},
             follow_redirects=False,
-            timeout=httpx.Timeout(5.0, connect=2.0),
+            timeout=httpx.Timeout(30.0, connect=2.0),
         )
     except httpx.RequestError as exc:
         raise TradingProxyError(

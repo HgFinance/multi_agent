@@ -218,9 +218,10 @@ def _timeout() -> float:
 # `/ui/ceo/tasks`는 이걸 root 개수만큼 반복하므로, root 20개면 동일한
 # `list --json`만 20번 돌고 전체 프로세스는 수백 개가 된다.
 #
-# 짧은 TTL 캐시가 이 중복을 걷어낸다. 주 목적은 **한 요청 안의 중복 제거**이고,
-# 화면 폴링 주기(본부 진행 10초 / 최종 답변 15초)보다 TTL이 훨씬 짧아 다음
-# polling은 항상 새 값을 받는다 - 진행 상황이 캐시 때문에 멈춰 보이지 않는다.
+# 짧은 TTL 캐시가 이 중복을 걷어낸다. 화면 폴링 주기(본부 진행 10초 / 최종
+# 답변 15초)와 맞춘 10초 기본 TTL로 같은 폴링 창의 중복 CLI 호출을 줄인다.
+# 작업 진행은 다음 폴링에서 반영되며, 캐시는 읽기 경로에만 적용되므로 실행
+# 상태를 바꾸거나 주문 경계를 우회하지 않는다.
 # 회계 스냅샷이 쓰는 2초 TTL과 같은 패턴이다(`apps/api/main.py`).
 #
 # 캐시하지 않는 것: 쓰기 명령(`archive`)과 **예외**. 실패를 캐시하면 일시적인
@@ -257,9 +258,9 @@ def _cache_ttl() -> float:
     """0이면 캐시를 끈다. 결정론이 필요한 테스트가 그렇게 쓴다."""
 
     try:
-        return max(0.0, float(os.getenv("KANBAN_READ_CACHE_TTL_SECONDS", "3")))
+        return max(0.0, float(os.getenv("KANBAN_READ_CACHE_TTL_SECONDS", "10")))
     except ValueError:
-        return 3.0
+        return 10.0
 
 
 def _terminal_cache_ttl() -> float:

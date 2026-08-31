@@ -61,6 +61,7 @@ def _directive_response(
         ("삼성전자 10주 시장가로 사줘", "PLACE_ORDER", "삼성전자", "BUY", "MARKET"),
         ("005930 5주 70,000원에 매수", "PLACE_ORDER", "005930", "BUY", "LIMIT"),
         ("현대자동차 3주 시장가 매도해", "PLACE_ORDER", "현대자동차", "SELL", "MARKET"),
+        ("현대자동차 3주 매도해", "PLACE_ORDER", "현대자동차", "SELL", "MARKET"),
         ("보유종목 전량 매도해", "SELL_ALL", None, None, None),
         ("전량 매도해", "SELL_ALL", None, None, None),
         ("미체결 주문 전부 취소", "CANCEL_ALL", None, None, None),
@@ -120,6 +121,32 @@ def test_deterministic_parser_accepts_exact_same_notional_buy_basket() -> None:
             },
         ]
     }
+
+
+def test_deterministic_parser_accepts_shared_allocation_qualifier_after_final_name() -> None:
+    action, payload = user_orders.parse_user_order_query(
+        "삼성전자, sk하이닉스, 삼성전자우, sk스퀘어, 삼성전기, "
+        "lg에너지솔루션, 현대차, 삼성바이오로직스, kb금융, 삼성생명, "
+        "삼성물산, 한화에어로스페이스, 두산에너빌리티 각 300만원씩 시장가 매수"
+    )
+
+    assert action is user_orders.DirectiveAction.PLACE_BASKET
+    assert [item["symbol"] for item in payload["orders"]] == [
+        "삼성전자",
+        "sk하이닉스",
+        "삼성전자우",
+        "sk스퀘어",
+        "삼성전기",
+        "lg에너지솔루션",
+        "현대차",
+        "삼성바이오로직스",
+        "kb금융",
+        "삼성생명",
+        "삼성물산",
+        "한화에어로스페이스",
+        "두산에너빌리티",
+    ]
+    assert all(item["notional_krw"] == "3000000" for item in payload["orders"])
 
 
 @pytest.mark.parametrize(
@@ -702,6 +729,57 @@ def test_place_order_resolves_canonical_symbol_and_never_calls_risk() -> None:
     assert not any("risk" in name.casefold() for name in imports)
 
 
+def test_sell_position_resolves_named_holding_and_preserves_payload() -> None:
+    captured: dict[str, object] = {}
+    raw = _directive_response(action="SELL_POSITION")
+
+    def submit(**kwargs):
+        captured.update(kwargs)
+        body = kwargs["body"]
+        raw["payload_sha256"] = service_token.payload_sha256(body["payload"])
+        raw["instruction_ref"] = body["instruction_ref"]
+        return raw
+
+    with (
+        patch.object(
+            user_orders,
+            "require_trading_book_access",
+            return_value={
+                "user_id": str(SUBJECT),
+                "fund_id": str(FUND_ID),
+                "book_id": str(BOOK_ID),
+                "role": "TRADER",
+            },
+        ),
+        patch.object(
+            user_orders,
+            "resolve_active_trading_instrument",
+            return_value={"instrument_id": str(INSTRUMENT_ID), "symbol": "018880"},
+        ) as resolve,
+        patch.object(user_orders, "issue_trading_directive_proof", return_value="proof"),
+        patch.object(user_orders, "submit_user_directive", side_effect=submit),
+    ):
+        response = user_orders.submit_verified_paper_directive(
+            subject=str(SUBJECT),
+            fund_id=str(FUND_ID),
+            book_id=str(BOOK_ID),
+            action="SELL_POSITION",
+            payload={"instrument_mention": "한온시스템"},
+            idempotency_key="request-0001",
+        )
+
+    assert response.action is user_orders.DirectiveAction.SELL_POSITION
+    resolve.assert_called_once_with("한온시스템", None)
+    assert captured["body"]["payload"] == {
+        "instrument_id": str(INSTRUMENT_ID),
+        "symbol": "018880",
+        "side": "SELL",
+        "order_type": "MARKET",
+        "time_in_force": "DAY",
+        "reduce_only": True,
+    }
+
+
 def test_place_basket_resolves_each_member_before_one_signed_submission() -> None:
     captured: dict[str, object] = {}
     raw = _directive_response(action="PLACE_BASKET", priority=1000)
@@ -856,6 +934,32 @@ def test_invalid_upstream_state_fails_closed() -> None:
     with pytest.raises(HTTPException) as error:
         user_orders._validated_response(raw)
     assert error.value.status_code == 502
+
+
+def test_deterministic_parser_accepts_shared_allocation_qualifier_after_final_name() -> None:
+    action, payload = user_orders.parse_user_order_query(
+        "삼성전자, sk하이닉스, 삼성전자우, sk스퀘어, 삼성전기, "
+        "lg에너지솔루션, 현대차, 삼성바이오로직스, kb금융, 삼성생명, "
+        "삼성물산, 한화에어로스페이스, 두산에너빌리티 각 300만원씩 시장가 매수"
+    )
+
+    assert action is user_orders.DirectiveAction.PLACE_BASKET
+    assert [item["symbol"] for item in payload["orders"]] == [
+        "삼성전자",
+        "sk하이닉스",
+        "삼성전자우",
+        "sk스퀘어",
+        "삼성전기",
+        "lg에너지솔루션",
+        "현대차",
+        "삼성바이오로직스",
+        "kb금융",
+        "삼성생명",
+        "삼성물산",
+        "한화에어로스페이스",
+        "두산에너빌리티",
+    ]
+    assert all(item["notional_krw"] == "3000000" for item in payload["orders"])
 
 
 @pytest.mark.parametrize(

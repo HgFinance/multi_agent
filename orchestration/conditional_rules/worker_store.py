@@ -18,7 +18,13 @@ from psycopg2.extras import Json, register_uuid
 
 from .contracts import ConditionalRuleSpec, expression_fingerprint, rule_fingerprint
 from .identities import evaluation_id, execution_idempotency_key, trigger_id
-from .semantic import TrailingStopParameters, trailing_stop_parameters, validate_rule_spec
+from .semantic import (
+    TemporalSequenceParameters,
+    TrailingStopParameters,
+    temporal_sequence_parameters,
+    trailing_stop_parameters,
+    validate_rule_spec,
+)
 
 register_uuid()
 
@@ -53,6 +59,7 @@ class TrailingStopState:
     high_price: Decimal
     armed_at: datetime | None
     last_observed_at: datetime
+    baseline_average_entry_price: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,91 @@ class TrailingStopObservation:
     state: TrailingStopState
     condition_result: bool
     ignored_stale_quote: bool = False
+
+
+@dataclass(frozen=True)
+class TemporalSequenceState:
+    armed_at: datetime
+    remaining_bars: int
+    last_observed_at: datetime
+
+
+@dataclass(frozen=True)
+class TemporalSequenceObservation:
+    state: TemporalSequenceState | None
+    condition_result: bool
+    cancelled: bool = False
+    window_expired: bool = False
+    ignored_stale_bar: bool = False
+
+
+def advance_temporal_sequence(
+    state: TemporalSequenceState | None,
+    *,
+    parameters: TemporalSequenceParameters,
+    arm_result: bool,
+    trigger_result: bool,
+    cancel_result: bool,
+    observed_at: datetime,
+) -> TemporalSequenceObservation:
+    """Advance one durable arm -> trigger/cancel completed-bar sequence."""
+
+    if observed_at.tzinfo is None:
+        raise RuleWorkerStoreError(
+            "TEMPORAL_SEQUENCE_TIME_INVALID",
+            "temporal sequence bar time must include timezone",
+        )
+    if state is not None and observed_at <= state.last_observed_at:
+        return TemporalSequenceObservation(
+            state=state,
+            condition_result=False,
+            ignored_stale_bar=True,
+        )
+    if state is None:
+        return TemporalSequenceObservation(
+            state=(
+                TemporalSequenceState(
+                    armed_at=observed_at,
+                    remaining_bars=parameters.window_bars,
+                    last_observed_at=observed_at,
+                )
+                if arm_result
+                else None
+            ),
+            condition_result=False,
+        )
+    # Cancellation wins on a bar where trigger and cancellation are both true.
+    # This is the fail-closed interpretation of "그 전에 ... 조건 취소".
+    if cancel_result:
+        return TemporalSequenceObservation(
+            state=None,
+            condition_result=False,
+            cancelled=True,
+        )
+    if trigger_result:
+        return TemporalSequenceObservation(
+            state=TemporalSequenceState(
+                armed_at=state.armed_at,
+                remaining_bars=state.remaining_bars,
+                last_observed_at=observed_at,
+            ),
+            condition_result=True,
+        )
+    remaining = state.remaining_bars - 1
+    if remaining <= 0:
+        return TemporalSequenceObservation(
+            state=None,
+            condition_result=False,
+            window_expired=True,
+        )
+    return TemporalSequenceObservation(
+        state=TemporalSequenceState(
+            armed_at=state.armed_at,
+            remaining_bars=remaining,
+            last_observed_at=observed_at,
+        ),
+        condition_result=False,
+    )
 
 
 def advance_trailing_stop(
@@ -88,7 +180,11 @@ def advance_trailing_stop(
             "TRAILING_STOP_PRICE_INVALID",
             "trailing stop requires a positive finite last price",
         )
-    if parameters.activation_return is not None and (
+    requires_cost_basis = (
+        parameters.activation_return is not None
+        or parameters.drawdown_mode == "RETURN_POINTS"
+    )
+    if requires_cost_basis and (
         not average_entry_price.is_finite() or average_entry_price <= 0
     ):
         raise RuleWorkerStoreError(
@@ -103,23 +199,35 @@ def advance_trailing_stop(
         )
     high_price = max(state.high_price, last_price) if state is not None else last_price
     armed_at = state.armed_at if state is not None else None
+    baseline_average_entry_price = (
+        state.baseline_average_entry_price if state is not None else None
+    )
+    if parameters.drawdown_mode == "RETURN_POINTS" and baseline_average_entry_price is None:
+        baseline_average_entry_price = average_entry_price
     if armed_at is None and (
         parameters.activation_return is None
         or last_price
-        >= average_entry_price * (Decimal("1") + parameters.activation_return)
+        >= (baseline_average_entry_price or average_entry_price)
+        * (Decimal("1") + parameters.activation_return)
     ):
         armed_at = observed_at
     next_state = TrailingStopState(
         high_price=high_price,
         armed_at=armed_at,
         last_observed_at=observed_at,
+        baseline_average_entry_price=baseline_average_entry_price,
     )
+    if parameters.drawdown_mode == "RETURN_POINTS":
+        assert baseline_average_entry_price is not None
+        drawdown_reached = (
+            (last_price / baseline_average_entry_price) - Decimal("1")
+            <= (high_price / baseline_average_entry_price) - Decimal("1") - parameters.drawdown
+        )
+    else:
+        drawdown_reached = last_price <= high_price * (Decimal("1") - parameters.drawdown)
     return TrailingStopObservation(
         state=next_state,
-        condition_result=(
-            armed_at is not None
-            and last_price <= high_price * (Decimal("1") - parameters.drawdown)
-        ),
+        condition_result=armed_at is not None and drawdown_reached,
     )
 
 
@@ -1575,6 +1683,118 @@ class PostgresRuleWorkerStore:
                 retryable=True,
             ) from exc
 
+    def observe_temporal_sequence(
+        self,
+        rule: ActiveRule,
+        *,
+        arm_result: bool,
+        trigger_result: bool,
+        cancel_result: bool,
+        observed_at: datetime,
+    ) -> TemporalSequenceObservation:
+        """Durably advance one bounded completed-bar sequence."""
+
+        parameters = temporal_sequence_parameters(rule.spec.condition)
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select armed_at,remaining_bars,last_observed_at
+                      from execution.conditional_rule_temporal_states
+                     where rule_id=%s and rule_version=%s
+                     for update
+                    """,
+                    (rule.rule_id, rule.rule_version),
+                )
+                row = cursor.fetchone()
+                existing = (
+                    TemporalSequenceState(
+                        armed_at=row[0],
+                        remaining_bars=int(row[1]),
+                        last_observed_at=row[2],
+                    )
+                    if row is not None
+                    else None
+                )
+                observation = advance_temporal_sequence(
+                    existing,
+                    parameters=parameters,
+                    arm_result=arm_result,
+                    trigger_result=trigger_result,
+                    cancel_result=cancel_result,
+                    observed_at=observed_at,
+                )
+                if observation.ignored_stale_bar:
+                    return observation
+                if observation.state is None:
+                    cursor.execute(
+                        """
+                        delete from execution.conditional_rule_temporal_states
+                         where rule_id=%s and rule_version=%s
+                        """,
+                        (rule.rule_id, rule.rule_version),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        insert into execution.conditional_rule_temporal_states (
+                          rule_id,rule_version,armed_at,remaining_bars,last_observed_at
+                        ) values (%s,%s,%s,%s,%s)
+                        on conflict (rule_id,rule_version) do update
+                          set armed_at=excluded.armed_at,
+                              remaining_bars=excluded.remaining_bars,
+                              last_observed_at=excluded.last_observed_at
+                        """,
+                        (
+                            rule.rule_id,
+                            rule.rule_version,
+                            observation.state.armed_at,
+                            observation.state.remaining_bars,
+                            observation.state.last_observed_at,
+                        ),
+                    )
+                if observation.cancelled:
+                    cursor.execute(
+                        """
+                        update execution.conditional_trade_rules
+                           set state='CANCELLED',completed_at=now(),version=version+1
+                         where rule_id=%s and state='ACTIVE' and version=%s
+                        """,
+                        (rule.rule_id, rule.row_version),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuleWorkerStoreError(
+                            "CONDITIONAL_RULE_CONCURRENT_TRANSITION",
+                            "temporal cancellation lost its active rule transition",
+                            retryable=True,
+                        )
+                    self._record_lifecycle_event(
+                        cursor,
+                        event_id=_stable_id(
+                            "tmp_", rule.rule_id, rule.rule_version, "CANCELLED"
+                        ),
+                        rule_id=rule.rule_id,
+                        rule_version=rule.rule_version,
+                        event_type="TEMPORAL_CONDITION_CANCELLED",
+                        from_state="ACTIVE",
+                        to_state="CANCELLED",
+                        payload={
+                            "observed_at": observed_at.isoformat(),
+                            "cancel_condition_result": True,
+                            "order_submitted": False,
+                        },
+                    )
+                return observation
+        except RuleWorkerStoreError:
+            raise
+        except (ValueError, psycopg2.Error) as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not persist temporal sequence state",
+                retryable=True,
+            ) from exc
+
     def observe_trailing_stop(
         self,
         rule: ActiveRule,
@@ -1599,8 +1819,9 @@ class PostgresRuleWorkerStore:
                 cursor.execute(
                     """
                     insert into execution.conditional_rule_trailing_states (
-                      rule_id,rule_version,high_price,armed_at,last_observed_at
-                    ) values (%s,%s,%s,%s,%s)
+                      rule_id,rule_version,high_price,armed_at,last_observed_at,
+                      baseline_average_entry_price
+                    ) values (%s,%s,%s,%s,%s,%s)
                     on conflict (rule_id,rule_version) do nothing
                     """,
                     (
@@ -1609,13 +1830,14 @@ class PostgresRuleWorkerStore:
                         initial.state.high_price,
                         initial.state.armed_at,
                         initial.state.last_observed_at,
+                        initial.state.baseline_average_entry_price,
                     ),
                 )
                 if cursor.rowcount == 1:
                     return initial
                 cursor.execute(
                     """
-                    select high_price,armed_at,last_observed_at
+                    select high_price,armed_at,last_observed_at,baseline_average_entry_price
                       from execution.conditional_rule_trailing_states
                      where rule_id=%s and rule_version=%s
                      for update
@@ -1633,6 +1855,9 @@ class PostgresRuleWorkerStore:
                     high_price=Decimal(str(row[0])),
                     armed_at=row[1],
                     last_observed_at=row[2],
+                    baseline_average_entry_price=(
+                        Decimal(str(row[3])) if row[3] is not None else None
+                    ),
                 )
                 observation = advance_trailing_stop(
                     existing,
@@ -1646,13 +1871,15 @@ class PostgresRuleWorkerStore:
                 cursor.execute(
                     """
                     update execution.conditional_rule_trailing_states
-                       set high_price=%s,armed_at=%s,last_observed_at=%s
+                       set high_price=%s,armed_at=%s,last_observed_at=%s,
+                           baseline_average_entry_price=%s
                      where rule_id=%s and rule_version=%s
                     """,
                     (
                         observation.state.high_price,
                         observation.state.armed_at,
                         observation.state.last_observed_at,
+                        observation.state.baseline_average_entry_price,
                         rule.rule_id,
                         rule.rule_version,
                     ),

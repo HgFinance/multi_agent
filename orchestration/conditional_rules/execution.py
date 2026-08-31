@@ -32,6 +32,7 @@ class ExecutionGuardInput(BaseModel):
     quote_fresh: bool
     current_price: Decimal = Field(gt=0)
     available_cash: Decimal = Field(ge=0)
+    portfolio_nav: Decimal | None = Field(default=None, gt=0)
     position_quantity: Decimal = Field(ge=0)
     sellable_quantity: Decimal = Field(ge=0)
     lot_size: Decimal = Field(default=Decimal("1"), gt=0)
@@ -106,8 +107,26 @@ def guard_rule_execution(
         # quantity.  The user-confirmed KRW value is therefore a ceiling, not
         # a promise to spend an impossible fractional share amount.
         requested = (sizing.value or Decimal("0")) / snapshot.current_price
+    elif sizing.type is SizingType.AVAILABLE_CASH_PERCENT_CAPPED:
+        cash_budget = snapshot.available_cash * (sizing.value or Decimal("0"))
+        notional_cap = sizing.cap_krw or Decimal("0")
+        requested = min(cash_budget, notional_cap) / snapshot.current_price
     elif sizing.type is SizingType.POSITION_PERCENT:
         requested = snapshot.sellable_quantity * (sizing.value or Decimal("0"))
+    elif sizing.type is SizingType.TARGET_POSITION_WEIGHT:
+        if snapshot.portfolio_nav is None:
+            return _deny(
+                "PORTFOLIO_NAV_UNAVAILABLE",
+                "목표 비중 주문에 필요한 포트폴리오 순자산을 확인할 수 없습니다.",
+            )
+        current_market_value = snapshot.position_quantity * snapshot.current_price
+        target_market_value = snapshot.portfolio_nav * (sizing.value or Decimal("0"))
+        if current_market_value <= target_market_value:
+            return _deny(
+                "TARGET_WEIGHT_NOT_EXCEEDED",
+                "현재 종목 비중이 목표 비중을 초과하지 않아 매도하지 않았습니다.",
+            )
+        requested = (current_market_value - target_market_value) / snapshot.current_price
     elif sizing.type is SizingType.ALL:
         requested = snapshot.sellable_quantity
     else:  # pragma: no cover - enum and schema make this unreachable.

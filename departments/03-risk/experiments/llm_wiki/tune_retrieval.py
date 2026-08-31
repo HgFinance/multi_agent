@@ -38,14 +38,19 @@ def _recall(pages_visited: list[str], gold_page_ids: list[str]) -> float:
 
 
 def eval_config(
-    questions: list[dict[str, Any]], index: BM25Index, use_keyword: bool, top_k: int, tmax: int
+    questions: list[dict[str, Any]],
+    index: BM25Index,
+    use_keyword: bool,
+    top_k: int,
+    tmax: int,
+    as_of: str,
 ) -> dict[str, Any]:
     recalls_b, recalls_c, ctx_b, ctx_c = [], [], [], []
     for q in questions:
         query, gold = q["query"], q["gold_page_ids"]
         bm25_seeds = [pid for pid, _score in index.score(query, top_k=top_k)]
 
-        read_b = read_bounded(query, bm25_seeds, tmax=tmax)
+        read_b = read_bounded(query, bm25_seeds, tmax=tmax, as_of=as_of)
         recalls_b.append(_recall(read_b.pages_visited, gold))
         ctx_b.append(len(read_b.context))
 
@@ -54,7 +59,7 @@ def eval_config(
             seeds += [p for p in keyword_seed(query) if p not in seeds]
         if not seeds:
             seeds = bm25_seeds
-        read_c = read_bounded(query, seeds, tmax=tmax)
+        read_c = read_bounded(query, seeds, tmax=tmax, as_of=as_of)
         recalls_c.append(_recall(read_c.pages_visited, gold))
         ctx_c.append(len(read_c.context))
 
@@ -76,12 +81,12 @@ def main() -> None:
     index = _bm25_index()
 
     configs = [
-        eval_config(questions, index, use_keyword=False, top_k=1, tmax=3),
-        eval_config(questions, index, use_keyword=True, top_k=1, tmax=3),
-        eval_config(questions, index, use_keyword=True, top_k=2, tmax=3),
-        eval_config(questions, index, use_keyword=True, top_k=1, tmax=2),
-        eval_config(questions, index, use_keyword=True, top_k=1, tmax=4),
-        eval_config(questions, index, use_keyword=True, top_k=1, tmax=5),
+        eval_config(questions, index, use_keyword=False, top_k=1, tmax=3, as_of=golden["as_of"]),
+        eval_config(questions, index, use_keyword=True, top_k=1, tmax=3, as_of=golden["as_of"]),
+        eval_config(questions, index, use_keyword=True, top_k=2, tmax=3, as_of=golden["as_of"]),
+        eval_config(questions, index, use_keyword=True, top_k=1, tmax=2, as_of=golden["as_of"]),
+        eval_config(questions, index, use_keyword=True, top_k=1, tmax=4, as_of=golden["as_of"]),
+        eval_config(questions, index, use_keyword=True, top_k=1, tmax=5, as_of=golden["as_of"]),
     ]
 
     lines = [

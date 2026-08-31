@@ -43,11 +43,14 @@ from orchestration.conditional_rules import (
     PostgresRuleWorkerStore,
     RuleState,
     RuleWorkerStoreError,
+    SizingType,
     SubmitReadyExecution,
+    TemporalSequenceObservation,
     TrailingStopObservation,
     Timeframe,
     TriggerClaim,
     evaluate_condition,
+    evaluate_expression_condition,
     guard_rule_execution,
 )
 from orchestration.conditional_rules.bar_data import (
@@ -106,6 +109,7 @@ class RuntimeInputs:
     position_quantity: Decimal
     sellable_quantity: Decimal
     lot_size: Decimal
+    portfolio_nav: Decimal | None = None
 
     def guard(self, rule: ActiveRule) -> ExecutionGuardInput:
         return ExecutionGuardInput(
@@ -122,6 +126,7 @@ class RuntimeInputs:
             quote_fresh=self.quote_fresh,
             current_price=self.current_price,
             available_cash=self.available_cash,
+            portfolio_nav=self.portfolio_nav,
             position_quantity=self.position_quantity,
             sellable_quantity=self.sellable_quantity,
             lot_size=self.lot_size,
@@ -170,6 +175,15 @@ class WorkerStore(Protocol):
         average_entry_price: Decimal,
         observed_at: datetime,
     ) -> TrailingStopObservation: ...
+    def observe_temporal_sequence(
+        self,
+        rule: ActiveRule,
+        *,
+        arm_result: bool,
+        trigger_result: bool,
+        cancel_result: bool,
+        observed_at: datetime,
+    ) -> TemporalSequenceObservation: ...
     def cancel_entry_trailing_on_position_mismatch(
         self,
         rule: ActiveRule,
@@ -203,6 +217,125 @@ class WorkerStore(Protocol):
 class RuntimeClient(Protocol):
     def load_inputs(self, rule: ActiveRule) -> RuntimeInputs: ...
     def submit(self, execution: SubmitReadyExecution) -> UUID: ...
+
+
+class MarketReferenceResolver(Protocol):
+    """Read only the existing market-breadth stream for market-wide guards."""
+
+    def values(self, fields: set[str]) -> tuple[dict[str, Decimal], datetime]: ...
+
+
+class TimescaleKOSPIReferenceResolver:
+    """KOSPI reference values from the collector-owned LS t1511 snapshots.
+
+    The worker deliberately consumes the existing 10-minute breadth feed; it
+    does not open another broker session or create a parallel index store.
+    """
+
+    def __init__(self, pool) -> None:
+        self._pool = pool
+
+    @classmethod
+    def from_env(cls) -> "TimescaleKOSPIReferenceResolver":
+        dsn = os.getenv("CONDITIONAL_RULE_MARKET_DATABASE_URL", "").strip()
+        if not dsn:
+            raise RuntimeDataError(
+                "MARKET_REFERENCE_DATABASE_REQUIRED",
+                "KOSPI conditional rules require the shared market database",
+                retryable=False,
+            )
+        try:
+            from psycopg2.pool import ThreadedConnectionPool
+
+            return cls(
+                ThreadedConnectionPool(
+                    1,
+                    max(1, min(int(os.getenv("CONDITIONAL_RULE_MARKET_MAX_CONNECTIONS", "8")), 16)),
+                    dsn,
+                    connect_timeout=max(1, min(int(os.getenv("CONDITIONAL_RULE_MARKET_CONNECT_TIMEOUT_SECONDS", "2")), 10)),
+                )
+            )
+        except Exception as exc:
+            raise RuntimeDataError(
+                "MARKET_REFERENCE_DATABASE_UNAVAILABLE",
+                "KOSPI conditional-rule reference data is unavailable",
+                retryable=True,
+            ) from exc
+
+    @staticmethod
+    def _decimal(value: object, *, field: str) -> Decimal:
+        try:
+            parsed = Decimal(str(value))
+        except Exception as exc:
+            raise RuntimeDataError(
+                "MARKET_REFERENCE_INVALID", f"KOSPI {field} is invalid", retryable=False
+            ) from exc
+        if not parsed.is_finite() or parsed <= 0:
+            raise RuntimeDataError(
+                "MARKET_REFERENCE_INVALID", f"KOSPI {field} must be positive", retryable=False
+            )
+        return parsed
+
+    def values(self, fields: set[str]) -> tuple[dict[str, Decimal], datetime]:
+        needs_daily = bool(fields & {"KOSPI_DAILY_CLOSE", "KOSPI_DAILY_SMA_60"})
+        needs_change = "KOSPI_DAY_CHANGE_RATIO" in fields
+        connection = self._pool.getconn()
+        try:
+            with connection.cursor() as cursor:
+                values: dict[str, Decimal] = {}
+                observed_at: datetime | None = None
+                if needs_change:
+                    cursor.execute(
+                        """
+                        select observed_at, values->>'index_level', values->>'prev_index_level'
+                          from market.market_breadth
+                         where market='KOSPI' and source='ls:t1511'
+                           and quality_status in ('PASS','WARN')
+                           and values->>'index_level' is not null
+                           and values->>'prev_index_level' is not null
+                         order by observed_at desc limit 1
+                        """
+                    )
+                    row = cursor.fetchone()
+                    if row is None or not isinstance(row[0], datetime) or row[0].tzinfo is None:
+                        raise RuntimeDataError("MARKET_REFERENCE_UNAVAILABLE", "fresh KOSPI snapshot is unavailable", retryable=True)
+                    level = self._decimal(row[1], field="index_level")
+                    previous = self._decimal(row[2], field="prev_index_level")
+                    values["KOSPI_DAY_CHANGE_RATIO"] = level / previous - Decimal("1")
+                    observed_at = row[0].astimezone(timezone.utc)
+                if needs_daily:
+                    cursor.execute(
+                        """
+                        select index_level
+                          from (
+                            select distinct on (values->>'session_basis_date')
+                                   values->>'index_level' as index_level,
+                                   values->>'session_basis_date' as basis_date,
+                                   event_time
+                              from market.market_breadth
+                             where market='KOSPI' and source='ls:t1511'
+                               and quality_status in ('PASS','WARN')
+                               and values->>'session_phase' in ('POST_CLOSE','PRIOR_CLOSE')
+                               and values->>'session_basis_date' is not null
+                               and values->>'index_level' is not null
+                             order by values->>'session_basis_date' desc, event_time desc
+                          ) daily
+                         order by basis_date desc limit 60
+                        """
+                    )
+                    closes = [self._decimal(row[0], field="daily_close") for row in cursor.fetchall()]
+                    if len(closes) < 60:
+                        raise RuntimeDataError("MARKET_REFERENCE_HISTORY_INSUFFICIENT", "KOSPI 60-day reference history is unavailable", retryable=True)
+                    values["KOSPI_DAILY_CLOSE"] = closes[0]
+                    values["KOSPI_DAILY_SMA_60"] = sum(closes, Decimal("0")) / Decimal("60")
+                assert values
+                return values, observed_at or datetime.now(timezone.utc)
+        except RuntimeDataError:
+            raise
+        except Exception as exc:
+            raise RuntimeDataError("MARKET_REFERENCE_DATABASE_UNAVAILABLE", "could not load KOSPI conditional-rule reference data", retryable=True) from exc
+        finally:
+            self._pool.putconn(connection)
 
 
 def _children(node: ExpressionNode) -> tuple[ExpressionNode, ...]:
@@ -285,6 +418,15 @@ def _portfolio_fields(node: ExpressionNode) -> frozenset[str]:
         item.field or ""
         for item in _walk(node)
         if item.type is ExpressionType.PORTFOLIO
+    )
+
+
+def _market_reference_fields(node: ExpressionNode) -> frozenset[str]:
+    return frozenset(
+        item.field or ""
+        for item in _walk(node)
+        if item.type is ExpressionType.MARKET
+        and (item.field or "").startswith("KOSPI_")
     )
 
 
@@ -429,6 +571,7 @@ class HttpRuntimeClient:
         fallback_price_cache_seconds: float = 5.0,
         shared_price_max_age_seconds: float = 30.0,
         bar_resolver: BarResolver | None = None,
+        market_reference_resolver: MarketReferenceResolver | None = None,
     ) -> None:
         if not trading_api_url.strip() or not market_api_url.strip():
             raise RuntimeDataError(
@@ -449,11 +592,13 @@ class HttpRuntimeClient:
             0.0, min(float(shared_price_max_age_seconds), 300.0)
         )
         self._bar_resolver = bar_resolver
+        self._market_reference_resolver = market_reference_resolver
         self._cycle_prices: dict[str, tuple[Decimal, datetime, dict[str, Any]]] = {}
         self._cycle_prices_lock = threading.Lock()
         self._price_resolver_lock = threading.Lock()
         self._fallback_price_lock = threading.Lock()
         self._bar_resolver_lock = threading.Lock()
+        self._market_reference_lock = threading.Lock()
 
     def begin_cycle(self) -> None:
         """Drop the bounded per-cycle quote snapshot before polling again."""
@@ -727,6 +872,27 @@ class HttpRuntimeClient:
         current_price, quote_at, _ = self._snapshot(
             rule.spec.symbol, rule.spec.instrument_id
         )
+        reference_fields = _market_reference_fields(rule.spec.condition)
+        reference_values: dict[str, Decimal] = {}
+        if reference_fields:
+            resolver = self._market_reference_resolver
+            if resolver is None:
+                with self._market_reference_lock:
+                    resolver = self._market_reference_resolver
+                    if resolver is None:
+                        resolver = TimescaleKOSPIReferenceResolver.from_env()
+                        self._market_reference_resolver = resolver
+            reference_values, reference_observed_at = resolver.values(set(reference_fields))
+            if "KOSPI_DAY_CHANGE_RATIO" in reference_fields:
+                reference_age = (
+                    datetime.now(timezone.utc) - reference_observed_at
+                ).total_seconds()
+                if reference_age > rule.spec.evaluation.max_data_age_seconds:
+                    raise RuntimeDataError(
+                        "MARKET_REFERENCE_STALE",
+                        "KOSPI intraday reference snapshot is stale",
+                        retryable=True,
+                    )
         history = _required_history(rule)
         bars = {
             timeframe: self._bars(
@@ -776,6 +942,8 @@ class HttpRuntimeClient:
         )
 
         requested_fields = set(_portfolio_fields(rule.spec.condition))
+        if rule.spec.action.sizing.type is SizingType.TARGET_POSITION_WEIGHT:
+            requested_fields.add("PORTFOLIO_NAV")
         if rule.spec.condition.type is ExpressionType.TRAILING_STOP:
             # The activation threshold is evaluated from the canonical current
             # cost basis, never from an LLM-provided price.
@@ -846,7 +1014,7 @@ class HttpRuntimeClient:
             rule.spec,
             bars=bars,
             portfolio={key: value for key, value in values.items() if key in requested_fields},
-            current_market={"LAST_PRICE": current_price},
+            current_market={"LAST_PRICE": current_price, **reference_values},
             external_indicators=_normalized_indicator_values(context.get("indicator_values"), field="indicator_values"),
             previous_external_indicators=_normalized_indicator_values(context.get("previous_indicator_values"), field="previous_indicator_values"),
             market_data_source_id=str(context["market_data_source_id"]) if context.get("market_data_source_id") is not None else None,
@@ -925,6 +1093,7 @@ class HttpRuntimeClient:
             position_quantity=position_quantity,
             sellable_quantity=sellable_quantity,
             lot_size=lot_size,
+            portfolio_nav=values.get("PORTFOLIO_NAV"),
         )
 
     def submit(self, execution: SubmitReadyExecution) -> UUID:
@@ -1118,7 +1287,25 @@ class ConditionalRuleWorker:
             return counts
         self._history_backoff_until.pop(backoff_key, None)
         try:
-            if rule.spec.condition.type is ExpressionType.TRAILING_STOP:
+            if rule.spec.condition.type is ExpressionType.TEMPORAL_SEQUENCE:
+                children = rule.spec.condition.children or ()
+                arm_result, trigger_result, cancel_result = (
+                    evaluate_expression_condition(child, inputs.evaluation_context)
+                    for child in children
+                )
+                observation = self.store.observe_temporal_sequence(
+                    rule,
+                    arm_result=arm_result,
+                    trigger_result=trigger_result,
+                    cancel_result=cancel_result,
+                    observed_at=inputs.data_watermark,
+                )
+                if observation.cancelled:
+                    counts["evaluated"] += 1
+                    counts["cancelled"] += 1
+                    return counts
+                result = observation.condition_result
+            elif rule.spec.condition.type is ExpressionType.TRAILING_STOP:
                 # Do not start tracking a price high before the target holding
                 # exists. Otherwise a later purchase could inherit a stale
                 # watermark and immediately exit on an unrelated pullback.
@@ -1218,7 +1405,6 @@ class ConditionalRuleWorker:
         counts["triggered"] += 1
         counts["submitted"] += int(self._guard_claim(rule, claim))
         return counts
-
     def _next_active_batch(self) -> list[ActiveRule]:
         """Rotate bounded pages so rules after the first page are not starved."""
 
@@ -1279,6 +1465,21 @@ class ConditionalRuleWorker:
         return counts
 
 
+def _cycle_sleep_seconds(
+    result: Mapping[str, int], *, poll: float, idle_poll: float
+) -> float:
+    """Back off only when the existing worker has no durable work to do.
+
+    Active rules and retryable work retain the configured low-latency poll.
+    An empty book should not repeatedly open the database and market clients
+    every second, which is especially costly while the market is closed.
+    """
+
+    if any(int(value) > 0 for value in result.values()):
+        return poll
+    return max(poll, idle_poll)
+
+
 def _settings() -> tuple[PostgresRuleWorkerStore, HttpRuntimeClient, float, int, int]:
     dsn = os.getenv("CONDITIONAL_RULE_DATABASE_URL", "").strip()
     if not dsn:
@@ -1323,6 +1524,13 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     store, client, poll, batch, workers = _settings()
+    idle_poll = max(
+        poll,
+        min(
+            float(os.getenv("CONDITIONAL_RULE_WORKER_IDLE_POLL_SECONDS", "30")),
+            300.0,
+        ),
+    )
     worker = ConditionalRuleWorker(
         store,
         client,
@@ -1353,7 +1561,8 @@ def main() -> int:
             LOG.info("conditional rule cycle", extra=result)
         except Exception:
             LOG.exception("conditional rule cycle failed closed")
-        time.sleep(poll)
+            result = {"errors": 1}
+        time.sleep(_cycle_sleep_seconds(result, poll=poll, idle_poll=idle_poll))
 
 
 if __name__ == "__main__":

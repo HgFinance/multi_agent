@@ -46,9 +46,11 @@ from directives.repository import (  # noqa: E402
 )
 from broker.ls_paper_broker import (  # noqa: E402
     LSPaperBrokerError,
+    LSPaperHolding,
     LSPaperOrderAck,
     LSPaperOrderStatus,
 )
+import directives.service as directive_service_module  # noqa: E402
 from directives.service import DirectiveServiceError, UserDirectiveService  # noqa: E402
 from directives.worker import run_once as run_directive_worker_once  # noqa: E402
 from api.directive_routes import (  # noqa: E402
@@ -405,6 +407,66 @@ def test_execute_binding_one_time_jti_idempotency_and_user_risk_bypass():
     assert run_directive_worker_once(h.service, batch=100, now=NOW)["reconciled"] == 0
 
 
+def test_basket_preflight_advances_injected_quote_clock(monkeypatch):
+    h = Harness()
+    second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
+    third = InstrumentRef(uuid4(), "051910", Decimal(1), None, "KRW")
+    for instrument in (second, third):
+        h.repository.add_instrument(instrument)
+
+    class SequentialMarket:
+        def __init__(self):
+            self.quote_times: list[datetime] = []
+            self.asks = {
+                "005930": Decimal("70000"),
+                "000660": Decimal("25000"),
+                "051910": Decimal("300000"),
+            }
+
+        def quote(self, instrument, *, now, max_age_seconds=None):
+            index = len(self.quote_times)
+            self.quote_times.append(now)
+            observed_at = NOW + timedelta(seconds=3 * index)
+            if now < observed_at - timedelta(seconds=2):
+                raise MarketDataError(
+                    "TRADING_MARKET_QUOTE_STALE",
+                    "sequential quote clock did not advance",
+                    409,
+                )
+            ask = self.asks[instrument.symbol]
+            return TrustedQuote(
+                str(instrument.instrument_id),
+                instrument.symbol,
+                observed_at,
+                ask - Decimal("100"),
+                ask,
+                Decimal("1000"),
+                Decimal("1000"),
+                "sequential-fixture",
+            )
+
+    market = SequentialMarket()
+    clock = iter((0.0, 0.0, 3.0, 6.0))
+    monkeypatch.setattr(
+        directive_service_module.time, "monotonic", lambda: next(clock)
+    )
+    h.service = UserDirectiveService(h.repository, market)
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("5000000"))
+    request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-basket-sequential-quote-clock-0001",
+        payload=_basket_payload(h.instrument, second, third),
+    )
+
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert len(market.quote_times) == 3
+    assert market.quote_times[0] == NOW
+    assert market.quote_times[1] == NOW + timedelta(seconds=3)
+    assert market.quote_times[2] == NOW + timedelta(seconds=6)
+    assert len(record.legs) == 3
+
+
 def test_same_notional_paper_basket_preflights_all_members_and_tracks_all_legs():
     h = Harness()
     second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
@@ -642,6 +704,65 @@ def test_external_basket_stops_before_unattempted_member_after_terminal_result()
     assert [leg.symbol for leg in record.legs] == ["005930", "000660"]
     assert record.state is DirectiveState.PARTIAL
     assert record.error_code == "TRADING_BASKET_SUBMISSION_STOPPED"
+
+
+def test_ls_paper_sell_all_sizes_each_child_from_current_broker_holdings() -> None:
+    class Broker:
+        def __init__(self) -> None:
+            self.holdings_reads = 0
+            self.placements: list[tuple[str, str, Decimal]] = []
+            self.quantities: dict[str, Decimal] = {}
+
+        def get_holdings(self):
+            self.holdings_reads += 1
+            return (
+                LSPaperHolding("006400", "삼성SDI", Decimal("10"), Decimal("10")),
+                LSPaperHolding("005930", "삼성전자", Decimal("30"), Decimal("29")),
+                LSPaperHolding("000660", "SK하이닉스", Decimal("6"), Decimal("6")),
+            )
+
+        def place_order(self, **kwargs):
+            symbol = kwargs["symbol"]
+            quantity = Decimal(kwargs["quantity"])
+            self.placements.append((symbol, kwargs["side"], quantity))
+            self.quantities[symbol] = quantity
+            return LSPaperOrderAck(f"order-{symbol}", "090000", symbol)
+
+        def order_status(self, broker_order_id):
+            symbol = broker_order_id.removeprefix("order-")
+            return LSPaperOrderStatus(
+                broker_order_id=broker_order_id,
+                state="ACKNOWLEDGED",
+                requested_quantity=self.quantities[symbol],
+                filled_quantity=Decimal("0"),
+                fill_price=None,
+                order_date=NOW.date(),
+            )
+
+    h = Harness()
+    second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
+    third = InstrumentRef(uuid4(), "006400", Decimal(1), None, "KRW")
+    h.repository.add_instrument(second)
+    h.repository.add_instrument(third)
+    # Deliberately make the local projection stale and incomplete.
+    h.repository.set_position(h.fund, h.book, h.instrument.instrument_id, Decimal("1"))
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository, h.market, external_broker=broker  # type: ignore[arg-type]
+    )
+
+    request = h.request(DirectiveAction.SELL_ALL, key="idem-sell-all-broker-snapshot")
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert broker.holdings_reads == 1
+    assert broker.placements == [
+        ("000660", "SELL", Decimal("6")),
+        ("005930", "SELL", Decimal("29")),
+        ("006400", "SELL", Decimal("10")),
+    ]
+    assert [leg.symbol for leg in record.legs] == ["000660", "005930", "006400"]
+    assert all(leg.reduce_only for leg in record.legs)
+    assert record.state is DirectiveState.IN_PROGRESS
 
 
 def test_ls_paper_adapter_uses_broker_fill_and_never_resubmits() -> None:
@@ -1534,6 +1655,80 @@ def _proof_object(request: UserDirectiveRequest, subject: UUID, jti: str):
     from directives.auth import decode_directive_proof
 
     return decode_directive_proof(_execute_token(request, subject, jti=jti), now=NOW.timestamp())
+
+
+def test_lower_priority_directive_waits_behind_higher_priority_barrier() -> None:
+    h = Harness()
+    second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
+    h.repository.add_instrument(second)
+    h.market.set_quote(
+        TrustedQuote(
+            str(second.instrument_id),
+            second.symbol,
+            NOW,
+            Decimal("100000"),
+            Decimal("100100"),
+            Decimal("1000"),
+            Decimal("1000"),
+            "fixture",
+        )
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("1000000"))
+
+    higher_request = h.request(DirectiveAction.SELL_ALL, key="idem-priority-owner")
+    higher, _ = h.repository.accept(
+        higher_request, _proof_object(higher_request, h.user, "priority-owner-jti")
+    )
+    h.repository.set_state(higher.directive_id, DirectiveState.IN_PROGRESS)
+    h.repository.activate_barrier(higher, reduce_only=True)
+
+    queued_request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-priority-queued",
+        payload=_quantity_basket_payload(
+            (h.instrument, "1"), (second, "1"), side="BUY"
+        ),
+    )
+    queued = h.service.submit(
+        queued_request,
+        _execute_token(queued_request, h.user, jti="priority-queued-jti"),
+        now=NOW,
+    )
+
+    assert queued.state is DirectiveState.RECEIVED
+    assert queued.error_code == "TRADING_HIGHER_PRIORITY_ACTIVE"
+    assert queued.legs == []
+    assert h.repository.state.barriers[(h.fund, h.book)][0] == higher.directive_id
+
+    h.repository.set_state(higher.directive_id, DirectiveState.FAILED)
+    h.repository.release_barrier(higher)
+    reconciled, errors = h.service.reconcile_active(now=NOW)
+
+    assert errors == []
+    assert any(item.directive_id == queued.directive_id for item in reconciled)
+    executed = h.repository.get(queued.directive_id)
+    assert executed is not None
+    assert executed.state is DirectiveState.IN_PROGRESS
+    assert {leg.symbol for leg in executed.legs} == {"000660", "005930"}
+    assert all(leg.state is DirectiveLegState.FILLED for leg in executed.legs)
+
+
+def test_terminal_barrier_is_discarded_before_new_directive() -> None:
+    h = Harness()
+    stale_request = h.request(DirectiveAction.SELL_ALL, key="idem-stale-barrier")
+    stale, _ = h.repository.accept(
+        stale_request, _proof_object(stale_request, h.user, "stale-barrier-jti")
+    )
+    h.repository.set_state(stale.directive_id, DirectiveState.FAILED)
+    h.repository.activate_barrier(stale, reduce_only=True)
+
+    current_request = h.request(DirectiveAction.SELL_ALL, key="idem-current-barrier")
+    current, _ = h.repository.accept(
+        current_request, _proof_object(current_request, h.user, "current-barrier-jti")
+    )
+    h.repository.activate_barrier(current, reduce_only=True)
+
+    assert h.repository.state.barriers[(h.fund, h.book)][0] == current.directive_id
 
 
 def test_barrier_release_reelects_other_active_directive_and_restart_hydrates():

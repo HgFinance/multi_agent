@@ -61,6 +61,28 @@ class CreateKanbanTaskCliContractTest(unittest.TestCase):
         run.assert_not_called()
 
 
+class CompleteKanbanTaskCliContractTest(unittest.TestCase):
+    def test_direct_completion_persists_one_answer_in_all_handoff_fields(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["hermes"], returncode=0, stdout="Completed t_trade", stderr=""
+        )
+        answer = "조건주문이 활성화되었습니다. 기준시각=2026-08-31T06:00:00Z"
+        with patch.object(
+            hermes_boundary.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertTrue(
+                hermes_boundary.complete_kanban_task(
+                    task_id="t_trade", result=answer
+                )
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--result") + 1], answer)
+        self.assertEqual(command[command.index("--summary") + 1], answer)
+        metadata = json.loads(command[command.index("--metadata") + 1])
+        self.assertEqual(metadata, {"final_answer": answer})
+
+
 class CeoRootTaskBoundaryTest(unittest.TestCase):
     def test_root_task_failure_does_not_call_ceo(self) -> None:
         request = ceo.CeoAsk(query="q", request_id="request-1")

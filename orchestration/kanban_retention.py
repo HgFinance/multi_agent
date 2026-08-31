@@ -1659,7 +1659,21 @@ class RetentionWorker:
             dict.fromkeys(
                 str(row.get("id") or row.get("task_id"))
                 for row in archived_rows
-                if _root_candidate(row)
+                if (
+                    _root_candidate(row)
+                    or (
+                        _standalone_candidate(row)
+                        and not bool(
+                            getattr(
+                                self.maintenance,
+                                "has_task_links",
+                                lambda _task_id: False,
+                            )(
+                                str(row.get("id") or row.get("task_id") or "")
+                            )
+                        )
+                    )
+                )
                 and str(row.get("status") or "").casefold() == ARCHIVED_STATUS
             )
         )

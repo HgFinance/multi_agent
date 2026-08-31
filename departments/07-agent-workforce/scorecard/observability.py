@@ -150,6 +150,20 @@ INVESTMENT_DEPARTMENT_STAGE: dict[str, str] = {
     "qa": "qa",
 }
 
+# Workforce metrics use compact department keys; Kanban stores the canonical
+# Hermes profile/assignee.  Keep this explicit because risk does not follow the
+# normal ``<key>-department`` convention.
+DEPARTMENT_PROFILE_BY_KEY: dict[str, str] = {
+    "research": "research-department",
+    "trading": "trading-department",
+    "risk": "risk-management",
+    "quant-backtest": "quant-backtest-department",
+    "accounting-portfolio": "accounting-portfolio-department",
+    "qa": "qa-department",
+}
+
+from kanban_latency import KanbanDepartmentLatencyReport, collect_kanban_department_latency
+
 
 def _safe_int(value: Any) -> int | None:
     """metadata 값을 int 로 바꾼다 - 형이 안 맞으면(None 포함) None."""
@@ -1948,6 +1962,9 @@ class WorkforceObservability:
     # 이 호출이 Langfuse 에 실제로 낸 논리 질의 수. 관측 자체를 관측한다 - 중복
     # 제거가 조용히 풀리면(예: 창이 어긋나 캐시 키가 갈라지면) 이 값이 먼저 는다.
     langfuse_queries: int
+    # Durable lifecycle timings are separate from optional Langfuse worker
+    # events.  They include queue time and terminal recovery outcomes.
+    kanban_latency: tuple[KanbanDepartmentLatencyReport, ...]
     # LLM Worker Registry와 분리된 deterministic services. In particular this
     # makes Trading's always-on desk runner visible without inventing token cost.
     runtime_services: tuple[dict[str, str], ...] = ()
@@ -1962,6 +1979,7 @@ class WorkforceObservability:
             "worker_usage": [r.as_dict() for r in self.worker_usage],
             "trigger_rates": [r.as_dict() for r in self.trigger_rates],
             "langfuse_queries": self.langfuse_queries,
+            "kanban_latency": [report.as_dict() for report in self.kanban_latency],
             "runtime_services": [dict(item) for item in self.runtime_services],
         }
         if self.head_profiles_unavailable:
@@ -1996,6 +2014,15 @@ def collect_workforce_observability(
 
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_hours)
+    department_profiles = {
+        department: DEPARTMENT_PROFILE_BY_KEY[department]
+        for department in departments
+    }
+    kanban_latency = collect_kanban_department_latency(
+        department_profiles=department_profiles,
+        window_start=since,
+        window_end=now,
+    )
 
     reader, reader_unavailable_reason = _resolve_reader(reader)
 
@@ -2076,6 +2103,7 @@ def collect_workforce_observability(
         trigger_rates=tuple(trigger_rates),
         head_profiles_unavailable=head_profiles_unavailable,
         langfuse_queries=shared.queries if isinstance(shared, WindowedActivityReader) else 0,
+        kanban_latency=kanban_latency,
         runtime_services=runtime_services,
     )
 

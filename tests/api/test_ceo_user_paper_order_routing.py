@@ -173,6 +173,71 @@ def test_exact_sample_is_durably_bound_before_either_card_is_finalized(
     assert response["task"]["status"] == "done"
 
 
+
+def test_account_sell_all_uses_the_deterministic_paper_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    create = _install_successful_route(
+        monkeypatch, events=events, repository=repository
+    )
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("USER_PAPER_ORDER_WORKFLOW_ENABLED", "true")
+    monkeypatch.setenv(
+        "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "true"
+    )
+
+    execution = {
+        "decision": "EXECUTE",
+        "mode": "PAPER",
+        "binding": True,
+        "order_submitted": True,
+        "order_request_id": "sell-all-by-mock",
+        "request_state": "IN_PROGRESS",
+        "user_message": "PAPER 전량 매도 주문을 제출했고 보유 종목별 체결을 추적 중입니다.",
+    }
+
+    def process(**kwargs: Any) -> dict[str, Any]:
+        events.append("deterministic-process")
+        interpretation = kwargs["interpretation"]
+        assert interpretation["action"] == "SELL_ALL"
+        assert interpretation["instrument_mention"] is None
+        assert interpretation["side"] is None
+        assert interpretation["quantity"] is None
+        assert interpretation["order_type"] is None
+        return execution
+
+    monkeypatch.setattr(ceo, "process_deterministic_user_paper_order", process)
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query="보유종목 전량 매도해줘",
+            request_id="request-sell-all-fast-100",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert create.call_count == 2
+    _, trading_call = create.call_args_list
+    assert "interpreter=DETERMINISTIC_EXACT_EVIDENCE" in trading_call.kwargs["body"]
+    assert events == [
+        "authorize",
+        "admit",
+        "create-root-blocked",
+        "comment-root-scope",
+        "bind-root",
+        "create-trading-blocked",
+        "bind-trading",
+        "complete-t_root1",
+        "deterministic-process",
+        "complete-t_trade1",
+    ]
+    assert response["order_state"] == "IN_PROGRESS"
+    assert response["answer"] == execution["user_message"]
+
+
 @pytest.mark.parametrize(
     ("raw", "instrument", "quantity"),
     [

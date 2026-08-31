@@ -794,6 +794,45 @@ def test_legacy_archived_workflow_is_audited_before_old_purge(tmp_path: Path) ->
     assert audit.get(ROOT)["purged_at"] == NOW
 
 
+def test_legacy_archived_standalone_card_is_not_immortal(tmp_path: Path) -> None:
+    maintenance = FakeMaintenance()
+    audit = AuditStore(tmp_path / "retention-audit.db")
+    standalone = {
+        "id": "legacy-archived-card",
+        "title": "legacy diagnostic",
+        "body": "legacy diagnostic only",
+        "status": "archived",
+        "created_at": NOW - 10 * 24 * 3600,
+        "completed_at": None,
+        "latest_summary": "legacy result",
+        "events": [
+            {"kind": "archived", "created_at": NOW - 8 * 24 * 3600}
+        ],
+    }
+    def rows(*, include_archived: bool = False):
+        return [standalone] if include_archived else []
+
+    def unexpected_loader(*_args, **_kwargs):
+        raise AssertionError("standalone legacy card should use the singleton path")
+
+    worker = RetentionWorker(
+        maintenance=maintenance,
+        audit=audit,
+        workflow_loader=unexpected_loader,
+        row_lister=rows,
+        delivery_reader=SimpleNamespace(
+            state=lambda _workflow: DeliveryState("not_required")
+        ),
+        clock=lambda: NOW,
+    )
+
+    result = worker.run_once()
+
+    assert result.purged_count == 1
+    assert maintenance.purged == [(standalone["id"], ())]
+    assert audit.get(standalone["id"])["purged_at"] == NOW
+
+
 def test_dry_run_reports_candidates_without_audit_or_board_mutation(tmp_path: Path) -> None:
     maintenance = FakeMaintenance()
     audit_path = tmp_path / "preview-audit.db"

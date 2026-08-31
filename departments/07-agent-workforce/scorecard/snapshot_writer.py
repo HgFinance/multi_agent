@@ -56,6 +56,7 @@ if str(_HERE) not in sys.path:  # api/app.py 와 같은 sys.path 규약
 from cost import CapacitySnapshot, CostSnapshot
 from observability import (
     CapacityObservationStatus,
+    DEPARTMENT_PROFILE_BY_KEY,
     DepartmentCapacityReport,
     WorkerUsageObservationStatus,
     WorkerUsageReport,
@@ -76,14 +77,7 @@ RECORDED_BY = "workforce-snapshot-writer/langfuse"
 # `risk-management`, qa 는 `qa-department` 라 규칙이 이미 두 번 깨진다. 표로 적고
 # 어긋나면 즉시 실패하는 쪽이 조용히 빈 Snapshot 을 내는 것보다 낫다
 # (app.py get_department_scorecard_brief 가 기본값을 거부하는 것과 같은 이유).
-DEPARTMENT_CODE_BY_STAGE_KEY: dict[str, str] = {
-    "research": "research-department",
-    "trading": "trading-department",
-    "risk": "risk-management",
-    "quant-backtest": "quant-backtest-department",
-    "accounting-portfolio": "accounting-portfolio-department",
-    "qa": "qa-department",
-}
+DEPARTMENT_CODE_BY_STAGE_KEY = DEPARTMENT_PROFILE_BY_KEY
 
 
 class UnknownDepartmentKey(RuntimeError):

@@ -38,6 +38,18 @@ ACTIVATION_LIFETIME_MIGRATION = (
     / "migrations"
     / "20260829000300_conditional_rule_activation_lifetime.sql"
 )
+TEMPORAL_STATE_MIGRATION = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260831000200_conditional_rule_temporal_state.sql"
+)
+TRAILING_RETURN_BASELINE_MIGRATION = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260831000300_conditional_rule_trailing_return_baseline.sql"
+)
 
 
 def compact() -> str:
@@ -157,3 +169,30 @@ def test_fill_gated_activation_lifetime_uses_only_the_governed_krx_calendar() ->
     assert "grant update (expires_at) on execution.conditional_trade_rules to svc_conditional_rule_worker" in sql
     assert "market_sessions_conditional_rule_worker_krx_select" in sql
     assert "conditional_trade_rule_versions', 'update'" in sql
+
+
+def test_temporal_sequence_state_is_durable_and_worker_only() -> None:
+    sql = " ".join(
+        TEMPORAL_STATE_MIGRATION.read_text(encoding="utf-8").lower().split()
+    )
+
+    assert "create table execution.conditional_rule_temporal_states" in sql
+    assert "remaining_bars integer not null" in sql
+    assert "primary key (rule_id, rule_version)" in sql
+    assert "on delete cascade" in sql
+    assert "enable row level security" in sql
+    assert "grant select, insert, update, delete" in sql
+    assert "to svc_conditional_rule_worker" in sql
+    assert "conditional_rule_temporal_states_worker_all" in sql
+
+
+def test_trailing_return_points_persists_the_original_cost_basis() -> None:
+    sql = " ".join(
+        TRAILING_RETURN_BASELINE_MIGRATION.read_text(encoding="utf-8")
+        .lower()
+        .split()
+    )
+
+    assert "alter table execution.conditional_rule_trailing_states" in sql
+    assert "add column baseline_average_entry_price numeric(30,10)" in sql
+    assert "baseline_average_entry_price is null or baseline_average_entry_price > 0" in sql

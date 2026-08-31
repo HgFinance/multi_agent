@@ -326,6 +326,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  "20260829000500_paper_basket_quantity_contract.sql",
                  "20260830000100_accounting_portfolio_snapshot_book_read_path.sql",
                  "20260830000200_audit_reproduction_empty_queue_probe.sql",
+                 # LangGraph PostgresSaver durable execution checkpoint.
+                 "20260831000100_langgraph_postgres_checkpoint.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -1157,6 +1159,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # +1: 20260829000200_conditional_rule_trailing_stop_state.sql
             "execution": 32,
             "governance": 20,
+            # LangGraph PostgresSaver uses the public schema because the
+            # pinned adapter emits unqualified checkpoint relation names.
+            "public": 4,
             # +1 (재일, 2026-08-10): 공장 재편으로 실험 사전등록/결과 원장 확장
             # +1 (재일, 2026-08-16): 사전 데이터 타당성 점검을 trial에서 분리
             # +6 (2026-08-17): intraday candidate ancestry, immutable resource
@@ -1184,7 +1189,19 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             for schema in expected_counts
         }
         self.assertEqual(actual_counts, expected_counts)
-        self.assertNotIn("public", {schema for schema, _ in self.tables})
+        self.assertEqual(
+            {
+                table
+                for schema, table in self.tables
+                if schema == "public"
+            },
+            {
+                "checkpoint_migrations",
+                "checkpoints",
+                "checkpoint_blobs",
+                "checkpoint_writes",
+            },
+        )
 
     def test_critical_end_to_end_entities_exist(self) -> None:
         required = {

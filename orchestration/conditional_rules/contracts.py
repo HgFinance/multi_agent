@@ -30,6 +30,7 @@ class ExpressionType(StrEnum):
     NOT = "NOT"
     CROSS = "CROSS"
     TRAILING_STOP = "TRAILING_STOP"
+    TEMPORAL_SEQUENCE = "TEMPORAL_SEQUENCE"
 
 
 class IndicatorSource(StrEnum):
@@ -102,6 +103,8 @@ class SizingType(StrEnum):
     FIXED_SHARES = "FIXED_SHARES"
     NOTIONAL_KRW = "NOTIONAL_KRW"
     POSITION_PERCENT = "POSITION_PERCENT"
+    AVAILABLE_CASH_PERCENT_CAPPED = "AVAILABLE_CASH_PERCENT_CAPPED"
+    TARGET_POSITION_WEIGHT = "TARGET_POSITION_WEIGHT"
     ALL = "ALL"
 
 
@@ -181,6 +184,7 @@ class ExpressionNode(BaseModel):
             ExpressionType.NOT: {"operand"},
             ExpressionType.CROSS: {"operator", "left", "right"},
             ExpressionType.TRAILING_STOP: {"parameters"},
+            ExpressionType.TEMPORAL_SEQUENCE: {"parameters", "children"},
         }
         required: dict[ExpressionType, set[str]] = {
             ExpressionType.LITERAL: {"value", "unit"},
@@ -194,6 +198,7 @@ class ExpressionNode(BaseModel):
             ExpressionType.NOT: {"operand"},
             ExpressionType.CROSS: {"operator", "left", "right"},
             ExpressionType.TRAILING_STOP: {"parameters"},
+            ExpressionType.TEMPORAL_SEQUENCE: {"parameters", "children"},
         }
         if not required[self.type].issubset(populated):
             missing = sorted(required[self.type] - populated)
@@ -205,6 +210,10 @@ class ExpressionNode(BaseModel):
             )
         if self.type is ExpressionType.LOGICAL and len(self.children or ()) < 2:
             raise ValueError("LOGICAL node requires at least two children")
+        if self.type is ExpressionType.TEMPORAL_SEQUENCE and len(self.children or ()) != 3:
+            raise ValueError(
+                "TEMPORAL_SEQUENCE requires arm, trigger, and cancel children"
+            )
         if self.type is ExpressionType.INDICATOR:
             object.__setattr__(self, "output", (self.output or "value").upper())
             if self.provider is not None:
@@ -225,12 +234,13 @@ class SizingPolicy(BaseModel):
 
     type: SizingType
     value: Decimal | None = None
+    cap_krw: Decimal | None = None
 
     @model_validator(mode="after")
     def _valid_sizing(self) -> "SizingPolicy":
         if self.type is SizingType.ALL:
-            if self.value is not None:
-                raise ValueError("ALL sizing must not include value")
+            if self.value is not None or self.cap_krw is not None:
+                raise ValueError("ALL sizing must not include value or cap_krw")
             return self
         if self.value is None or not self.value.is_finite() or self.value <= 0:
             raise ValueError(f"{self.type.value} sizing requires a positive value")
@@ -238,8 +248,25 @@ class SizingPolicy(BaseModel):
             self.value != self.value.to_integral_value()
         ):
             raise ValueError(f"{self.type.value} must be an integer")
-        if self.type is SizingType.POSITION_PERCENT and self.value > 1:
-            raise ValueError("POSITION_PERCENT must be within (0, 1]")
+        ratio_types = {
+            SizingType.POSITION_PERCENT,
+            SizingType.AVAILABLE_CASH_PERCENT_CAPPED,
+            SizingType.TARGET_POSITION_WEIGHT,
+        }
+        if self.type in ratio_types and self.value > 1:
+            raise ValueError(f"{self.type.value} must be within (0, 1]")
+        if self.type is SizingType.AVAILABLE_CASH_PERCENT_CAPPED:
+            if (
+                self.cap_krw is None
+                or not self.cap_krw.is_finite()
+                or self.cap_krw <= 0
+                or self.cap_krw != self.cap_krw.to_integral_value()
+            ):
+                raise ValueError(
+                    "AVAILABLE_CASH_PERCENT_CAPPED requires a positive whole-KRW cap_krw"
+                )
+        elif self.cap_krw is not None:
+            raise ValueError(f"{self.type.value} must not include cap_krw")
         return self
 
 
@@ -258,14 +285,32 @@ class RuleAction(BaseModel):
     def _valid_order_and_sizing(self) -> "RuleAction":
         if (
             self.side is ActionSide.BUY
-            and self.sizing.type in {SizingType.POSITION_PERCENT, SizingType.ALL}
+            and self.sizing.type
+            in {
+                SizingType.POSITION_PERCENT,
+                SizingType.TARGET_POSITION_WEIGHT,
+                SizingType.ALL,
+            }
         ):
-            raise ValueError("BUY supports FIXED_SHARES or NOTIONAL_KRW only in v1")
+            raise ValueError(
+                "BUY supports FIXED_SHARES, NOTIONAL_KRW, or "
+                "AVAILABLE_CASH_PERCENT_CAPPED"
+            )
         if (
-            self.sizing.type is SizingType.NOTIONAL_KRW
+            self.side is ActionSide.SELL
+            and self.sizing.type is SizingType.AVAILABLE_CASH_PERCENT_CAPPED
+        ):
+            raise ValueError("AVAILABLE_CASH_PERCENT_CAPPED is BUY only")
+        if (
+            self.sizing.type
+            in {
+                SizingType.NOTIONAL_KRW,
+                SizingType.AVAILABLE_CASH_PERCENT_CAPPED,
+                SizingType.TARGET_POSITION_WEIGHT,
+            }
             and self.order_type != "MARKET"
         ):
-            raise ValueError("NOTIONAL_KRW supports MARKET only in v1")
+            raise ValueError(f"{self.sizing.type.value} supports MARKET only")
         if self.order_type == "LIMIT" and self.limit_price is None:
             raise ValueError("LIMIT requires limit_price")
         if self.order_type == "MARKET" and self.limit_price is not None:

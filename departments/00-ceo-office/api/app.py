@@ -666,13 +666,27 @@ else:
 # 모듈 docstring "checkpointer는 생성자 필수 인자다" 참고). psycopg(v3)는 prepare_threshold=
 # None으로 연다 - Supabase Pooler가 transaction 모드(6543 포트)면 서버사이드 prepared
 # statement가 풀링된 연결 사이에서 충돌한다(known psycopg3+PgBouncer 비호환, 자체 점검에서
-# 실측).
+# 실측). checkpoint DDL은 애플리케이션 runtime 권한으로 수행하지 않는다. 정본 control
+# migration(20260831000100)이 관리자 권한으로 테이블을 만들고 runtime에는 DML만 준다.
 if os.environ.get("DATABASE_URL") and PostgresSaver is not None:
     _checkpoint_conn = psycopg.connect(
         os.environ["DATABASE_URL"], autocommit=True, prepare_threshold=None, row_factory=dict_row,
     )
     _mandate_checkpointer: object = PostgresSaver(_checkpoint_conn)
-    _mandate_checkpointer.setup()
+    with _checkpoint_conn.cursor() as _checkpoint_cursor:
+        _checkpoint_cursor.execute(
+            "select " + ",".join("to_regclass(%s) is not null" for _ in range(4)),
+            (
+                "public.checkpoint_migrations",
+                "public.checkpoints",
+                "public.checkpoint_blobs",
+                "public.checkpoint_writes",
+            ),
+        )
+        if not all(_checkpoint_cursor.fetchone()):
+            raise RuntimeError(
+                "LangGraph checkpoint schema is missing; apply the control-database migrations"
+            )
 else:
     _mandate_checkpointer = InMemorySaver()
 

@@ -124,7 +124,11 @@ MAX_EVENTS = int(os.getenv("LS_ORDER_EVENTS_MAX", "200"))
 # 응답을 캐시한다 - 확정된 과거 거래라 자주 바뀌지 않는다.
 LEDGER_DAYS = int(os.getenv("ACCOUNTING_LEDGER_DAYS", "30"))
 LEDGER_CACHE_SECONDS = int(os.getenv("ACCOUNTING_LEDGER_CACHE_SECONDS", "60"))
-ORDER_HISTORY_CACHE_SECONDS = int(os.getenv("LS_ORDER_HISTORY_CACHE_SECONDS", "3"))
+# The dashboard polls every 3 seconds, while one broker-backed read can take
+# longer than that. Cache only the read-only ledger/history portion long enough
+# to prevent overlapping TR refreshes; the live FEED events are still merged on
+# every response, so new order events are not hidden behind this cache.
+ORDER_HISTORY_CACHE_SECONDS = int(os.getenv("LS_ORDER_HISTORY_CACHE_SECONDS", "10"))
 ACCOUNT_PROJECTION_RESYNC_SECONDS = max(
     float(os.getenv("LS_ACCOUNT_PROJECTION_RESYNC_SECONDS", "30")), 5.0
 )
@@ -1118,10 +1122,11 @@ def merge_order_events(
     realtime_events: list[dict[str, Any]],
     limit: int,
 ) -> list[dict[str, Any]]:
-    """확정 체결내역과 실시간 미체결 상태를 기존 주문 사건 목록으로 합친다.
+    """확정 체결내역과 실시간 주문 사건을 기존 화면 계약으로 합친다.
 
     CDPCQ04700에는 접수·정정·취소·거부가 없으므로 그 상태는 SC 실시간 피드에서
-    가져온다. 체결은 계좌 거래내역을 기준으로 유지해 SC1과 중복 표시하지 않는다.
+    가져온다. SC1 체결도 거래내역이 갱신되기 전까지는 즉시 보여 주고, 계좌
+    거래내역이 도착하면 주문번호 기준으로 한 건만 남긴다.
     """
     # 실시간/당일 주문 조회가 같은 접수를 함께 주는 경우 주문번호로 한 건만 남긴다.
     # 주문번호가 없을 때도 화면 계약 필드 조합으로 중복을 막되 값을 지어내지 않는다.
@@ -1129,43 +1134,88 @@ def merge_order_events(
     seen: set[tuple[Any, ...]] = set()
     projected_ledger = [dict(event) for event in ledger_events]
     supplemental: list[dict[str, Any]] = []
+    history_fills: list[dict[str, Any]] = []
+    realtime_fills: list[dict[str, Any]] = []
+
+    def order_ids(event: dict[str, Any]) -> set[str]:
+        values = {
+            str(value).strip()
+            for value in (
+                event.get("order_no"),
+                event.get("broker_order_id"),
+                *(event.get("broker_order_ids") or []),
+            )
+            if str(value or "").strip()
+        }
+        return values
+
+    def event_time_key(value: Any) -> str:
+        digits = "".join(character for character in str(value or "") if character.isdigit())
+        return digits[:6] if len(digits) >= 6 else digits
+
+    def same_fill(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        left_ids = order_ids(left)
+        right_ids = order_ids(right)
+        if left_ids and right_ids:
+            return bool(left_ids & right_ids)
+        # 주문번호가 없는 계좌 원장과도 동일 체결을 알아볼 수 있을 때만
+        # 보조적으로 합친다. 시각까지 같아야 하므로 같은 종목의 부분 체결을
+        # 임의로 하나로 숨기지 않는다.
+        return (
+            left.get("symbol")
+            and left.get("symbol") == right.get("symbol")
+            and left.get("side")
+            and left.get("side") == right.get("side")
+            and left.get("quantity") is not None
+            and left.get("quantity") == right.get("quantity")
+            and left.get("price") is not None
+            and left.get("price") == right.get("price")
+            and event_time_key(left.get("event_time"))
+            and event_time_key(left.get("event_time")) == event_time_key(right.get("event_time"))
+        )
+
     for event in realtime_events:
         if event.get("kind") != "FILLED":
             supplemental.append(event)
             continue
-        # Raw SC1 pushes are already represented by the account ledger.  The
-        # CSPAQ13700 projection is different: it carries the actual LS order
-        # number plus requested and execution prices.  Enrich one exact ledger
-        # match, or keep it as independent broker evidence when t0150 omitted
-        # that fill (the observed API-order case).
-        if event.get("source") != "LS_ORDER_HISTORY":
-            continue
-        order_no = str(event.get("order_no") or "").strip()
-        matches = [
-            candidate
-            for candidate in projected_ledger
-            if order_no
-            and order_no
-            in {
-                str(value)
-                for value in candidate.get("broker_order_ids") or []
-            }
-        ]
-        if len(matches) == 1:
-            match = matches[0]
-            match["order_no"] = order_no
-            match["broker_order_id"] = order_no
-            for field in (
-                "requested_price",
-                "filled_quantity",
-                "average_fill_price",
-                "unfilled_quantity",
-            ):
-                if event.get(field) is not None:
-                    match[field] = event[field]
+        if event.get("source") == "LS_ORDER_HISTORY":
+            # CSPAQ13700 carries the actual LS order number plus requested and
+            # execution prices. Enrich one exact ledger match, or retain it as
+            # independent broker evidence when t0150 omitted that fill.
+            order_no = str(event.get("order_no") or "").strip()
+            matches = [
+                candidate
+                for candidate in projected_ledger
+                if order_no and order_no in order_ids(candidate)
+            ]
+            if len(matches) == 1:
+                match = matches[0]
+                match["order_no"] = order_no
+                match["broker_order_id"] = order_no
+                for field in (
+                    "requested_price",
+                    "filled_quantity",
+                    "average_fill_price",
+                    "unfilled_quantity",
+                ):
+                    if event.get(field) is not None:
+                        match[field] = event[field]
+            else:
+                history_fills.append(event)
         else:
+            # Keep the SC1 event visible during the history-cache window. It is
+            # removed below when an authoritative history event already covers
+            # the same fill, so this does not create a second order row.
+            realtime_fills.append(event)
+
+    known_history_fills = history_fills + projected_ledger
+    for event in realtime_fills:
+        if not any(same_fill(event, candidate) for candidate in known_history_fills):
             supplemental.append(event)
-    candidates = supplemental + projected_ledger
+
+    # Prefer account-history evidence over its provisional realtime counterpart
+    # when both are present and share an order number.
+    candidates = supplemental + history_fills + projected_ledger
     for event in candidates:
         order_no = event.get("order_no")
         key = (

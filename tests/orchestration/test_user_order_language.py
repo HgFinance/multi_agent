@@ -85,6 +85,14 @@ def test_relative_time_order_does_not_ignore_non_ceo_or_embedded_mentions() -> N
             None,
         ),
         (
+            "삼성전자 2주 매도해",
+            "삼성전자",
+            OrderSide.SELL,
+            "2",
+            OrderType.MARKET,
+            None,
+        ),
+        (
             "SK하이닉스 보유수량 확인해서 시장가로 1주 매도",
             "SK하이닉스",
             OrderSide.SELL,
@@ -189,6 +197,59 @@ def test_deterministic_candidate_builds_exact_verified_same_notional_basket() ->
             },
         ]
     }
+
+
+def test_same_notional_basket_drops_final_allocation_particle_from_instrument() -> None:
+    raw = (
+        "삼성전자, SK하이닉스, 두산에너빌리티 각 300만원씩 시장가 매수"
+    )
+
+    candidate = deterministic_order_candidate(raw)
+
+    assert candidate is not None
+    assert candidate.basket_instrument_mentions == (
+        "삼성전자",
+        "SK하이닉스",
+        "두산에너빌리티",
+    )
+    verified = verify_order_candidate(raw, candidate)
+    assert isinstance(verified, VerifiedPaperDirective)
+    assert [
+        order.instrument_mention for order in verified.payload.orders
+    ] == ["삼성전자", "SK하이닉스", "두산에너빌리티"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "action"),
+    [
+        ("보유 종목 전량 매도", DirectiveAction.SELL_ALL),
+        ("보유종목 전량 매도해", DirectiveAction.SELL_ALL),
+        ("미체결 주문 전부 취소", DirectiveAction.CANCEL_ALL),
+    ],
+)
+def test_deterministic_candidate_builds_exact_verified_aggregate_command(
+    raw: str, action: DirectiveAction
+) -> None:
+    candidate = deterministic_order_candidate(raw)
+
+    assert candidate is not None
+    assert candidate.action is action
+    assert candidate.instrument_mention is None
+    assert candidate.side is None
+    assert candidate.quantity is None
+    assert candidate.order_type is None
+    assert candidate.limit_price is None
+    assert {item.field for item in candidate.evidence} == {
+        EvidenceField.ACTION,
+        EvidenceField.AGGREGATE_SCOPE,
+    }
+    for evidence in candidate.evidence:
+        assert raw[evidence.start : evidence.end] == evidence.text
+
+    verified = verify_order_candidate(raw, candidate)
+    assert isinstance(verified, VerifiedPaperDirective)
+    assert verified.action is action
+    assert verified.canonical_payload() == {}
 
 
 @pytest.mark.parametrize(
@@ -365,7 +426,7 @@ def _place_candidate(
     quantity_text: str,
     quantity: int,
     order_type_text: str | None,
-    order_type: OrderType,
+    order_type: OrderType | None,
     limit_price_text: str | None = None,
     limit_price: int | None = None,
 ) -> HermesOrderCandidate:
@@ -979,6 +1040,53 @@ def test_missing_order_type_defaults_to_market_without_fabricated_evidence() -> 
     }
 
 
+def test_bare_sell_without_order_type_defaults_to_market() -> None:
+    raw = "삼성전자 2주 매도해"
+    candidate = _place_candidate(
+        raw,
+        instrument="삼성전자",
+        side_text="매도해",
+        side=OrderSide.SELL,
+        quantity_text="2주",
+        quantity=2,
+        order_type_text=None,
+        order_type=None,
+    )
+
+    result = verify_order_candidate(raw, candidate)
+
+    assert isinstance(result, VerifiedPaperDirective)
+    assert result.payload is not None
+    assert result.payload.side is OrderSide.SELL
+    assert result.payload.order_type is OrderType.MARKET
+    assert result.payload.limit_price is None
+    assert {item.field for item in result.evidence} == {
+        EvidenceField.INSTRUMENT,
+        EvidenceField.SIDE,
+        EvidenceField.QUANTITY,
+    }
+
+
+def test_bare_sell_candidate_with_omitted_type_is_accepted_from_mapping() -> None:
+    raw = "삼성전자 2주 매도해"
+    candidate = _place_candidate(
+        raw,
+        instrument="삼성전자",
+        side_text="매도해",
+        side=OrderSide.SELL,
+        quantity_text="2주",
+        quantity=2,
+        order_type_text=None,
+        order_type=None,
+    ).model_dump(mode="json")
+
+    result = verify_order_candidate(raw, candidate)
+
+    assert isinstance(result, VerifiedPaperDirective)
+    assert result.payload is not None
+    assert result.payload.order_type is OrderType.MARKET
+
+
 def test_explicit_market_still_requires_exact_order_type_evidence() -> None:
     raw = "삼성전자 2주 시장가 매수해"
     candidate = _place_candidate(
@@ -1360,6 +1468,11 @@ _AGGREGATE_SENTENCES = [
     "모든 열린 주문 철회해줘",
     "주문 전량취소",
     "미체결 주문 전량 일괄 취소해주세요",
+    # SELL_ALL is inherently a MARKET liquidation; saying so out loud must not
+    # push the sentence out of the grammar.
+    "보유중인 종목 전부 다 시장가 매도해줘",
+    "보유종목 전량 시장가 매도",
+    "내 계좌 주식 모두 시장가로 팔아줘",
 ]
 
 
@@ -1419,3 +1532,172 @@ def test_every_supported_aggregate_sentence_verifies_for_any_valid_span(
                 f"{getattr(result, 'reason_codes', result)}"
             )
             assert result.action is action
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A limit sell-all is not a supported grammar.
+        "보유종목 전량 지정가 매도",
+        "보유종목 전량 70000원에 매도",
+        # One named instrument is not an account-wide liquidation.  Until a
+        # per-position grammar exists this must clarify, never widen SELL_ALL.
+        "보유중인 한온시스템 전부 다 시장가 매도해줘.",
+        "한온시스템 전량 매도해줘",
+    ],
+)
+def test_unsupported_liquidation_shapes_are_not_sell_all(raw: str) -> None:
+    from orchestration.user_order_language import _aggregate_match
+
+    assert _aggregate_match(raw) is None
+
+
+_SELL_POSITION_SENTENCES = [
+    "보유중인 한온시스템 전부 다 시장가 매도해줘.",
+    "한온시스템 전량 매도해줘",
+    "SK하이닉스 전부 시장가 매도",
+    "보유중인 삼성전자를 전량 매도해줘",
+    "내 계좌 LG전자 모두 팔아줘",
+    "005930 전량 시장가 매도해줘",
+]
+
+
+def _sell_position_candidate(raw, *, action_span, scope_span, instrument_span):
+    mention = raw[instrument_span[0] : instrument_span[1]]
+    return HermesOrderCandidate(
+        raw_text_sha256=raw_text_sha256(raw),
+        decision=CandidateDecision.EXECUTE,
+        action=DirectiveAction.SELL_POSITION,
+        instrument_mention=mention,
+        evidence=(
+            TextEvidence(
+                field=EvidenceField.ACTION,
+                start=action_span[0],
+                end=action_span[1],
+                text=raw[action_span[0] : action_span[1]],
+                normalized="SELL_POSITION",
+            ),
+            TextEvidence(
+                field=EvidenceField.AGGREGATE_SCOPE,
+                start=scope_span[0],
+                end=scope_span[1],
+                text=raw[scope_span[0] : scope_span[1]],
+                normalized="ALL",
+            ),
+            TextEvidence(
+                field=EvidenceField.INSTRUMENT,
+                start=instrument_span[0],
+                end=instrument_span[1],
+                text=mention,
+                normalized=mention,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("raw", _SELL_POSITION_SENTENCES)
+def test_single_holding_liquidation_verifies_for_any_valid_span(raw: str) -> None:
+    from orchestration.user_order_language import (
+        _literal_subspan,
+        _scope_word_spans,
+        _sell_position_match,
+    )
+
+    matched = _sell_position_match(raw)
+    assert matched is not None, raw
+    sentence, action_match, scope_match = matched
+    instrument_span = sentence.span("instrument")
+    for action_span in {
+        action_match.span(),
+        _literal_subspan(action_match, "매도", "팔아", "팔", "파"),
+    }:
+        for scope_span in {scope_match.span(), *_scope_word_spans(scope_match)}:
+            result = verify_order_candidate(
+                raw,
+                _sell_position_candidate(
+                    raw,
+                    action_span=action_span,
+                    scope_span=scope_span,
+                    instrument_span=instrument_span,
+                ),
+            )
+            assert isinstance(result, VerifiedPaperDirective), (
+                f"{raw!r} {action_span} {scope_span} -> "
+                f"{getattr(result, 'reason_codes', result)}"
+            )
+            assert result.action is DirectiveAction.SELL_POSITION
+            assert result.canonical_payload() == {
+                "instrument_mention": raw[instrument_span[0] : instrument_span[1]],
+                "side": "SELL",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+                "reduce_only": True,
+            }
+
+
+def test_particle_never_enters_the_instrument_mention() -> None:
+    from orchestration.user_order_language import _sell_position_match
+
+    matched = _sell_position_match("보유중인 삼성전자를 전량 매도해줘")
+    assert matched is not None
+    sentence = matched[0]
+    assert sentence.group("instrument") == "삼성전자"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Account-wide sentences belong to SELL_ALL and must not be captured
+        # here - a fragment of the honorific prefix is not an instrument.
+        "보유종목 전량 매도해줘",
+        "보유중인 종목 전부 다 시장가 매도해줘",
+        "보유 주식 전부 매도해",
+        # An explicit quantity is a plain PLACE_ORDER.
+        "한온시스템 10주 매도해줘",
+        # MARKET only.
+        "한온시스템 전량 지정가 매도",
+        # Buying is never a position liquidation.
+        "한온시스템 전량 매수해줘",
+    ],
+)
+def test_sentences_outside_the_single_holding_grammar(raw: str) -> None:
+    from orchestration.user_order_language import _sell_position_match
+
+    assert _sell_position_match(raw) is None
+
+
+def test_sell_position_candidate_cannot_carry_order_fields() -> None:
+    raw = "한온시스템 전량 매도해줘"
+    from orchestration.user_order_language import (
+        _literal_subspan,
+        _sell_position_match,
+    )
+
+    sentence, action_match, scope_match = _sell_position_match(raw)
+    payload = _sell_position_candidate(
+        raw,
+        action_span=action_match.span(),
+        scope_span=scope_match.span(),
+        instrument_span=sentence.span("instrument"),
+    ).model_dump(mode="json")
+    payload["quantity"] = "10"
+    result = verify_order_candidate(raw, payload)
+    assert isinstance(result, OrderClarification)
+    assert result.reason_codes == (OrderReasonCode.INVALID_CANDIDATE_SCHEMA,)
+
+
+def test_sell_position_instrument_mention_must_match_the_source() -> None:
+    raw = "한온시스템 전량 매도해줘"
+    from orchestration.user_order_language import _sell_position_match
+
+    sentence, action_match, scope_match = _sell_position_match(raw)
+    payload = _sell_position_candidate(
+        raw,
+        action_span=action_match.span(),
+        scope_span=scope_match.span(),
+        instrument_span=sentence.span("instrument"),
+    ).model_dump(mode="json")
+    payload["instrument_mention"] = "삼성전자"
+    result = verify_order_candidate(raw, payload)
+    assert isinstance(result, OrderClarification)
+    assert OrderReasonCode.CANDIDATE_MISMATCH in result.reason_codes

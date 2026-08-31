@@ -367,3 +367,26 @@ def test_user_query_reaches_conditional_paper_result_and_evolution_approval(
     assert evolution["report"]["outcome_evidence"]["status"] == (
         "ACTIVE_PENDING_FEEDBACK"
     )
+
+
+def test_short_relative_move_pair_reaches_safe_clarification(
+    monkeypatch,
+) -> None:
+    """The user-facing bridge handles the shorthand without inventing a trade."""
+
+    raw = "삼성전자 1퍼 오르면 매도해주고 1퍼 내리면 매수해"
+    orders, rules, _tasks = _install_workflow(monkeypatch, raw_instruction=raw)
+
+    result = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidate=None,
+        clarification_reason="AMBIGUOUS_RETURN_BASELINE",
+    )
+
+    assert result["binding"] is False
+    assert result["rule_active"] is False
+    assert result["awaiting_user_reply"] is True
+    assert result["reason_codes"] == ["AMBIGUOUS_RETURN_BASELINE"]
+    assert rules.list_for_user(USER_ID) == []
+    assert next(iter(orders._records.values())).state == "CLARIFICATION_REQUIRED"

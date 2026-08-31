@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -95,6 +96,36 @@ def _oco_exit_candidate(
             },
             "evaluation": {"clock": "QUOTE"},
             "oco_mode": "EXIT_BRACKET",
+        }
+    )
+
+
+def _relative_move_candidate(
+    *, side: str, multiplier: str, quantity: str
+) -> conditional_rules.ConditionalRuleCandidate:
+    return conditional_rules.ConditionalRuleCandidate.model_validate(
+        {
+            "symbol": "삼성전자",
+            "condition": {
+                "type": "COMPARISON",
+                "operator": "GTE" if Decimal(multiplier) > 1 else "LTE",
+                "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                "right": {
+                    "type": "ARITHMETIC",
+                    "operator": "MUL",
+                    "left": {"type": "PORTFOLIO", "field": "AVG_ENTRY_PRICE"},
+                    "right": {
+                        "type": "LITERAL",
+                        "value": multiplier,
+                        "unit": "NUMBER",
+                    },
+                },
+            },
+            "action": {
+                "side": side,
+                "sizing": {"type": "FIXED_SHARES", "value": quantity},
+            },
+            "evaluation": {"clock": "QUOTE"},
         }
     )
 
@@ -378,6 +409,36 @@ def test_multiple_price_actions_activate_as_independent_one_shot_rules(
     assert {item["workflow_state"] for item in status["rules"]} == {
         "WAITING_FOR_TRIGGER"
     }
+
+
+def test_relative_move_pair_preserves_opposite_actions_as_two_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = (
+        "삼성전자 평균 매입가 대비 1퍼 오르면 2주 매도하고 "
+        "1퍼 내리면 1주 매수해"
+    )
+    orders, rules, _tasks = _install_workflow(monkeypatch, raw_instruction=raw)
+    record = next(iter(orders._records.values()))
+
+    result = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidates=(
+            _relative_move_candidate(side="SELL", multiplier="1.01", quantity="2"),
+            _relative_move_candidate(side="BUY", multiplier="0.99", quantity="1"),
+        ),
+    )
+
+    assert result["binding"] is True
+    assert len(result["rule_ids"]) == 2
+    stored = rules.list_for_user(USER_ID)
+    assert {item.state for item in stored} == {RuleState.ACTIVE}
+    assert {item.spec.action.side.value for item in stored} == {"BUY", "SELL"}
+    assert {str(item.spec.action.sizing.value) for item in stored} == {"1", "2"}
+    outcome = orders.get(record.order_request_id)
+    assert outcome is not None
+    assert outcome.state == "COMPLETED"
 
 
 def test_oco_exit_bracket_is_server_bound_and_atomically_activated(

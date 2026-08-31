@@ -1,0 +1,145 @@
+{
+  "dataset_name": "Risk legal LLM-Wiki independent holdout v1",
+  "split": "holdout",
+  "tuning_status": "frozen_after_golden_tuning",
+  "department_head_instruction": "당신은 헤지펀드 Risk 부서의 Compliance Policy 담당입니다. 트레이딩본부·임직원의 행위가 자본시장법과 하위 규정을 위반하는지 판단하세요. 제공된 근거 문서에 없는 규칙은 절대 단정하지 마세요. 근거가 불충분하면 verdict를 'ambiguous'로 하고 escalate=true로 설정하세요.",
+  "mandate": "Mandate: 이 펀드는 미공개중요정보 이용행위, 시세조종행위, 부정거래행위, 임직원 사적 매매 규정을 엄격히 준수합니다. 모든 판정은 제공된 법령·행정규칙·판례 근거에만 기반해야 하며, 추측이나 일반 상식으로 결론을 내리지 않습니다.",
+  "as_of": "2026-08-26",
+  "questions": [
+    {
+      "id": "h01",
+      "query": "업무 중 알게 된 공개되지 않은 정보를 지인에게 넘겨 그 사람이 이익을 얻도록 해도 되는가?",
+      "gold_answer": "안 된다. 제54조제1항은 금융투자업자가 직무상 알게 된 외부에 공개되지 않은 정보를 정당한 사유 없이 자기 또는 제삼자의 이익을 위하여 이용하는 것을 금지한다.",
+      "gold_verdict": "breach",
+      "query_kind": "conduct_assessment",
+      "gold_page_ids": ["자본시장법_제54조_직무관련정보의이용금지"],
+      "tags": ["paraphrase", "third_party_benefit"]
+    },
+    {
+      "id": "h02",
+      "query": "직원이 자기 돈으로 금융투자상품을 거래하면서 배우자 명의 계좌를 이용하는 것은 허용되는가?",
+      "gold_answer": "허용되지 않는다. 제63조제1항제1호는 임직원이 자기 계산으로 금융투자상품을 매매할 때 자기의 명의로 매매하도록 한다.",
+      "gold_verdict": "breach",
+      "query_kind": "conduct_assessment",
+      "gold_page_ids": ["자본시장법_제63조_임직원의금융투자상품매매"],
+      "tags": ["paraphrase", "near_opposite"]
+    },
+    {
+      "id": "h03",
+      "query": "조사분석자료를 공개한 뒤 하루가 지나기 전에 그 대상 상품을 회사 자금으로 사고파는 것은 가능한가?",
+      "gold_answer": "안 된다. 제71조제2호는 조사분석자료의 내용이 사실상 확정된 때부터 공표 후 24시간이 지나기 전까지 그 대상 금융투자상품을 자기 계산으로 매매하는 행위를 금지한다.",
+      "gold_verdict": "breach",
+      "query_kind": "conduct_assessment",
+      "gold_page_ids": ["자본시장법_제71조_불건전영업행위의금지"],
+      "tags": ["paraphrase", "temporal_condition"]
+    },
+    {
+      "id": "h04",
+      "query": "상장회사 임원이 특정증권을 산 뒤 5개월 후 팔아 수익을 냈다면 회사가 그 이익을 돌려달라고 할 수 있는가?",
+      "gold_answer": "청구할 수 있다. 제172조제1항은 주권상장법인의 임원 등이 특정증권등을 매수한 후 6개월 이내에 매도하여 이익을 얻은 경우 법인이 단기매매차익의 반환을 청구할 수 있도록 한다.",
+      "gold_verdict": "breach",
+      "query_kind": "conduct_assessment",
+      "gold_page_ids": ["자본시장법_제172조_내부자의단기매매차익반환"],
+      "tags": ["paraphrase", "threshold_boundary"]
+    },
+    {
+      "id": "h05",
+      "query": "미공개중요정보를 전달받은 사람도 그 정보를 이용해 관련 증권을 거래하면 안 되는가?",
+      "gold_answer": "안 된다. 제174조제1항제6호는 제1호부터 제5호까지의 사람으로부터 미공개중요정보를 받은 자가 그 정보를 특정증권등의 거래에 이용하는 것을 금지한다.",
+      "gold_verdict": "breach",
+      "query_kind": "conduct_assessment",
+      "gold_page_ids": ["자본시장법_제174조_미공개중요정보이용행위금지"],
+      "tags": ["paraphrase", "recipient_scope"]
+    },
+    {
+      "id": "h06",
+      "query": "임원이나 주요주주가 된 뒤 특정증권 소유현황을 처음 신고해야 하는 기한을 알려줘.",
+      "gold_answer": "제173조제1항에 따라 임원 또는 주요주주가 된 날부터 5일 이내에 특정증권등의 소유상황을 보고해야 한다.",
+      "gold_verdict": "no_breach",
+      "query_kind": "rule_lookup",
+      "gold_page_ids": ["자본시장법_제173조_임원등의특정증권등소유상황보고"],
+      "tags": ["paraphrase", "deadline"]
+    },
+    {
+      "id": "h07",
+      "query": "자기 계산으로 한 매매의 명세는 일반 임직원과 조사분석인력 각각 언제 소속 회사에 통지해야 하나?",
+      "gold_answer": "제63조제1항제3호에 따라 일반 임직원은 분기별로, 투자권유자문인력·조사분석인력·투자운용인력은 월별로 매매명세를 통지해야 한다.",
+      "gold_verdict": "no_breach",
+      "query_kind": "rule_lookup",
+      "gold_page_ids": ["자본시장법_제63조_임직원의금융투자상품매매"],
+      "tags": ["paraphrase", "near_opposite", "frequency"]
+    },
+    {
+      "id": "h08",
+      "query": "정보교류차단 내부통제기준의 준수 여부를 점검하고 위반을 조사하는 책임자는 어떤 직책인가?",
+      "gold_answer": "금융투자업규정 제4-6조제2항에 따라 해당 업무를 전담하는 부서의 장이며, 금융회사의 지배구조에 관한 법률 제25조에 따른 준법감시인을 포함한다.",
+      "gold_verdict": "no_breach",
+      "query_kind": "rule_lookup",
+      "gold_page_ids": ["금융투자업규정_제4의6조_정보교류의차단"],
+      "tags": ["paraphrase", "role_definition"]
+    },
+    {
+      "id": "h09",
+      "query": "단기매매차익 반환청구권은 이익을 얻은 날부터 얼마 동안 행사할 수 있나?",
+      "gold_answer": "제172조제5항에 따라 이익을 취득한 날부터 2년 이내에 행사하지 않으면 그 권리는 소멸한다.",
+      "gold_verdict": "no_breach",
+      "query_kind": "rule_lookup",
+      "gold_page_ids": ["자본시장법_제172조_내부자의단기매매차익반환"],
+      "tags": ["paraphrase", "deadline"]
+    },
+    {
+      "id": "h10",
+      "query": "제176조 제1항에서 사전에 짜고 같은 시기에 같은 가격으로 주고받는 매매를 어떻게 취급하는지 설명해줘.",
+      "gold_answer": "제176조제1항은 타인이 같은 시기에 같은 가격으로 반대매매를 하기로 사전에 짠 후 매도하거나 매수하는 행위를 금지한다.",
+      "gold_verdict": "no_breach",
+      "query_kind": "rule_lookup",
+      "gold_page_ids": ["자본시장법_제176조_시세조종행위등의금지"],
+      "tags": ["paraphrase", "multi_clause_context"]
+    },
+    {
+      "id": "h11",
+      "query": "가상자산 거래소가 신규 코인을 상장할 때 적용하는 심사 기준은 무엇인가?",
+      "gold_answer": "이 코퍼스에는 가상자산 거래소의 신규 코인 상장 심사 기준에 관한 근거 문서가 없다. 근거가 없으므로 판정을 내릴 수 없고 escalate해야 한다.",
+      "gold_verdict": "ambiguous",
+      "query_kind": "scope_assessment",
+      "gold_page_ids": [],
+      "tags": ["out_of_corpus"]
+    },
+    {
+      "id": "h12",
+      "query": "해외 지점이 작성한 조사분석자료에도 제71조의 공표 후 24시간 제한이 같은 방식으로 적용되는지 이 자료만으로 확정할 수 있나?",
+      "gold_answer": "이 코퍼스에는 해외 지점에 대한 적용 범위나 예외를 판단할 근거가 없다. 제71조의 일반 규정만으로 해외 지점에 같은 방식으로 적용된다고 확정하지 말고 ambiguous로 escalate해야 한다.",
+      "gold_verdict": "ambiguous",
+      "query_kind": "conduct_assessment",
+      "gold_page_ids": ["자본시장법_제71조_불건전영업행위의금지"],
+      "tags": ["scope_boundary", "insufficient_evidence"]
+    },
+    {
+      "id": "h13",
+      "query": "내부정보를 알고 있었지만 실제 거래 판단에는 사용하지 않았다는 사실을 어떤 증거로 입증해야 하는가?",
+      "gold_answer": "이 코퍼스는 미공개중요정보 이용 금지 요건은 제시하지만 거래 의사결정의 입증 방법이나 증거 기준은 제시하지 않는다. 따라서 구체적인 입증 방법을 단정하지 말고 ambiguous로 escalate해야 한다.",
+      "gold_verdict": "ambiguous",
+      "query_kind": "scope_assessment",
+      "gold_page_ids": ["자본시장법_제174조_미공개중요정보이용행위금지"],
+      "tags": ["evidence_standard", "insufficient_evidence"]
+    },
+    {
+      "id": "h14",
+      "query": "금융투자업자가 정보교류차단 내부통제기준을 지켰다면 제54조 관련 책임이 모든 경우에 면제되는가?",
+      "gold_answer": "모든 경우에 면제된다고 확정할 수 없다. 제공된 금융투자업규정 제4-6조는 일정한 관리·감독상 주의를 다한 경우 조치를 감면할 수 있다고 규정할 뿐, 제54조 책임의 일률적인 면제를 정하지 않는다.",
+      "gold_verdict": "ambiguous",
+      "query_kind": "conduct_assessment",
+      "gold_page_ids": ["금융투자업규정_제4의6조_정보교류의차단", "자본시장법_제54조_직무관련정보의이용금지"],
+      "tags": ["near_opposite", "multi_clause_context", "insufficient_evidence"]
+    },
+    {
+      "id": "h15",
+      "query": "제178조 사건에서 공시 직전에 관계자에게 구두로 설명한 사실만으로 그 공시가 반드시 부정거래가 되는가?",
+      "gold_answer": "그 사실만으로 반드시 부정거래라고 확정할 수 없다. 제178조와 2019도12887 판례는 부정한 수단·계획·기교 및 공시의 구체적 내용과 행위 경위를 종합해 판단하므로 추가 사실과 근거가 필요하다.",
+      "gold_verdict": "ambiguous",
+      "query_kind": "conduct_assessment",
+      "gold_page_ids": ["자본시장법_제178조_부정거래행위등의금지", "대법원_2019도12887_부정거래행위판단기준"],
+      "tags": ["near_opposite", "multi_clause_context", "insufficient_evidence"]
+    }
+  ]
+}

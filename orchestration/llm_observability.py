@@ -227,6 +227,10 @@ _LANGSMITH_ROOT_CONTEXT_RE = re.compile(
 WORKFLOW_LANGSMITH_PROJECT = "First"
 _LANGSMITH_QUOTA_LOCK = Lock()
 _LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
+# A monthly unique-trace limit cannot recover during a short cooldown. Keep a
+# process-local hard latch so the observer does not schedule one futile retry
+# every few minutes. Business execution remains independent of this latch.
+_LANGSMITH_USAGE_LIMITED = False
 _LANGSMITH_SUCCESS_STATUSES = frozenset(
     {"completed", "success", "succeeded", "done", "ok"}
 )
@@ -386,7 +390,19 @@ def _langsmith_quota_pause_seconds() -> float:
 
 def _langsmith_quota_paused() -> bool:
     with _LANGSMITH_QUOTA_LOCK:
-        return time.monotonic() < _LANGSMITH_QUOTA_PAUSED_UNTIL
+        return _LANGSMITH_USAGE_LIMITED or time.monotonic() < _LANGSMITH_QUOTA_PAUSED_UNTIL
+
+
+def langsmith_usage_limit_exhausted() -> bool:
+    """Whether LangSmith reported a hard monthly unique-trace limit.
+
+    This is intentionally separate from the short transient rate-limit
+    cooldown. Recovery lanes use it to discard already-pending observer work;
+    no business or order state depends on the result.
+    """
+
+    with _LANGSMITH_QUOTA_LOCK:
+        return _LANGSMITH_USAGE_LIMITED
 
 
 def _langsmith_quota_remaining_seconds() -> float:
@@ -395,15 +411,21 @@ def _langsmith_quota_remaining_seconds() -> float:
 
 
 def _mark_langsmith_quota_pause(error: BaseException) -> None:
-    """Stop hammering an exhausted LangSmith tenant until its cooldown ends."""
+    """Stop hammering an exhausted LangSmith tenant.
+
+    A monthly unique-trace exhaustion is a hard process-local stop. Other 429
+    and quota messages retain the existing bounded cooldown behavior.
+    """
 
     message = str(error).casefold()
     if not any(
         marker in message for marker in ("429", "quota", "rate limit", "usage limit")
     ):
         return
-    global _LANGSMITH_QUOTA_PAUSED_UNTIL
+    global _LANGSMITH_QUOTA_PAUSED_UNTIL, _LANGSMITH_USAGE_LIMITED
     with _LANGSMITH_QUOTA_LOCK:
+        if "monthly unique trace" in message and "usage limit" in message:
+            _LANGSMITH_USAGE_LIMITED = True
         _LANGSMITH_QUOTA_PAUSED_UNTIL = max(
             _LANGSMITH_QUOTA_PAUSED_UNTIL,
             time.monotonic() + _langsmith_quota_pause_seconds(),

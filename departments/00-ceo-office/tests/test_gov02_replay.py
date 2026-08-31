@@ -31,10 +31,12 @@ CAPITAL_ALLOCATION, object_id=<case_id>로 걸어도 DB 제약을 어기지 않�
 from __future__ import annotations
 
 import os
+import socket
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
 
 _API_DIR = Path(__file__).resolve().parents[1] / "api"
 sys.path.insert(0, str(_API_DIR))
@@ -43,7 +45,51 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()  # 저장소 루트 .env - 이미 설정된 값은 덮어쓰지 않는다.
 
-_dsn = os.environ.get("DATABASE_URL")
+
+def _resolve_replay_dsn() -> str:
+    """Use Docker DNS in-container and the mapped control port on the host."""
+
+    dsn = (
+        os.environ.get("GOVERNANCE_REPLAY_DATABASE_URL")
+        or os.environ.get("DATABASE_URL")
+        or ""
+    ).strip()
+    if not dsn:
+        return ""
+
+    parsed = urlsplit(dsn)
+    if parsed.hostname != "timescaledb":
+        return dsn
+    try:
+        socket.getaddrinfo(parsed.hostname, parsed.port or 5432)
+    except OSError:
+        _disable_unreachable_docker_redis()
+        password = os.environ.get("HEDGEFUND_RUNTIME_DB_PASSWORD", "").strip()
+        if not password:
+            return dsn
+        database = os.environ.get("HEDGEFUND_CONTROL_DB_NAME", "control").strip() or "control"
+        netloc = f"hgfinance_runtime:{quote(password, safe='')}@127.0.0.1:5434"
+        return urlunsplit((parsed.scheme, netloc, f"/{database}", parsed.query, parsed.fragment))
+    return dsn
+
+
+def _disable_unreachable_docker_redis() -> None:
+    """Keep host replay quiet when the optional Docker-only Redis name is absent."""
+
+    for variable in ("GOVERNANCE_EVENT_REDIS_URL", "REDIS_URL"):
+        value = os.environ.get(variable, "").strip()
+        if not value:
+            continue
+        parsed = urlsplit(value)
+        if parsed.hostname != "redis":
+            continue
+        try:
+            socket.getaddrinfo(parsed.hostname, parsed.port or 6379)
+        except OSError:
+            os.environ[variable] = ""
+
+
+_dsn = _resolve_replay_dsn()
 if not _dsn:
     if "pytest" in sys.modules:
         import pytest
@@ -54,6 +100,7 @@ if not _dsn:
         )
     print("DATABASE_URL 미설정 - GOV-02 전체 상태 Replay는 건너뛴다")
     raise SystemExit(0)
+os.environ["DATABASE_URL"] = _dsn
 
 from fastapi.testclient import TestClient  # noqa: E402
 

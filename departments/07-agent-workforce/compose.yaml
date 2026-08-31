@@ -20,6 +20,10 @@ services:
         max-file: "3"
     environment:
       DATABASE_URL: ${GOVERNANCE_WORKFORCE_DATABASE_URL:-${DATABASE_URL:-}}
+      # Kanban lifecycle metadata is the durable source for per-department
+      # queue/execution latency. The mount below is read-only and the reader
+      # selects no task body/result content.
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
       # Langfuse(2026-08-10 도입, 993682f). 이 컨테이너는 **읽는** 쪽이다 -
       # GET /workforce/v1/departments/idle-agents 가 6개 투자본부 Worker의
       # 마지막 관측 시각만 조회한다(scorecard/observability.py). Trace 원문
@@ -30,6 +34,8 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
     ports:
       - "127.0.0.1:8044:8000"   # 로컬 전용 - 외부 노출 금지
+    volumes:
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import json, urllib.request; payload=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)); assert payload.get('status') == 'ready' and payload.get('authoritative') is True"]
       interval: 15s

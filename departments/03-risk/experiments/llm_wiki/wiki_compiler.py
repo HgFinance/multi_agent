@@ -77,6 +77,7 @@ class RawDoc:
     text: str
     origin_url: str
     source_sha256: str
+    effective_to: str | None = None
 
 
 @dataclass(frozen=True)
@@ -188,6 +189,7 @@ def render_wiki_page(doc: RawDoc, links: list[OutgoingLink]) -> str:
         f"clause_id: {doc.clause_id}",
         f"authority: {doc.authority}",
         f"effective_from: {doc.effective_from or ''}",
+        f"effective_to: {doc.effective_to or ''}",
         "jurisdiction: KR",
         f"source_sha256: {doc.source_sha256}",
         f"origin_url: {doc.origin_url}",

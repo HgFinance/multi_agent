@@ -602,6 +602,73 @@ def test_discord_message_normalizes_database_decimal_quantities(
     assert "3.0000000000주" not in result["user_message"]
 
 
+def test_discord_message_separates_cancellation_audit_legs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    response = _directive_response(context.record, state=DirectiveState.UNKNOWN)
+    response = response.model_copy(
+        update={
+            "legs": [
+                DirectiveLeg.model_validate(
+                    {
+                        "leg_id": "55555555-5555-4555-8555-555555555555",
+                        "leg_index": 0,
+                        "symbol": "124500",
+                        "side": None,
+                        "order_type": None,
+                        "requested_quantity": None,
+                        "filled_quantity": "0",
+                        "state": "UNKNOWN",
+                        "reduce_only": True,
+                        "error_code": "TRADING_EXTERNAL_CANCEL_RECONCILIATION_REQUIRED",
+                    }
+                ),
+                DirectiveLeg.model_validate(
+                    {
+                        "leg_id": "66666666-6666-4666-8666-666666666666",
+                        "leg_index": 1,
+                        "symbol": "005930",
+                        "side": "SELL",
+                        "order_type": "MARKET",
+                        "requested_quantity": "30",
+                        "filled_quantity": "0",
+                        "state": "UNKNOWN",
+                        "reduce_only": True,
+                    }
+                ),
+            ]
+        }
+    )
+
+    message = orchestrator._directive_user_message(
+        record=context.record, response=response
+    )
+
+    assert "124500 방향 미확인" not in message
+    assert "005930 매도 시장가(가격 미지정) 요청 30주/체결 0주" in message
+    assert "기존 주문 취소 대사 미확정 1건" in message
+
+
+def test_priority_wait_is_reported_as_pending_not_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    response = _directive_response(
+        context.record,
+        state=DirectiveState.RECEIVED,
+        error_code="TRADING_HIGHER_PRIORITY_ACTIVE",
+    )
+
+    message = orchestrator._directive_user_message(
+        record=context.record, response=response
+    )
+
+    assert message.startswith("PAPER 주문 대기 중:")
+    assert "기존 고우선순위 PAPER 주문이 정리될 때까지 제출 대기" in message
+    assert "자동 재시도하지 않습니다" not in message
+
+
 def test_changed_interpretation_replay_conflicts_even_after_directive_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

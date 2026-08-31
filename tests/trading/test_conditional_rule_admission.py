@@ -35,10 +35,18 @@ from directives.service import DirectiveServiceError  # noqa: E402
 from orchestration.conditional_rules import ConditionalRuleSpec  # noqa: E402
 
 
-def _spec(*, sizing_type: str, sizing_value: str | None) -> ConditionalRuleSpec:
+def _spec(
+    *,
+    sizing_type: str,
+    sizing_value: str | None,
+    side: str = "SELL",
+    cap_krw: str | None = None,
+) -> ConditionalRuleSpec:
     sizing = {"type": sizing_type}
     if sizing_value is not None:
         sizing["value"] = sizing_value
+    if cap_krw is not None:
+        sizing["cap_krw"] = cap_krw
     return ConditionalRuleSpec.model_validate(
         {
             "schema_version": "conditional-trade-rule.v1",
@@ -55,7 +63,7 @@ def _spec(*, sizing_type: str, sizing_value: str | None) -> ConditionalRuleSpec:
                 "left": {"type": "MARKET", "field": "LAST_PRICE"},
                 "right": {"type": "LITERAL", "value": "1", "unit": "PRICE"},
             },
-            "action": {"side": "SELL", "sizing": sizing},
+            "action": {"side": side, "sizing": sizing},
             "evaluation": {"clock": "QUOTE"},
             "expires_at": "2026-09-20T00:00:00+00:00",
             "raw_instruction_sha256": "0" * 64,
@@ -74,7 +82,7 @@ def _admission(spec: ConditionalRuleSpec, quantity: str):
             "payload": {
                 "instrument_id": str(spec.instrument_id),
                 "symbol": spec.symbol,
-                "side": "SELL",
+                "side": spec.action.side.value,
                 "quantity": quantity,
                 "order_type": "MARKET",
                 "limit_price": None,
@@ -90,10 +98,13 @@ class _Repository:
         return nullcontext()
 
     def resolve_instrument(self, *args):
-        return SimpleNamespace(lot_size=Decimal("1"))
+        return SimpleNamespace(lot_size=Decimal("1"), currency="KRW")
 
     def sellable_quantity(self, *args):
         return Decimal("103")
+
+    def available_cash(self, *args):
+        return Decimal("20000000")
 
 
 def test_fixed_quantity_must_match_confirmed_rule() -> None:
@@ -134,6 +145,43 @@ def test_krw_notional_is_capped_against_trading_executable_quote() -> None:
             instrument=instrument,
             trusted_quote=quote,
         )
+
+    assert raised.value.code == "TRADING_CONDITIONAL_RULE_QUANTITY_MISMATCH"
+
+
+def test_available_cash_percent_cap_is_rechecked_with_trading_ask() -> None:
+    spec = _spec(
+        sizing_type="AVAILABLE_CASH_PERCENT_CAPPED",
+        sizing_value="0.10",
+        cap_krw="1000000",
+        side="BUY",
+    )
+    instrument = SimpleNamespace(lot_size=Decimal("1"), currency="KRW")
+    quote = SimpleNamespace(bid=Decimal("70000"), ask=Decimal("71000"))
+
+    _assert_confirmed_rule_quantity(
+        _admission(spec, "14"),
+        _Repository(),
+        instrument=instrument,
+        trusted_quote=quote,
+    )
+    with pytest.raises(DirectiveServiceError) as raised:
+        _assert_confirmed_rule_quantity(
+            _admission(spec, "15"),
+            _Repository(),
+            instrument=instrument,
+            trusted_quote=quote,
+        )
+
+    assert raised.value.code == "TRADING_CONDITIONAL_RULE_QUANTITY_MISMATCH"
+
+
+def test_target_weight_quantity_cannot_exceed_current_sellable_position() -> None:
+    spec = _spec(sizing_type="TARGET_POSITION_WEIGHT", sizing_value="0.20")
+
+    _assert_confirmed_rule_quantity(_admission(spec, "100"), _Repository())
+    with pytest.raises(DirectiveServiceError) as raised:
+        _assert_confirmed_rule_quantity(_admission(spec, "104"), _Repository())
 
     assert raised.value.code == "TRADING_CONDITIONAL_RULE_QUANTITY_MISMATCH"
 

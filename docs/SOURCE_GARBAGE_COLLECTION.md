@@ -1,6 +1,6 @@
 # Source Garbage Collection
 
-- Generated: `2026-08-30T16:50:23.598114+00:00`
+- Generated: `2026-08-31T07:07:42.425568+00:00`
 - Scope: three statically orphaned Python candidates identified in the release audit
 - Method: tracked Python source references, excluding the candidate itself
 

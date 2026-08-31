@@ -29,8 +29,8 @@ FROM python:3.12-slim
 # 버전은 이 저장소에서 이미 검증된 값(risk/audit Dockerfile과 동일 pin)으로 고정한다.
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
-    psycopg2-binary==2.9.12 redis==7.0.1 \
-    langgraph==0.6.11 langgraph-checkpoint-postgres
+    psycopg2-binary==2.9.12 psycopg-binary==3.3.4 redis==7.0.1 \
+    langgraph==1.2.2 langgraph-checkpoint-postgres==3.1.2
 
 WORKDIR /app
 COPY departments/00-ceo-office/api ./departments/00-ceo-office/api

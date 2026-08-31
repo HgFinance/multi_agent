@@ -291,6 +291,19 @@ For the immediate-order marker:
    two spans are adjacent and must not overlap. A scope word alone, a partial
    scope (`일부`, `절반`), a named instrument, or a liquidation verb the grammar
    does not list (`청산`) is not an aggregate command and must clarify.
+   `SELL_POSITION` liquidates the whole holding of ONE named instrument
+   (`보유중인 한온시스템 전부 다 시장가 매도해줘`, `삼성전자 전량 매도해줘`). It is
+   SELL_ALL narrowed to one symbol, so the account still sizes it: set
+   `instrument_mention` to the exact source mention with no particle
+   (`삼성전자`, never `삼성전자를`) and leave `side`, `quantity`,
+   `notional_krw`, `order_type`, and `limit_price` null with the basket lists
+   empty. Evidence is exactly three spans: `ACTION` over the verb with
+   `normalized="SELL_POSITION"`, `AGGREGATE_SCOPE` over the scope word with
+   `normalized="ALL"`, and `INSTRUMENT` over the mention with `normalized`
+   equal to `instrument_mention`. It is MARKET-only; a price or `지정가` makes
+   it a `PLACE_ORDER` that needs an explicit quantity, and a quantity
+   (`한온시스템 10주 매도해줘`) is a plain `PLACE_ORDER`, never this action.
+   Two or more named instruments are not this command.
    For `CLARIFY` or `NOT_ORDER`, set `action`, `instrument_mention`, `side`,
    `quantity`, `notional_krw`, `order_type`, and `limit_price` to `null`, set
    `basket_instrument_mentions`, `basket_quantities`, `basket_notionals_krw`,

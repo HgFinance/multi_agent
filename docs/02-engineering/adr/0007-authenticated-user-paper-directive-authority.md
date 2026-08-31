@@ -66,8 +66,9 @@
   (a)와 (c)는 Trading이 book lock 안에서 최신 매도호가와 lot size로
   `floor(금액 / ask, lot size)` 수량을 산정하므로 종목별 실제 주문금액이 명시 금액
   이하이다. (b)는 각 종목의 명시 수량을 보존하며 SELL인 경우 `reduce_only`다.
-- `SELL_ALL`: 해당 Fund/Book의 canonical PAPER 보유분을 다시 읽어 매도 가능한
-  수량만 `reduce_only` 자식 주문으로 전개
+- `SELL_ALL`: LS PAPER 계좌 `t0424` 체결기준 snapshot을 한 번 읽고, 각 종목코드로
+  해당 Fund/Book의 canonical instrument를 매칭한 뒤 broker 매도가능수량만
+  `reduce_only` child 주문으로 종목별 순차 전개
 - `CANCEL_ALL`: 해당 Fund/Book의 canonical 미종료 PAPER 주문을 다시 읽어 취소
   가능한 주문만 자식 취소로 전개
 
@@ -83,7 +84,9 @@ directive와 대상 snapshot이 durable PAPER store에 기록된 뒤에만 반�
 - 요청 Fund와 Book의 canonical 결합 및 사용자 membership
 - `mode == PAPER`; LIVE mode·LIVE 주문 route·계좌번호·계좌 비밀번호 입력 금지
 - 지원 symbol/side/order type, 양수 수량, lot/tick, limit price, TTL
-- canonical PAPER cash/position, sellable quantity와 미종료 주문 reservation
+- SELL_ALL은 LS PAPER `t0424` 체결기준 보유 snapshot을 먼저 읽고, 종목코드로
+  canonical instrument를 매칭한 뒤 broker sellable quantity와 lot size로 전개
+- 일반 주문은 canonical PAPER cash/position, sellable quantity와 미종료 주문 reservation
 - durable store readiness, payload hash와 idempotency conflict
 
 `PLACE_BASKET`은 Broker 수준의 원자 주문이 아니다. 모든 member의 catalog 해석,
@@ -111,9 +114,11 @@ directive는 고정된 대상 snapshot과 자식별 결과를 보존하며 다�
   성공/실패/건너뜀 수와 각 대상의
   오류를 함께 반환한다.
 - 대상이 있었지만 하나도 성공하지 못하면 `FAILED`다.
-- `SELL_ALL`의 대상이 0건인 no-op을 `COMPLETED`로 확정하는 경우는 canonical
-  양수 회계 보유분(`positive accounting position`)과 기존 open SELL reservation이 모두 0임을 같은
-  snapshot에서 확인했을 때뿐이다. 양수 보유분이 있지만 전부 예약됐거나 상태를
+- `SELL_ALL`의 대상이 0건인 no-op을 `COMPLETED`로 확정하는 경우는 외부 LS PAPER
+  모드에서는 최신 `t0424` snapshot에 양수 매도가능 보유분이 없고 durable open SELL
+  reservation도 0임을 확인했을 때뿐이다. 로컬 PAPER 모드에서는 canonical 양수 회계
+  보유분(`positive accounting position`)과 기존 open SELL reservation이 모두 0임을
+  확인한다. 양수 보유분이 있지만 전부 예약됐거나 상태를
   확정할 수 없는 경우는 완료가 아니다. `CANCEL_ALL`도 canonical open PAPER order가
   0건임을 확인한 경우에만 `legs: []` no-op `COMPLETED`다.
 - 부분 체결 뒤 취소, snapshot 뒤 체결/취소 같은 race는 성공으로 덮지 않는다.

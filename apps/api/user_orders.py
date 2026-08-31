@@ -27,6 +27,9 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from orchestration.user_order_language import (
+    normalize_shared_allocation_instrument_mention,
+)
 
 try:
     from .conditional_rule_workflow import (
@@ -113,6 +116,7 @@ class DirectiveAction(str, Enum):
     PLACE_ORDER = "PLACE_ORDER"
     PLACE_BASKET = "PLACE_BASKET"
     SELL_ALL = "SELL_ALL"
+    SELL_POSITION = "SELL_POSITION"
     CANCEL_ALL = "CANCEL_ALL"
 
 
@@ -167,6 +171,30 @@ class PaperOrderInput(BaseModel):
         if self.order_type == OrderType.LIMIT and self.limit_price is None:
             raise ValueError("limit orders require limit_price")
         return self
+
+
+class PaperSellPositionInput(BaseModel):
+    """One named holding liquidation, sized from Trading's fresh snapshot."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    instrument_id: UUID | None = None
+    symbol: str = Field(min_length=1, max_length=80)
+    side: Literal[OrderSide.SELL] = OrderSide.SELL
+    order_type: Literal[OrderType.MARKET] = OrderType.MARKET
+    time_in_force: Literal["DAY"] = "DAY"
+    reduce_only: Literal[True] = True
+
+    @field_validator("symbol")
+    @classmethod
+    def _clean_symbol(cls, value: str) -> str:
+        cleaned = " ".join(value.strip().split())
+        if not cleaned or any(ord(character) < 32 for character in cleaned):
+            raise ValueError("symbol is invalid")
+        canonical_code = cleaned.upper()
+        if _KRX_TRADING_SYMBOL.fullmatch(canonical_code):
+            return canonical_code
+        return cleaned
 
 
 class PaperBasketOrderInput(BaseModel):
@@ -490,6 +518,9 @@ def _basket_payload_from_query(normalized: str) -> dict[str, Any] | None:
     for index, raw_name in enumerate(raw_names):
         name = raw_name
         if index == len(raw_names) - 1:
+            # "각 300만원씩" is a shared allocation qualifier, not part
+            # of the final instrument name.
+            name = normalize_shared_allocation_instrument_mention(name)
             name = name.rstrip("을를").strip()
         if (
             not name
@@ -969,6 +1000,22 @@ def _submit(
         normalized_payload = _basket_payload(
             PaperBasketInput(orders=tuple(normalized_orders))
         )
+    elif action == DirectiveAction.SELL_POSITION:
+        position = PaperSellPositionInput.model_validate(payload)
+        resolved = resolve_active_trading_instrument(
+            position.symbol,
+            str(position.instrument_id)
+            if position.instrument_id is not None
+            else None,
+        )
+        normalized_payload = {
+            "instrument_id": str(resolved["instrument_id"]),
+            "symbol": resolved["symbol"],
+            "side": position.side.value,
+            "order_type": position.order_type.value,
+            "time_in_force": position.time_in_force,
+            "reduce_only": position.reduce_only,
+        }
     else:
         normalized_payload = {}
     payload_hash = payload_sha256(normalized_payload)
@@ -1034,7 +1081,13 @@ def submit_verified_paper_directive(
 
     directive_action = DirectiveAction(action)
     normalized_payload = dict(payload)
-    if directive_action is DirectiveAction.PLACE_ORDER:
+    if directive_action in {
+        DirectiveAction.PLACE_ORDER,
+        DirectiveAction.SELL_POSITION,
+    }:
+        # The language layer never resolves a catalog identity, so it hands over
+        # the exact user mention.  Trading resolves it fail-closed to a
+        # canonical KRX symbol under the same book authority.
         instrument_mention = normalized_payload.pop("instrument_mention", None)
         if instrument_mention is None or "symbol" in normalized_payload:
             raise HTTPException(status_code=422, detail="paper_order_payload_invalid")

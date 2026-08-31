@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "ll
 from arms import (
     _LEGAL_VERDICT_SCHEMA,
     _LLM_WIKI_GENERATE_SYSTEM,
+    _finalize_wiki_answer,
     PERSONA,
     _generate_verdict,
     build_flat_corpus,
@@ -113,3 +114,57 @@ def test_generate_verdict_uses_qwen_gateway_without_arithmetic_adapter(
     assert len(calls) == 1
     assert calls[0]["json_schema"] == _LEGAL_VERDICT_SCHEMA
     assert Binding.adapter_id is None
+
+
+def test_wiki_answer_rejects_unvisited_citations_and_escalates() -> None:
+    result = _finalize_wiki_answer(
+        {
+            "verdict": "no_breach",
+            "cited_documents": ["not-visited"],
+            "rationale": "제공된 근거만으로는 판단할 수 없다.",
+            "confidence": 0.9,
+            "escalate": False,
+        },
+        ["visited-page"],
+    )
+
+    assert result["verdict"] == "ambiguous"
+    assert result["cited_documents"] == []
+    assert result["confidence"] == 0.0
+    assert result["escalate"] is True
+
+
+def test_wiki_answer_requires_a_visited_citation_for_a_definitive_verdict() -> None:
+    result = _finalize_wiki_answer(
+        {
+            "verdict": "breach",
+            "cited_documents": [],
+            "rationale": "제178조에 따른다.",
+            "confidence": 0.8,
+            "escalate": False,
+        },
+        ["visited-page"],
+    )
+
+    assert result["verdict"] == "ambiguous"
+    assert result["escalate"] is True
+
+
+def test_wiki_answer_preserves_grounded_verdict_and_only_visited_citations() -> None:
+    result = _finalize_wiki_answer(
+        {
+            "verdict": "breach",
+            "cited_documents": ["visited-page", "not-visited"],
+            "rationale": "제178조에 따른다.",
+            "confidence": 0.8,
+            "escalate": False,
+        },
+        ["visited-page"],
+    )
+
+    assert result["verdict"] == "ambiguous"
+    assert result["cited_documents"] == ["visited-page"]
+
+
+def test_llm_wiki_prompt_requires_numeric_threshold_comparison() -> None:
+    assert "M months/days with M less than or equal to N" in _LLM_WIKI_GENERATE_SYSTEM

@@ -10,6 +10,8 @@ from orchestration.llm_observability import (
     close_root_trace,
     langfuse_enabled,
     langfuse_worker_event_name,
+    langsmith_usage_limit_exhausted,
+    _mark_langsmith_quota_pause,
     langsmith_project,
     publish_langfuse_metric,
     publish_metric,
@@ -21,6 +23,32 @@ from orchestration.llm_observability import (
     trace_should_publish,
     worker_graph_trace_config,
 )
+
+
+def test_monthly_unique_trace_limit_stops_observer_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hard monthly limit is not retried every cooldown window."""
+
+    import orchestration.llm_observability as observability
+
+    with observability._LANGSMITH_QUOTA_LOCK:
+        observability._LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
+        observability._LANGSMITH_USAGE_LIMITED = False
+
+    try:
+        _mark_langsmith_quota_pause(
+            RuntimeError(
+                "429 Too Many Requests: tenant exceeded usage limits: "
+                "Monthly unique traces usage limit exceeded"
+            )
+        )
+        assert langsmith_usage_limit_exhausted()
+        assert not observability.langsmith_enabled()
+    finally:
+        with observability._LANGSMITH_QUOTA_LOCK:
+            observability._LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
+            observability._LANGSMITH_USAGE_LIMITED = False
 
 
 @pytest.fixture(autouse=True)

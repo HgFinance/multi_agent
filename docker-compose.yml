@@ -145,6 +145,9 @@ services:
       HERMES_HOME: /opt/hermes-cli
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
+      # Read-only Kanban CLI cache. Keep this aligned with the Agent Logs
+      # polling window; it does not cache or alter any order/Hermes mutation.
+      KANBAN_READ_CACHE_TTL_SECONDS: ${KANBAN_READ_CACHE_TTL_SECONDS:-10}
       HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
       HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
       # The history endpoint reconstructs independent roots in parallel. Keep
@@ -331,6 +334,9 @@ services:
       BROKER_SNAPSHOT_CACHE_SECONDS: ${BROKER_SNAPSHOT_CACHE_SECONDS:-10}
       ENABLE_LS_MARKET_DATA: "true"
       ENABLE_LS_ACCOUNT_DATA: "true"
+      # Read-only ledger/history cache. This does not enable or replay orders;
+      # live FEED events are merged into every response separately.
+      LS_ORDER_HISTORY_CACHE_SECONDS: ${LS_ORDER_HISTORY_CACHE_SECONDS:-10}
       # Accounting Hermes cannot call the broker itself. Preload and cache the
       # ten account-wide TRs here; the two symbol/price TRs remain on-demand.
       LS_ACCOUNTING_EVIDENCE_CACHE_SECONDS: ${LS_ACCOUNTING_EVIDENCE_CACHE_SECONDS:-300}
@@ -869,7 +875,11 @@ services:
   # (재일님 지시 "바스켓 종목만 구독" - 대규모 동시 구독은 krx-tick-collector 실증).
   ls-realtime:
     build:
-      context: departments/01-research
+      # The Dockerfile's explicit COPY allowlist uses repository-root paths.
+      # Keep the build context aligned with those paths so a fresh recovery
+      # cannot silently fall back to an old image.
+      context: .
+      dockerfile: departments/01-research/Dockerfile
     container_name: hedgefund-ls-realtime
     restart: unless-stopped
     logging:
@@ -944,7 +954,11 @@ services:
     # macro and social inputs are queried on demand through MCP and are never
     # persisted by this service.
     build:
-      context: departments/01-research
+      # The Research Dockerfile copies a small allowlist from repository-root
+      # paths; keep fresh rebuilds reproducible instead of relying on an old
+      # cached image.
+      context: .
+      dockerfile: departments/01-research/Dockerfile
     container_name: hedgefund-batch-collectors
     restart: unless-stopped
     logging:
@@ -1405,7 +1419,10 @@ services:
   #   포트는 호스트에 게시하지 않는다(ls-mcp:8038, compose 안 전용).
   ls-mcp:
     build:
-      context: departments/01-research
+      # Keep the build context consistent with the Dockerfile's root-relative
+      # COPY allowlist so recovery/rebuilds use the current source tree.
+      context: .
+      dockerfile: departments/01-research/Dockerfile
     container_name: hedgefund-ls-mcp
     restart: unless-stopped
     logging:
@@ -2554,7 +2571,9 @@ services:
       ACCOUNTING_ADVISORY_BOOK_ID: ${ACCOUNTING_ADVISORY_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
       ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-2.0}
       PORTFOLIO_BFF_INTERNAL_URL: ${PORTFOLIO_BFF_INTERNAL_URL:-http://portfolio-bff:8000}
-      CEO_SUPERVISOR_OBSERVER_WORKERS: ${CEO_SUPERVISOR_OBSERVER_WORKERS:-2}
+      # Workflow mutations share one Hermes SQLite board lock; extra observer
+      # threads only queue behind that lock and add contention.
+      CEO_SUPERVISOR_OBSERVER_WORKERS: ${CEO_SUPERVISOR_OBSERVER_WORKERS:-1}
       CEO_SUPERVISOR_OBSERVER_MAX_PENDING: ${CEO_SUPERVISOR_OBSERVER_MAX_PENDING:-128}
     healthcheck:
       # init(1) remains as a reaper, so inspect the supervised Python child

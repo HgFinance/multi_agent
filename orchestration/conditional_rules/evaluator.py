@@ -474,7 +474,9 @@ def _contains_cross(node: ExpressionNode | None) -> bool:
 def _contains_bar_market_field(node: ExpressionNode | None) -> bool:
     if node is None:
         return False
-    if node.type is ExpressionType.MARKET and node.field != "LAST_PRICE":
+    if node.type is ExpressionType.MARKET and node.field in {
+        "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"
+    }:
         return True
     return any(
         _contains_bar_market_field(child)
@@ -526,6 +528,11 @@ def _evaluate(node: ExpressionNode, frame: EvaluationFrame) -> Decimal | bool:
         raise EvaluationError(
             "TRAILING_STOP_STATE_REQUIRED",
             "trailing stop must be evaluated by the durable worker state store",
+        )
+    if node.type is ExpressionType.TEMPORAL_SEQUENCE:
+        raise EvaluationError(
+            "TEMPORAL_SEQUENCE_STATE_REQUIRED",
+            "temporal sequence must be evaluated by the durable worker state store",
         )
     if node.type is ExpressionType.ARITHMETIC:
         left = _numeric(_evaluate(node.left, frame), code="ARITHMETIC_TYPE_ERROR")  # type: ignore[arg-type]
@@ -606,11 +613,17 @@ def _evaluate_with_cross(node: ExpressionNode, context: EvaluationContext) -> De
     return _evaluate(node, context.current)
 
 
-def evaluate_condition(rule: ConditionalRuleSpec, context: EvaluationContext) -> bool:
-    result = _evaluate_with_cross(rule.condition, context)
+def evaluate_expression_condition(
+    expression: ExpressionNode, context: EvaluationContext
+) -> bool:
+    result = _evaluate_with_cross(expression, context)
     if not isinstance(result, bool):
         raise EvaluationError("CONDITION_NOT_BOOLEAN", "condition did not produce boolean")
     return result
+
+
+def evaluate_condition(rule: ConditionalRuleSpec, context: EvaluationContext) -> bool:
+    return evaluate_expression_condition(rule.condition, context)
 
 
 __all__ = [

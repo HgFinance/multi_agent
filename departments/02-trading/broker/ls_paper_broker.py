@@ -170,6 +170,16 @@ class LSPaperOrderAck:
 
 
 @dataclass(frozen=True)
+class LSPaperHolding:
+    """One holding from the current LS PAPER account snapshot."""
+
+    symbol: str
+    name: str | None
+    quantity: Decimal
+    sellable_quantity: Decimal
+
+
+@dataclass(frozen=True)
 class LSPaperOrderStatus:
     broker_order_id: str
     state: str
@@ -385,6 +395,71 @@ class LSPaperBroker:
             "bid_size": _decimal(block.get("bidrem1"), "bidrem1"),
             "ask_size": _decimal(block.get("offerrem1"), "offerrem1"),
         }
+
+    def get_holdings(self) -> tuple[LSPaperHolding, ...]:
+        """Read executed and sellable holdings from the LS PAPER account."""
+        body = self._post_tr(
+            "t0424",
+            {
+                "t0424InBlock": {
+                    "prcgb": "1",
+                    "chegb": "2",
+                    "dangb": "0",
+                    "charge": "1",
+                    "cts_expcode": "",
+                }
+            },
+            path="/stock/accno",
+        )
+        raw_rows = body.get("t0424OutBlock1")
+        if not isinstance(raw_rows, list) or any(
+            not isinstance(row, dict) for row in raw_rows
+        ):
+            raise LSPaperBrokerError(
+                "LS_PAPER_RESPONSE_INVALID",
+                "LS PAPER holdings rows are invalid",
+            )
+
+        holdings: list[LSPaperHolding] = []
+        seen_symbols: set[str] = set()
+        for row in raw_rows:
+            raw_symbol = str(row.get("expcode") or row.get("symbol") or "")
+            symbol = raw_symbol.strip().removeprefix("A")
+            if len(symbol) != 6 or not symbol.isdigit():
+                raise LSPaperBrokerError(
+                    "LS_PAPER_RESPONSE_INVALID",
+                    "LS PAPER holdings contain an invalid instrument symbol",
+                )
+            if symbol in seen_symbols:
+                raise LSPaperBrokerError(
+                    "LS_PAPER_RESPONSE_INVALID",
+                    "LS PAPER holdings contain a duplicate instrument symbol",
+                )
+            seen_symbols.add(symbol)
+            quantity = _decimal(row.get("janqty"), "janqty")
+            sellable_quantity = _decimal(row.get("mdposqt"), "mdposqt")
+            if (
+                quantity < 0
+                or sellable_quantity < 0
+                or quantity != quantity.to_integral_value()
+                or sellable_quantity != sellable_quantity.to_integral_value()
+                or sellable_quantity > quantity
+            ):
+                raise LSPaperBrokerError(
+                    "LS_PAPER_RESPONSE_INVALID",
+                    "LS PAPER holdings contain an invalid quantity",
+                )
+            raw_name = row.get("hname")
+            name = str(raw_name).strip() if raw_name is not None else None
+            holdings.append(
+                LSPaperHolding(
+                    symbol=symbol,
+                    name=name or None,
+                    quantity=quantity,
+                    sellable_quantity=sellable_quantity,
+                )
+            )
+        return tuple(holdings)
 
     @staticmethod
     def _row_order_datetime(row: dict[str, Any], order_day: date) -> datetime | None:
@@ -738,6 +813,7 @@ __all__ = [
     "LSPaperBroker",
     "LSPaperBrokerConfig",
     "LSPaperBrokerError",
+    "LSPaperHolding",
     "LSPaperOrderAck",
     "LSPaperOrderStatus",
 ]

@@ -94,6 +94,7 @@ def preview_request(raw: str, candidate: dict | None = None):
         "삼성전자 주가가 5일 이동평균선보다 높으면 1주 매수",
         "네이버 주가가 200000원 아래로 떨어지면 1주 매도",
         "삼성전자 볼린저밴드 상단에 닿으면 1주 매도",
+        "삼성전자 1퍼 오르면 매도해주고 1퍼 내리면 매수해",
     ),
 )
 def test_explicit_korean_condition_endings_route_to_conditional_lane(raw: str) -> None:
@@ -136,6 +137,41 @@ def test_semantic_rejection_is_a_client_error_that_names_the_field(monkeypatch) 
     assert raised.value.status_code == 422
     assert raised.value.detail["code"] == "UNSUPPORTED_PORTFOLIO_FIELD"
     assert "AVG_BUY_PRICE" in raised.value.detail["message"]
+
+
+def test_korean_relative_move_without_baseline_or_quantity_is_not_activated(monkeypatch) -> None:
+    """A relative move pair must not invent its baseline or share counts."""
+
+    install_scope(monkeypatch)
+    raw = "삼성전자 1퍼 오르면 매도해주고 1퍼 내리면 매수해"
+    candidate = {
+        "symbol": "삼성전자",
+        "condition": {
+            "type": "COMPARISON",
+            "operator": "GTE",
+            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+            "right": {
+                "type": "ARITHMETIC",
+                "operator": "MUL",
+                "left": {"type": "PORTFOLIO", "field": "AVG_ENTRY_PRICE"},
+                "right": {"type": "LITERAL", "value": "1.01", "unit": "NUMBER"},
+            },
+        },
+        "action": {"side": "SELL", "sizing": {"type": "FIXED_SHARES", "value": "1"}},
+        "evaluation": {"clock": "QUOTE"},
+    }
+
+    preview = api._build_preview(
+        preview_request(raw, candidate),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is False
+    assert preview.clarification_codes == (
+        "QUANTITY_REQUIRED",
+        "AMBIGUOUS_RETURN_BASELINE",
+    )
 
 
 @pytest.mark.parametrize(
@@ -244,6 +280,7 @@ def test_trailing_stop_preview_explains_its_durable_high_watermark(monkeypatch) 
     } <= set(preview.assumptions)
     assert preview.summary["condition_overview"]["trailing_stop"] == {
         "drawdown_ratio": "0.01",
+        "drawdown_mode": "PRICE_RATIO",
         "activation_return_ratio": "0.02",
         "watermark": "HIGHEST_FRESH_QUOTE_SINCE_ACTIVE",
         "expected_position_quantity": None,
@@ -545,6 +582,7 @@ def test_deferred_entry_trailing_candidate_is_a_valid_position_bound_sell_rule(
     assert preview.spec.condition.type.value == "TRAILING_STOP"
     assert preview.summary["condition_overview"]["trailing_stop"] == {
         "drawdown_ratio": "0.01",
+        "drawdown_mode": "PRICE_RATIO",
         "activation_return_ratio": "0.03",
         "watermark": "HIGHEST_FRESH_QUOTE_SINCE_ACTIVE",
         "expected_position_quantity": "5",

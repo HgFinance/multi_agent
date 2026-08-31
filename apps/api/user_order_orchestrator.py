@@ -398,11 +398,20 @@ def _directive_user_message(
         headline = "PAPER 주문 상태 미확정"
     elif response.error_code == "TRADING_FILL_ACCOUNTING_PENDING":
         headline = "PAPER 체결 확인·원장 반영 대기"
+    elif response.error_code in {
+        "TRADING_HIGHER_PRIORITY_ACTIVE",
+        "trading_higher_priority_directive_active",
+    }:
+        headline = "PAPER 주문 대기 중"
     else:
         headline = "PAPER 주문 추적 중"
 
     leg_messages: list[str] = []
     for leg in response.legs:
+        # side=None is a cancellation audit leg, not a user order. Do not
+        # render it as an order with a fake direction or quantity.
+        if leg.side is None:
+            continue
         symbol = leg.symbol or "종목 미확인"
         side = {"BUY": "매수", "SELL": "매도"}.get(
             leg.side.value if leg.side else "", "방향 미확인"
@@ -433,7 +442,20 @@ def _directive_user_message(
             f" ({leg.state}{broker_text}{error_text})"
         )
 
-    detail = "; ".join(leg_messages) if leg_messages else "주문 leg 없음"
+    detail_parts = list(leg_messages)
+    if response.error_code in {
+        "TRADING_HIGHER_PRIORITY_ACTIVE",
+        "trading_higher_priority_directive_active",
+    }:
+        detail_parts.append("기존 고우선순위 PAPER 주문이 정리될 때까지 제출 대기")
+    unknown_cancel_count = sum(
+        1
+        for leg in response.legs
+        if leg.side is None and leg.state == "UNKNOWN"
+    )
+    if unknown_cancel_count:
+        detail_parts.append(f"기존 주문 취소 대사 미확정 {unknown_cancel_count}건")
+    detail = "; ".join(detail_parts) if detail_parts else "주문 leg 없음"
     suffix = ""
     if response.state is DirectiveState.UNKNOWN:
         suffix = " 제출 성공 여부를 단정할 수 없어 자동 재시도하지 않습니다."

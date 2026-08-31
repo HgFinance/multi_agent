@@ -217,6 +217,7 @@ class DirectiveRepository(Protocol):
     def record_external_cancel(self, record: DirectiveRecord, target_record: DirectiveRecord, target_leg: DirectiveLeg, *, target_state: DirectiveLegState | None, audit_state: DirectiveLegState, broker_cancel_order_id: str | None = None, error_code: str | None = None, error_message: str | None = None) -> DirectiveLeg: ...
     def external_cancel_targets(self, record: DirectiveRecord) -> list[tuple[DirectiveLeg, DirectiveRecord, DirectiveLeg]]: ...
     def cancel_open_orders(self, record: DirectiveRecord, *, below_priority: int | None, include_direct_legs: bool = True) -> list[DirectiveLeg]: ...
+    def unknown_order_sides(self, record: DirectiveRecord, *, below_priority: int | None) -> set[str]: ...
     def reconcile_cancel_legs(self, record: DirectiveRecord) -> DirectiveRecord: ...
     def expire_open_legs(self, record: DirectiveRecord, *, now: datetime) -> list[DirectiveLeg]: ...
     def expire_scope_legs(self, fund_id: UUID, book_id: UUID, *, now: datetime) -> list[DirectiveRecord]: ...
@@ -344,6 +345,12 @@ class InMemoryDirectiveRepository:
     def set_state(self, directive_id: UUID, state: DirectiveState, *, error_code: str | None = None, error_message: str | None = None) -> DirectiveRecord:
         with self.state.lock:
             record = self.state.directives[directive_id]
+            if (
+                record.state is state
+                and record.error_code == error_code
+                and record.error_message == error_message
+            ):
+                return record
             record.state = state
             record.error_code = error_code
             record.error_message = error_message
@@ -370,6 +377,11 @@ class InMemoryDirectiveRepository:
     def activate_barrier(self, record: DirectiveRecord, *, reduce_only: bool) -> None:
         key = (record.fund_id, record.book_id)
         current = self.state.barriers.get(key)
+        if current and current[0] != record.directive_id:
+            owner = self.state.directives.get(current[0])
+            if owner is None or owner.state not in ACTIVE_DIRECTIVE_STATES:
+                self.state.barriers.pop(key, None)
+                current = None
         if current and current[0] != record.directive_id and current[1] > record.priority:
             raise DirectiveRepositoryError("TRADING_HIGHER_PRIORITY_ACTIVE", "higher-priority directive is active", 409)
         self.state.barriers[key] = (record.directive_id, record.priority, reduce_only)
@@ -398,6 +410,7 @@ class InMemoryDirectiveRepository:
                             elected.action is DirectiveAction.PLACE_ORDER
                             and elected.payload.get("side") == "SELL"
                         )
+                        or elected.action is DirectiveAction.SELL_POSITION
                         or (
                             elected.action is DirectiveAction.PLACE_BASKET
                             and isinstance(elected.payload.get("orders"), list)
@@ -898,6 +911,22 @@ class InMemoryDirectiveRepository:
                     break
         return result
 
+    def unknown_order_sides(
+        self, record: DirectiveRecord, *, below_priority: int | None
+    ) -> set[str]:
+        sides: set[str] = set()
+        for other in self.state.directives.values():
+            if other.directive_id == record.directive_id:
+                continue
+            if other.fund_id != record.fund_id or other.book_id != record.book_id:
+                continue
+            if below_priority is not None and other.priority >= below_priority:
+                continue
+            for leg in other.legs:
+                if leg.side is not None and leg.state is DirectiveLegState.UNKNOWN:
+                    sides.add(leg.side.upper())
+        return sides
+
     def cancel_open_orders(
         self,
         record: DirectiveRecord,
@@ -1315,15 +1344,29 @@ class PostgresDirectiveRepository:
             cur.execute(
                 """
                 update execution.user_directives
-                   set state=%s,error_code=%s,error_message=%s,updated_at=now(),
+                 set state=%s,error_code=%s,error_message=%s,updated_at=now(),
                        completed_at=case when %s='COMPLETED' then now() else null end,
                        version=version+1
                  where directive_id=%s
+                   and (state,error_code,error_message)
+                       is distinct from (%s,%s,%s)
                 """,
-                (state.value, error_code, error_message, state.value, directive_id),
+                (
+                    state.value,
+                    error_code,
+                    error_message,
+                    state.value,
+                    directive_id,
+                    state.value,
+                    error_code,
+                    error_message,
+                ),
             )
             if cur.rowcount != 1:
-                raise DirectiveRepositoryError("TRADING_DIRECTIVE_NOT_FOUND", "directive not found", 404)
+                record = self.get(directive_id)
+                if record is None:
+                    raise DirectiveRepositoryError("TRADING_DIRECTIVE_NOT_FOUND", "directive not found", 404)
+                return record
         record = self.get(directive_id)
         assert record is not None
         return record
@@ -1349,10 +1392,28 @@ class PostgresDirectiveRepository:
     def activate_barrier(self, record: DirectiveRecord, *, reduce_only: bool) -> None:
         with self._cursor() as cur:
             cur.execute(
-                "select active_directive_id,priority from execution.paper_directive_barriers where fund_id=%s and book_id=%s for update",
+                """
+                select barrier.active_directive_id,barrier.priority,directive.state
+                  from execution.paper_directive_barriers barrier
+                  left join execution.user_directives directive
+                    on directive.directive_id=barrier.active_directive_id
+                 where barrier.fund_id=%s and barrier.book_id=%s
+                 for update of barrier
+                """,
                 (record.fund_id, record.book_id),
             )
             current = cur.fetchone()
+            if current and current[0] != record.directive_id and current[2] not in {
+                "RECEIVED",
+                "RUNNING",
+                "IN_PROGRESS",
+                "UNKNOWN",
+            }:
+                cur.execute(
+                    "delete from execution.paper_directive_barriers where fund_id=%s and book_id=%s and active_directive_id=%s",
+                    (record.fund_id, record.book_id, current[0]),
+                )
+                current = None
             if current and current[0] != record.directive_id and current[1] > record.priority:
                 raise DirectiveRepositoryError("TRADING_HIGHER_PRIORITY_ACTIVE", "higher-priority directive is active", 409)
             cur.execute(
@@ -1383,6 +1444,7 @@ class PostgresDirectiveRepository:
                          when action='SELL_ALL' then 'REDUCE_ONLY'
                          when action='PLACE_ORDER' and payload->>'side'='SELL'
                            then 'REDUCE_ONLY'
+                         when action='SELL_POSITION' then 'REDUCE_ONLY'
                          when action='PLACE_BASKET'
                            and payload->'orders'->0->>'side'='SELL'
                            then 'REDUCE_ONLY'
@@ -2214,6 +2276,24 @@ class PostgresDirectiveRepository:
                 result.append((audit, target_record, target))
         return result
 
+    def unknown_order_sides(
+        self, record: DirectiveRecord, *, below_priority: int | None
+    ) -> set[str]:
+        query = """
+            select distinct upper(l.side)
+              from execution.user_directive_legs l
+              join execution.user_directives d on d.directive_id=l.directive_id
+             where d.fund_id=%s and d.book_id=%s and d.directive_id<>%s
+               and l.side is not null and l.state='UNKNOWN'
+        """
+        params: list[Any] = [record.fund_id, record.book_id, record.directive_id]
+        if below_priority is not None:
+            query += " and d.priority < %s"
+            params.append(below_priority)
+        with self._cursor() as cur:
+            cur.execute(query, tuple(params))
+            return {row[0] for row in cur.fetchall() if row[0]}
+
     def cancel_open_orders(
         self,
         record: DirectiveRecord,
@@ -2226,7 +2306,7 @@ class PostgresDirectiveRepository:
             # priority directives; CANCEL_ALL passes None and cancels all peers.
             query = """
                 select l.leg_id,l.instrument_id,l.symbol,l.state,d.priority,l.directive_id,
-                       l.filled_quantity
+                       l.filled_quantity,l.side,l.broker_order_id,l.expires_at
                   from execution.user_directive_legs l
                   join execution.user_directives d on d.directive_id=l.directive_id
                  where d.fund_id=%s and d.book_id=%s and d.directive_id<>%s
@@ -2246,14 +2326,53 @@ class PostgresDirectiveRepository:
             query += " for update"
             cur.execute(query, tuple(params))
             affected_directives: set[UUID] = set()
-            for target_id, instrument_id, symbol, state, _priority, target_directive_id, target_filled in cur.fetchall():
+            now = datetime.now(timezone.utc)
+            for (
+                target_id, instrument_id, symbol, state, _priority, target_directive_id,
+                target_filled, target_side, target_broker_order_id, target_expires_at,
+            ) in cur.fetchall():
                 affected_directives.add(target_directive_id)
                 if state == "UNKNOWN":
+                    # A leg the broker never acknowledged (no broker order id)
+                    # whose DAY expiry has passed can never fill again, so it is
+                    # dead rather than uncertain.  Nothing reconciles it - the
+                    # autonomous reconciler skips exactly these rows because
+                    # there is no broker identity to query - so it used to sit
+                    # ACTIVE forever and permanently block every later SELL_ALL
+                    # with TRADING_ORDER_RECONCILIATION_REQUIRED (2026-08-31,
+                    # one 2026-08-24 leg).  Settle it here instead of emitting
+                    # an unknown that no one can ever resolve.
+                    if (
+                        not target_broker_order_id
+                        and target_expires_at is not None
+                        and target_expires_at <= now
+                        and Decimal(target_filled) == 0
+                    ):
+                        cur.execute(
+                            """update execution.user_directive_legs
+                                  set state='EXPIRED',
+                                      error_code='TRADING_PAPER_ORDER_EXPIRED',
+                                      error_message='never acknowledged before its DAY expiry',
+                                      updated_at=now()
+                                where leg_id=%s""",
+                            (target_id,),
+                        )
+                        self._retain_unaccounted_fill_reservation(cur, target_id)
+                        self._insert_cancel_leg(
+                            cur, record, linked_order_id=None, instrument_id=instrument_id,
+                            symbol=symbol, state=DirectiveLegState.CANCELLED,
+                            target_ref=str(target_id),
+                            target_filled_quantity=Decimal(target_filled),
+                        )
+                        continue
                     self._insert_cancel_leg(
                         cur, record, linked_order_id=None, instrument_id=instrument_id,
                         symbol=symbol, state=DirectiveLegState.UNKNOWN,
-                        target_ref=str(target_id), error_code="TRADING_ORDER_RECONCILIATION_REQUIRED",
-                        error_message="order state is UNKNOWN",
+                        target_ref=str(target_id),
+                        error_code="TRADING_ORDER_RECONCILIATION_REQUIRED",
+                        error_message=(
+                            f"order state is UNKNOWN (side={target_side or 'UNKNOWN'})"
+                        ),
                     )
                     continue
                 cur.execute("update execution.user_directive_legs set state='CANCELLED',updated_at=now() where leg_id=%s", (target_id,))

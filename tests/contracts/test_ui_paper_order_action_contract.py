@@ -58,7 +58,13 @@ class UiPaperOrderActionContractTest(unittest.TestCase):
         # 목록이 늘면 아래 세 대조가 UI를 같이 고치도록 강제한다.
         self.assertEqual(
             self.expected,
-            {"PLACE_ORDER", "PLACE_BASKET", "SELL_ALL", "CANCEL_ALL"},
+            {
+                "PLACE_ORDER",
+                "PLACE_BASKET",
+                "SELL_ALL",
+                "SELL_POSITION",
+                "CANCEL_ALL",
+            },
             "DirectiveAction이 바뀌었다. ai-office의 사본 세 곳을 같이 고쳐라.",
         )
 

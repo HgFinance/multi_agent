@@ -59,6 +59,7 @@ class RawDocument:
     text: str
     origin_url: str
     source_sha256: str
+    effective_to: str | None = None
 
 
 def _slug_safe(text: str) -> str:

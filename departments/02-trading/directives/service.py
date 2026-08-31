@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -13,7 +14,7 @@ from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
-from broker.ls_paper_broker import LSPaperBroker, LSPaperBrokerError
+from broker.ls_paper_broker import LSPaperBroker, LSPaperBrokerError, LSPaperHolding
 from broker.paper_policy import participation_cap
 
 from .auth import (
@@ -47,6 +48,12 @@ class _BasketAdmission:
     quote: TrustedQuote
     quantity: Decimal
     reserve_cash: Decimal | None
+
+
+@dataclass(frozen=True)
+class _SellAllAdmission:
+    instrument: InstrumentRef
+    quantity: Decimal
 
 
 class DirectiveServiceError(RuntimeError):
@@ -157,11 +164,20 @@ def _quote_event_key(quote: Any) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
 def _translate(exc: Exception, directive_id: UUID | None = None) -> DirectiveServiceError:
     if isinstance(exc, DirectiveServiceError):
         if exc.directive_id is None:
             exc.directive_id = directive_id
         return exc
+    if isinstance(exc, LSPaperBrokerError):
+        return DirectiveServiceError(
+            exc.code,
+            str(exc),
+            409 if exc.ambiguous else 503,
+            directive_id=directive_id,
+        )
     if isinstance(exc, (DirectiveRepositoryError, MarketDataError, DirectiveAuthError)):
         return DirectiveServiceError(
             exc.code,
@@ -291,11 +307,26 @@ class UserDirectiveService:
                     result = self._place_basket(record, request, now=current_time)
                 elif request.action is DirectiveAction.CANCEL_ALL:
                     result = self._cancel_all(record)
+                elif request.action is DirectiveAction.SELL_POSITION:
+                    result = self._sell_position(record, request, now=current_time)
                 else:
                     result = self._sell_all(record, now=current_time)
             except Exception as exc:
                 failure = _translate(exc, record.directive_id)
                 current = self.repository.get(record.directive_id) or record
+                if failure.code == "TRADING_HIGHER_PRIORITY_ACTIVE" and not current.legs:
+                    # This is an admission wait, not a broker failure. Keep the
+                    # durable row RECEIVED so the worker can execute it after
+                    # the higher-priority directive releases the book barrier.
+                    return self.repository.set_state(
+                        record.directive_id,
+                        DirectiveState.RECEIVED,
+                        error_code=failure.code,
+                        error_message=(
+                            "queued until the higher-priority PAPER directive "
+                            "is reconciled"
+                        ),
+                    )
                 active_order_effect = any(
                     leg.side is not None
                     and leg.state in {
@@ -411,6 +442,20 @@ class UserDirectiveService:
                             current = self._place_basket(current, request, now=current_time)
                         elif current.action is DirectiveAction.CANCEL_ALL:
                             current = self._cancel_all(current)
+                        elif current.action is DirectiveAction.SELL_POSITION:
+                            request = UserDirectiveRequest.model_validate(
+                                {
+                                    "fund_id": current.fund_id,
+                                    "book_id": current.book_id,
+                                    "action": current.action,
+                                    "instruction_ref": current.instruction_ref,
+                                    "idempotency_key": current.idempotency_key,
+                                    "payload": current.payload,
+                                }
+                            )
+                            current = self._sell_position(
+                                current, request, now=current_time
+                            )
                         else:
                             current = self._sell_all(current, now=current_time)
                     else:
@@ -418,6 +463,20 @@ class UserDirectiveService:
                     reconciled.append(current)
             except Exception as exc:
                 translated = _translate(exc, queued.directive_id)
+                current = self.repository.get(queued.directive_id) or queued
+                if translated.code == "TRADING_HIGHER_PRIORITY_ACTIVE" and not current.legs:
+                    reconciled.append(
+                        self.repository.set_state(
+                            queued.directive_id,
+                            DirectiveState.RECEIVED,
+                            error_code=translated.code,
+                            error_message=(
+                                "queued until the higher-priority PAPER directive "
+                                "is reconciled"
+                            ),
+                        )
+                    )
+                    continue
                 errors.append(f"{queued.directive_id}:{translated.code}")
                 try:
                     # A bad/stale quote for one row must not permanently occupy
@@ -1075,6 +1134,10 @@ class UserDirectiveService:
         side = basket.orders[0].side
         admissions: list[_BasketAdmission] = []
         resolved_ids: set[UUID] = set()
+        # A PAPER basket may need one throttled LS quote per member. Keep the
+        # injected admission clock moving with that bounded preflight so a
+        # freshly observed later quote is not classified as a future quote.
+        quote_clock_started = time.monotonic()
         for item in basket.orders:
             instrument = self.repository.resolve_instrument(
                 record.fund_id,
@@ -1095,7 +1158,10 @@ class UserDirectiveService:
                     "PAPER basket members must be KRW instruments",
                     422,
                 )
-            quote = self.market_data.quote(instrument, now=now)
+            quote_now = now + timedelta(
+                seconds=max(0.0, time.monotonic() - quote_clock_started)
+            )
+            quote = self.market_data.quote(instrument, now=quote_now)
             if item.quantity is not None:
                 quantity = item.quantity
             else:
@@ -1300,18 +1366,176 @@ class UserDirectiveService:
         self.repository.release_barrier(record)
         return completed
 
+    def _external_sell_all_admissions(
+        self, record: DirectiveRecord
+    ) -> tuple[list[_SellAllAdmission], bool, str, str]:
+        """Build SELL_ALL children from one fresh LS account snapshot."""
+        assert self.external_broker is not None
+        holdings = self.external_broker.get_holdings()
+        if not isinstance(holdings, (tuple, list)) or any(
+            not isinstance(holding, LSPaperHolding) for holding in holdings
+        ):
+            raise DirectiveServiceError(
+                "TRADING_BROKER_HOLDINGS_INVALID",
+                "broker holdings snapshot has an invalid shape",
+                503,
+            )
+
+        admissions: list[_SellAllAdmission] = []
+        unsellable = False
+        remainder_code = "TRADING_ODD_LOT_REMAINDER"
+        remainder_message = "a position remainder is below the canonical lot size"
+        seen_symbols: set[str] = set()
+        for holding in holdings:
+            symbol = holding.symbol.strip().removeprefix("A")
+            if symbol in seen_symbols:
+                raise DirectiveServiceError(
+                    "TRADING_BROKER_HOLDINGS_INVALID",
+                    "broker holdings snapshot contains a duplicate symbol",
+                    503,
+                )
+            seen_symbols.add(symbol)
+            # The broker code is authoritative for identity. The returned
+            # name is display metadata only and is never used for matching.
+            instrument = self.repository.resolve_instrument(
+                record.fund_id, record.book_id, None, symbol
+            )
+            if holding.quantity <= 0:
+                continue
+            sellable = holding.sellable_quantity
+            if sellable <= 0:
+                unsellable = True
+                remainder_code = "TRADING_SELLABLE_POSITION_UNAVAILABLE"
+                remainder_message = (
+                    f"{symbol} is held but has no broker-reported sellable quantity"
+                )
+                continue
+            quantity = (sellable // instrument.lot_size) * instrument.lot_size
+            if quantity <= 0:
+                unsellable = True
+                continue
+            if quantity != sellable:
+                unsellable = True
+            _mechanical_order_rules(instrument, quantity=quantity, limit_price=None)
+            admissions.append(_SellAllAdmission(instrument, quantity))
+        admissions.sort(key=lambda admission: admission.instrument.symbol)
+        return admissions, unsellable, remainder_code, remainder_message
+
+    def _sell_position(
+        self,
+        record: DirectiveRecord,
+        request: UserDirectiveRequest,
+        *,
+        now: datetime,
+    ) -> DirectiveRecord:
+        """Liquidate the whole holding of ONE instrument.
+
+        This is SELL_ALL narrowed to a single symbol: the account, not the
+        sentence, sets the quantity, so the size comes from the same authority
+        SELL_ALL uses - the LS snapshot in external mode, canonical accounting
+        otherwise - and the leg stays ``reduce_only``.
+        """
+
+        payload = request.sell_position()
+        instrument = self.repository.resolve_instrument(
+            record.fund_id,
+            record.book_id,
+            payload.instrument_id,
+            payload.symbol,
+        )
+        self.repository.activate_barrier(record, reduce_only=True)
+
+        if self.external_broker is not None:
+            holdings = {
+                holding.symbol: holding
+                for holding in self.external_broker.get_holdings()
+            }
+            holding = holdings.get(instrument.symbol)
+            sellable = holding.sellable_quantity if holding else Decimal(0)
+        else:
+            sellable = self.repository.sellable_quantity(
+                record.fund_id, record.book_id, instrument.instrument_id
+            )
+
+        quantity = (sellable // instrument.lot_size) * instrument.lot_size
+        if quantity <= 0:
+            # Nothing sellable is an honest no-op only when no open SELL is
+            # already working the same holding.
+            if self.repository.open_sell_quantity(record.fund_id, record.book_id) == 0:
+                completed = self.repository.set_state(
+                    record.directive_id, DirectiveState.COMPLETED
+                )
+                self.repository.release_barrier(record)
+                return completed
+            return self.repository.set_state(
+                record.directive_id,
+                DirectiveState.IN_PROGRESS,
+                error_code="TRADING_POSITION_ALREADY_RESERVED",
+                error_message="the whole holding is already reserved by an open SELL",
+            )
+
+        _mechanical_order_rules(instrument, quantity=quantity, limit_price=None)
+        expires_at = self.repository.market_session_close(now=now)
+        trusted = self.market_data.quote(instrument, now=now)
+        if self.external_broker is None:
+            leg = self.repository.create_acknowledged_leg(
+                record,
+                instrument,
+                side="SELL",
+                order_type="MARKET",
+                quantity=quantity,
+                limit_price=None,
+                reserve_cash=None,
+                reduce_only=True,
+                expires_at=expires_at,
+            )
+            self._fill_from_quote(record, leg, instrument, trusted)
+        else:
+            leg = self.repository.create_pending_leg(
+                record,
+                instrument,
+                side="SELL",
+                order_type="MARKET",
+                quantity=quantity,
+                limit_price=None,
+                reserve_cash=None,
+                reduce_only=True,
+                expires_at=expires_at,
+            )
+            leg = self._submit_external_leg(record, leg, instrument)
+            if leg.state in {
+                DirectiveLegState.ACKNOWLEDGED,
+                DirectiveLegState.PARTIALLY_FILLED,
+            }:
+                self._sync_external_leg(record, leg, instrument, now=now)
+
+        self.repository.set_state(record.directive_id, DirectiveState.IN_PROGRESS)
+        refreshed = self.repository.get(record.directive_id) or record
+        return self._status_locked(refreshed, now=now)
+
     def _sell_all(self, record: DirectiveRecord, *, now: datetime) -> DirectiveRecord:
         self.repository.activate_barrier(record, reduce_only=True)
         cancellation_legs = self._cancel_open_orders(
             record,
             below_priority=record.priority,
         )
-        if any(leg.state is DirectiveLegState.UNKNOWN for leg in cancellation_legs):
+        # Only an UNKNOWN leg that can still *reduce* the position makes
+        # sizing unsafe: if an unknown SELL already filled, the ledger
+        # overstates the holding and selling it in full would oversell.  An
+        # unknown BUY can only ever leave more shares than the ledger shows, so
+        # this reduce-only liquidation cannot oversell because of it - it would
+        # merely leave a residue.  Blocking on both made one stale unknown BUY
+        # brick every SELL_ALL indefinitely (2026-08-31).
+        if any(leg.state is DirectiveLegState.UNKNOWN for leg in cancellation_legs) and (
+            "SELL" in self.repository.unknown_order_sides(
+                record, below_priority=record.priority
+            )
+        ):
             return self.repository.set_state(
                 record.directive_id,
                 DirectiveState.UNKNOWN,
                 error_code="TRADING_ORDER_RECONCILIATION_REQUIRED",
-                error_message="SELL_ALL cannot size safely while an order is UNKNOWN",
+                error_message="SELL_ALL cannot size safely while a SELL order is UNKNOWN",
             )
 
         if self.repository.has_unaccounted_buy_fills(record.fund_id, record.book_id):
@@ -1322,28 +1546,49 @@ class UserDirectiveService:
                 error_message="SELL_ALL is waiting for a durable BUY fill projection",
             )
 
-        positions = self.repository.positions(record.fund_id, record.book_id)
-        if not positions and self.repository.open_sell_quantity(record.fund_id, record.book_id) == 0:
-            completed = self.repository.set_state(record.directive_id, DirectiveState.COMPLETED)
-            self.repository.release_barrier(record)
-            return completed
+        open_sell = self.repository.open_sell_quantity(record.fund_id, record.book_id)
+        unsellable = False
+        remainder_code = "TRADING_ODD_LOT_REMAINDER"
+        remainder_message = "a position remainder is below the canonical lot size"
+        if self.external_broker is None:
+            positions = self.repository.positions(record.fund_id, record.book_id)
+            if not positions and open_sell == 0:
+                completed = self.repository.set_state(
+                    record.directive_id, DirectiveState.COMPLETED
+                )
+                self.repository.release_barrier(record)
+                return completed
+            planned = []
+            for instrument, _gross_quantity in positions:
+                sellable = self.repository.sellable_quantity(
+                    record.fund_id, record.book_id, instrument.instrument_id
+                )
+                quantity = (sellable // instrument.lot_size) * instrument.lot_size
+                if quantity <= 0:
+                    continue
+                if quantity != sellable:
+                    unsellable = True
+                _mechanical_order_rules(
+                    instrument, quantity=quantity, limit_price=None
+                )
+                planned.append(_SellAllAdmission(instrument, quantity))
+        else:
+            planned, unsellable, remainder_code, remainder_message = (
+                self._external_sell_all_admissions(record)
+            )
+            if not planned and not unsellable and open_sell == 0:
+                completed = self.repository.set_state(
+                    record.directive_id, DirectiveState.COMPLETED
+                )
+                self.repository.release_barrier(record)
+                return completed
 
         expires_at = self.repository.market_session_close(now=now)
-        unsellable = False
-        for instrument, _gross_quantity in positions:
-            sellable = self.repository.sellable_quantity(
-                record.fund_id, record.book_id, instrument.instrument_id
-            )
-            quantity = (sellable // instrument.lot_size) * instrument.lot_size
-            if quantity <= 0:
-                # An already-open same-priority reduce-only leg may own the
-                # reservation.  Do not duplicate it.
-                continue
-            if quantity != sellable:
-                unsellable = True
-            _mechanical_order_rules(instrument, quantity=quantity, limit_price=None)
-            trusted = self.market_data.quote(instrument, now=now)
+        for admission in planned:
+            instrument = admission.instrument
+            quantity = admission.quantity
             if self.external_broker is None:
+                trusted = self.market_data.quote(instrument, now=now)
                 leg = self.repository.create_acknowledged_leg(
                     record,
                     instrument,
@@ -1356,24 +1601,25 @@ class UserDirectiveService:
                     expires_at=expires_at,
                 )
                 self._fill_from_quote(record, leg, instrument, trusted)
-            else:
-                leg = self.repository.create_pending_leg(
-                    record,
-                    instrument,
-                    side="SELL",
-                    order_type="MARKET",
-                    quantity=quantity,
-                    limit_price=None,
-                    reserve_cash=None,
-                    reduce_only=True,
-                    expires_at=expires_at,
-                )
-                leg = self._submit_external_leg(record, leg, instrument)
-                if leg.state in {
-                    DirectiveLegState.ACKNOWLEDGED,
-                    DirectiveLegState.PARTIALLY_FILLED,
-                }:
-                    self._sync_external_leg(record, leg, instrument, now=now)
+                continue
+
+            leg = self.repository.create_pending_leg(
+                record,
+                instrument,
+                side="SELL",
+                order_type="MARKET",
+                quantity=quantity,
+                limit_price=None,
+                reserve_cash=None,
+                reduce_only=True,
+                expires_at=expires_at,
+            )
+            leg = self._submit_external_leg(record, leg, instrument)
+            if leg.state in {
+                DirectiveLegState.ACKNOWLEDGED,
+                DirectiveLegState.PARTIALLY_FILLED,
+            }:
+                self._sync_external_leg(record, leg, instrument, now=now)
 
         if unsellable:
             refreshed = self.repository.get(record.directive_id) or record
@@ -1391,8 +1637,8 @@ class UserDirectiveService:
             result = self.repository.set_state(
                 record.directive_id,
                 state,
-                error_code="TRADING_ODD_LOT_REMAINDER",
-                error_message="a position remainder is below the canonical lot size",
+                error_code=remainder_code,
+                error_message=remainder_message,
             )
             if state is DirectiveState.PARTIAL:
                 self.repository.release_barrier(record)
@@ -1409,6 +1655,10 @@ class UserDirectiveService:
 
     def _status_locked(self, current: DirectiveRecord, *, now: datetime) -> DirectiveRecord:
         """Reconcile a directive while its canonical book lock is already held."""
+        if current.state is DirectiveState.RECEIVED and not current.legs:
+            # A lower-priority directive may be durably queued behind an
+            # unresolved higher-priority barrier. It has no execution leg yet.
+            return current
         if current.state in {DirectiveState.COMPLETED, DirectiveState.FAILED}:
             return current
         if current.state is DirectiveState.PARTIAL:
@@ -1435,6 +1685,7 @@ class UserDirectiveService:
             DirectiveAction.PLACE_ORDER,
             DirectiveAction.PLACE_BASKET,
             DirectiveAction.SELL_ALL,
+            DirectiveAction.SELL_POSITION,
         }:
             current = self._fill_active_direct_legs(current, now=now)
         if current.action in {
@@ -1577,9 +1828,22 @@ class UserDirectiveService:
             self.repository.release_barrier(current)
             return completed
 
-        states = {leg.state for leg in current.legs}
+        order_legs = [leg for leg in current.legs if leg.side is not None]
+        cancel_legs = [leg for leg in current.legs if leg.side is None]
+        states = {leg.state for leg in order_legs}
         if DirectiveLegState.UNKNOWN in states:
             return self.repository.set_state(current.directive_id, DirectiveState.UNKNOWN)
+        if any(leg.state is DirectiveLegState.UNKNOWN for leg in cancel_legs) and (
+            "SELL" in self.repository.unknown_order_sides(
+                current, below_priority=current.priority
+            )
+        ):
+            return self.repository.set_state(
+                current.directive_id,
+                DirectiveState.UNKNOWN,
+                error_code="TRADING_ORDER_RECONCILIATION_REQUIRED",
+                error_message="SELL_ALL cannot proceed while a SELL cancellation is UNKNOWN",
+            )
         if self.repository.has_unaccounted_buy_fills(current.fund_id, current.book_id):
             return self.repository.set_state(
                 current.directive_id,
@@ -1588,11 +1852,9 @@ class UserDirectiveService:
                 error_message="SELL_ALL is waiting for a durable BUY fill projection",
             )
         positions = self.repository.positions(current.fund_id, current.book_id)
-        open_sell = self.repository.open_sell_quantity(current.fund_id, current.book_id)
-        if not positions and open_sell == 0:
-            completed = self.repository.set_state(current.directive_id, DirectiveState.COMPLETED)
-            self.repository.release_barrier(current)
-            return completed
+        open_sell = self.repository.open_sell_quantity(
+            current.fund_id, current.book_id
+        )
         has_active_sell = any(
             leg.side == "SELL"
             and leg.state in {
@@ -1601,11 +1863,22 @@ class UserDirectiveService:
                 DirectiveLegState.PARTIALLY_FILLED,
                 DirectiveLegState.UNKNOWN,
             }
-            for leg in current.legs
+            for leg in order_legs
         )
-        if positions and open_sell == 0 and not has_active_sell:
-            # The cancel phase has now reconciled. Resume the durable SELL_ALL
-            # sizing phase under the same book lock without duplicating legs.
+        if open_sell == 0 and not has_active_sell:
+            # External mode re-reads the broker account here. The accounting
+            # projection can lag after a fill and must not decide that SELL_ALL
+            # is complete while the broker still reports a holding.
+            if self.external_broker is not None:
+                return self._sell_all(current, now=now)
+            if not positions:
+                completed = self.repository.set_state(
+                    current.directive_id, DirectiveState.COMPLETED
+                )
+                self.repository.release_barrier(current)
+                return completed
+            # The cancel phase has now reconciled. Resume local SELL_ALL sizing
+            # under the same book lock without duplicating legs.
             return self._sell_all(current, now=now)
         active_states = {
             DirectiveLegState.PENDING,

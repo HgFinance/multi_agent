@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,11 +23,13 @@ WIKI_DIR = Path(__file__).resolve().parent / "data" / "wiki"
 # chunk 800자/청크)의 청크 크기와도 같은 자릿수라 "맥락 절약" 취지를 크게 벗어나지
 # 않는다.
 WINDOW_CHARS = 800  # 매칭 지점 앞뒤로 읽는 문자 수 (전체 페이지가 아니라 "주변"만)
+MAX_WINDOW_SNIPPETS = 2  # 서로 떨어진 핵심 일치 구간을 함께 보존하는 상한
 DEFAULT_TMAX = 3  # seed 포함 최대 방문 페이지 수
 DEFAULT_PATIENCE = 1  # 링크를 따라가도 새 스니펫이 없으면 몇 번까지 더 시도할지
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n\n(.*)$", re.DOTALL)
 _LINK_LINE_RE = re.compile(r"^- \[\[([^\]]+)\]\] \((\w+)\): (.+)$", re.MULTILINE)
+_FRONTMATTER_FIELD_RE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_]*):\s*(?P<value>.*)$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -48,20 +51,106 @@ def _load_page(page_id: str, wiki_dir: Path) -> tuple[str, str] | None:
     return frontmatter, body
 
 
-def _window_around(body: str, query: str) -> str:
-    """query 토큰이 처음 등장하는 지점 주변 WINDOW_CHARS만 자른다. 못 찾으면 앞부분."""
+def _frontmatter_value(frontmatter: str, key: str) -> str | None:
+    """Read one scalar frontmatter field without adding a YAML dependency."""
 
-    terms = re.findall(r"\w+", query)
-    idx = -1
-    for term in terms:
-        found = body.find(term)
-        if found >= 0:
-            idx = found
+    for match in _FRONTMATTER_FIELD_RE.finditer(frontmatter):
+        if match.group("key") == key:
+            value = match.group("value").strip()
+            return value or None
+    return None
+
+
+def _parse_as_of(as_of: str) -> date:
+    """Normalize the legal query's ISO date/datetime cutoff."""
+
+    raw = str(as_of or "").strip()
+    try:
+        return date.fromisoformat(raw)
+    except (TypeError, ValueError):
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "as_of must be an ISO date (YYYY-MM-DD) or ISO datetime"
+            ) from exc
+
+
+def _page_is_visible(frontmatter: str, as_of: date) -> bool:
+    """Apply an inclusive effective_from/effective_to PIT window.
+
+    Missing or malformed effective_from is rejected. This keeps a page with
+    unknown temporal provenance out of a point-in-time legal context instead of
+    silently treating it as current. effective_to is inclusive, matching the
+    existing Agentic RAG PIT contract.
+    """
+
+    effective_from_raw = _frontmatter_value(frontmatter, "effective_from")
+    effective_to_raw = _frontmatter_value(frontmatter, "effective_to")
+    if not effective_from_raw:
+        return False
+    try:
+        effective_from = _parse_as_of(effective_from_raw)
+        effective_to = _parse_as_of(effective_to_raw) if effective_to_raw else None
+    except ValueError:
+        return False
+    if effective_from > as_of:
+        return False
+    return effective_to is None or as_of <= effective_to
+
+
+def _window_around(body: str, query: str) -> str:
+    """질문과 가장 많이 겹치는 조문 window를 선택한다.
+
+    제목의 첫 단어만 기준으로 잡으면 제172조처럼 핵심 기한(⑤항)이 뒤쪽에
+    있는 페이지에서 본문 앞부분만 전달될 수 있다. 모든 query term의 후보
+    위치를 평가해 질문 term coverage가 가장 높은 window를 고른다. 관련 조항
+    링크/JSON 메타데이터는 본문 검색 대상에서 제외해 링크의 반복 문구가
+    실제 조문보다 우선되지 않도록 한다.
+    """
+
+    source_body = body.split("\n## 관련 조항", 1)[0]
+    terms = [term for term in re.findall(r"\w+", query) if len(term) > 1 or term.isdigit()]
+    if not source_body or not terms:
+        return source_body[:WINDOW_CHARS].strip()
+
+    positions: list[int] = []
+    for term in dict.fromkeys(terms):
+        start = 0
+        while True:
+            found = source_body.find(term, start)
+            if found < 0:
+                break
+            positions.append(found)
+            start = found + max(len(term), 1)
+
+    if not positions:
+        return source_body[:WINDOW_CHARS].strip()
+
+    half = WINDOW_CHARS // 2
+    candidates: list[tuple[int, int, int, str]] = []
+    for idx in positions:
+        start = max(0, idx - half)
+        end = min(len(source_body), idx + half)
+        snippet = source_body[start:end].strip()
+        coverage = sum(1 for term in dict.fromkeys(terms) if term in snippet)
+        # 같은 coverage면 본문 쪽 후보를 우선한다. 제목/조문 헤더만 맞는
+        # 후보보다 실제 질문의 조건·기한이 있는 문장이 선택될 가능성이 높다.
+        candidates.append((coverage, idx, start, snippet))
+
+    ranked = sorted(candidates, key=lambda item: (item[0], item[1]), reverse=True)
+    lead_end = min(len(source_body), WINDOW_CHARS)
+    selected: list[tuple[int, int, str]] = [(0, lead_end, source_body[:lead_end].strip())]
+    for _coverage, _position, start, snippet in ranked:
+        end = min(len(source_body), start + WINDOW_CHARS)
+        if any(start < selected_end and selected_start < end for selected_start, selected_end, _ in selected):
+            continue
+        selected.append((start, end, snippet))
+        if len(selected) >= MAX_WINDOW_SNIPPETS:
             break
-    idx = max(idx, 0)
-    start = max(0, idx - WINDOW_CHARS // 2)
-    end = min(len(body), idx + WINDOW_CHARS // 2)
-    return body[start:end].strip()
+
+    selected.sort(key=lambda item: item[0])
+    return "\n…\n".join(snippet for _start, _end, snippet in selected)
 
 
 def _outgoing_links(body: str) -> list[tuple[str, str, str]]:
@@ -74,8 +163,18 @@ def read_bounded(
     wiki_dir: Path = WIKI_DIR,
     tmax: int = DEFAULT_TMAX,
     patience: int = DEFAULT_PATIENCE,
+    *,
+    as_of: str | None = None,
 ) -> ReadResult:
-    """seed 페이지(들)에서 시작해 window + 링크 스니펫만 bounded하게 읽는다."""
+    """seed 페이지(들)에서 시작해 PIT-valid window + 링크만 bounded하게 읽는다.
+
+    ``as_of`` is mandatory at runtime. A missing cutoff fails closed rather than
+    allowing a caller to accidentally read a future or expired legal page.
+    """
+
+    cutoff = _parse_as_of(as_of) if as_of is not None else None
+    if cutoff is None:
+        raise ValueError("as_of is required for point-in-time Wiki reads")
 
     if not seed_page_ids:
         return ReadResult(pages_visited=[], context="", truncated=False)
@@ -94,6 +193,8 @@ def read_bounded(
         if loaded is None:
             continue
         _frontmatter, body = loaded
+        if not _page_is_visible(_frontmatter, cutoff):
+            continue
         visited.append(page_id)
 
         window = _window_around(body, query)
@@ -125,7 +226,7 @@ def read_bounded(
 
 
 if __name__ == "__main__":
-    result_no_seed = read_bounded("아무 질문", [])
+    result_no_seed = read_bounded("아무 질문", [], as_of="2026-08-07")
     assert result_no_seed.pages_visited == []
     assert result_no_seed.context == ""
 
@@ -133,6 +234,7 @@ if __name__ == "__main__":
         "제178조 부정거래행위",
         ["자본시장법_제178조_부정거래행위등의금지"],
         tmax=3,
+        as_of="2026-08-07",
     )
     assert result.pages_visited[0] == "자본시장법_제178조_부정거래행위등의금지"
     assert "부정거래행위" in result.context
@@ -142,6 +244,7 @@ if __name__ == "__main__":
         "제178조 부정거래행위",
         ["자본시장법_제178조_부정거래행위등의금지"],
         tmax=1,
+        as_of="2026-08-07",
     )
     assert result_tmax1.pages_visited == ["자본시장법_제178조_부정거래행위등의금지"]
     assert result_tmax1.truncated is True

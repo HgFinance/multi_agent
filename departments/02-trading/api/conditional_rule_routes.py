@@ -153,7 +153,10 @@ def _assert_confirmed_rule_quantity(
     spec = admission.spec
     payload = admission.request.place_order()
     sizing = spec.action.sizing
-    if sizing.type is SizingType.NOTIONAL_KRW:
+    if sizing.type in {
+        SizingType.NOTIONAL_KRW,
+        SizingType.AVAILABLE_CASH_PERCENT_CAPPED,
+    }:
         # The worker calculates a preliminary whole-share quantity from a
         # fresh last price.  Trading repeats the cap check with its own
         # executable quote under the book lock.  A price decline may leave the
@@ -167,7 +170,19 @@ def _assert_confirmed_rule_quantity(
             if spec.action.side.value == "BUY"
             else trusted_quote.bid
         )
-        maximum = ((sizing.value or Decimal("0")) / price // instrument.lot_size) * instrument.lot_size
+        if sizing.type is SizingType.NOTIONAL_KRW:
+            maximum_notional = sizing.value or Decimal("0")
+        else:
+            available = repository.available_cash(
+                spec.authority.fund_id,
+                spec.authority.book_id,
+                instrument.currency,
+            )
+            maximum_notional = min(
+                available * (sizing.value or Decimal("0")),
+                sizing.cap_krw or Decimal("0"),
+            )
+        maximum = (maximum_notional / price // instrument.lot_size) * instrument.lot_size
         if maximum <= 0 or payload.quantity > maximum:
             raise DirectiveServiceError(
                 "TRADING_CONDITIONAL_RULE_QUANTITY_MISMATCH",
@@ -182,14 +197,22 @@ def _assert_confirmed_rule_quantity(
             spec.instrument_id,
             spec.symbol,
         )
+        sellable = repository.sellable_quantity(
+            spec.authority.fund_id,
+            spec.authority.book_id,
+            spec.instrument_id,
+        )
         if sizing.type is SizingType.FIXED_SHARES:
             expected = sizing.value or Decimal("0")
+        elif sizing.type is SizingType.TARGET_POSITION_WEIGHT:
+            if payload.quantity <= 0 or payload.quantity > sellable:
+                raise DirectiveServiceError(
+                    "TRADING_CONDITIONAL_RULE_QUANTITY_MISMATCH",
+                    "target-weight execution exceeds the current sellable position",
+                    409,
+                )
+            return
         else:
-            sellable = repository.sellable_quantity(
-                spec.authority.fund_id,
-                spec.authority.book_id,
-                spec.instrument_id,
-            )
             requested = (
                 sellable * (sizing.value or Decimal("0"))
                 if sizing.type is SizingType.POSITION_PERCENT
@@ -237,7 +260,11 @@ def submit_conditional_rule_execution(
         ),
         conditional_quantity_validator=(
             _validate_quote_bound_notional
-            if admission.spec.action.sizing.type is SizingType.NOTIONAL_KRW
+            if admission.spec.action.sizing.type
+            in {
+                SizingType.NOTIONAL_KRW,
+                SizingType.AVAILABLE_CASH_PERCENT_CAPPED,
+            }
             else None
         ),
     )

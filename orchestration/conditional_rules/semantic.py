@@ -31,6 +31,11 @@ MARKET_FIELDS: dict[str, ValueUnit] = {
     "LOW": ValueUnit.PRICE,
     "CLOSE": ValueUnit.PRICE,
     "VOLUME": ValueUnit.VOLUME,
+    # KOSPI values are read from the existing LS t1511 market-breadth stream,
+    # never inferred from a constituent or an untrusted natural-language value.
+    "KOSPI_DAILY_CLOSE": ValueUnit.PRICE,
+    "KOSPI_DAILY_SMA_60": ValueUnit.PRICE,
+    "KOSPI_DAY_CHANGE_RATIO": ValueUnit.RATIO,
 }
 
 PORTFOLIO_FIELDS: dict[str, ValueUnit] = {
@@ -104,8 +109,48 @@ class TrailingStopParameters:
     """Validated durable high-water exit parameters."""
 
     drawdown: Decimal
+    drawdown_mode: str
     activation_return: Decimal | None
     expected_position_quantity: Decimal | None
+
+
+@dataclass(frozen=True)
+class TemporalSequenceParameters:
+    """Bounded completed-bar memory for arm -> trigger/cancel rules."""
+
+    window_bars: int
+
+
+def temporal_sequence_parameters(node: ExpressionNode) -> TemporalSequenceParameters:
+    if node.type is not ExpressionType.TEMPORAL_SEQUENCE:
+        raise _error(
+            "TEMPORAL_SEQUENCE_NODE_REQUIRED", "temporal sequence node required"
+        )
+    supplied = {
+        str(key).upper(): value for key, value in (node.parameters or {}).items()
+    }
+    if set(supplied) != {"WINDOW_BARS"}:
+        raise _error(
+            "TEMPORAL_SEQUENCE_PARAMETER_INVALID",
+            "temporal sequence requires only WINDOW_BARS",
+        )
+    try:
+        value = Decimal(str(supplied["WINDOW_BARS"]))
+    except Exception as exc:
+        raise _error(
+            "TEMPORAL_SEQUENCE_PARAMETER_INVALID",
+            "WINDOW_BARS must be an integer in [1, 500]",
+        ) from exc
+    if (
+        not value.is_finite()
+        or value != value.to_integral_value()
+        or not Decimal("1") <= value <= Decimal("500")
+    ):
+        raise _error(
+            "TEMPORAL_SEQUENCE_PARAMETER_INVALID",
+            "WINDOW_BARS must be an integer in [1, 500]",
+        )
+    return TemporalSequenceParameters(window_bars=int(value))
 
 
 def trailing_stop_parameters(node: ExpressionNode) -> TrailingStopParameters:
@@ -119,7 +164,12 @@ def trailing_stop_parameters(node: ExpressionNode) -> TrailingStopParameters:
     if node.type is not ExpressionType.TRAILING_STOP:
         raise _error("TRAILING_STOP_NODE_REQUIRED", "trailing stop node required")
     supplied = {str(key).upper(): value for key, value in (node.parameters or {}).items()}
-    allowed = {"DRAWDOWN", "ACTIVATION_RETURN", "EXPECTED_POSITION_QUANTITY"}
+    allowed = {
+        "DRAWDOWN",
+        "DRAWDOWN_MODE",
+        "ACTIVATION_RETURN",
+        "EXPECTED_POSITION_QUANTITY",
+    }
     unknown = set(supplied) - allowed
     if unknown:
         raise _error(
@@ -151,6 +201,12 @@ def trailing_stop_parameters(node: ExpressionNode) -> TrailingStopParameters:
 
     drawdown = ratio("DRAWDOWN", minimum=Decimal("0.0001"), maximum=Decimal("1"))
     assert drawdown is not None
+    drawdown_mode = str(supplied.get("DRAWDOWN_MODE", "PRICE_RATIO")).upper()
+    if drawdown_mode not in {"PRICE_RATIO", "RETURN_POINTS"}:
+        raise _error(
+            "INVALID_TRAILING_STOP_PARAMETER",
+            "DRAWDOWN_MODE must be PRICE_RATIO or RETURN_POINTS",
+        )
     activation_return = ratio(
         "ACTIVATION_RETURN", minimum=Decimal("0"), maximum=Decimal("10")
     )
@@ -177,6 +233,7 @@ def trailing_stop_parameters(node: ExpressionNode) -> TrailingStopParameters:
             )
     return TrailingStopParameters(
         drawdown=drawdown,
+        drawdown_mode=drawdown_mode,
         activation_return=activation_return,
         expected_position_quantity=expected_position_quantity,
     )
@@ -481,7 +538,12 @@ def _infer(
         unit = MARKET_FIELDS.get(node.field or "")
         if unit is None:
             raise _error("UNSUPPORTED_MARKET_FIELD", f"unsupported market field {node.field!r}")
-        if clock is EvaluationClock.QUOTE and node.field != "LAST_PRICE":
+        if clock is EvaluationClock.QUOTE and node.field not in {
+            "LAST_PRICE",
+            "KOSPI_DAILY_CLOSE",
+            "KOSPI_DAILY_SMA_60",
+            "KOSPI_DAY_CHANGE_RATIO",
+        }:
             raise _error("QUOTE_FIELD_UNAVAILABLE", f"{node.field} requires completed bars")
         return unit
 
@@ -517,6 +579,21 @@ def _infer(
 
     if node.type is ExpressionType.TRAILING_STOP:
         trailing_stop_parameters(node)
+        return ValueUnit.BOOL
+
+    if node.type is ExpressionType.TEMPORAL_SEQUENCE:
+        temporal_sequence_parameters(node)
+        if clock is not EvaluationClock.BAR_CLOSE:
+            raise _error(
+                "TEMPORAL_SEQUENCE_REQUIRES_BAR_CLOSE",
+                "temporal sequence requires completed bars",
+            )
+        for child in node.children or ():
+            if _infer(child, clock=clock, depth=depth + 1, counter=counter) is not ValueUnit.BOOL:
+                raise _error(
+                    "TEMPORAL_SEQUENCE_REQUIRES_BOOL",
+                    "temporal sequence children must be boolean",
+                )
         return ValueUnit.BOOL
 
     if node.type is ExpressionType.ARITHMETIC:
@@ -619,6 +696,19 @@ def validate_rule_spec(rule: ConditionalRuleSpec) -> ConditionalRuleSpec:
                 "TRAILING_STOP_SELL_ONLY",
                 "trailing stop is an existing-position SELL exit only",
             )
+    temporal_nodes = [
+        node
+        for node in _walk_nodes(rule.condition)
+        if node.type is ExpressionType.TEMPORAL_SEQUENCE
+    ]
+    if temporal_nodes and (
+        len(temporal_nodes) != 1
+        or rule.condition.type is not ExpressionType.TEMPORAL_SEQUENCE
+    ):
+        raise _error(
+            "TEMPORAL_SEQUENCE_COMPOSITION_UNSUPPORTED",
+            "temporal sequence must be the complete condition",
+        )
     if (
         rule.action.side is ActionSide.SELL
         and rule.action.sizing.type is SizingType.FIXED_SHARES
@@ -638,7 +728,9 @@ __all__ = [
     "IndicatorDefinition",
     "RuleSemanticError",
     "TrailingStopParameters",
+    "TemporalSequenceParameters",
     "normalized_indicator_parameters",
     "trailing_stop_parameters",
+    "temporal_sequence_parameters",
     "validate_rule_spec",
 ]

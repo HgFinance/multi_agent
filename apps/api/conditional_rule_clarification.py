@@ -79,9 +79,33 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
         _DEFECT,
         "원문에 적힌 최대 주문금액과 조건주문 해석값이 달라 시스템 결함으로 기록했습니다",
     ),
+    "AVAILABLE_CASH_PERCENT_REQUIRED": (
+        _ASK,
+        "매수에 사용할 가용 현금 비율을 명시해 주세요",
+    ),
+    "AVAILABLE_CASH_PERCENT_MISMATCH": (
+        _DEFECT,
+        "원문에 적힌 가용 현금 비율과 조건주문 해석값이 달라 시스템 결함으로 기록했습니다",
+    ),
+    "MAX_ORDER_AMOUNT_REQUIRED": (
+        _ASK,
+        "동적 현금비율 매수의 최대 주문금액을 명시해 주세요",
+    ),
+    "MAX_ORDER_AMOUNT_MISMATCH": (
+        _DEFECT,
+        "원문에 적힌 최대 주문금액과 동적 수량 해석값이 달라 시스템 결함으로 기록했습니다",
+    ),
+    "TARGET_POSITION_WEIGHT_REQUIRED": (
+        _ASK,
+        "초과 비중 매도의 목표 포트폴리오 비중을 명시해 주세요",
+    ),
+    "TARGET_POSITION_WEIGHT_MISMATCH": (
+        _DEFECT,
+        "원문에 적힌 목표 비중과 조건주문 해석값이 달라 시스템 결함으로 기록했습니다",
+    ),
     "AMBIGUOUS_RETURN_BASELINE": (
         _ASK,
-        "상승·하락률의 기준(평균 매입가 등)을 명시해 주세요",
+        "상승·하락률의 기준(예: 평균 매입가)과 각 매수·매도 수량을 명시해 주세요",
     ),
     "TIMEFRAME_NOT_IN_INSTRUCTION": (_ASK, "지표의 봉 주기를 명시해 주세요"),
     "TIMEFRAME_REQUIRED_FOR_CROSS": (
@@ -93,6 +117,10 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
         "시간대의 오전·오후 또는 24시간 표기(예: 14:00)를 명시해 주세요",
     ),
     "QUANTITY_REQUIRED": (_ASK, "매수 수량을 명시해 주세요(예: 1주)"),
+    "FIXED_SHARE_QUANTITY_MISMATCH": (
+        _DEFECT,
+        "원문에 적힌 주식 수량과 조건주문 해석값이 달라 시스템 결함으로 기록했습니다",
+    ),
     "CONDITIONAL_RULE_AST_REQUIRED": (
         _ASK,
         "조건을 한 가지 의미로 확정할 수 없습니다. 종목·조건·수량을 한 문장으로 다시 말씀해 주세요",
@@ -237,7 +265,19 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
     ),
     "TRAILING_STOP_PARAMETER_UNSUPPORTED": (
         _GAP,
-        "트레일링 손절에는 고점 대비 하락률과 선택적 활성 수익률만 지정할 수 있습니다",
+        "트레일링 손절에는 고점 대비 하락률, 하락률 방식, 선택적 활성 수익률만 지정할 수 있습니다",
+    ),
+    "TEMPORAL_SEQUENCE_REQUIRES_BAR_CLOSE": (
+        _GAP,
+        "순차 조건은 완성된 봉 기준에서만 지원합니다",
+    ),
+    "TEMPORAL_SEQUENCE_COMPOSITION_UNSUPPORTED": (
+        _GAP,
+        "순차 조건은 하나의 최상위 arm·trigger·cancel 규칙으로 구성해야 합니다",
+    ),
+    "TEMPORAL_SEQUENCE_PARAMETER_INVALID": (
+        _DEFECT,
+        "순차 조건의 봉 개수 범위가 올바르게 해석되지 않았습니다",
     ),
     # -- the interpreter built a malformed AST ----------------------------
     "INVALID_INDICATOR_PARAMETER": (_DEFECT, "지표 설정값이 올바르지 않습니다"),

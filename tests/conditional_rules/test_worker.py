@@ -14,6 +14,7 @@ from apps.api.conditional_rule_worker import (
     HttpRuntimeClient,
     RuntimeDataError,
     RuntimeInputs,
+    _cycle_sleep_seconds,
     _align_completed_bars,
 )
 from orchestration.conditional_rules.market_data import (
@@ -29,11 +30,16 @@ from orchestration.conditional_rules import (
     EvaluationError,
     SubmitReadyExecution,
     Timeframe,
+    TemporalSequenceState,
     TrailingStopState,
     TriggerClaim,
     advance_trailing_stop,
+    advance_temporal_sequence,
 )
-from orchestration.conditional_rules.semantic import trailing_stop_parameters
+from orchestration.conditional_rules.semantic import (
+    temporal_sequence_parameters,
+    trailing_stop_parameters,
+)
 
 
 def _candle(at: datetime, close: str = "100") -> Candle:
@@ -72,11 +78,20 @@ def test_multi_timeframe_alignment_excludes_bars_newer_than_primary_close() -> N
 NOW = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
 
 
+def test_idle_cycle_uses_bounded_backoff_without_slowing_active_work() -> None:
+    assert _cycle_sleep_seconds({}, poll=1.0, idle_poll=30.0) == 30.0
+    assert (
+        _cycle_sleep_seconds({"evaluated": 1}, poll=1.0, idle_poll=30.0)
+        == 1.0
+    )
+
+
 def active_rule(
     *,
     threshold: str = "100",
     side: str = "BUY",
     trailing_drawdown: str | None = None,
+    trailing_drawdown_mode: str | None = None,
     trailing_activation_return: str | None = None,
     trailing_expected_position_quantity: str | None = None,
 ) -> ActiveRule:
@@ -88,6 +103,8 @@ def active_rule(
     }
     if trailing_drawdown is not None:
         parameters: dict[str, str] = {"DRAWDOWN": trailing_drawdown}
+        if trailing_drawdown_mode is not None:
+            parameters["DRAWDOWN_MODE"] = trailing_drawdown_mode
         if trailing_activation_return is not None:
             parameters["ACTIVATION_RETURN"] = trailing_activation_return
         if trailing_expected_position_quantity is not None:
@@ -174,6 +191,8 @@ class FakeStore:
         self.submission_acquired = True
         self.trailing_state: TrailingStopState | None = None
         self.entry_trailing_cancellations: list[tuple[Decimal, Decimal]] = []
+        self.temporal_state: TemporalSequenceState | None = None
+        self.temporal_cancellations = 0
 
     def expire_due(self) -> int:
         return 0
@@ -215,6 +234,30 @@ class FakeStore:
         )
         if not observation.ignored_stale_quote:
             self.trailing_state = observation.state
+        return observation
+
+    def observe_temporal_sequence(
+        self,
+        rule: ActiveRule,
+        *,
+        arm_result: bool,
+        trigger_result: bool,
+        cancel_result: bool,
+        observed_at: datetime,
+    ):
+        observation = advance_temporal_sequence(
+            self.temporal_state,
+            parameters=temporal_sequence_parameters(rule.spec.condition),
+            arm_result=arm_result,
+            trigger_result=trigger_result,
+            cancel_result=cancel_result,
+            observed_at=observed_at,
+        )
+        if not observation.ignored_stale_bar:
+            self.temporal_state = observation.state
+        if observation.cancelled:
+            self.temporal_cancellations += 1
+            self.active = []
         return observation
 
     def cancel_entry_trailing_on_position_mismatch(
@@ -550,6 +593,36 @@ def test_trailing_stop_arms_after_profit_and_exits_from_durable_high_watermark()
     assert store.trailing_state is not None
     assert store.trailing_state.high_price == Decimal("102")
     assert store.trailing_state.armed_at == start + timedelta(seconds=1)
+    assert client.submit_calls == 1
+
+
+def test_trailing_stop_return_points_uses_the_persisted_cost_basis() -> None:
+    rule = active_rule(
+        side="SELL",
+        trailing_drawdown="0.05",
+        trailing_drawdown_mode="RETURN_POINTS",
+        trailing_activation_return="0.15",
+    )
+    store = FakeStore(rule)
+    start = datetime.now(timezone.utc)
+    client = FakeClient(inputs(price="115", observed=start))
+    worker = ConditionalRuleWorker(store, client)
+
+    armed = worker.process_once()
+    # At the fixed 100 KRW baseline this is +10%, a 5%p fall from +15%.
+    # It must fire even though it is only a 4.35% price fall from 115.
+    client.runtime_inputs = inputs(
+        price="110",
+        average_entry_price="80",
+        observed=start + timedelta(seconds=1),
+    )
+    exit_result = worker.process_once()
+
+    assert armed["triggered"] == 0
+    assert exit_result["triggered"] == 1
+    assert exit_result["submitted"] == 1
+    assert store.trailing_state is not None
+    assert store.trailing_state.baseline_average_entry_price == Decimal("100")
     assert client.submit_calls == 1
 
 

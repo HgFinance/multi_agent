@@ -41,6 +41,10 @@ class DirectiveAction(StrEnum):
     PLACE_ORDER = "PLACE_ORDER"
     PLACE_BASKET = "PLACE_BASKET"
     SELL_ALL = "SELL_ALL"
+    # Liquidate the whole position of ONE named instrument.  Like SELL_ALL the
+    # account sizes it, so the candidate carries no quantity - only the
+    # unresolved instrument mention.
+    SELL_POSITION = "SELL_POSITION"
     CANCEL_ALL = "CANCEL_ALL"
 
 
@@ -236,9 +240,16 @@ class HermesOrderCandidate(BaseModel):
                 or self.basket_notionals_krw
                 or self.side is None
                 or self.quantity is None
-                or self.order_type is None
             ):
                 raise ValueError("PLACE_ORDER candidate is incomplete")
+            # A complete natural-language PAPER order may omit the order-type
+            # marker. The verifier owns the managed default (MARKET), while
+            # an omitted type next to a price remains invalid rather than
+            # silently turning a limit intent into a market order.
+            if self.order_type is None and self.limit_price is not None:
+                raise ValueError(
+                    "PLACE_ORDER candidate with limit_price requires order_type"
+                )
             if self.order_type is OrderType.MARKET and self.limit_price is not None:
                 raise ValueError("MARKET candidate cannot carry limit_price")
             if self.order_type is OrderType.LIMIT and self.limit_price is None:
@@ -256,14 +267,14 @@ class HermesOrderCandidate(BaseModel):
                 raise ValueError("PLACE_BASKET candidate is incomplete or unsupported")
             if self.notional_krw is not None:
                 if (
-                    self.side is not OrderSide.BUY
+                    self.side is None
                     or self.basket_quantities
                     or self.basket_notionals_krw
                 ):
                     raise ValueError("notional basket candidate is invalid")
             elif self.basket_notionals_krw:
                 if (
-                    self.side is not OrderSide.BUY
+                    self.side is None
                     or self.basket_quantities
                     or len(self.basket_notionals_krw)
                     != len(self.basket_instrument_mentions)
@@ -274,6 +285,24 @@ class HermesOrderCandidate(BaseModel):
                 or len(self.basket_quantities) != len(self.basket_instrument_mentions)
             ):
                 raise ValueError("quantity basket candidate is incomplete")
+        elif self.action is DirectiveAction.SELL_POSITION:
+            # The instrument is the only order field a position liquidation
+            # may carry; the holding decides the quantity.
+            if self.instrument_mention is None or any(
+                value is not None
+                for value in (
+                    self.side,
+                    self.quantity,
+                    self.notional_krw,
+                    self.order_type,
+                    self.limit_price,
+                )
+            ) or (
+                self.basket_instrument_mentions
+                or self.basket_quantities
+                or self.basket_notionals_krw
+            ):
+                raise ValueError("SELL_POSITION candidate is incomplete or unsupported")
         elif any(
             value is not None
             for value in (
@@ -318,6 +347,18 @@ class CanonicalPlaceOrderPayload(BaseModel):
         return self
 
 
+class CanonicalSellPositionPayload(BaseModel):
+    """Liquidate one unresolved instrument mention; the holding sets the size."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    instrument_mention: str = Field(min_length=1, max_length=80)
+    side: Literal[OrderSide.SELL] = OrderSide.SELL
+    order_type: Literal[OrderType.MARKET] = OrderType.MARKET
+    time_in_force: Literal["DAY"] = "DAY"
+    reduce_only: Literal[True] = True
+
+
 class CanonicalBasketOrderItem(BaseModel):
     """One unresolved member of a strict PAPER market basket."""
 
@@ -338,8 +379,8 @@ class CanonicalBasketOrderItem(BaseModel):
     def _sizing_policy(self) -> "CanonicalBasketOrderItem":
         if (self.notional_krw is None) == (self.quantity is None):
             raise ValueError("basket member requires exactly one sizing policy")
-        if self.notional_krw is not None and self.side is not OrderSide.BUY:
-            raise ValueError("notional basket member must be BUY")
+        # A KRW-sized SELL is bounded by the live bid and stays reduce_only
+        # downstream, so it can undershoot but never oversell.
         return self
 
 
@@ -371,7 +412,12 @@ class VerifiedPaperDirective(BaseModel):
     requires_authenticated_admission: Literal[True] = True
     raw_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     action: DirectiveAction
-    payload: CanonicalPlaceOrderPayload | CanonicalPlaceBasketPayload | None = None
+    payload: (
+        CanonicalPlaceOrderPayload
+        | CanonicalPlaceBasketPayload
+        | CanonicalSellPositionPayload
+        | None
+    ) = None
     evidence: tuple[TextEvidence, ...]
 
     @model_validator(mode="after")
@@ -380,9 +426,14 @@ class VerifiedPaperDirective(BaseModel):
             raise ValueError("PLACE_ORDER verified directive requires payload")
         if self.action is DirectiveAction.PLACE_BASKET and self.payload is None:
             raise ValueError("PLACE_BASKET verified directive requires payload")
+        if self.action is DirectiveAction.SELL_POSITION and not isinstance(
+            self.payload, CanonicalSellPositionPayload
+        ):
+            raise ValueError("SELL_POSITION verified directive requires its payload")
         if self.action not in {
             DirectiveAction.PLACE_ORDER,
             DirectiveAction.PLACE_BASKET,
+            DirectiveAction.SELL_POSITION,
         } and self.payload is not None:
             raise ValueError("aggregate verified directive must not carry payload")
         return self
@@ -423,6 +474,7 @@ __all__ = [
     "CanonicalBasketOrderItem",
     "CanonicalPlaceBasketPayload",
     "CanonicalPlaceOrderPayload",
+    "CanonicalSellPositionPayload",
     "DirectiveAction",
     "EvidenceField",
     "HermesOrderCandidate",

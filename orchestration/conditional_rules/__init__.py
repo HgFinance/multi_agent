@@ -26,6 +26,7 @@ from .evaluator import (
     EvaluationFrame,
     IndicatorEngine,
     evaluate_condition,
+    evaluate_expression_condition,
 )
 from .execution import (
     ExecutionGuardInput,
@@ -33,7 +34,11 @@ from .execution import (
     guard_rule_execution,
 )
 from .identities import evaluation_id, execution_idempotency_key, trigger_id
-from .semantic import RuleSemanticError, validate_rule_spec
+from .semantic import (
+    RuleSemanticError,
+    temporal_sequence_parameters,
+    validate_rule_spec,
+)
 from .indicators import (
     DEFAULT_REGISTRY,
     IndicatorCalculator,
@@ -51,8 +56,11 @@ from .worker_store import (
     SubmitReadyExecution,
     TrailingStopObservation,
     TrailingStopState,
+    TemporalSequenceObservation,
+    TemporalSequenceState,
     TriggerClaim,
     advance_trailing_stop,
+    advance_temporal_sequence,
 )
 
 __all__ = [
@@ -93,14 +101,19 @@ __all__ = [
     "SubmitReadyExecution",
     "TrailingStopObservation",
     "TrailingStopState",
+    "TemporalSequenceObservation",
+    "TemporalSequenceState",
     "TriggerClaim",
     "advance_trailing_stop",
+    "advance_temporal_sequence",
     "evaluate_condition",
+    "evaluate_expression_condition",
     "evaluation_id",
     "execution_idempotency_key",
     "expression_fingerprint",
     "guard_rule_execution",
     "rule_fingerprint",
     "trigger_id",
+    "temporal_sequence_parameters",
     "validate_rule_spec",
 ]

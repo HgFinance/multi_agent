@@ -324,12 +324,21 @@ def complete_kanban_task(*, task_id: str, result: str) -> bool:
     A CLI timeout has unknown commit status, so verify the supported read model
     before reporting failure.  Replays are idempotent when the card is already
     terminal.
+
+    ``result`` is the one authoritative user-facing answer for this direct
+    completion boundary.  Persist it in the task result, closing-run summary,
+    and ``metadata.final_answer`` together so CEO's structured handoff can use
+    the existing no-second-LLM path.  The metadata is deliberately generated
+    here rather than by a second Trading/CEO implementation.
     """
 
     task_id = str(task_id or "").strip()
     result = str(result or "").strip()
     if not task_id or not result:
         return False
+    final_answer_metadata = json.dumps(
+        {"final_answer": result}, ensure_ascii=False, separators=(",", ":")
+    )
     cli_environment = os.environ.copy()
     cli_environment.setdefault(
         "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
@@ -347,6 +356,8 @@ def complete_kanban_task(*, task_id: str, result: str) -> bool:
                     result,
                     "--summary",
                     result,
+                    "--metadata",
+                    final_answer_metadata,
                 ],
             ),
             capture_output=True,

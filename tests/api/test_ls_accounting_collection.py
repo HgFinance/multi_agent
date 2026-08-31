@@ -48,6 +48,58 @@ def test_parameterized_trs_are_added_only_with_required_inputs() -> None:
     assert requests["CSPBQ00200"]["payload"]["CSPBQ00200InBlock1"]["BnsTpCode"] == "2"
 
 
+def test_realtime_fill_is_visible_before_account_history_refresh() -> None:
+    realtime_fill = {
+        "kind": "FILLED",
+        "source": "LS_REALTIME",
+        "order_no": "1001",
+        "broker_order_id": "1001",
+        "broker_order_ids": ["1001"],
+        "symbol": "005930",
+        "side": "매수",
+        "quantity": "1",
+        "price": "70000",
+        "event_time": "09:01:02",
+        "received_at": "2026-08-31T00:01:02+00:00",
+        "seq": 1,
+    }
+
+    merged = ls_account_stream.merge_order_events([], [realtime_fill], 50)
+
+    assert len(merged) == 1
+    assert merged[0]["kind"] == "FILLED"
+    assert merged[0]["source"] == "LS_REALTIME"
+
+
+def test_realtime_fill_is_deduplicated_when_account_history_arrives() -> None:
+    realtime_fill = {
+        "kind": "FILLED",
+        "source": "LS_REALTIME",
+        "order_no": "1001",
+        "broker_order_id": "1001",
+        "broker_order_ids": ["1001"],
+        "symbol": "005930",
+        "side": "매수",
+        "quantity": "1",
+        "price": "70000",
+        "event_time": "09:01:02",
+        "received_at": "2026-08-31T00:01:02+00:00",
+        "seq": 1,
+    }
+    history_fill = {
+        **realtime_fill,
+        "source": "LS_ORDER_HISTORY",
+        "received_at": "2026-08-31T09:01:02",
+    }
+
+    merged = ls_account_stream.merge_order_events(
+        [], [realtime_fill, history_fill], 50
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["source"] == "LS_ORDER_HISTORY"
+
+
 def test_continuation_pages_merge_rows_and_forward_cts(monkeypatch) -> None:
     calls = []
 

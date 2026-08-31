@@ -1144,7 +1144,7 @@ def main() -> int:
     environment = dict(os.environ)
     client = HermesKanbanClient(environment=environment)
     observer_queue = TerminalObserverQueue(
-        workers=int(environment.get("CEO_SUPERVISOR_OBSERVER_WORKERS", "2")),
+        workers=int(environment.get("CEO_SUPERVISOR_OBSERVER_WORKERS", "1")),
         max_pending=int(environment.get("CEO_SUPERVISOR_OBSERVER_MAX_PENDING", "128")),
     )
     service = CeoSupervisorService(

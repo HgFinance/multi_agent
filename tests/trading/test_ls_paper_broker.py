@@ -16,6 +16,7 @@ from broker.ls_paper_broker import (
     LSPaperBroker,
     LSPaperBrokerConfig,
     LSPaperBrokerError,
+    LSPaperHolding,
 )
 
 
@@ -95,6 +96,62 @@ def test_get_quote_uses_read_only_t1101_contract() -> None:
     assert quote["bid_size"] == Decimal("100")
     assert quote["ask_size"] == Decimal("120")
     assert quote["observed_at"].tzinfo is not None
+
+
+def test_get_holdings_uses_executed_sellable_t0424_snapshot() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token"})
+        assert request.url.path == "/stock/accno"
+        assert request.headers["tr_cd"] == "t0424"
+        body = __import__("json").loads(request.content)
+        assert body == {
+            "t0424InBlock": {
+                "prcgb": "1",
+                "chegb": "2",
+                "dangb": "0",
+                "charge": "1",
+                "cts_expcode": "",
+            }
+        }
+        return httpx.Response(
+            200,
+            json={
+                "rsp_cd": "00000",
+                "t0424OutBlock1": [
+                    {"expcode": "A005930", "hname": "삼성전자", "janqty": "30", "mdposqt": "29"},
+                    {"expcode": "000660", "hname": "SK하이닉스", "janqty": 6, "mdposqt": 6},
+                ],
+            },
+        )
+
+    holdings = _broker(handler).get_holdings()
+
+    assert holdings == (
+        LSPaperHolding("005930", "삼성전자", Decimal("30"), Decimal("29")),
+        LSPaperHolding("000660", "SK하이닉스", Decimal("6"), Decimal("6")),
+    )
+
+
+def test_get_holdings_rejects_duplicate_symbols() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token"})
+        return httpx.Response(
+            200,
+            json={
+                "rsp_cd": "00000",
+                "t0424OutBlock1": [
+                    {"expcode": "005930", "janqty": 1, "mdposqt": 1},
+                    {"expcode": "A005930", "janqty": 1, "mdposqt": 1},
+                ],
+            },
+        )
+
+    with pytest.raises(LSPaperBrokerError) as caught:
+        _broker(handler).get_holdings()
+
+    assert caught.value.code == "LS_PAPER_RESPONSE_INVALID"
 
 
 def test_place_market_buy_uses_paper_cash_order_contract() -> None:

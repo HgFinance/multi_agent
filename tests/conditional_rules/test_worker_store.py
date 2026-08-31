@@ -612,7 +612,7 @@ def test_trailing_stop_persists_a_locked_high_watermark_update(monkeypatch) -> N
         ),
     )
     cursor = _Cursor(
-        fetchone_rows=[(Decimal("102"), observed, observed)],
+        fetchone_rows=[(Decimal("102"), observed, observed, None)],
     )
     # The initial INSERT collides with the already-persisted state, so the
     # store must lock it, derive the result, and update it in one transaction.
@@ -633,6 +633,7 @@ def test_trailing_stop_persists_a_locked_high_watermark_update(monkeypatch) -> N
     assert "insert into execution.conditional_rule_trailing_states" in sql
     assert "on conflict (rule_id,rule_version) do nothing" in sql
     assert "for update" in sql
+    assert "baseline_average_entry_price" in sql
     assert "update execution.conditional_rule_trailing_states" in sql
 
 

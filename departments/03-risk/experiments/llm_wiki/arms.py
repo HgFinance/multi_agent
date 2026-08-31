@@ -11,10 +11,9 @@ Arm A는 `skills/agentic-rag/src/graph.py`의 `run_compliance_check`를 그대�
 read → 아래 `_generate_verdict`(nodes.py와 동일한 CircuitBreaker/RedisJsonCache 패턴을
 독립적으로 재사용 — private 함수를 다른 모듈 밖에서 끌어쓰지 않는다)로 이어진다.
 
-# ponytail: PIT(Point-in-Time) 필터는 Arm A(nodes.py의 retrieve_node)에만 있고 Arm B/C
-# 위키 리더에는 없다. 이번 golden set 코퍼스는 전부 이미 시행 중인 조문만 써서 결과에
-# 영향이 없지만, 미래 시행일 조문이 코퍼스에 들어가면 wiki_reader에도 as_of 필터를
-# 추가해야 한다.
+# PIT(Point-in-Time) filtering is shared by Arm B/C's Wiki reader. The caller must
+# provide the same as_of cutoff used by the legal query; pages with missing or
+# malformed effective_from metadata are rejected by the reader.
 """
 
 from __future__ import annotations
@@ -107,7 +106,31 @@ _LLM_WIKI_GENERATE_SYSTEM = PERSONA_PROMPTS[PERSONA]["generate_system"] + (
     "possibly qualified/limited); (소극) means the court denied it (a 'no'). Treat that "
     "marker as the court's actual conclusion, not merely as a description of the issue "
     "raised — do not answer 'ambiguous' when a case excerpt already resolves the "
-    "question via such a marker."
+    "question via such a marker. Cite only the exact page_id shown in the evidence "
+    "heading. Use 'no_breach' only when the supplied facts are affirmatively compliant; "
+    "a question that merely asks for a rule, deadline, or penalty is not itself a "
+    "no-breach finding. If the rationale says the facts or scope are insufficient, "
+    "cannot be determined, or require additional facts, the verdict must be 'ambiguous'. "
+    "For a threshold expressed as 'within N months/days', compare the facts numerically: "
+    "M months/days with M less than or equal to N satisfies that within-period condition; "
+    "do not reverse the result merely because the trade happened before N. A numbered "
+    "subparagraph that directly names the conduct or recipient is sufficient scope; do "
+    "not invent an ambiguity when the supplied excerpt explicitly covers it."
+)
+
+_LEGAL_VERDICTS = {"no_breach", "breach", "ambiguous"}
+_UNCERTAINTY_MARKERS = (
+    "판단할 수 없",
+    "판단하기 어렵",
+    "확정할 수 없",
+    "단정할 수 없",
+    "근거가 없",
+    "근거가 부족",
+    "불충분",
+    "추가 사실",
+    "추가적인 사실",
+    "추가 근거",
+    "확인할 수 없",
 )
 
 
@@ -255,6 +278,56 @@ def _generate_verdict(query: str, context: str, system: str | None = None) -> di
     return result
 
 
+def _finalize_wiki_answer(answer: object, pages_visited: list[str]) -> dict[str, Any]:
+    """생성 결과를 방문한 근거 페이지에 고정하고 모순 시 fail-closed한다.
+
+    모델 응답의 JSON shape는 gateway가 보장하지만, 법률 안전성에 필요한
+    provenance/판정 일관성은 여기서 한 번 더 결정론적으로 검증한다. 이 함수는
+    별도 QA 경로나 executor가 아니라 기존 Wiki handoff의 단일 출구다.
+    """
+
+    raw = answer if isinstance(answer, dict) else {}
+    verdict = raw.get("verdict")
+    if verdict not in _LEGAL_VERDICTS:
+        verdict = "ambiguous"
+
+    raw_citations = raw.get("cited_documents")
+    citations = [item for item in raw_citations if isinstance(item, str)] if isinstance(raw_citations, list) else []
+    valid_pages = set(pages_visited)
+    invalid_citations = [item for item in citations if item not in valid_pages]
+    citations = list(dict.fromkeys(item for item in citations if item in valid_pages))
+    rationale = str(raw.get("rationale") or "").strip()
+    confidence_raw = raw.get("confidence")
+    try:
+        confidence = float(confidence_raw)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if not 0.0 <= confidence <= 1.0:
+        confidence = 0.0
+
+    safety_reasons: list[str] = []
+    if invalid_citations:
+        safety_reasons.append("모델이 실제로 방문하지 않은 근거 페이지를 인용했습니다.")
+    if pages_visited and not citations and verdict != "ambiguous":
+        safety_reasons.append("방문한 근거 페이지와 연결되는 인용이 없습니다.")
+    if verdict != "ambiguous" and any(marker in rationale for marker in _UNCERTAINTY_MARKERS):
+        safety_reasons.append("답변 설명이 판단 유보 또는 추가 근거 필요 상태입니다.")
+
+    if safety_reasons:
+        verdict = "ambiguous"
+        confidence = min(confidence, 0.0)
+        rationale = " ".join(part for part in (rationale, *safety_reasons) if part).strip()
+
+    return {
+        "verdict": verdict,
+        "cited_documents": citations,
+        "rationale": rationale,
+        "confidence": confidence,
+        # 법률 Wiki는 근거 수집·초안 작성만 하며 자동 승인을 절대 하지 않는다.
+        "escalate": True,
+    }
+
+
 def llm_wiki_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str, Any]:
     """Arm B — BM25 단독 seed → wiki_reader bounded read → generate.
 
@@ -268,9 +341,12 @@ def llm_wiki_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str,
     full_query = _wrap_query(query, mandate)
     top = _bm25_index().score(query, top_k=1)
     seeds = [page_id for page_id, _score in top]
-    read = read_bounded(query, seeds)
+    read = read_bounded(query, seeds, as_of=as_of)
     return {
-        "answer": _generate_verdict(full_query, read.context, system=_LLM_WIKI_GENERATE_SYSTEM),
+        "answer": _finalize_wiki_answer(
+            _generate_verdict(full_query, read.context, system=_LLM_WIKI_GENERATE_SYSTEM),
+            read.pages_visited,
+        ),
         "context_chars": len(read.context),
         "pages_visited": read.pages_visited,
     }
@@ -303,9 +379,12 @@ def llm_wiki_grep_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict
     if not seeds:
         top = _bm25_index().score(query, top_k=1)
         seeds = [page_id for page_id, _score in top]
-    read = read_bounded(query, seeds)
+    read = read_bounded(query, seeds, as_of=as_of)
     return {
-        "answer": _generate_verdict(full_query, read.context, system=_LLM_WIKI_GENERATE_SYSTEM),
+        "answer": _finalize_wiki_answer(
+            _generate_verdict(full_query, read.context, system=_LLM_WIKI_GENERATE_SYSTEM),
+            read.pages_visited,
+        ),
         "context_chars": len(read.context),
         "pages_visited": read.pages_visited,
     }

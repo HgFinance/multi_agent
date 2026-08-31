@@ -954,7 +954,14 @@ def runtime_healthcheck(environment: dict | None = None) -> None:
             )
             if not in_capture_window:
                 return
-            latest: dict[str, datetime | None] = {}
+            # `event_time` is the provider's clock and PAPER can legitimately
+            # trail the socket by several minutes.  The liveness decision must
+            # use `received_at`, which is our observation of an actually
+            # ingested row; otherwise a healthy feed is repeatedly restarted
+            # during provider-side replay/lag.  Keep ordering by event_time so
+            # this check uses the existing hot-table index and never adds a
+            # full-table sort to the ingestion path.
+            latest: dict[str, tuple[datetime | None, datetime | None]] = {}
             tables = {
                 "tick": "market.market_ticks",
                 "quote": "market.market_quotes",
@@ -962,11 +969,11 @@ def runtime_healthcheck(environment: dict | None = None) -> None:
             for label in _required_health_streams(now):
                 table = tables[label]
                 cur.execute(
-                    f"select event_time from {table} "
+                    f"select event_time, received_at from {table} "
                     "order by event_time desc limit 1"
                 )
                 row = cur.fetchone()
-                latest[label] = row[0] if row else None
+                latest[label] = (row[0], row[1]) if row else (None, None)
     finally:
         conn.close()
 
@@ -978,13 +985,15 @@ def runtime_healthcheck(environment: dict | None = None) -> None:
         30.0,
     )
     stale = []
-    for label, observed in latest.items():
-        if observed is None:
+    for label, (_event_time, received_at) in latest.items():
+        if received_at is None:
             stale.append(f"{label}=missing")
             continue
-        age = (now.astimezone(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
+        age = (
+            now.astimezone(timezone.utc) - received_at.astimezone(timezone.utc)
+        ).total_seconds()
         if age > max_age:
-            stale.append(f"{label}_age={age:.1f}s")
+            stale.append(f"{label}_received_age={age:.1f}s")
     if stale:
         raise LsRealtimeError(
             "장중 LS 권위 시세가 stale: " + ", ".join(stale)

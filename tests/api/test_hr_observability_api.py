@@ -51,7 +51,7 @@ def test_observability_returns_all_four_reports_in_one_response(
     """네 관측이 한 응답에 다 있어야 한다 - 하나라도 빠지면 그 표가 조용히 빈다."""
 
     body = _without_langfuse(monkeypatch)
-    for key in ("idle_agents", "capacity", "llm_usage", "trigger_rates"):
+    for key in ("idle_agents", "capacity", "llm_usage", "trigger_rates", "kanban_latency"):
         assert body[key], f"{key} 가 비어 있다 - 통합 응답이 한 축을 잃었다"
     assert body["window_start"] < body["window_end"]
 
@@ -86,6 +86,15 @@ def test_observability_reports_zero_langfuse_queries_without_credentials(
 
     body = _without_langfuse(monkeypatch)
     assert body["langfuse_queries"] == 0
+
+
+def test_observability_keeps_missing_kanban_as_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HERMES_KANBAN_DB", "/not-mounted/kanban.db")
+    body = _without_langfuse(monkeypatch)
+    assert all(report["status"] == "UNAVAILABLE" for report in body["kanban_latency"])
+    assert all(report["reason"] == "kanban_db_unavailable" for report in body["kanban_latency"])
 
 
 def test_observability_keeps_registry_failure_as_503(

@@ -21,6 +21,9 @@ class DirectiveAction(StrEnum):
     PLACE_BASKET = "PLACE_BASKET"
     CANCEL_ALL = "CANCEL_ALL"
     SELL_ALL = "SELL_ALL"
+    # Liquidate the whole holding of ONE instrument.  Trading sizes it from the
+    # account snapshot, so the payload carries a symbol but never a quantity.
+    SELL_POSITION = "SELL_POSITION"
 
 
 class DirectiveState(StrEnum):
@@ -50,7 +53,34 @@ DIRECTIVE_PRIORITIES: dict[DirectiveAction, int] = {
     DirectiveAction.PLACE_BASKET: 1000,
     DirectiveAction.CANCEL_ALL: 2000,
     DirectiveAction.SELL_ALL: 2000,
+    DirectiveAction.SELL_POSITION: 2000,
 }
+
+
+class SellPositionPayload(BaseModel):
+    """One instrument to liquidate; the account snapshot sets the quantity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    instrument_id: UUID | None = None
+    symbol: str = Field(pattern=r"^[0-9A-Z]{6}$")
+    side: str = Field(pattern=r"^SELL$")
+    order_type: str = Field(pattern=r"^MARKET$")
+    time_in_force: str = Field(pattern=r"^DAY$")
+    reduce_only: bool = True
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def _canonical_symbol(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
+
+    @model_validator(mode="after")
+    def _reduce_only(self) -> "SellPositionPayload":
+        if not self.reduce_only:
+            raise ValueError("SELL_POSITION must stay reduce_only")
+        return self
 
 
 class PlaceOrderPayload(BaseModel):
@@ -166,6 +196,8 @@ class UserDirectiveRequest(BaseModel):
             PlaceOrderPayload.model_validate(self.payload)
         elif self.action is DirectiveAction.PLACE_BASKET:
             PlaceBasketPayload.model_validate(self.payload)
+        elif self.action is DirectiveAction.SELL_POSITION:
+            SellPositionPayload.model_validate(self.payload)
         elif self.payload:
             raise ValueError(f"{self.action.value} payload must be an empty object")
         return self
@@ -180,11 +212,18 @@ class UserDirectiveRequest(BaseModel):
             raise ValueError("directive is not PLACE_BASKET")
         return PlaceBasketPayload.model_validate(self.payload)
 
+    def sell_position(self) -> SellPositionPayload:
+        if self.action is not DirectiveAction.SELL_POSITION:
+            raise ValueError("directive is not SELL_POSITION")
+        return SellPositionPayload.model_validate(self.payload)
+
     def canonical_payload(self) -> dict[str, Any]:
         if self.action is DirectiveAction.PLACE_ORDER:
             return self.place_order().model_dump(mode="json", exclude_none=False)
         if self.action is DirectiveAction.PLACE_BASKET:
             return self.place_basket().model_dump(mode="json", exclude_none=False)
+        if self.action is DirectiveAction.SELL_POSITION:
+            return self.sell_position().model_dump(mode="json", exclude_none=False)
         return {}
 
     def payload_sha256(self) -> str:
