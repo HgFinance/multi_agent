@@ -22,6 +22,7 @@ import unittest
 from dataclasses import dataclass
 
 from orchestration.ceo_query_routing import verify_primary_route
+from orchestration.query_lexicon import negated_spans
 from orchestration.ceo_request_classifier import ORDER_LANES, classify_ceo_request
 
 
@@ -371,6 +372,44 @@ class CeoRouteNegationGuardTest(unittest.TestCase):
         decision = classify_ceo_request("주문 안 하고 분석만 해줘")
         self.assertFalse(decision.is_order_lane)
         self.assertIn("trading", decision.excluded_departments)
+
+    # 사용자는 `안`·`못`을 뒤 용언에 붙여 쓴다. 공백을 요구하면 그 부정을
+    # 통째로 놓치고, 같은 문장이 띄어쓰기 하나 차이로 주문 카드가 된다.
+    SPACING_VARIANTS = (
+        "이평 깨지면 매수 안 하고 지켜봐",
+        "이평 깨지면 매수 안하고 지켜봐",
+        "이평 깨지면 매수안하고 지켜봐",
+        "이평 깨지면 주문 안하고 지켜봐",
+        "이평 깨지면 매도 안할래",
+        "이평 깨지면 매도 안함",
+        "이평 깨지면 매도 못하게 해줘",
+        "이평 깨지면 체결 안되게 해줘",
+        "이평 깨지면 매도 않고 지켜봐",
+        "이평 깨지면 매도하지말고 지켜봐",
+    )
+
+    def test_spacing_variants_are_all_negations(self) -> None:
+        for query in self.SPACING_VARIANTS:
+            with self.subTest(query=query):
+                self.assertFalse(_route(query).lane in ORDER_LANES, msg=query)
+
+    # 부정이 아닌데 `안`·`못`으로 시작하거나 끝나는 낱말들. 가드가 넓어질 때
+    # 가장 먼저 깨지는 쪽이다.
+    NON_NEGATIONS = (
+        "장 안에서 매도해",
+        "안전하게 매도해",
+        "안정적으로 매수해",
+        "불안하지만 매수해",
+        "안내받고 매수해",
+        "안건 정리하고 매수해",
+        "삼성전자 2주 시장가 매수를 잘못 했어",
+        "못을 박듯 매수해",
+    )
+
+    def test_lookalike_words_are_not_negations(self) -> None:
+        for query in self.NON_NEGATIONS:
+            with self.subTest(query=query):
+                self.assertEqual(negated_spans(query), (), msg=query)
 
     def test_negation_on_the_instrument_still_allows_a_conditional_order(self) -> None:
         """가드가 레인 자체를 막아서는 안 된다. 부정이 종목에만 걸린 경우다."""
