@@ -244,6 +244,24 @@ class CeoRouteNegationGuardTest(unittest.TestCase):
     def test_bare_negated_buy_is_not_binding(self) -> None:
         self._assert_lane("매수하지 마", "department_analysis", ("research", "risk"))
 
+    # `하지 마` 계열만 부정으로 알아보던 자리. `건드리지 말고`가 인식되지 않아
+    # 사용자가 배제한 부서가 오히려 fan-out에 **추가**됐다.
+    def test_alternative_negation_vocabulary_is_recognized(self) -> None:
+        self._assert_lane(
+            "회계쪽은 건드리지 말고 리서치만 해줘",
+            "department_analysis",
+            ("research", "risk"),
+        )
+
+    def test_excluded_scope_still_counts_as_a_specific_request(self) -> None:
+        """배제 어휘를 알아본 뒤에도 되묻기로 떨어지면 안 된다.
+
+        되묻기 게이트는 "알아볼 만한 대상이 있는가"를 묻는다. 금지도
+        대상을 지목한 것이므로, 넓은 부정 어휘는 부서 선택에만 적용한다.
+        """
+
+        self.assertNotEqual(_route("회계쪽은 건드리지 말고 리서치만 해줘").lane, "clarification")
+
     def test_negation_on_the_instrument_still_allows_a_conditional_order(self) -> None:
         """가드가 레인 자체를 막아서는 안 된다. 부정이 종목에만 걸린 경우다."""
 
@@ -275,16 +293,6 @@ class CeoRouteKnownDefectTest(unittest.TestCase):
             "리스크 검토도 하지 말고 뉴스만 정리해줘",
             "department_analysis",
             ("research",),
-        )
-
-    # 결함 4 - 부정 어휘가 `하지 마` 계열 한 종류뿐이라
-    # `건드리지 말고`가 부정으로 인식되지 않고 오히려 부서를 추가한다.
-    @unittest.expectedFailure
-    def test_alternative_negation_vocabulary_is_recognized(self) -> None:
-        self._assert_lane(
-            "회계쪽은 건드리지 말고 리서치만 해줘",
-            "department_analysis",
-            ("research", "risk"),
         )
 
     # 계좌 상태 질문인데 상태/보고 어구가 사전에 없어 Research/Risk로 fan-out 된다.

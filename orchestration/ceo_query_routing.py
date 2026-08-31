@@ -233,8 +233,18 @@ def _account_status_terms(normalized_query: str) -> list[str]:
     return matched
 
 
-def _query_term_matches(normalized_query: str, term: str) -> bool:
-    """Match Korean phrases by containment and English abbreviations by word."""
+def _query_term_matches(
+    normalized_query: str, term: str, *, extended_negation: bool = True
+) -> bool:
+    """Match Korean phrases by containment and English abbreviations by word.
+
+    ``extended_negation`` selects how wide the prohibition vocabulary is.
+    Department fan-out uses the wide reading: a department the user excluded
+    must not be added.  The clarification gate deliberately uses the narrow
+    one - it asks whether the request names *anything* recognizable, and a
+    prohibition is still a recognizable subject.  Reading it widely there
+    turned ``회계쪽은 건드리지 말고 리서치만 해줘`` into "please rephrase".
+    """
 
     normalized_term = term.casefold()
     if normalized_term.isascii() and any(char.isalnum() for char in normalized_term):
@@ -252,7 +262,9 @@ def _query_term_matches(normalized_query: str, term: str) -> bool:
             and normalized_query[max(0, match.start() - 2) : match.start()] == "가상"
         ):
             continue
-        if _is_negated_suffix(normalized_query[match.end() :]):
+        if _is_negated_suffix(
+            normalized_query[match.end() :], extended=extended_negation
+        ):
             continue
         if _is_prohibited_safety_term(normalized_query, match.start(), match.end()):
             continue
@@ -260,10 +272,16 @@ def _query_term_matches(normalized_query: str, term: str) -> bool:
     return False
 
 
-def _is_negated_suffix(suffix: str) -> bool:
-    """Recognize short safety prohibitions, including joined Korean clauses."""
+def _is_negated_suffix(suffix: str, *, extended: bool = True) -> bool:
+    """Recognize short safety prohibitions, including joined Korean clauses.
 
-    return is_negated_suffix(suffix)
+    ``extended`` also covers the exclusion vocabulary (``건드리지 말고``,
+    ``빼고``, ``제외하고``, bare ``말고``).  Without it a request such as
+    ``회계쪽은 건드리지 말고 리서치만 해줘`` was not read as a prohibition at
+    all, so the very department the user excluded was *added* to the fan-out.
+    """
+
+    return is_negated_suffix(suffix, extended=extended)
 
 
 def _is_prohibited_safety_term(normalized_query: str, start: int, end: int) -> bool:
@@ -359,7 +377,7 @@ def query_requires_clarification(query: str, category: str = "") -> bool:
     if _account_status_terms(normalized_query):
         return False
     if any(
-        _query_term_matches(normalized_query, term)
+        _query_term_matches(normalized_query, term, extended_negation=False)
         for terms in _QUERY_STAGE_KEYWORDS.values()
         for term in terms
     ):
