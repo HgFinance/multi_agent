@@ -7,12 +7,13 @@
    `parse_compound_paper_order`/`parse_analysis_then_conditional_paper_order`,
    `build_ceo_task_plan`, `infer_workflow_mode`)이 **합쳐서** 내리는 레인 판정을
    질의 문자열 하나에서 재현 가능한 형태로 못박는다.
-2. 지금 깨져 있는 판정을 `expectedFailure`로 **결함으로 명시**해, 통합 커밋이
-   결함을 조용히 유지하거나 조용히 바꾸지 못하게 한다.
+2. 깨져 있던 판정을 `expectedFailure`로 **결함으로 명시**해, 통합 커밋이
+   결함을 조용히 유지하거나 조용히 바꾸지 못하게 한다. 고쳐진 결함은
+   표시를 떼고 정식 회귀 테스트로 승격한다.
 
-`_route()`는 프로덕션 코드를 고치지 않고 현재 체인을 그대로 조립한 참조 구현이다.
-단일 진입점(`classify_ceo_request`)이 생기면 이 함수 본문만 그 호출로 바뀌고,
-아래 케이스 표는 그대로여야 한다 - 구조 이관 커밋의 성공 기준이 그것이다.
+`_route()`는 처음에 프로덕션 코드를 건드리지 않고 현재 체인을 손으로 조립한
+참조 구현이었다. 단일 진입점(`classify_ceo_request`)으로 바꾼 뒤에도 아래
+케이스 표가 한 줄도 바뀌지 않는 것이 구조 이관의 성공 기준이었다.
 """
 
 from __future__ import annotations
@@ -117,9 +118,9 @@ STABLE_CASES: tuple[GoldenCase, ...] = (
     ),
     GoldenCase(
         "삼성전자 2주 시장가 매수하지 마",
-        "llm_planner_required",
+        "department_analysis",
         ("research", "risk"),
-        note="즉시 주문 레인에는 이미 부정 가드가 있다",
+        note="주문 문법은 잡히지만 부정이 지배하므로 주문 레인에 들어가지 않는다",
     ),
     GoldenCase(
         "이어서",
@@ -180,6 +181,78 @@ class CeoRouteGoldenTest(unittest.TestCase):
         self.assertEqual(route.routing_basis, "previous_question_context")
 
 
+class CeoRouteNegationGuardTest(unittest.TestCase):
+    """부정이 붙은 주문 문장은 네 레인 어디로도 들어가지 않는다.
+
+    예전에는 즉시 주문 레인에만 가드가 있었다. 조건·복합·연계 레인은
+    같은 부정 문장을 그대로 주문 카드로 만들었다.
+    """
+
+    def _assert_lane(
+        self,
+        query: str,
+        lane: str,
+        departments: tuple[str, ...] = (),
+    ) -> None:
+        route = _route(query)
+        self.assertEqual(route.lane, lane, msg=query)
+        if lane not in ORDER_LANES:
+            self.assertEqual(route.departments, departments, msg=query)
+
+    # 조건·복합·연계 레인이 부정 문장을 그대로 삼키던 자리.
+    def test_negated_conditional_order_does_not_enter_order_lane(self) -> None:
+        self._assert_lane(
+            "이평 깨지면 매도하지 마", "department_analysis", ("research", "risk")
+        )
+
+    def test_negated_price_conditional_does_not_enter_order_lane(self) -> None:
+        self._assert_lane(
+            "삼성전자 300000원 이상이면 10주 매도하지 마",
+            "department_analysis",
+            ("research", "risk"),
+        )
+
+    def test_negated_compound_order_does_not_enter_order_lane(self) -> None:
+        self._assert_lane(
+            "삼성전자 2주 시장가 매수하지 말고 300000원 이상이면 2주 매도하지 마",
+            "department_analysis",
+            ("research", "risk"),
+        )
+
+    def test_negated_analysis_then_order_does_not_enter_order_lane(self) -> None:
+        self._assert_lane(
+            "리서치 분석 후 삼성전자 300000원 넘으면 10주 매도하지 마",
+            "department_analysis",
+            ("research", "risk"),
+        )
+
+    # `explicit_non_execution` 어휘에 `매수`/`매도`가 없어서 순수 부정 문장이
+    # binding으로 남고 LLM 플래너로 넘어가던 자리. 조건 트리거가 있든 없든
+    # 같은 레인이어야 한다.
+    def test_bare_negated_sell_is_not_binding(self) -> None:
+        self._assert_lane(
+            "손실 나도 매도하지 마", "department_analysis", ("research", "risk")
+        )
+
+    def test_negated_sell_with_timeframe_is_not_binding(self) -> None:
+        self._assert_lane(
+            "5분내 60초선 깨져도 매도하지 마",
+            "department_analysis",
+            ("research", "risk"),
+        )
+
+    def test_bare_negated_buy_is_not_binding(self) -> None:
+        self._assert_lane("매수하지 마", "department_analysis", ("research", "risk"))
+
+    def test_negation_on_the_instrument_still_allows_a_conditional_order(self) -> None:
+        """가드가 레인 자체를 막아서는 안 된다. 부정이 종목에만 걸린 경우다."""
+
+        self._assert_lane(
+            "삼성전자 말고 SK하이닉스 300000원 이상이면 10주 매도해",
+            "conditional_order",
+        )
+
+
 class CeoRouteKnownDefectTest(unittest.TestCase):
     """지금 깨져 있는 판정. 수정 커밋에서 `expectedFailure`를 뗀다."""
 
@@ -193,60 +266,6 @@ class CeoRouteKnownDefectTest(unittest.TestCase):
         self.assertEqual(route.lane, lane, msg=query)
         if lane not in ORDER_LANES:
             self.assertEqual(route.departments, departments, msg=query)
-
-    # 결함 1 - 주문 레인 4종에 부정 가드가 대칭으로 걸려 있지 않다.
-    # 즉시 주문만 `is_clearly_non_executable_order_language`를 통과시키고,
-    # 조건·복합·연계 레인은 부정 문장을 그대로 삼킨다.
-    @unittest.expectedFailure
-    def test_negated_conditional_order_does_not_enter_order_lane(self) -> None:
-        self._assert_lane(
-            "이평 깨지면 매도하지 마", "department_analysis", ("research", "risk")
-        )
-
-    @unittest.expectedFailure
-    def test_negated_price_conditional_does_not_enter_order_lane(self) -> None:
-        self._assert_lane(
-            "삼성전자 300000원 이상이면 10주 매도하지 마",
-            "department_analysis",
-            ("research", "risk"),
-        )
-
-    @unittest.expectedFailure
-    def test_negated_compound_order_does_not_enter_order_lane(self) -> None:
-        self._assert_lane(
-            "삼성전자 2주 시장가 매수하지 말고 300000원 이상이면 2주 매도하지 마",
-            "department_analysis",
-            ("research", "risk"),
-        )
-
-    @unittest.expectedFailure
-    def test_negated_analysis_then_order_does_not_enter_order_lane(self) -> None:
-        self._assert_lane(
-            "리서치 분석 후 삼성전자 300000원 넘으면 10주 매도하지 마",
-            "department_analysis",
-            ("research", "risk"),
-        )
-
-    # 결함 1 - `explicit_non_execution` 어휘에 `매수`/`매도`가 빠져 있어
-    # 순수 부정 문장이 여전히 binding으로 분류되고 LLM 플래너로 넘어간다.
-    # 조건 트리거가 없는 문장도, 있는 문장도 같은 레인이어야 한다.
-    @unittest.expectedFailure
-    def test_bare_negated_sell_is_not_binding(self) -> None:
-        self._assert_lane(
-            "손실 나도 매도하지 마", "department_analysis", ("research", "risk")
-        )
-
-    @unittest.expectedFailure
-    def test_negated_sell_with_timeframe_is_not_binding(self) -> None:
-        self._assert_lane(
-            "5분내 60초선 깨져도 매도하지 마",
-            "department_analysis",
-            ("research", "risk"),
-        )
-
-    @unittest.expectedFailure
-    def test_bare_negated_buy_is_not_binding(self) -> None:
-        self._assert_lane("매수하지 마", "department_analysis", ("research", "risk"))
 
     # 결함 3 - 부정으로 부서를 제거할 수 없다. `stages`가 기본값을 선적재한 뒤
     # `add`만 하므로 명시적으로 배제한 부서가 그대로 남는다.

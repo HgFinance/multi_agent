@@ -134,6 +134,38 @@ def negated_spans(text: str) -> tuple[tuple[int, int], ...]:
     return tuple(spans)
 
 
+# 주문 레인이 소유하는 행위 어휘. 부정이 이 어휘를 지배하면 주문이 아니다.
+ORDER_ACTION_PATTERN = (
+    r"매수|매도|주문|매매|체결|청산|"
+    r"사\s*(?:줘|주세요|라)|팔아(?:\s*줘|주세요)?|"
+    r"\bbuy\b|\bsell\b|\border\b"
+)
+_ORDER_ACTION_RE = re.compile(rf"(?:{ORDER_ACTION_PATTERN})", re.IGNORECASE)
+
+
+def is_negated_order_instruction(text: str) -> bool:
+    """주문 행위가 부정에 지배당하는 문장인지 본다.
+
+    `"이평 깨지면 매도하지 마"`는 조건주문 문법을 그대로 만족하지만 주문이
+    아니다. 즉시 주문 레인에는 이런 가드가 있었고 조건·복합·연계 레인에는
+    없었다 - 같은 부정이 어느 문법에 걸리느냐에 따라 주문 카드가 생겼다.
+
+    문장 전체가 아니라 **부정이 지배하는 구간**만 본다. 그래서
+    `"삼성전자 말고 SK하이닉스 300000원 넘으면 매도해"`처럼 부정이 종목에만
+    걸린 정상 조건주문은 계속 통과한다.
+    """
+
+    source = str(text or "")
+    spans = negated_spans(source)
+    if not spans:
+        return False
+    return any(
+        span_start <= match.start() and match.end() <= span_end
+        for span_start, span_end in spans
+        for match in _ORDER_ACTION_RE.finditer(source)
+    )
+
+
 def dominant_negated_keys(
     spans: Iterable[tuple[int, int]],
     occurrences: Iterable[tuple[int, int, str]],
@@ -168,9 +200,12 @@ def dominant_negated_keys(
 # 비집행 선언 (binding 분류에서 빠지는 문장)
 # ---------------------------------------------------------------------------
 
-# `explicit_non_execution`이 보던 행위 어휘.
+# `explicit_non_execution`이 보던 행위 어휘. `매수`·`매도`가 빠져 있어서
+# `"매도하지 마"`가 binding으로 분류돼 결정론 플랜이 root body에 실리지 않고
+# LLM 플래너 경로로 넘어갔다 - 사용자가 아무것도 하지 말라고 한 문장이
+# 가장 덜 결정론적인 경로로 간 셈이다.
 NON_EXECUTION_ACTION_PATTERN = (
-    r"주문(?:\s*제출)?|매매|집행|실행|원장\s*변경|설정\s*변경|"
+    r"주문(?:\s*제출)?|매매|매수|매도|집행|실행|원장\s*변경|설정\s*변경|"
     r"외부\s*(?:쓰기|변경)"
 )
 NON_EXECUTION_WINDOW = 80
@@ -272,9 +307,11 @@ __all__ = [
     "NON_BINDING_PHRASES",
     "NON_EXECUTION_ACTION_PATTERN",
     "NON_EXECUTION_WINDOW",
+    "ORDER_ACTION_PATTERN",
     "ORDER_NEGATION_PATTERN",
     "QUERY_INTENT_TERMS",
     "dominant_negated_keys",
+    "is_negated_order_instruction",
     "is_negated_suffix",
     "negated_spans",
     "non_execution_match",

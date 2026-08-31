@@ -39,6 +39,7 @@ from orchestration.compound_paper_orders import (
     parse_analysis_then_conditional_paper_order,
     parse_compound_paper_order,
 )
+from orchestration.query_lexicon import is_negated_order_instruction
 from orchestration.user_order_language import (
     is_clearly_non_executable_order_language,
     looks_like_user_order_request,
@@ -192,7 +193,13 @@ def classify_ceo_request(
 
     # ── Stage 2 ─────────────────────────────────────────────────────────
     # 주문 문법 4종. 좁은 것부터 넓은 것 순서이며, 순서가 곧 우선순위다.
-    if not read_only_scope:
+    #
+    # 부정 가드는 네 레인에 **대칭으로** 걸린다. 예전에는 즉시 주문 레인에만
+    # 있었고, 그래서 `"이평 깨지면 매도하지 마"`가 조건주문 카드가 됐다.
+    # 가드는 문장 전체가 아니라 부정이 지배하는 구간만 보므로 부정 없는
+    # 정상 조건주문은 그대로 통과한다.
+    negated_order = is_negated_order_instruction(text)
+    if not read_only_scope and not negated_order:
         analysis_then = parse_analysis_then_conditional_paper_order(text)
         if analysis_then is not None:
             return decide(
@@ -231,7 +238,11 @@ def classify_ceo_request(
     if workflow_mode == "analysis" and not read_only_risk_e2e:
         return decide(
             "department_analysis",
-            "deterministic_department_route",
+            *(
+                ("negated_order_instruction", "deterministic_department_route")
+                if negated_order
+                else ("deterministic_department_route",)
+            ),
             order_grammar_detected=order_grammar,
         )
 
