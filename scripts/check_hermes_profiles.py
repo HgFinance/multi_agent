@@ -29,6 +29,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECK_VERSION = "hermes-profile-contract-check-v2"
+PROFILE_REGISTRY = ROOT / "scripts" / "hermes_profile_registry.txt"
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -77,16 +78,40 @@ EXPECTED_MODELS = {
 # EXPECTED_MODELS when switching employee Workers.
 EXPECTED_WORKER_MODEL = DEFAULT_VLLM_MODEL
 
-DEPARTMENTS = {
-    "ceo-agent": "00-ceo-office",
-    "research-department": "01-research",
-    "trading-department": "02-trading",
-    "risk-management": "03-risk",
-    "quant-backtest-department": "04-quant-backtest",
-    "accounting-portfolio-department": "05-accounting-portfolio",
-    "qa-department": "06-ai-qa-audit",
-    "hr-department": "07-agent-workforce",
-}
+def _load_department_profiles() -> dict[str, str]:
+    """Load the canonical Profile -> department mapping shared by shell tools."""
+    profiles: dict[str, str] = {}
+    seen: set[str] = set()
+    for line_number, raw_line in enumerate(
+        PROFILE_REGISTRY.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("|")
+        if len(fields) != 4:
+            raise ValueError(
+                f"{PROFILE_REGISTRY}:{line_number}: expected 4 fields"
+            )
+        profile, directory, kind, container = fields
+        if not profile or not directory:
+            raise ValueError(f"{PROFILE_REGISTRY}:{line_number}: empty field")
+        if profile in seen:
+            raise ValueError(f"duplicate Profile: {profile}")
+        seen.add(profile)
+        if kind == "department":
+            if container == "-":
+                raise ValueError(f"department Profile has no container: {profile}")
+            profiles[profile] = directory
+        elif kind == "liaison":
+            if container != "-":
+                raise ValueError(f"liaison Profile has a container: {profile}")
+        else:
+            raise ValueError(f"unknown Profile kind '{kind}' for {profile}")
+    return profiles
+
+
+DEPARTMENTS = _load_department_profiles()
 
 # 컨테이너 실측(2026-08-02): Hermes 코드가 인식하는 키 / 우리 저장소 전용 키
 HERMES_KNOWN = ("model", "agent", "skills", "env")

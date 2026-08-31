@@ -1,0 +1,14 @@
+# Canonical Hermes Profile registry.
+# Format: profile_id|department_directory|kind|container_name
+# kind is either department or liaison; liaisons use '-' as container_name.
+# Keep this file as the single source for repository/runtime profile mapping.
+ceo-agent|00-ceo-office|department|hedgefund-ceo-hermes
+hr-department|07-agent-workforce|department|hedgefund-workforce-hermes
+research-department|01-research|department|hedgefund-research-hermes
+trading-department|02-trading|department|hedgefund-trading-hermes
+risk-management|03-risk|department|hedgefund-risk-hermes
+quant-backtest-department|04-quant-backtest|department|hedgefund-quant-hermes
+accounting-portfolio-department|05-accounting-portfolio|department|hedgefund-accounting-hermes
+qa-department|06-ai-qa-audit|department|hedgefund-qa-hermes
+research-liaison|01-research|liaison|-
+quant-liaison|04-quant-backtest|liaison|-

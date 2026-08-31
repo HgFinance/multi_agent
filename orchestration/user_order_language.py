@@ -1078,6 +1078,16 @@ def _verify_basket(
     )
 
 
+def _scope_word_spans(scope_match: re.Match[str]) -> tuple[tuple[int, int], ...]:
+    """Every individual scope word inside a redundant stacked scope run."""
+
+    base = scope_match.start()
+    return tuple(
+        (base + word.start(), base + word.end())
+        for word in re.finditer(_AGGREGATE_SCOPE_WORD, scope_match.group(0))
+    )
+
+
 def _aggregate_match(
     raw_text: str,
 ) -> tuple[DirectiveAction, re.Match[str], re.Match[str]] | None:
@@ -1106,16 +1116,33 @@ def _verify_aggregate(
         return _clarify(digest, OrderReasonCode.CANDIDATE_MISMATCH)
     if set(evidence) != {EvidenceField.ACTION, EvidenceField.AGGREGATE_SCOPE}:
         return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
+    # The single-order path already accepts the bare verb literal inside a
+    # polite form ("매도" within "매도해줘").  The aggregate path demanded the
+    # whole grammar match instead, so the same sentence verified as a single
+    # order but clarified as a sell-all (2026-08-31).  One convention.
     if not _expected_evidence(
         evidence,
         field=EvidenceField.ACTION,
         span=action_match.span(),
         normalized=action.value,
+        alternative_spans=(
+            _literal_subspan(
+                action_match,
+                *(
+                    ("매도", "팔아", "팔", "파")
+                    if action is DirectiveAction.SELL_ALL
+                    else ("취소", "철회")
+                ),
+            ),
+        ),
     ) or not _expected_evidence(
         evidence,
         field=EvidenceField.AGGREGATE_SCOPE,
         span=scope_match.span(),
         normalized="ALL",
+        # A stacked run ("전량 일괄") is redundant emphasis: any one of its
+        # words carries the whole scope, so either span is honest evidence.
+        alternative_spans=_scope_word_spans(scope_match),
     ):
         return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
     return VerifiedPaperDirective(

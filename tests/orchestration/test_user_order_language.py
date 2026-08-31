@@ -1276,16 +1276,37 @@ def test_aggregate_evidence_must_slice_the_source_exactly() -> None:
     assert result.reason_codes == (OrderReasonCode.EVIDENCE_TEXT_MISMATCH,)
 
 
-def test_aggregate_scope_span_must_cover_the_whole_stacked_run() -> None:
-    # Half of a stacked scope is not the scope the sentence gate matched.
+@pytest.mark.parametrize("scope_text", ["전량 일괄", "전량", "일괄"])
+def test_any_word_of_a_stacked_scope_is_honest_evidence(scope_text: str) -> None:
+    # A stacked run is redundant emphasis, so either word carries the whole
+    # scope. Demanding the full run only made Hermes guess (2026-08-31).
     raw = "보유종목 전량 일괄매도"
-    candidate = _aggregate_candidate(
+    result = verify_order_candidate(
         raw,
-        action=DirectiveAction.SELL_ALL,
-        action_text="매도",
-        scope_text="일괄",
+        _aggregate_candidate(
+            raw,
+            action=DirectiveAction.SELL_ALL,
+            action_text="매도",
+            scope_text=scope_text,
+        ),
     )
-    result = verify_order_candidate(raw, candidate)
+    assert isinstance(result, VerifiedPaperDirective)
+    assert result.action is DirectiveAction.SELL_ALL
+
+
+def test_scope_evidence_outside_the_matched_run_still_clarifies() -> None:
+    # Tolerance is bounded to the scope run the sentence gate actually
+    # matched; an unrelated noun is not a scope word.
+    raw = "보유종목 전량 매도해줘"
+    result = verify_order_candidate(
+        raw,
+        _aggregate_candidate(
+            raw,
+            action=DirectiveAction.SELL_ALL,
+            action_text="매도",
+            scope_text="보유종목",
+        ),
+    )
     assert isinstance(result, OrderClarification)
     assert OrderReasonCode.EVIDENCE_FIELD_MISMATCH in result.reason_codes
 
@@ -1319,3 +1340,82 @@ def test_invalid_candidate_shape_is_fail_closed_not_an_exception() -> None:
     )
     assert isinstance(result, OrderClarification)
     assert result.reason_codes == (OrderReasonCode.INVALID_CANDIDATE_SCHEMA,)
+
+
+# 실제 운영에서 Hermes는 같은 문장에도 동사 전체("매도해줘")나 어간("매도")
+# 중 어느 스팬이든 보낸다. 문자열 하나씩 고치면 다음 변형에서 또 터지므로,
+# 지원한다고 선언한 문장 × Hermes가 고를 수 있는 모든 스팬 조합을 전수 검증한다.
+_AGGREGATE_SENTENCES = [
+    "보유종목 전량 매도해줘",
+    "보유종목 전량 매도해",
+    "보유종목 전량 매도",
+    "보유종목 전량매도",
+    "계좌에 있는 종목 일괄매도",
+    "보유종목 전량 일괄매도",
+    "내 계좌 주식 모두 팔아줘",
+    "보유 종목 전부 팔아",
+    "전량 파세요",
+    "모두 팔자",
+    "미체결 주문 전부 취소해",
+    "모든 열린 주문 철회해줘",
+    "주문 전량취소",
+    "미체결 주문 전량 일괄 취소해주세요",
+]
+
+
+def _candidate_span_choices(raw: str):
+    """(action_span, scope_span) 조합 - 검증기가 받아들여야 하는 전부."""
+
+    from orchestration.user_order_language import (
+        _aggregate_match,
+        _literal_subspan,
+        _scope_word_spans,
+    )
+
+    aggregate = _aggregate_match(raw)
+    assert aggregate is not None, f"문장 게이트가 {raw!r}를 일괄주문으로 인식하지 못했다"
+    action, action_match, scope_match = aggregate
+    tokens = (
+        ("매도", "팔아", "팔", "파")
+        if action is DirectiveAction.SELL_ALL
+        else ("취소", "철회")
+    )
+    action_spans = {action_match.span(), _literal_subspan(action_match, *tokens)}
+    scope_spans = {scope_match.span(), *_scope_word_spans(scope_match)}
+    return action, sorted(action_spans), sorted(scope_spans)
+
+
+@pytest.mark.parametrize("raw", _AGGREGATE_SENTENCES)
+def test_every_supported_aggregate_sentence_verifies_for_any_valid_span(
+    raw: str,
+) -> None:
+    action, action_spans, scope_spans = _candidate_span_choices(raw)
+    for action_span in action_spans:
+        for scope_span in scope_spans:
+            candidate = HermesOrderCandidate(
+                raw_text_sha256=raw_text_sha256(raw),
+                decision=CandidateDecision.EXECUTE,
+                action=action,
+                evidence=(
+                    TextEvidence(
+                        field=EvidenceField.ACTION,
+                        start=action_span[0],
+                        end=action_span[1],
+                        text=raw[action_span[0] : action_span[1]],
+                        normalized=action.value,
+                    ),
+                    TextEvidence(
+                        field=EvidenceField.AGGREGATE_SCOPE,
+                        start=scope_span[0],
+                        end=scope_span[1],
+                        text=raw[scope_span[0] : scope_span[1]],
+                        normalized="ALL",
+                    ),
+                ),
+            )
+            result = verify_order_candidate(raw, candidate)
+            assert isinstance(result, VerifiedPaperDirective), (
+                f"{raw!r} action={action_span} scope={scope_span} -> "
+                f"{getattr(result, 'reason_codes', result)}"
+            )
+            assert result.action is action
