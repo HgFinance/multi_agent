@@ -202,6 +202,7 @@ class Occurrence:
     source_artifact_id: str = ""
     benchmark_id: str = ""
     improvement_type: str = ""
+    task_activation: str = ""
 
 
 @dataclass(frozen=True)
@@ -216,6 +217,7 @@ class SkillCandidate:
     source_artifact_ids: tuple[str, ...] = ()
     benchmark_ids: tuple[str, ...] = ()
     improvement_type: str = "SKILL_CREATE"
+    task_activation: str = ""
 
     @property
     def slug(self) -> str:
@@ -346,6 +348,14 @@ def detect_candidates(
         requested_types = {
             item.improvement_type for item in usable if item.improvement_type
         }
+        # Automatic injection is opt-in evidence, not a property inferred from
+        # the skill name. Mixed or omitted evidence leaves the skill
+        # documentation-only, so a later task cannot acquire instructions by
+        # accident.
+        activation_values = {item.task_activation.strip() for item in usable}
+        task_activation = (
+            "owner-task" if activation_values == {"owner-task"} else ""
+        )
         if "SKILL_EVOLVE" in requested_types and parent is None:
             # A requested evolution must bind to an active canonical parent;
             # silently turning it into a new skill would bypass owner review.
@@ -372,6 +382,7 @@ def detect_candidates(
                     sorted({item.benchmark_id for item in usable if item.benchmark_id})
                 ),
                 improvement_type=("SKILL_EVOLVE" if parent else "SKILL_CREATE"),
+                task_activation=task_activation,
             )
         )
     candidates.sort(key=lambda candidate: (-candidate.count, candidate.slug))
@@ -398,6 +409,10 @@ _DRAFT_PROMPT = """아래 반복 사건을 다음 실행에서 재사용할 수 
 - 첫 제목은 '# {slug}'
 - '## 왜 필요한가', '## 작업 순서', '## 하지 않을 것'을 포함한다
 - 관측된 사실과 재현 가능한 절차만 쓴다
+- CEO의 응답 품질 개선 사건이면, 답변 전에 상태·목적·증거를 확인하고,
+  필요한 경우에만 소유 부서에 위임하며, 관측되지 않은 사실은 명확히 한 뒤
+  최종 답변을 종합하는 순서를 구체적으로 쓴다
+- 단일 작업 안의 내부 판단 절차와 Hermes의 기존 Kanban 위임 권한을 혼동하지 않는다
 - 프로필, 페르소나, 권한 또는 승인 절차를 재정의하지 않는다
 - 코드 전체를 복사하지 말고 정본 경로와 검증 명령만 쓴다
 - 미완성 표시나 가상의 출력은 넣지 않는다
@@ -422,10 +437,16 @@ def draft_body(candidate: SkillCandidate, llm: Callable[[str], str]) -> str | No
 
 
 def render_skill(candidate: SkillCandidate, body: str) -> str:
-    description = (
-        f"{candidate.kind} 문제가 서로 다른 실행에서 반복될 때 사용하는 검증된 복구 절차. "
-        "일회성 오류나 관측되지 않은 문제에는 사용하지 않는다."
-    )
+    if candidate.task_activation == "owner-task":
+        description = (
+            f"{candidate.kind}에 대해 QA가 검증한 소유 프로필의 응답·위임 절차. "
+            "활성 승인된 소유자 작업에서만 적용한다."
+        )
+    else:
+        description = (
+            f"{candidate.kind} 문제가 서로 다른 실행에서 반복될 때 사용하는 검증된 복구 절차. "
+            "일회성 오류나 관측되지 않은 문제에는 사용하지 않는다."
+        )
     frontmatter = {
         "name": candidate.slug,
         "description": description,
@@ -434,6 +455,11 @@ def render_skill(candidate: SkillCandidate, body: str) -> str:
             "hermes": {
                 "tags": ["evolution", "observed-procedure"],
                 "source": "skill-evolution-pipeline",
+                **(
+                    {"task_activation": "owner-task"}
+                    if candidate.task_activation == "owner-task"
+                    else {}
+                ),
             }
         },
     }
@@ -480,6 +506,13 @@ def validate_artifacts(
         errors.append("frontmatter description is required")
     if str(frontmatter.get("version") or "") != f"{expected_version}.0.0":
         errors.append("frontmatter version does not match proposal version")
+    hermes_metadata = (frontmatter.get("metadata") or {}).get("hermes")
+    if hermes_metadata is not None and not isinstance(hermes_metadata, Mapping):
+        errors.append("metadata.hermes must be a mapping")
+    elif isinstance(hermes_metadata, Mapping):
+        task_activation = str(hermes_metadata.get("task_activation") or "")
+        if task_activation not in {"", "owner-task"}:
+            errors.append("metadata.hermes.task_activation is invalid")
     for heading in ("## 왜 필요한가", "## 작업 순서", "## 하지 않을 것"):
         if heading not in body:
             errors.append(f"required heading missing: {heading}")

@@ -65,6 +65,7 @@ def _occurrences(store: EvolutionSkillStore, department: str) -> list[Occurrence
             source_artifact_id=str(row.get("source_artifact_id") or ""),
             benchmark_id=str(row.get("benchmark_id") or ""),
             improvement_type=str(row.get("improvement_type") or ""),
+            task_activation=str(row.get("task_activation") or ""),
         )
         for row in store.load_occurrences(department=department)
     ]

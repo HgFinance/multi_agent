@@ -16,6 +16,7 @@ from types import MappingProxyType
 from orchestration.evolution_skills import (
     EvolutionSkillError,
     active_registry_bindings,
+    parse_skill_markdown,
 )
 
 CANONICAL_SHARED_SKILL_ROOT = Path(__file__).resolve().parents[1] / "skills"
@@ -259,6 +260,46 @@ def validate_skills_for_profile(
     return tuple(result)
 
 
+def active_task_skills_for_profile(
+    profile: str,
+    *,
+    root: Path | None = None,
+) -> tuple[str, ...]:
+    """Return explicitly task-activating evolved skills for one owner profile.
+
+    Evolution Skills are documentation by default.  A skill is injected into a
+    Hermes task only when it is active, belongs to the assignee, and its
+    canonical frontmatter explicitly requests ``owner-task`` activation.
+    """
+
+    if profile not in CANONICAL_PROFILES | STRATEGY_RUNTIME_PROFILES:
+        raise CanonicalSkillError(f"unknown Hermes profile: {profile!r}")
+    active, owners = _live_evolution_contract()
+    selected: list[str] = []
+    for name in sorted(active):
+        if profile not in owners.get(name, frozenset()):
+            continue
+        source = resolve_canonical_skill(name, root=root)
+        try:
+            frontmatter, _body = parse_skill_markdown(source.read_text(encoding="utf-8"))
+        except (OSError, EvolutionSkillError) as exc:
+            raise CanonicalSkillError(
+                f"cannot load active evolution skill: {name}"
+            ) from exc
+        metadata = frontmatter.get("metadata") or {}
+        hermes = metadata.get("hermes") if isinstance(metadata, dict) else None
+        if hermes is None:
+            continue
+        if not isinstance(hermes, dict):
+            raise CanonicalSkillError(f"invalid Hermes metadata: {name}")
+        activation = str(hermes.get("task_activation") or "")
+        if activation not in {"", "owner-task"}:
+            raise CanonicalSkillError(f"invalid task activation: {name}")
+        if activation == "owner-task":
+            selected.append(validate_skill_for_profile(name, profile, root=root))
+    return tuple(selected)
+
+
 def validate_skills_for_profiles(
     skills: Iterable[str] | None,
     profiles: Iterable[str],
@@ -327,6 +368,7 @@ __all__ = [
     "STRATEGY_RUNTIME_PROFILES",
     "STATIC_CANONICAL_SKILLS",
     "CanonicalSkillError",
+    "active_task_skills_for_profile",
     "resolve_canonical_skill",
     "skill_owners",
     "validate_required_skills",

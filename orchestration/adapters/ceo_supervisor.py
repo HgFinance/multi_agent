@@ -115,6 +115,10 @@ from orchestration.primary_task_idempotency import (
     request_user_input_idempotency_key,
     validate_primary_create,
 )
+from orchestration.skill_contract import (
+    active_task_skills_for_profile,
+    validate_skills_for_profile,
+)
 from orchestration.qa_contract import (
     canonical_qa_contract,
     split_planner_selection,
@@ -5684,6 +5688,7 @@ class SupervisorDecision:
     reason: str = ""
     retry_count: int = 0
     initial_status: str | None = None
+    skills: tuple[str, ...] = ()
 
 
 def _blocked_decision(
@@ -7485,6 +7490,7 @@ class HermesKanbanClient:
         initial_status: str | None = None,
         max_runtime_seconds: int | None = None,
         max_retries: int | None = None,
+        skills: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         # 사용자 발원(origin=user-query) 워크플로의 자식은 대기열에서 공장 카드보다
         # 앞선다. 루트만 앞세우면 소용이 없다 - 실제로 답을 만드는 것은 자식이고,
@@ -7510,6 +7516,8 @@ class HermesKanbanClient:
             raise SupervisorValidationError(primary_rejection)
         args: list[str] = ["kanban", "create", request.title, "--body", request.body]
         args.extend(("--assignee", request.assignee))
+        for skill in validate_skills_for_profile(skills, request.assignee):
+            args.extend(("--skill", skill))
         for parent_task_id in parent_task_ids:
             args.extend(("--parent", str(parent_task_id)))
         args.extend(
@@ -15206,6 +15214,14 @@ class CeoSupervisorService:
                 parent_task_ids=decision.parent_task_ids,
                 idempotency_key=idempotency_key,
                 initial_status=decision.initial_status,
+                skills=tuple(
+                    dict.fromkeys(
+                        (
+                            *decision.skills,
+                            *active_task_skills_for_profile(decision.assignee),
+                        )
+                    )
+                ),
             )
             if decision.reason == "binding_paper_structured_template":
                 created_task = (

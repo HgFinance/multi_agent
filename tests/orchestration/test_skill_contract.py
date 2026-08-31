@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -12,6 +16,7 @@ from orchestration.skill_contract import (
     PENDING_SOURCE_SKILLS,
     SKILL_OWNER_BY_NAME,
     CanonicalSkillError,
+    active_task_skills_for_profile,
     resolve_canonical_skill,
     validate_required_skills,
     validate_skill_for_profile,
@@ -39,6 +44,67 @@ ALL_PROFILE_SOURCES = {
 
 
 class SharedSkillContractTest(unittest.TestCase):
+    def test_active_evolved_skill_is_task_injected_only_for_its_owner(self) -> None:
+        import orchestration.skill_contract as contract
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "skills/evolved/ceo-bounded-react/SKILL.md"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "---\n"
+                "name: ceo-bounded-react\n"
+                "description: QA verified CEO procedure\n"
+                "version: 1.0.0\n"
+                "metadata:\n"
+                "  hermes:\n"
+                "    task_activation: owner-task\n"
+                "---\n\n"
+                "# ceo-bounded-react\n\n"
+                "## 왜 필요한가\nQA 검증 절차입니다.\n\n"
+                "## 작업 순서\n증거를 확인합니다.\n\n"
+                "## 하지 않을 것\n권한을 바꾸지 않습니다.\n",
+                encoding="utf-8",
+            )
+            registry = root / "skills/evolution-registry.json"
+            registry.write_text(
+                json.dumps(
+                    {
+                        "registry_version": "hgfinance.evolution-skill-registry.v1",
+                        "skills": {
+                            "ceo-bounded-react": {
+                                "classification": "evolved",
+                                "status": "active",
+                                "owner_profiles": ["ceo-agent"],
+                                "current_version": 1,
+                                "source": "skills/evolved/ceo-bounded-react/SKILL.md",
+                                "content_hash": hashlib.sha256(
+                                    source.read_bytes()
+                                ).hexdigest(),
+                                "approved_by": "discord:test",
+                                "qa_verdict": "PASS",
+                                "activated_at": "2026-08-31T00:00:00+00:00",
+                                "replacement": None,
+                                "proposal_id": "ceo-bounded-react-v1-aaaaaaaaaaaa",
+                            }
+                        },
+                        "project_skills": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(contract, "EVOLUTION_SKILL_REGISTRY", registry):
+                self.assertEqual(
+                    active_task_skills_for_profile("ceo-agent", root=root / "skills"),
+                    ("ceo-bounded-react",),
+                )
+                self.assertEqual(
+                    active_task_skills_for_profile(
+                        "research-department", root=root / "skills"
+                    ),
+                    (),
+                )
+
     def test_canonical_skill_resolves_from_project_source(self) -> None:
         path = resolve_canonical_skill(
             "financial-portfolio-assessment",

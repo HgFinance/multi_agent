@@ -22,10 +22,11 @@ from orchestration.evolution_skills import (
     inventory_skills,
     promote_proposal,
     record_trace_occurrences,
+    render_skill,
     retire_skill,
     validate_canonical_registry,
 )
-from scripts.evolution_skills import _proposal_history
+from scripts.evolution_skills import _occurrences, _proposal_history
 
 
 def _body(slug: str) -> str:
@@ -299,6 +300,44 @@ def test_candidate_requires_three_distinct_unconsumed_runs() -> None:
         )
         == []
     )
+
+
+def test_task_activation_requires_explicit_qa_evidence() -> None:
+    rows = [
+        Occurrence(
+            kind="ceo bounded supervision",
+            detail="QA A/B verified bounded CEO response procedure",
+            run_id=f"qa-run-{number}",
+            department="00-ceo-office",
+            source_type="qa-benchmark",
+            task_activation="owner-task",
+        )
+        for number in range(1, 4)
+    ]
+
+    candidate = detect_candidates(rows, department="00-ceo-office")[0]
+
+    assert candidate.task_activation == "owner-task"
+    assert "task_activation: owner-task" in render_skill(
+        candidate, _body(candidate.slug)
+    )
+
+
+def test_cli_occurrence_loader_preserves_explicit_task_activation(tmp_path: Path) -> None:
+    store = EvolutionSkillStore(tmp_path)
+    store.append_occurrences(
+        [
+            Occurrence(
+                kind="ceo bounded supervision",
+                run_id="qa-run-1",
+                department="00-ceo-office",
+                source_type="qa-benchmark",
+                task_activation="owner-task",
+            )
+        ]
+    )
+
+    assert _occurrences(store, "00-ceo-office")[0].task_activation == "owner-task"
 
 
 def test_generation_requires_governed_14b_and_deterministic_structure(

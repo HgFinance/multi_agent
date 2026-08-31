@@ -9,6 +9,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import ClassVar
+from unittest.mock import patch
 
 from orchestration.adapters.ceo_supervisor import (
     CeoSupervisorService,
@@ -1360,6 +1361,34 @@ class UserQueryPriorityTest(unittest.TestCase):
         assert calls
         priority_index = calls[0].index("--priority")
         assert calls[0][priority_index + 1] == str(RESEARCH_QUERY_PRIORITY)
+
+    def test_owned_skill_is_forwarded_to_hermes_task(self) -> None:
+        import json
+        import subprocess
+
+        calls: list[list[str]] = []
+
+        def runner(args, **kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(args, 0, json.dumps({"id": "ceo"}), "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = HermesKanbanClient(
+                runner=runner,
+                environment={"HERMES_KANBAN_HOME": tmp},
+            )
+            client.create_task(
+                title="CEO synthesis",
+                body="workflow_root_task_id=root\nworkflow_role=synthesis",
+                assignee="ceo-agent",
+                parent_task_ids=("root",),
+                idempotency_key="root:synthesis:ceo-agent",
+                skills=("hermes-memory",),
+            )
+
+        assert calls
+        skill_index = calls[0].index("--skill")
+        assert calls[0][skill_index + 1] == "hermes-memory"
 
 
 class AnswerBodyHandoffTest(unittest.TestCase):
@@ -2746,6 +2775,26 @@ def test_ceo_synthesis_receives_owned_self_review_guardrails() -> None:
     assert "CEO self-improvement guardrails" in synthesis_body
     assert "D5_CHECK_" not in synthesis_body
     assert "QA does not command or mutate the CEO" in synthesis_body
+
+
+def test_active_evolved_skill_is_attached_to_its_ceo_task() -> None:
+    client = FakeClient()
+    service = CeoSupervisorService(client, qa_required=False)
+    decision = SupervisorDecision(
+        SupervisorAction.SYNTHESIZE,
+        "root",
+        assignee="ceo-agent",
+        title="CEO final synthesis",
+        body="hgfinance.ceo-supervisor.v1 action=SYNTHESIZE",
+    )
+
+    with patch(
+        "orchestration.adapters.ceo_supervisor.active_task_skills_for_profile",
+        return_value=("ceo-bounded-react",),
+    ):
+        service._execute(decision, SupervisorState("root", ()))
+
+    assert client.created[0]["skills"] == ("ceo-bounded-react",)
 
 
 def test_risk_primary_result_contract_repairs_transport_token_from_metadata():
@@ -5319,8 +5368,10 @@ class ReadyPrimaryPlanRecoveryTest(unittest.TestCase):
             tuple(decision.assignee for decision in first),
             self.selected,
         )
-        self.assertEqual(
-            tuple(item["assignee"] for item in client.created),
+        # Primary tasks are deliberately created in a bounded parallel fan-out.
+        # Creation completion order is therefore not part of the contract.
+        self.assertCountEqual(
+            (item["assignee"] for item in client.created),
             self.selected,
         )
         self.assertTrue(
