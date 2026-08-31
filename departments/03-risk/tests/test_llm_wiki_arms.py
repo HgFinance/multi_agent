@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "llm_wiki"))
 
 from arms import (
@@ -164,6 +166,26 @@ def test_wiki_answer_preserves_grounded_verdict_and_only_visited_citations() -> 
 
     assert result["verdict"] == "ambiguous"
     assert result["cited_documents"] == ["visited-page"]
+
+
+def test_wiki_answer_uses_reader_aliases_without_rereading_pages(monkeypatch) -> None:
+    def fail_if_called(_page_ids):
+        raise AssertionError("normal Wiki path must not reread citation pages")
+
+    monkeypatch.setattr("arms.citation_aliases", fail_if_called)
+    result = _finalize_wiki_answer(
+        {
+            "verdict": "breach",
+            "cited_documents": ["doc-a"],
+            "rationale": "제1조에 따른다.",
+            "confidence": 0.8,
+            "escalate": False,
+        },
+        ["page-a"],
+        citation_alias_map={"page-a": "page-a", "doc-a": "page-a"},
+    )
+
+    assert result["cited_documents"] == ["page-a"]
 
 
 def test_llm_wiki_prompt_requires_numeric_threshold_comparison() -> None:

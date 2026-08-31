@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 WIKI_DIR = Path(__file__).resolve().parent / "data" / "wiki"
@@ -39,6 +39,9 @@ class ReadResult:
     pages_visited: list[str]
     context: str  # 모델에 넘길, 사람이 읽는 그대로의 발췌 텍스트
     truncated: bool  # Tmax에 걸려 더 못 읽은 링크가 있었는지
+    # `_load_page()`가 이미 읽은 frontmatter에서 만든 alias. 최종화 단계에서
+    # 같은 페이지를 다시 읽지 않도록 reader의 단일 출구에 함께 실어 보낸다.
+    citation_aliases: dict[str, str] = field(default_factory=dict)
 
 
 def _load_page(page_id: str, wiki_dir: Path) -> tuple[str, str] | None:
@@ -159,6 +162,32 @@ def _outgoing_links(body: str) -> list[tuple[str, str, str]]:
     return [(m.group(1), m.group(2), m.group(3)) for m in _LINK_LINE_RE.finditer(body)]
 
 
+def _record_page_aliases(
+    aliases: dict[str, str],
+    ambiguous: set[str],
+    page_id: str,
+    frontmatter: str | None = None,
+) -> None:
+    """Add one page's unambiguous identifiers to the shared alias map."""
+
+    values = [page_id]
+    if frontmatter is not None:
+        values.extend(
+            value
+            for key in ("page_id", "document_id", "clause_id")
+            if (value := _frontmatter_value(frontmatter, key))
+        )
+    for value in dict.fromkeys(values):
+        if value in ambiguous:
+            continue
+        previous = aliases.get(value)
+        if previous is not None and previous != page_id:
+            aliases.pop(value, None)
+            ambiguous.add(value)
+            continue
+        aliases[value] = page_id
+
+
 def citation_aliases(
     page_ids: list[str], wiki_dir: Path = WIKI_DIR
 ) -> dict[str, str]:
@@ -174,23 +203,8 @@ def citation_aliases(
     ambiguous: set[str] = set()
     for page_id in dict.fromkeys(page_ids):
         loaded = _load_page(page_id, wiki_dir)
-        values = [page_id]
-        if loaded is not None:
-            frontmatter, _body = loaded
-            values.extend(
-                value
-                for key in ("page_id", "document_id", "clause_id")
-                if (value := _frontmatter_value(frontmatter, key))
-            )
-        for value in dict.fromkeys(values):
-            if value in ambiguous:
-                continue
-            previous = aliases.get(value)
-            if previous is not None and previous != page_id:
-                aliases.pop(value, None)
-                ambiguous.add(value)
-                continue
-            aliases[value] = page_id
+        frontmatter = loaded[0] if loaded is not None else None
+        _record_page_aliases(aliases, ambiguous, page_id, frontmatter)
     return aliases
 
 
@@ -218,6 +232,8 @@ def read_bounded(
 
     visited: list[str] = []
     chunks: list[str] = []
+    aliases: dict[str, str] = {}
+    ambiguous_aliases: set[str] = set()
     queue = list(seed_page_ids)
     empty_reads = 0
     truncated = False
@@ -229,10 +245,11 @@ def read_bounded(
         loaded = _load_page(page_id, wiki_dir)
         if loaded is None:
             continue
-        _frontmatter, body = loaded
-        if not _page_is_visible(_frontmatter, cutoff):
+        frontmatter, body = loaded
+        if not _page_is_visible(frontmatter, cutoff):
             continue
         visited.append(page_id)
+        _record_page_aliases(aliases, ambiguous_aliases, page_id, frontmatter)
 
         window = _window_around(body, query)
         links = _outgoing_links(body)
@@ -258,7 +275,10 @@ def read_bounded(
         truncated = True
 
     return ReadResult(
-        pages_visited=visited, context="\n\n".join(chunks), truncated=truncated
+        pages_visited=visited,
+        context="\n\n".join(chunks),
+        truncated=truncated,
+        citation_aliases=aliases,
     )
 
 

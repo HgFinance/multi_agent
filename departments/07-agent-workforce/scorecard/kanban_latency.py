@@ -18,6 +18,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
+from percentiles import percentile
+
 
 class KanbanLatencyStatus(str, Enum):
     MEASURED = "MEASURED"
@@ -25,14 +27,6 @@ class KanbanLatencyStatus(str, Enum):
 
 
 _FAILURE_OUTCOMES = frozenset({"crashed", "gave_up", "reclaimed", "timed_out"})
-
-
-def _percentile(values: list[int], fraction: float) -> int | None:
-    if not values:
-        return None
-    ordered = sorted(values)
-    index = min(len(ordered) - 1, max(0, round(fraction * (len(ordered) - 1))))
-    return ordered[index]
 
 
 def _epoch_seconds(value: datetime) -> int:
@@ -161,23 +155,20 @@ def collect_kanban_department_latency(
     placeholders = ",".join("?" for _ in department_profiles)
     query = f"""
         select t.assignee, t.created_at, t.completed_at,
-               (select min(candidate.started_at)
-                  from task_runs candidate
-                 where candidate.task_id = t.id) as first_started_at,
-               (select sum(case when candidate.ended_at >= candidate.started_at
-                                then candidate.ended_at - candidate.started_at
-                                else 0 end)
-                  from task_runs candidate
-                 where candidate.task_id = t.id
-                   and candidate.ended_at is not null) as active_seconds,
-               (select group_concat(lower(candidate.status), ',')
-                  from task_runs candidate
-                 where candidate.task_id = t.id) as run_outcomes
-        from tasks t
-        where t.assignee in ({placeholders})
-          and t.completed_at >= ? and t.completed_at < ?
-          and t.created_at is not null
-          and t.completed_at >= t.created_at
+               min(candidate.started_at) as first_started_at,
+               sum(case when candidate.ended_at is not null
+                        then case when candidate.ended_at >= candidate.started_at
+                                  then candidate.ended_at - candidate.started_at
+                                  else 0 end
+                        end) as active_seconds,
+               group_concat(lower(candidate.status), ',') as run_outcomes
+          from tasks t
+          left join task_runs candidate on candidate.task_id = t.id
+         where t.assignee in ({placeholders})
+           and t.completed_at >= ? and t.completed_at < ?
+           and t.created_at is not null
+           and t.completed_at >= t.created_at
+         group by t.id, t.assignee, t.created_at, t.completed_at
     """
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25) as database:
@@ -230,12 +221,12 @@ def collect_kanban_department_latency(
                 window_end=window_end,
                 status=KanbanLatencyStatus.MEASURED,
                 completed_tasks=len(values),
-                queue_p50_ms=_percentile(queues, 0.50),
-                queue_p95_ms=_percentile(queues, 0.95),
-                workflow_p50_ms=_percentile(workflows, 0.50),
-                workflow_p95_ms=_percentile(workflows, 0.95),
-                execution_p50_ms=_percentile(executions, 0.50),
-                execution_p95_ms=_percentile(executions, 0.95),
+                queue_p50_ms=percentile(queues, 0.50),
+                queue_p95_ms=percentile(queues, 0.95),
+                workflow_p50_ms=percentile(workflows, 0.50),
+                workflow_p95_ms=percentile(workflows, 0.95),
+                execution_p50_ms=percentile(executions, 0.50),
+                execution_p95_ms=percentile(executions, 0.95),
                 execution_attributed_tasks=len(executions),
                 failure_count=sum(item in _FAILURE_OUTCOMES for item in outcomes),
                 timeout_count=outcomes.count("timed_out"),

@@ -94,3 +94,33 @@ def test_kanban_latency_separates_blocked_wall_time_from_active_execution(tmp_pa
     assert report.timeout_count == 0
     assert report.gave_up_count == 1
     assert report.crash_count == 1
+
+
+def test_kanban_latency_does_not_attribute_unfinished_runs_to_execution(tmp_path: Path) -> None:
+    database_path = tmp_path / "kanban.db"
+    with sqlite3.connect(database_path) as database:
+        database.executescript(
+            """
+            create table tasks (
+              id text primary key, assignee text, created_at integer,
+              started_at integer, completed_at integer
+            );
+            create table task_runs (
+              id integer primary key, task_id text, started_at integer, ended_at integer, status text
+            );
+            insert into tasks values ('qa-open-run', 'qa-department', 100, 101, 205);
+            insert into task_runs values (1, 'qa-open-run', 101, null, 'running');
+            """
+        )
+
+    start = datetime.fromtimestamp(90, timezone.utc)
+    report = collect_kanban_department_latency(
+        department_profiles={"qa": "qa-department"},
+        window_start=start,
+        window_end=start + timedelta(seconds=120),
+        database_path=database_path,
+    )[0]
+
+    assert report.completed_tasks == 1
+    assert report.execution_attributed_tasks == 0
+    assert report.execution_p95_ms is None

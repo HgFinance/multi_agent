@@ -23,7 +23,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # data/*.py 형제 모듈(bm25 등)
 _RISK_ROOT = Path(__file__).resolve().parents[2]  # departments/03-risk
@@ -308,6 +308,7 @@ def _finalize_wiki_answer(
     *,
     query: str = "",
     context: str = "",
+    citation_alias_map: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """생성 결과를 방문한 근거 페이지에 고정하고 모순 시 fail-closed한다.
 
@@ -323,7 +324,14 @@ def _finalize_wiki_answer(
 
     raw_citations = raw.get("cited_documents")
     citations = [item for item in raw_citations if isinstance(item, str)] if isinstance(raw_citations, list) else []
-    page_aliases = citation_aliases(pages_visited)
+    # read_bounded() already loaded these pages and returns the aliases made from
+    # that same frontmatter. Keep the old helper as a compatibility fallback for
+    # direct callers of this finalizer, but do not reread pages on the normal path.
+    page_aliases = (
+        citation_alias_map
+        if citation_alias_map is not None
+        else citation_aliases(pages_visited)
+    )
     invalid_citations = [item for item in citations if item not in page_aliases]
     citations = list(
         dict.fromkeys(page_aliases[item] for item in citations if item in page_aliases)
@@ -408,6 +416,7 @@ def llm_wiki_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str,
             read.pages_visited,
             query=query,
             context=read.context,
+            citation_alias_map=read.citation_aliases,
         ),
         "context_chars": len(read.context),
         "pages_visited": read.pages_visited,
@@ -448,6 +457,7 @@ def llm_wiki_grep_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict
             read.pages_visited,
             query=query,
             context=read.context,
+            citation_alias_map=read.citation_aliases,
         ),
         "context_chars": len(read.context),
         "pages_visited": read.pages_visited,

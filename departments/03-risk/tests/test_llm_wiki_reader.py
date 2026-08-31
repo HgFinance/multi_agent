@@ -139,6 +139,24 @@ def test_citation_aliases_accept_unambiguous_document_and_clause_ids(tmp_path: P
     assert aliases["제1조"] == "page-a"
 
 
+def test_read_bounded_returns_aliases_from_the_pages_it_already_loaded(tmp_path: Path) -> None:
+    wiki_dir = tmp_path / "wiki"
+    wiki_dir.mkdir(parents=True, exist_ok=True)
+    (wiki_dir / "page-a.md").write_text(
+        "---\neffective_from: 2026-01-01\neffective_to: \n"
+        "document_id: doc-a\nclause_id: 제1조\n---\n\n근거 본문입니다.\n",
+        encoding="utf-8",
+    )
+
+    result = read_bounded("근거", ["page-a"], wiki_dir=wiki_dir, as_of="2026-08-26")
+
+    assert result.citation_aliases == {
+        "page-a": "page-a",
+        "doc-a": "page-a",
+        "제1조": "page-a",
+    }
+
+
 def test_empty_effective_to_does_not_consume_following_frontmatter_fields(tmp_path: Path) -> None:
     wiki_dir = tmp_path / "wiki"
     wiki_dir.mkdir(parents=True, exist_ok=True)

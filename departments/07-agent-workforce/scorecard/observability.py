@@ -163,6 +163,7 @@ DEPARTMENT_PROFILE_BY_KEY: dict[str, str] = {
 }
 
 from kanban_latency import KanbanDepartmentLatencyReport, collect_kanban_department_latency
+from percentiles import percentile
 
 
 def _safe_int(value: Any) -> int | None:
@@ -182,16 +183,6 @@ def _safe_str(value: Any) -> str | None:
     if value in (None, ""):
         return None
     return str(value)
-
-
-def _percentile(values: list[float], fraction: float) -> float | None:
-    """values 의 fraction 분위수(예: 0.95 -> p95). values 가 비면 None."""
-
-    if not values:
-        return None
-    ordered = sorted(values)
-    index = min(len(ordered) - 1, max(0, round(fraction * (len(ordered) - 1))))
-    return ordered[index]
 
 
 def _require_reason(status: Any, unavailable: Any, reason: str | None) -> None:
@@ -1421,7 +1412,7 @@ def compute_department_capacity(
         department=department, window_start=since, window_end=now,
         status=CapacityObservationStatus.MEASURED,
         arrivals=arrivals,
-        duration_p95_ms=_percentile(latencies, 0.95) if latencies else None,
+        duration_p95_ms=percentile(latencies, 0.95),
         error_rate=(sum(errors) / arrivals) if errors else None,
         retry_rate=(sum(retries) / arrivals) if retries else None,
         utilization=(sum(latencies) / window_ms) if latencies else None,
