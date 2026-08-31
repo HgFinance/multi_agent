@@ -14,6 +14,7 @@ import {
   paperDirectiveIsComplete,
   paperDirectivePollInterval,
   paperDirectiveStatusPath,
+  parsePaperDirective,
   persistPendingPaperDirective,
   persistRetryablePaperOrderAction,
   preparePaperOrderAction,
@@ -277,4 +278,27 @@ test("CEO chat unifies advice and PAPER commands while keeping book scope explic
   assert.match(ceoClient, /fundId\?: string/);
   assert.match(ceoClient, /bookId\?: string/);
   assert.match(ceoClient, /bookId \? \{ book_id: bookId \} : \{\}/);
+});
+
+test("모든 백엔드 directive action을 파싱한다", () => {
+  // PLACE_BASKET이 허용목록에서 빠져 있으면 백엔드가 성공시킨 바스켓 주문을
+  // UI가 paper_order_invalid_response로 던져버린다. 백엔드 계약
+  // (orchestration/contracts/user_paper_order.py DirectiveAction)과 어긋나지
+  // 않도록 네 액션을 모두 고정한다.
+  for (const action of [
+    "PLACE_ORDER",
+    "PLACE_BASKET",
+    "SELL_ALL",
+    "CANCEL_ALL",
+  ]) {
+    const parsed = parsePaperDirective(directive({ action }));
+    assert.equal(parsed.action, action);
+  }
+});
+
+test("계약에 없는 action은 계속 거부한다", () => {
+  assert.throws(
+    () => parsePaperDirective(directive({ action: "LIQUIDATE_ALL" })),
+    /paper_order_invalid_response/,
+  );
 });
