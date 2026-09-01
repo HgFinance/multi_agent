@@ -224,6 +224,98 @@ def test_fast_advisory_default_budget_stops_after_bounded_terminal_pass(
     assert bounded[bounded.index("--max-turns") + 1] == "8"
 
 
+def test_conditional_paper_uses_only_existing_mcp_and_terminal_boundaries(
+    tmp_path, monkeypatch
+):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    body = (
+        "workflow_role=primary\n"
+        "workflow_mode=binding\n"
+        "hgfinance.user-conditional-paper-rule.v1\n"
+        "workflow_root_task_id=t_root\n"
+        "## Exact user instruction\n"
+        "삼성전자 5분봉 RSI(14)가 30 이하면 2주 시장가 매수"
+    )
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE tasks SET body = ? WHERE id = 't_qa'", (body,))
+    conn.commit()
+    conn.close()
+    monkeypatch.delenv("HGFINANCE_CONDITIONAL_PAPER_MAX_TURNS", raising=False)
+    monkeypatch.delenv("HGFINANCE_CONDITIONAL_PAPER_REASONING", raising=False)
+    monkeypatch.setenv("HGFINANCE_CONDITIONAL_PAPER_FAST_WORKER_ENABLED", "true")
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["chat", "--toolsets", "all", "-q", "work kanban task t_qa"],
+        db_path=db,
+        task_id="t_qa",
+        profile="trading-department",
+    )
+
+    assert qa_worker._response_task_kind(
+        body, profile="trading-department"
+    ) == "conditional_paper"
+    assert bounded[bounded.index("--max-turns") + 1] == "4"
+    assert bounded[bounded.index("--reasoning") + 1] == "medium"
+    assert bounded[bounded.index("--toolsets") + 1] == "kanban,user-paper-order"
+    prompt = bounded[bounded.index("-q") + 1]
+    assert "Do not call kanban_show/kanban_list" in prompt
+    assert "process_user_conditional_paper_rule exactly once" in prompt
+    assert "kanban_complete exactly once" in prompt
+    assert body in prompt
+
+
+def test_conditional_paper_budget_is_bounded_and_does_not_match_other_profiles(
+    tmp_path, monkeypatch
+):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    body = "hgfinance.user-conditional-paper-rule.v1\nworkflow_mode=binding"
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE tasks SET body = ? WHERE id = 't_qa'", (body,))
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HGFINANCE_CONDITIONAL_PAPER_MAX_TURNS", "999")
+    monkeypatch.setenv("HGFINANCE_CONDITIONAL_PAPER_FAST_WORKER_ENABLED", "true")
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["chat", "-q", "work"],
+        db_path=db,
+        task_id="t_qa",
+        profile="trading-department",
+    )
+    assert bounded[bounded.index("--max-turns") + 1] == "8"
+
+    unrelated = ["chat", "-q", "work"]
+    assert qa_worker._bounded_worker_argv(
+        unrelated,
+        db_path=db,
+        task_id="t_qa",
+        profile="research-department",
+    ) == unrelated
+
+
+def test_conditional_paper_fast_worker_is_disabled_by_default(tmp_path, monkeypatch):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    body = "hgfinance.user-conditional-paper-rule.v1\nworkflow_mode=binding"
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE tasks SET body = ? WHERE id = 't_qa'", (body,))
+    conn.commit()
+    conn.close()
+    monkeypatch.delenv(
+        "HGFINANCE_CONDITIONAL_PAPER_FAST_WORKER_ENABLED", raising=False
+    )
+
+    original = ["chat", "-q", "work"]
+    assert qa_worker._bounded_worker_argv(
+        original,
+        db_path=db,
+        task_id="t_qa",
+        profile="trading-department",
+    ) == original
+
+
 def test_hr_e2e_uses_one_bounded_read_only_helper_pass(tmp_path, monkeypatch):
     db = tmp_path / "kanban.db"
     _db_with_running_run(db)

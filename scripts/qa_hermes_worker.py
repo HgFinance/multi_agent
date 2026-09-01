@@ -34,12 +34,15 @@ QA_PROFILE = "qa-department"
 HR_PROFILE = "hr-department"
 RISK_PROFILE = "risk-management"
 RESEARCH_PROFILE = "research-department"
+TRADING_PROFILE = "trading-department"
 QUANT_PROFILE = "quant-backtest-department"
 QUANT_LIAISON_PROFILE = "quant-liaison"
 RISK_USER_PRIMARY_TOOLSETS = "kanban,risk-legal"
 RESEARCH_FAST_ADVISORY_TOOLSETS = "kanban,research"
 QUANT_FAST_ADVISORY_TOOLSETS = "kanban,ls-securities"
 QUANT_LIAISON_FAST_ADVISORY_TOOLSETS = "kanban,research"
+CONDITIONAL_PAPER_TOOLSETS = "kanban,user-paper-order"
+CONDITIONAL_PAPER_MARKER = "hgfinance.user-conditional-paper-rule.v1"
 _TASK_ID_RE = re.compile(r"\bt_[A-Za-z0-9_-]+\b")
 FAST_ADVISORY_MODE = "analysis_mode=fast_advisory"
 # Fast advisory completes after the bounded evidence pass and terminal
@@ -57,6 +60,10 @@ DEFAULT_USER_RESPONSE_MAX_TURNS = 12
 MIN_USER_RESPONSE_MAX_TURNS = 8
 MAX_USER_RESPONSE_MAX_TURNS = 32
 DEFAULT_USER_RESPONSE_REASONING = "medium"
+DEFAULT_CONDITIONAL_PAPER_MAX_TURNS = 4
+MIN_CONDITIONAL_PAPER_MAX_TURNS = 4
+MAX_CONDITIONAL_PAPER_MAX_TURNS = 8
+DEFAULT_CONDITIONAL_PAPER_REASONING = "medium"
 DEFAULT_QA_AUDIT_MAX_TURNS = 8
 MIN_QA_AUDIT_MAX_TURNS = 8
 MAX_QA_AUDIT_MAX_TURNS = 32
@@ -222,6 +229,54 @@ def _user_response_reasoning() -> str:
     )
 
 
+def _conditional_paper_max_turns(
+    *, env: Mapping[str, str] | None = None
+) -> int:
+    """Bound the one-MCP-call PAPER interpretation lane."""
+
+    runtime_env = os.environ if env is None else env
+    raw = runtime_env.get(
+        "HGFINANCE_CONDITIONAL_PAPER_MAX_TURNS",
+        str(DEFAULT_CONDITIONAL_PAPER_MAX_TURNS),
+    ).strip()
+    try:
+        configured = int(raw)
+    except ValueError:
+        configured = DEFAULT_CONDITIONAL_PAPER_MAX_TURNS
+    return min(
+        MAX_CONDITIONAL_PAPER_MAX_TURNS,
+        max(MIN_CONDITIONAL_PAPER_MAX_TURNS, configured),
+    )
+
+
+def _conditional_paper_reasoning(
+    *, env: Mapping[str, str] | None = None
+) -> str:
+    """Keep production-quality reasoning while removing unrelated tool turns."""
+
+    runtime_env = os.environ if env is None else env
+    configured = runtime_env.get(
+        "HGFINANCE_CONDITIONAL_PAPER_REASONING",
+        DEFAULT_CONDITIONAL_PAPER_REASONING,
+    ).strip().casefold()
+    return (
+        configured
+        if configured in _REASONING_LEVELS
+        else DEFAULT_CONDITIONAL_PAPER_REASONING
+    )
+
+
+def _conditional_paper_fast_worker_enabled(
+    *, env: Mapping[str, str] | None = None
+) -> bool:
+    """Keep the latency path opt-in until its PAPER canary passes."""
+
+    runtime_env = os.environ if env is None else env
+    return runtime_env.get(
+        "HGFINANCE_CONDITIONAL_PAPER_FAST_WORKER_ENABLED", "false"
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+
+
 def _fast_advisory_reasoning(*, env: Mapping[str, str] | None = None) -> str:
     """Use a bounded reasoning floor for evidence-limited advisory passes."""
 
@@ -318,6 +373,13 @@ def _is_hr_e2e_body(body: str, *, profile: str) -> bool:
 def _response_task_kind(body: str, *, profile: str = "") -> str | None:
     """Classify only bounded tasks on the user-facing response plane."""
 
+    if (
+        profile == TRADING_PROFILE
+        and CONDITIONAL_PAPER_MARKER in body
+        and _conditional_paper_fast_worker_enabled()
+    ):
+        return "conditional_paper"
+
     if _is_hr_e2e_body(body, profile=profile):
         return "hr_e2e_readonly"
 
@@ -396,6 +458,8 @@ def task_execution_metadata(
     configured_max_turns = 0
     if task_kind == "fast_advisory":
         configured_max_turns = _fast_advisory_max_turns(env=env)
+    elif task_kind == "conditional_paper":
+        configured_max_turns = _conditional_paper_max_turns(env=env)
     elif task_kind == "hr_e2e_readonly":
         configured_max_turns = _hr_e2e_max_turns(env=env)
     elif task_kind == "qa_primary":
@@ -478,6 +542,8 @@ def _bounded_worker_argv(
                 "--reasoning",
                 _hr_e2e_reasoning()
                 if task_kind == "hr_e2e_readonly"
+                else _conditional_paper_reasoning()
+                if task_kind == "conditional_paper"
                 else _qa_primary_reasoning()
                 if task_kind == "qa_primary"
                 else _qa_audit_reasoning()
@@ -487,7 +553,21 @@ def _bounded_worker_argv(
                 else _user_response_reasoning(),
             ]
         )
-    if task_kind == "hr_e2e_readonly":
+    if task_kind == "conditional_paper":
+        # The task payload already carries the immutable root/task scope and
+        # the exact user text.  Avoid a redundant kanban_show plus unrelated
+        # skill/memory discovery; the trusted MCP still re-reads the durable
+        # scope and owns every schema, semantic, authority, and PAPER gate.
+        allowed_toolsets = CONDITIONAL_PAPER_TOOLSETS
+        if toolsets_index is None:
+            additions.extend(["--toolsets", allowed_toolsets])
+        else:
+            option = args[toolsets_index]
+            if option in {"-t", "--toolsets"} and toolsets_index + 1 < len(args):
+                args[toolsets_index + 1] = allowed_toolsets
+            elif option.startswith("--toolsets="):
+                args[toolsets_index] = f"--toolsets={allowed_toolsets}"
+    elif task_kind == "hr_e2e_readonly":
         # HR's verification card already defines the exact three GETs. Keep
         # only the terminal handoff and read-only terminal tool available so
         # Hermes cannot spend turns scanning skills/files or opening unrelated
@@ -579,9 +659,45 @@ def _bounded_worker_argv(
     )
     if task_kind == "hr_e2e_readonly":
         return _hr_e2e_worker_argv(bounded)
+    if task_kind == "conditional_paper":
+        return _conditional_paper_worker_argv(bounded, task_body=body)
     if task_kind == "fast_advisory" and profile == RESEARCH_PROFILE:
         return _research_fast_advisory_worker_argv(bounded, task_body=body)
     return bounded
+
+
+def _conditional_paper_worker_argv(
+    argv: Sequence[str],
+    *,
+    task_body: str,
+) -> list[str]:
+    """Run the existing conditional owner path without a redundant board read."""
+
+    body = str(task_body or "").strip()
+    prompt = (
+        "Use the complete scoped task payload below as the authoritative PAPER "
+        "interpretation input. Do not call kanban_show/kanban_list, inspect "
+        "memory or skills, delegate, or use any tool outside the two allowed "
+        "boundaries. Re-read the exact user instruction and construct either "
+        "the supported ConditionalRuleCandidate AST or a registered "
+        "clarification code. Call process_user_conditional_paper_rule exactly "
+        "once; its deterministic owner rechecks the durable root/task scope, "
+        "schema, units, semantics, authority, idempotency, and PAPER-only mode. "
+        "Then copy its user_message faithfully and call kanban_complete exactly "
+        "once. Never retry an unknown outcome, never submit LIVE, and never "
+        "claim an order or fill merely because a rule became ACTIVE.\n\n"
+        "SCOPED TASK PAYLOAD:\n"
+        + body
+    )
+    args = list(argv)
+    for index, arg in enumerate(args):
+        if arg in {"-q", "--query"} and index + 1 < len(args):
+            args[index + 1] = prompt
+            return args
+        if arg.startswith("--query="):
+            args[index] = f"--query={prompt}"
+            return args
+    return [*args, "--query", prompt]
 
 
 def _hr_e2e_worker_argv(argv: Sequence[str]) -> list[str]:

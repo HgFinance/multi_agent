@@ -1012,9 +1012,42 @@ def test_indicator_prompt_names_every_parameter_the_validator_accepts() -> None:
     from orchestration.conditional_rules import list_supported_indicators
 
     catalog = ceo._conditional_rule_indicator_catalog_prompt()
-    assert "BOLLINGER(PERIOD=20,STDDEV=2,OFFSET=0)->UPPER|MIDDLE|LOWER" in catalog
-    assert "BROKER_SEARCH_MATCH(SEARCH_ID=required)->VALUE" in catalog
+    assert (
+        "BOLLINGER(PERIOD=20,STDDEV=2,OFFSET=0)"
+        "->UPPER:PRICE|MIDDLE:PRICE|LOWER:PRICE@BAR_CLOSE"
+    ) in catalog
+    assert (
+        "BROKER_SEARCH_MATCH(SEARCH_ID=required)->VALUE:BOOL@BAR_CLOSE"
+    ) in catalog
+    assert "VI_STATUS()->VALUE:BOOL@QUOTE" in catalog
     for item in list_supported_indicators():
         assert f"{item['name']}(" in catalog, item["name"]
         for parameter in {*item["defaults"], *item["required_parameters"]}:
             assert parameter in catalog, (item["name"], parameter)
+        for output, unit in item["outputs"].items():
+            assert f"{output}:{unit}" in catalog, (item["name"], output, unit)
+
+
+def test_conditional_prompt_never_defaults_an_omitted_indicator_timeframe() -> None:
+    from orchestration.ceo_workflow_scope import UserPaperOrderScope
+
+    body = ceo._conditional_rule_child_body(
+        query="삼성전자 RSI가 30 이하면 2주 매수",
+        scope=UserPaperOrderScope(
+            order_request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            raw_instruction_sha256="a" * 64,
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        root_task_id="t_root_prompt_contract",
+        request_id="prompt-contract-1",
+        has_mandate=False,
+    )
+
+    assert "clarification_reason=TIMEFRAME_NOT_IN_INSTRUCTION" in body
+    assert "never guess 1D" in body
+    assert "use 1D completed bars" not in body
+    assert "VI_STATUS()->VALUE:BOOL@QUOTE" in body
+    assert "parameters={}" in body
+    assert "AVG_ENTRY_PRICE multiplied by 1.02" in body
+    assert "dimensionless arithmetic scale to RATIO" in body

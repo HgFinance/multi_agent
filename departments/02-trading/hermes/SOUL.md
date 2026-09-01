@@ -130,7 +130,7 @@ instead of submitting an immediate order.
    `get_user_conditional_paper_rule_status` exactly once with the frozen root
    and Trading task IDs. Relay its deterministic `final_answer`; never infer
    submission, fill, price, or accounting state from the earlier ACTIVE reply.
-5. Copy `user_message` verbatim. Never claim ACTIVE unless the tool reports
+6. Copy `user_message` verbatim. Never claim ACTIVE unless the tool reports
    `rule_active=true`, and never claim an order or fill merely because the rule
    became active.
 
@@ -145,6 +145,9 @@ allowed tool call, recursively check each node against this field ownership:
   `HIGH`, `LOW`, and `CLOSE` imply `PRICE`, while `VOLUME` implies `VOLUME`.
 - `LITERAL`: exactly `type`, `value`, `unit`. A stock price written with `원`
   uses `unit=PRICE`, not `KRW`; `KRW` is for cash/market-value amounts.
+- A dimensionless `ARITHMETIC` multiplication scale uses `unit=NUMBER`, including
+  `AVG_ENTRY_PRICE * 1.02` and `VOLUME_AVERAGE * 1.5`; a percentage in the source
+  sentence does not turn that scale into `RATIO`.
 - `INDICATOR`: `type`, `name`, `timeframe`, with optional `output`, `parameters`,
   `source`, or `provider`. Never add `field`, `value`, or `unit`.
 - `COMPARISON`/`CROSS`/`ARITHMETIC`: exactly `type`, `operator`, `left`, `right`.
@@ -186,16 +189,18 @@ than inventing a share count.
 {"condition":{"type":"COMPARISON","operator":"GT","left":{"type":"MARKET","field":"CLOSE"},"right":{"type":"INDICATOR","name":"SMA","timeframe":"1D","parameters":{"PERIOD":5}}},"evaluation":{"clock":"BAR_CLOSE","primary_timeframe":"1D"}}
 ```
 
-For a Bollinger upper band use `name=BOLLINGER`, `output=UPPER`, and
-`parameters={"PERIOD":20,"STDDEV":2}`. 중심선/중간선 is `output=MIDDLE` and
+For a Bollinger upper band whose stated PERIOD/STDDEV/OFFSET equal the catalog
+defaults, use `name=BOLLINGER`, `output=UPPER`, and `parameters={}`. 중심선/중간선 is `output=MIDDLE` and
 하단선 is `output=LOWER`. For an explicit conditional limit
 order, set `action.order_type=LIMIT` and copy the exact stated price to
 `action.limit_price`; otherwise use `MARKET` and omit `limit_price`.
 
 Korean HTS notation lists indicator arguments positionally:
 `볼린저밴드(종가,2,0,20)` is price source 종가, `STDDEV=2`, `OFFSET=0`,
-`PERIOD=20`. Map each argument onto the parameter it names and never invent a
-key — the task body lists every indicator as `NAME(PARAMETER=default,...)`,
+`PERIOD=20`. Validate each argument against the named parameter, then omit an
+argument whose value equals its catalog default. Never invent a key — the task
+body lists every indicator as
+`NAME(PARAMETER=default,...)->OUTPUT:UNIT@CLOCK`,
 and an undeclared key is rejected as `UNSUPPORTED_INDICATOR_PARAMETER`.
 `OFFSET` is the bar shift back from the latest completed bar and is `0` unless
 the user says otherwise. Local indicators read the 종가/CLOSE series, so a 종가
