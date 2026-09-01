@@ -103,10 +103,10 @@ def _langsmith_client():
     """Create the optional client lazily; missing SDK/config is fail-open."""
 
     from langsmith import Client
-    from orchestration.llm_observability import langsmith_batch_ingest_info
+    from orchestration.llm_observability import langsmith_multipart_ingest_info
 
     return Client(
-        info=langsmith_batch_ingest_info(),
+        info=langsmith_multipart_ingest_info(),
         hide_inputs=True,
         hide_outputs=True,
         hide_metadata=False,

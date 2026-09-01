@@ -1,10 +1,10 @@
 """Small SmithDB v2 query adapter shared by LangSmith read paths.
 
-The legacy LangSmith SDK listing helper uses a retired v1 query endpoint. The
-runtime still owns synchronous pollers and FastAPI threadpool handlers, while
-the SmithDB v2 SDK exposes an awaitable paginator.  This module keeps that
-boundary in one place: resolve a project name to its UUID once per process,
-query with an explicit time window, and return a bounded list to callers.
+The legacy LangSmith SDK project helper and run listing helper use retired API
+endpoints. The runtime still owns synchronous pollers and FastAPI threadpool
+handlers, while the SmithDB v2 SDK exposes an awaitable paginator. This module
+keeps that boundary in one place: require a provisioned project UUID, query
+with an explicit time window, and return a bounded list to callers.
 
 Only run metadata selected by the caller is requested.  No run retrieval or
 payload fallback is allowed here because the QA and dashboard paths are
@@ -18,8 +18,6 @@ import inspect
 import json
 import logging
 import os
-import threading
-import time
 import urllib.error
 import urllib.request
 from collections.abc import Collection, Mapping, Sequence
@@ -29,15 +27,7 @@ from typing import Any
 from uuid import UUID
 
 from orchestration.langsmith_egress import langsmith_egress_enabled
-from weakref import WeakKeyDictionary
-
 logger = logging.getLogger(__name__)
-
-_PROJECT_ID_CACHE_TTL_SECONDS = 600.0
-_PROJECT_ID_CACHE: WeakKeyDictionary[Any, dict[str, tuple[float, str]]] = (
-    WeakKeyDictionary()
-)
-_PROJECT_ID_CACHE_LOCK = threading.Lock()
 
 
 def _http_status_code(error: BaseException) -> int | None:
@@ -114,37 +104,6 @@ def _is_sdk_transport_compatibility_error(error: BaseException) -> bool:
     )
 
 
-def _cached_project_id(client: Any, project_name: str) -> str | None:
-    now = time.monotonic()
-    with _PROJECT_ID_CACHE_LOCK:
-        try:
-            client_cache = _PROJECT_ID_CACHE.get(client)
-        except TypeError:
-            # A non-weak-referenceable compatibility client remains correct;
-            # it merely resolves the project again instead of caching it.
-            return None
-        cached = client_cache.get(project_name) if client_cache else None
-        if cached is None:
-            return None
-        expires_at, project_id = cached
-        if expires_at <= now:
-            client_cache.pop(project_name, None)
-            return None
-        return project_id
-
-
-def _cache_project_id(client: Any, project_name: str, project_id: str) -> None:
-    with _PROJECT_ID_CACHE_LOCK:
-        try:
-            client_cache = _PROJECT_ID_CACHE.setdefault(client, {})
-        except TypeError:
-            return
-        client_cache[project_name] = (
-            time.monotonic() + _PROJECT_ID_CACHE_TTL_SECONDS,
-            project_id,
-        )
-
-
 def _configured_project_id(project_name: str) -> str | None:
     """Return an explicitly provisioned SmithDB project UUID when available.
 
@@ -173,41 +132,14 @@ def _configured_project_id(project_name: str) -> str | None:
 
 
 async def _resolve_project_id(client: Any, project_name: str) -> str:
+    del client  # project resolution must never invoke an SDK HTTP method.
     name = str(project_name or "").strip()
     if not name:
         raise ValueError("langsmith_project_name_required")
     configured = _configured_project_id(name)
     if configured:
-        _cache_project_id(client, name, configured)
         return configured
-    cached = _cached_project_id(client, name)
-    if cached:
-        return cached
-
-    reader = getattr(client, "aread_project", None)
-    if not callable(reader):
-        raise RuntimeError(  # noqa: TRY004 - SDK capability, not caller input.
-            "langsmith_sdk_missing_aread_project"
-        )
-    try:
-        project = await reader(project_name=name)
-    except Exception as exc:
-        # Do not use a second, synchronous project-listing request as a
-        # compatibility fallback.  The official migration guide still permits
-        # project resolution separately; this boundary deliberately has one
-        # bounded async resolution path so an SDK transport failure cannot
-        # double query latency or mask an observability outage. Read-only
-        # callers already fail open at their boundary.
-        if _is_sdk_transport_compatibility_error(exc):
-            raise RuntimeError("langsmith_v2_project_resolution_unavailable") from exc
-        raise
-    if project is None:
-        raise RuntimeError("langsmith_project_not_found")
-    project_id = str(getattr(project, "id", "") or "").strip()
-    if not project_id:
-        raise RuntimeError("langsmith_project_id_missing")
-    _cache_project_id(client, name, project_id)
-    return project_id
+    raise RuntimeError("langsmith_project_id_required")
 
 
 def _api_url(client: Any, path: str) -> str:
@@ -499,15 +431,16 @@ def query_runs(
 
 
 def resolve_project_id(client: Any, project_name: str) -> str:
-    """Resolve one configured project name through the same bounded cache."""
+    """Return a provisioned UUID without calling the legacy project API."""
 
-    async def _resolve_and_release() -> str:
-        try:
-            return await _resolve_project_id(client, project_name)
-        finally:
-            await _release_query_transport_async(client)
-
-    return asyncio.run(_resolve_and_release())
+    del client
+    name = str(project_name or "").strip()
+    if not name:
+        raise ValueError("langsmith_project_name_required")
+    project_id = _configured_project_id(name)
+    if project_id is None:
+        raise RuntimeError("langsmith_project_id_required")
+    return project_id
 
 
 def query_correlated_trace_metadata(
@@ -558,10 +491,10 @@ def query_correlated_trace_metadata(
     client: Any | None = None
     try:
         from langsmith import Client
-        from orchestration.llm_observability import langsmith_batch_ingest_info
+        from orchestration.llm_observability import langsmith_multipart_ingest_info
 
         client = Client(
-            info=langsmith_batch_ingest_info(),
+            info=langsmith_multipart_ingest_info(),
             hide_inputs=True,
             hide_outputs=True,
             hide_metadata=False,

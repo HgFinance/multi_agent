@@ -1,10 +1,10 @@
 """Redacted LangSmith observation for dispatcher-owned Hermes workers.
 
 The central Kanban dispatcher, rather than the department container, starts
-the real Hermes worker.  This small boundary therefore owns the only reliable
-place to attach the Kanban task identity to the worker process.  It deliberately
-uses the LangSmith batch HTTP endpoint instead of importing the optional SDK:
-the Hermes image does not ship that SDK, and installing it into the agent image
+the real Hermes worker. This small boundary therefore owns the only reliable
+place to attach the Kanban task identity to the worker process. It uses the
+current LangSmith multipart endpoint without importing the optional SDK: the
+Hermes image does not ship that SDK, and installing it into the agent image
 would widen the runtime surface.
 
 Only bounded metadata is sent.  Task bodies, prompts, answers, tool arguments,
@@ -24,7 +24,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from orchestration.langsmith_egress import langsmith_egress_enabled
 
@@ -513,17 +513,63 @@ def _run_payload(
     return payload
 
 
-def _post_batch(*, env: Mapping[str, str], runs: list[dict[str, Any]]) -> bool:
+def _multipart_body(runs: Sequence[Mapping[str, Any]]) -> tuple[str, bytes]:
+    """Encode redacted run creates using LangSmith's multipart contract."""
+
+    boundary = f"----hgfinance-{uuid4().hex}"
+    chunks: list[bytes] = []
+
+    def add_part(name: str, value: Any) -> None:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            default=str,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        chunks.extend(
+            (
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n'.encode(),
+                b"Content-Type: application/json\r\n",
+                f"Content-Length: {len(encoded)}\r\n\r\n".encode(),
+                encoded,
+                b"\r\n",
+            )
+        )
+
+    for source in runs:
+        run = dict(source)
+        run_id = str(run.get("id") or "").strip()
+        trace_id = str(run.get("trace_id") or "").strip()
+        dotted_order = str(run.get("dotted_order") or "").strip()
+        if not run_id or not trace_id or not dotted_order:
+            raise ValueError("multipart run requires id, trace_id and dotted_order")
+        separated = {
+            key: run.pop(key)
+            for key in ("inputs", "outputs", "events", "extra", "error", "serialized")
+            if key in run and run[key] is not None
+        }
+        add_part(f"post.{run_id}", run)
+        for key, value in separated.items():
+            add_part(f"post.{run_id}.{key}", value)
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return boundary, b"".join(chunks)
+
+
+def _publish_multipart(*, env: Mapping[str, str], runs: list[dict[str, Any]]) -> bool:
     global _LANGSMITH_USAGE_LIMITED
     if not runs or not _enabled(env) or _LANGSMITH_USAGE_LIMITED:
         return False
     endpoint = str(env.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")).rstrip("/")
-    body = json.dumps({"post": runs, "patch": []}, separators=(",", ":")).encode()
+    try:
+        boundary, body = _multipart_body(runs)
+    except (TypeError, ValueError):
+        return False
     request = urllib.request.Request(
-        f"{endpoint}/runs/batch",
+        f"{endpoint}/runs/multipart",
         data=body,
         headers={
-            "Content-Type": "application/json",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Accept": "application/json",
             "x-api-key": str(env.get("LANGSMITH_API_KEY", "")),
         },
@@ -875,7 +921,7 @@ def publish_department_worker_trace(
                 },
             )
         )
-    return _post_batch(env=runtime_env, runs=runs)
+    return _publish_multipart(env=runtime_env, runs=runs)
 
 
 def publish_discord_worker_trace(
@@ -896,9 +942,9 @@ def publish_discord_worker_trace(
     Kanban workers use :func:`publish_department_worker_trace`, which derives
     its identity from a task and persisted worker log. Direct Discord turns do
     not have either of those inputs, so this boundary records only the stable
-    message/session coordinates and terminal timing. The same batch publisher,
-    project, redaction policy, and profile registry are reused; no raw message,
-    prompt, answer, tool argument, or tool result is sent.
+    message/session coordinates and terminal timing. The same multipart
+    publisher, project, redaction policy, and profile registry are reused; no
+    raw message, prompt, answer, tool argument, or tool result is sent.
     """
 
     runtime_env = env or os.environ
@@ -987,7 +1033,7 @@ def publish_discord_worker_trace(
             "raw_payloads_sent": False,
         },
     )
-    return _post_batch(env=runtime_env, runs=[run])
+    return _publish_multipart(env=runtime_env, runs=[run])
 
 
 def publish_accounting_worker_trace(**kwargs: Any) -> bool:

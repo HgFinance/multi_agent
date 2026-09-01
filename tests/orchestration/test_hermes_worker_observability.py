@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -24,9 +26,48 @@ class _Response:
         return False
 
 
+def _trace_run(run_id: str = "11111111-1111-4111-8111-111111111111") -> dict:
+    return {
+        "id": run_id,
+        "trace_id": "22222222-2222-4222-8222-222222222222",
+        "dotted_order": f"20260901T000000000000Z{run_id}",
+        "name": "worker.test",
+        "run_type": "chain",
+        "session_name": "First",
+        "inputs": {},
+        "outputs": {},
+        "extra": {"metadata": {"raw_payloads_sent": False}},
+    }
+
+
+def _multipart_payload(request) -> dict[str, list[dict]]:
+    """Reassemble LangSmith multipart run fields for contract assertions."""
+
+    content_type = request.headers["Content-type"]
+    message = BytesParser(policy=policy.default).parsebytes(
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
+        + request.data
+    )
+    bases: dict[str, dict] = {}
+    order: list[str] = []
+    separated: list[tuple[str, str, object]] = []
+    for part in message.iter_parts():
+        name = str(part.get_param("name", header="content-disposition") or "")
+        segments = name.split(".", 2)
+        value = json.loads(part.get_payload(decode=True).decode("utf-8"))
+        if len(segments) == 2 and segments[0] == "post":
+            bases[segments[1]] = value
+            order.append(segments[1])
+        elif len(segments) == 3 and segments[0] == "post":
+            separated.append((segments[1], segments[2], value))
+    for run_id, field, value in separated:
+        bases[run_id][field] = value
+    return {"post": [bases[run_id] for run_id in order]}
+
+
 def test_langsmith_unique_trace_quota_fails_open_and_stops_retries() -> None:
     quota_error = HTTPError(
-        "https://langsmith.invalid/runs/batch",
+        "https://langsmith.invalid/runs/multipart",
         429,
         "rate limited",
         {},
@@ -44,17 +85,42 @@ def test_langsmith_unique_trace_quota_fails_open_and_stops_retries() -> None:
             "scripts.hermes_worker_observability.urllib.request.urlopen",
             side_effect=quota_error,
         ) as open_url:
-            assert not worker_observability._post_batch(env=env, runs=[{"id": "run"}])
+            assert not worker_observability._publish_multipart(
+                env=env, runs=[_trace_run()]
+            )
             open_url.assert_called_once()
 
         assert worker_observability._LANGSMITH_USAGE_LIMITED is True
         with patch(
             "scripts.hermes_worker_observability.urllib.request.urlopen"
         ) as open_url:
-            assert not worker_observability._post_batch(env=env, runs=[{"id": "run-2"}])
+            assert not worker_observability._publish_multipart(
+                env=env,
+                runs=[_trace_run("33333333-3333-4333-8333-333333333333")],
+            )
             open_url.assert_not_called()
     finally:
         worker_observability._LANGSMITH_USAGE_LIMITED = False
+
+
+def test_dispatcher_publisher_uses_only_the_multipart_ingest_endpoint() -> None:
+    env = {
+        "LANGSMITH_TRACING": "true",
+        "LANGSMITH_API_KEY": "test-key",
+        "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
+    }
+
+    with patch(
+        "scripts.hermes_worker_observability.urllib.request.urlopen",
+        return_value=_Response(),
+    ) as open_url:
+        assert worker_observability._publish_multipart(env=env, runs=[_trace_run()])
+
+    request = open_url.call_args.args[0]
+    assert request.full_url == "https://langsmith.invalid/runs/multipart"
+    assert request.headers["Content-type"].startswith("multipart/form-data; boundary=")
+    assert b'name="post.11111111-1111-4111-8111-111111111111"' in request.data
+    assert b'name="post.11111111-1111-4111-8111-111111111111.extra"' in request.data
 
 
 def test_explicit_publisher_can_run_with_automatic_tracing_disabled() -> None:
@@ -67,7 +133,7 @@ def test_explicit_publisher_can_run_with_automatic_tracing_disabled() -> None:
     )
 
 
-def test_egress_circuit_breaker_blocks_direct_batch_publisher() -> None:
+def test_egress_circuit_breaker_blocks_direct_multipart_publisher() -> None:
     assert not worker_observability._enabled(
         {
             "LANGSMITH_TRACING": "true",
@@ -127,7 +193,7 @@ def test_accounting_worker_trace_correlates_task_model_and_tools(tmp_path: Path)
         )
 
     request = open_url.call_args.args[0]
-    payload = json.loads(request.data.decode("utf-8"))
+    payload = _multipart_payload(request)
     runs = payload["post"]
     assert len(runs) == 5  # worker + model + three observed tools
     metadata = [run["extra"]["metadata"] for run in runs]
@@ -203,7 +269,7 @@ def test_worker_trace_aggregates_tool_children_when_configured(tmp_path: Path):
             env=env,
         )
 
-    runs = json.loads(open_url.call_args.args[0].data.decode("utf-8"))["post"]
+    runs = _multipart_payload(open_url.call_args.args[0])["post"]
     assert [run["extra"]["metadata"]["observation_unit"] for run in runs] == [
         "worker",
         "model",
@@ -251,7 +317,7 @@ def test_worker_trace_keeps_request_id_separate_from_kanban_root(tmp_path: Path)
             env=env,
         )
 
-    payload = json.loads(open_url.call_args.args[0].data.decode("utf-8"))
+    payload = _multipart_payload(open_url.call_args.args[0])
     metadata = payload["post"][0]["extra"]["metadata"]
     assert metadata["root_id"] == "t_root"
     assert metadata["workflow_root_task_id"] == "t_root"
@@ -305,7 +371,7 @@ def test_ceo_synthesis_uses_the_same_redacted_worker_trace_contract(tmp_path: Pa
             env=env,
         )
 
-    payload = json.loads(open_url.call_args.args[0].data.decode("utf-8"))
+    payload = _multipart_payload(open_url.call_args.args[0])
     assert [run["name"] for run in payload["post"]] == [
         "hgfinance.ceo.worker",
         "hgfinance.ceo.llm",
@@ -350,7 +416,7 @@ def test_risk_blocked_worker_is_business_block_not_langsmith_error(tmp_path: Pat
             env=env,
         )
 
-    payload = json.loads(open_url.call_args.args[0].data.decode("utf-8"))
+    payload = _multipart_payload(open_url.call_args.args[0])
     runs = payload["post"]
     assert runs
     assert all(run["extra"]["metadata"]["status"] == "blocked" for run in runs)
@@ -544,7 +610,7 @@ def test_discord_worker_trace_uses_redacted_gateway_boundary() -> None:
             env=env,
         )
 
-    payload = json.loads(open_url.call_args.args[0].data.decode("utf-8"))
+    payload = _multipart_payload(open_url.call_args.args[0])
     assert len(payload["post"]) == 1
     run = payload["post"][0]
     metadata = run["extra"]["metadata"]
@@ -609,7 +675,7 @@ def test_qa_worker_trace_uses_the_same_task_correlated_redacted_contract(tmp_pat
             env=env,
         )
 
-    payload = json.loads(open_url.call_args.args[0].data.decode("utf-8"))
+    payload = _multipart_payload(open_url.call_args.args[0])
     runs = payload["post"]
     assert [run["name"] for run in runs] == [
         "hgfinance.qa.worker",
@@ -671,7 +737,7 @@ def test_failed_worker_trace_marks_langsmith_run_as_failed_without_raw_error(
             env=env,
         )
 
-    payload = json.loads(open_url.call_args.args[0].data.decode("utf-8"))
+    payload = _multipart_payload(open_url.call_args.args[0])
     assert {run["error"] for run in payload["post"]} == {"kanban_timed_out"}
     assert all(run["extra"]["metadata"]["raw_payloads_sent"] is False for run in payload["post"])
 
@@ -714,7 +780,7 @@ def test_worker_trace_records_workflow_mode_and_fast_advisory_budget(tmp_path: P
             env=env,
         )
 
-    payload = json.loads(open_url.call_args.args[0].data.decode("utf-8"))
+    payload = _multipart_payload(open_url.call_args.args[0])
     metadata = payload["post"][0]["extra"]["metadata"]
     assert metadata["workflow_mode"] == "analysis"
     assert metadata["stage"] == "research"

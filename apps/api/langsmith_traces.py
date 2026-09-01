@@ -123,12 +123,12 @@ def _collect(days: int, project: str | None) -> dict[str, Any]:
 
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
-    from orchestration.llm_observability import langsmith_batch_ingest_info
+    from orchestration.llm_observability import langsmith_multipart_ingest_info
 
-    client = Client(info=langsmith_batch_ingest_info())
+    client = Client(info=langsmith_multipart_ingest_info())
     # SmithDB v2 requires a project UUID and an explicit time window. The
-    # adapter resolves the configured name once per process and enforces the
-    # server page-size bound; the total result cap remains local.
+    # adapter uses the provisioned project UUID and enforces the server
+    # page-size bound; the total result cap remains local.
     # 부서 구분이 태그가 아니라 metadata에 있어서(머리말) 서버 필터를 걸 수 없고,
     # Worker/terminal QA runs may be children of the CEO root. Query the whole
     # bounded tree and select QA stages locally; ``is_root=True`` would hide

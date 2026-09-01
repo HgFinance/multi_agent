@@ -3354,10 +3354,10 @@ class LangSmithFeedbackService:
                 self._record_poll_success()
                 return {"discovered": 0, "completed": 0, "failed": 0, "dropped": 0}
             from langsmith import Client
-            from orchestration.llm_observability import langsmith_batch_ingest_info
+            from orchestration.llm_observability import langsmith_multipart_ingest_info
 
             client = Client(
-                info=langsmith_batch_ingest_info(),
+                info=langsmith_multipart_ingest_info(),
                 hide_inputs=True,
                 hide_outputs=True,
                 hide_metadata=False,

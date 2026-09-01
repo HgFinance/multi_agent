@@ -51,7 +51,7 @@ def test_monthly_unique_trace_limit_stops_observer_retries(
         observability._LANGSMITH_USAGE_LIMITED = False
 
 
-def test_langsmith_clients_use_batch_ingest_without_multipart(
+def test_langsmith_clients_use_current_multipart_ingest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import orchestration.llm_observability as observability
@@ -75,7 +75,7 @@ def test_langsmith_clients_use_batch_ingest_without_multipart(
     assert len(calls) == 2
     for kwargs in calls:
         config = kwargs["info"]["batch_ingest_config"]
-        assert config["use_multipart_endpoint"] is False
+        assert config["use_multipart_endpoint"] is True
         assert config["size_limit"] == 100
 
 

@@ -18,6 +18,10 @@ def _isolate_langsmith_egress(monkeypatch: pytest.MonkeyPatch) -> None:
     """Do not inherit a developer machine's outbound circuit breaker."""
 
     monkeypatch.setenv("HGFINANCE_LANGSMITH_EGRESS_ENABLED", "true")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "First")
+    monkeypatch.setenv(
+        "LANGSMITH_PROJECT_ID", "5fa63243-7c10-4b3f-9d8e-25f04b62b2e9"
+    )
 
 
 class _Paginator:
@@ -60,7 +64,7 @@ def test_query_runs_uses_smithdb_v2_and_bounds_results() -> None:
     start = datetime(2026, 8, 26, tzinfo=timezone.utc)
     rows = query_runs(
         client,
-        project_name="Test-SmithDB",
+        project_name="First",
         min_start_time=start,
         max_start_time=start,
         is_root=True,
@@ -72,7 +76,7 @@ def test_query_runs_uses_smithdb_v2_and_bounds_results() -> None:
 
     assert [row.id for row in rows] == ["run-1"]
     call = client.query_calls[0]
-    assert call["project_ids"] == ["project-Test-SmithDB"]
+    assert call["project_ids"] == ["5fa63243-7c10-4b3f-9d8e-25f04b62b2e9"]
     assert call["min_start_time"] == start
     assert call["max_start_time"] == start
     assert call["is_root"] is True
@@ -81,49 +85,30 @@ def test_query_runs_uses_smithdb_v2_and_bounds_results() -> None:
     assert call["selects"] == ["ID", "EXTRA"]
 
 
-def test_query_runs_caches_project_uuid() -> None:
+def test_query_runs_never_calls_legacy_project_reader() -> None:
     client = _Client()
     start = datetime(2026, 8, 26, tzinfo=timezone.utc)
 
-    query_runs(client, project_name="Cached-SmithDB", min_start_time=start, max_results=1)
-    query_runs(client, project_name="Cached-SmithDB", min_start_time=start, max_results=1)
+    query_runs(client, project_name="First", min_start_time=start, max_results=1)
+    query_runs(client, project_name="First", min_start_time=start, max_results=1)
 
-    assert client.project_reads == 1
+    assert client.project_reads == 0
 
 
-def test_project_uuid_cache_is_scoped_to_one_client_instance(monkeypatch) -> None:
-    # Some workflow tests load the repository .env into the shared pytest
-    # process. This test exercises runtime lookup, not the provisioned-ID path.
+def test_query_runs_requires_a_provisioned_project_uuid(monkeypatch) -> None:
     monkeypatch.delenv("LANGSMITH_PROJECT_ID", raising=False)
-    class _WorkspaceClient(_Client):
-        def __init__(self, project_id: str):
-            super().__init__()
-            self.project_id = project_id
+    client = _Client()
 
-        async def aread_project(self, *, project_name):
-            self.project_reads += 1
-            return SimpleNamespace(id=self.project_id)
+    with pytest.raises(RuntimeError, match="langsmith_project_id_required"):
+        query_runs(
+            client,
+            project_name="First",
+            min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
+            max_results=1,
+        )
 
-    langsmith_queries._PROJECT_ID_CACHE.clear()
-    first = _WorkspaceClient("project-workspace-a")
-    second = _WorkspaceClient("project-workspace-b")
-
-    query_runs(
-        first,
-        project_name="First",
-        min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
-        max_results=1,
-    )
-    query_runs(
-        second,
-        project_name="First",
-        min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
-        max_results=1,
-    )
-
-    assert first.query_calls[0]["project_ids"] == ["project-workspace-a"]
-    assert second.query_calls[0]["project_ids"] == ["project-workspace-b"]
-    assert first.project_reads == second.project_reads == 1
+    assert client.project_reads == 0
+    assert client.query_calls == []
 
 
 def test_query_runs_uses_provisioned_project_uuid_without_legacy_lookup(monkeypatch) -> None:
@@ -133,7 +118,6 @@ def test_query_runs_uses_provisioned_project_uuid_without_legacy_lookup(monkeypa
 
     monkeypatch.setenv("LANGSMITH_PROJECT", "First")
     monkeypatch.setenv("LANGSMITH_PROJECT_ID", "5fa63243-7c10-4b3f-9d8e-25f04b62b2e9")
-    langsmith_queries._PROJECT_ID_CACHE.clear()
     client = _NoLookupClient()
 
     query_runs(
@@ -147,7 +131,7 @@ def test_query_runs_uses_provisioned_project_uuid_without_legacy_lookup(monkeypa
     assert client.query_calls[0]["project_ids"] == ["5fa63243-7c10-4b3f-9d8e-25f04b62b2e9"]
 
 
-def test_project_resolution_never_falls_back_to_legacy_project_listing() -> None:
+def test_project_resolution_never_calls_any_legacy_project_api(monkeypatch) -> None:
     class _LegacyListingClient(_Client):
         async def aread_project(self, *, project_name):
             raise RuntimeError("async paginator transport unavailable")
@@ -155,7 +139,8 @@ def test_project_resolution_never_falls_back_to_legacy_project_listing() -> None
         def list_projects(self, **_kwargs):
             pytest.fail("legacy /sessions listing must not be called")
 
-    with pytest.raises(RuntimeError, match="langsmith_v2_project_resolution_unavailable"):
+    monkeypatch.delenv("LANGSMITH_PROJECT_ID", raising=False)
+    with pytest.raises(RuntimeError, match="langsmith_project_id_required"):
         query_runs(
             _LegacyListingClient(),
             project_name="No-Legacy-Project-Listing",
@@ -197,7 +182,7 @@ def test_query_runs_does_not_rest_fallback_after_http_error(monkeypatch) -> None
     with pytest.raises(_HttpStatusError):
         query_runs(
             client,
-            project_name="No-Duplicate-Query",
+            project_name="First",
             min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
             max_results=1,
         )
@@ -215,7 +200,7 @@ def test_query_runs_keeps_rest_fallback_for_async_transport_compatibility(
 
     rows = query_runs(
         client,
-        project_name="Transport-Fallback",
+        project_name="First",
         min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
         max_results=1,
     )
@@ -236,7 +221,7 @@ def test_query_runs_falls_back_for_pre_response_api_connection_error(monkeypatch
 
     rows = query_runs(
         client,
-        project_name="API-Connection-Fallback",
+        project_name="First",
         min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
         max_results=1,
     )
@@ -259,7 +244,7 @@ def test_query_runs_falls_back_for_wrapped_api_connection_error(monkeypatch) -> 
 
     rows = query_runs(
         client,
-        project_name="Wrapped-API-Connection-Fallback",
+        project_name="First",
         min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
         max_results=1,
     )
@@ -330,7 +315,7 @@ def test_correlated_trace_metadata_is_bounded_and_redacted(monkeypatch) -> None:
     result = query_correlated_trace_metadata(
         correlation_ids=("t_root", "t_research"),
         min_start_time=datetime(2026, 8, 27, tzinfo=timezone.utc),
-        project_name="Correlated-Metadata-Test",
+        project_name="First",
         max_results=999,
     )
 

@@ -441,9 +441,9 @@ def publish_risk_hermes_profile(
         "parent_run_id": str(parent_run_id),
     }
     try:
-        # Use the shared SDK queue rather than the old synchronous
-        # ``/sessions`` + ``/runs/batch`` pair. This removes two legacy HTTP
-        # calls and keeps Risk profile publication off the terminal path.
+        # Use the shared SDK multipart queue rather than the old synchronous
+        # project-lookup and batch-ingest pair. This keeps Risk profile
+        # publication off the terminal path.
         _client().create_run(
             id=payload["id"],
             name=payload["name"],

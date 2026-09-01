@@ -229,11 +229,11 @@ _LANGSMITH_ROOT_CONTEXT_RE = re.compile(
 WORKFLOW_LANGSMITH_PROJECT = "First"
 _LANGSMITH_QUOTA_LOCK = Lock()
 _LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
-# Keep SDK-owned root/QA writes on the same documented ``/runs/batch`` ingest
-# route as the dispatcher publisher. Without /info discovery, the SDK defaults
-# to multipart; make the complete queue configuration explicit instead.
-_LANGSMITH_BATCH_INGEST_CONFIG = {
-    "use_multipart_endpoint": False,
+# Keep every SDK-owned root/QA write on LangSmith's current multipart ingest
+# route. Supplying the capability locally avoids a request-path /info probe
+# and prevents fallback to the retired batch endpoint.
+_LANGSMITH_MULTIPART_INGEST_CONFIG = {
+    "use_multipart_endpoint": True,
     "size_limit": 100,
     "size_limit_bytes": None,
     "scale_up_nthreads_limit": 10,
@@ -242,16 +242,18 @@ _LANGSMITH_BATCH_INGEST_CONFIG = {
 }
 
 
-def langsmith_batch_ingest_info() -> dict[str, Any]:
-    """Return a fresh SDK capability payload for the supported batch writer.
+def langsmith_multipart_ingest_info() -> dict[str, Any]:
+    """Return a fresh SDK capability payload for multipart trace ingestion.
 
     Every application-owned LangSmith client uses this one payload.  It avoids
     an SDK capability probe on the hot path and prevents a client constructed
-    by a low-frequency reader/poller from silently selecting multipart ingest.
+    by a low-frequency reader/poller from silently selecting another route.
     A fresh mapping is intentional because SDK clients may mutate ``info``.
     """
 
-    return {"batch_ingest_config": dict(_LANGSMITH_BATCH_INGEST_CONFIG)}
+    return {"batch_ingest_config": dict(_LANGSMITH_MULTIPART_INGEST_CONFIG)}
+
+
 # A monthly unique-trace limit cannot recover during a short cooldown. Keep a
 # process-local hard latch so the observer does not schedule one futile retry
 # every few minutes. Business execution remains independent of this latch.
@@ -1062,8 +1064,8 @@ def _safe_langsmith_client() -> Any:
 
     return Client(
         # Avoid a request-path /info discovery while explicitly selecting the
-        # supported batch ingest route.
-        info=langsmith_batch_ingest_info(),
+        # supported multipart ingest route.
+        info=langsmith_multipart_ingest_info(),
         hide_inputs=True,
         hide_outputs=True,
         hide_metadata=False,
@@ -1086,9 +1088,9 @@ def _structured_langsmith_client() -> Any:
     from langsmith import Client
 
     return Client(
-        # Root lifecycle writes use the supported batch ingest route without
+        # Root lifecycle writes use the supported multipart route without
         # a per-process /info discovery request on the observer path.
-        info=langsmith_batch_ingest_info(),
+        info=langsmith_multipart_ingest_info(),
         hide_inputs=False,
         hide_outputs=False,
         hide_metadata=False,

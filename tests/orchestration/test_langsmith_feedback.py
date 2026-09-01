@@ -1078,9 +1078,17 @@ def test_feedback_config_bounds_concurrency_inputs(monkeypatch) -> None:
 def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(
     tmp_path, monkeypatch
 ) -> None:
-    # Another full-suite workflow may load the repository .env. This fixture
-    # intentionally verifies SDK project resolution through the fake client.
-    monkeypatch.delenv("LANGSMITH_PROJECT_ID", raising=False)
+    # Query the provisioned SmithDB project directly; project-name lookup uses
+    # a retired endpoint and must not occur in production or tests.
+    monkeypatch.setenv(
+        "LANGSMITH_PROJECT_ID", "5fa63243-7c10-4b3f-9d8e-25f04b62b2e9"
+    )
+    monkeypatch.setenv("LANGSMITH_PROJECT", "First")
+    monkeypatch.setenv("LANGSMITH_METRICS_PROJECT", "HgFinance-Metrics")
+    monkeypatch.setenv(
+        "LANGSMITH_METRICS_PROJECT_ID", "6fa63243-7c10-4b3f-9d8e-25f04b62b2e9"
+    )
+
     class _Paginator:
         def __init__(self, rows):
             self.rows = rows
@@ -1101,7 +1109,9 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(
 
         async def query(self, **kwargs):
             self.owner.query_calls.append(kwargs)
-            if kwargs.get("project_ids") == ["project-First"]:
+            if kwargs.get("project_ids") == [
+                "5fa63243-7c10-4b3f-9d8e-25f04b62b2e9"
+            ]:
                 return _Paginator([_Run()])
             return _Paginator([])
 
@@ -1111,7 +1121,7 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(
             self.runs = _Runs(self)
 
         async def aread_project(self, *, project_name):
-            return SimpleNamespace(id=f"project-{project_name}")
+            pytest.fail(f"legacy project lookup must not run for {project_name}")
 
     fake_client = _Client()
     monkeypatch.setattr("langsmith.Client", lambda **kwargs: fake_client)
@@ -1145,7 +1155,9 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(
 
     assert result["completed"] == 1
     root_call = fake_client.query_calls[0]
-    assert root_call["project_ids"] == ["project-First"]
+    assert root_call["project_ids"] == [
+        "5fa63243-7c10-4b3f-9d8e-25f04b62b2e9"
+    ]
     assert "max_start_time" in root_call
     assert "min_start_time" in root_call
     assert "gt(end_time" in root_call["filter"]
