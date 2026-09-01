@@ -42,6 +42,7 @@ COPY departments/04-quant-backtest/pipeline/stock_universe.py \
 # 결함을 추적하는 데 몇 시간이 걸렸다). 루트 requirements.txt 와 같은 pin.
 RUN pip install --no-cache-dir langgraph==0.6.7 langfuse==4.14.3
 
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app:/app/departments/01-research:/app/departments/01-research/api
 
 CMD ["python", "api/mcp_server.py", "--serve"]

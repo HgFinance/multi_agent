@@ -154,6 +154,10 @@ def test_research_mcp_image_contains_canonical_gateway_dependencies() -> None:
         "COPY departments/worker_model_gateway.py "
         "/app/departments/worker_model_gateway.py"
     ) in dockerfile
+    assert (
+        "PYTHONPATH=/app:/app/departments/01-research:"
+        "/app/departments/01-research/api"
+    ) in dockerfile
 
 
 def test_research_images_do_not_ship_retired_factory_sources() -> None:
