@@ -20,8 +20,11 @@ COPY departments/01-research/collectors/source_registry.py \
 COPY departments/01-research/repository ./repository
 COPY departments/01-research/api ./api
 COPY departments/01-research/evidence ./evidence
-# Evidence observability imports the repository-wide LangSmith egress gate.
+# Evidence observability and the Research LLM client import these repository-wide
+# single sources. Keep the existing modules; do not add image-local fallbacks.
 COPY orchestration/langsmith_egress.py /app/orchestration/langsmith_egress.py
+COPY orchestration/llm_observability.py /app/orchestration/llm_observability.py
+COPY departments/worker_model_gateway.py /app/departments/worker_model_gateway.py
 
 # 퇴역한 종목별 Packet 파이프라인(agents/, scripts.py)은 이미지에 넣지 않는다.
 # 활성 직원 registry는 compose가 employee_workers.py를 명시적으로 read-only

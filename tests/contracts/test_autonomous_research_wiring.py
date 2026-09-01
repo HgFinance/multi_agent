@@ -141,6 +141,21 @@ def test_model_overlay_research_mcp_waits_for_the_shared_vllm_plane() -> None:
     assert service["environment"]["WORKER_MODEL_EXECUTION_CONTEXT"] == "container"
 
 
+def test_research_mcp_image_contains_canonical_gateway_dependencies() -> None:
+    dockerfile = (
+        ROOT / "departments/01-research/Dockerfile.mcp"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "COPY orchestration/llm_observability.py "
+        "/app/orchestration/llm_observability.py"
+    ) in dockerfile
+    assert (
+        "COPY departments/worker_model_gateway.py "
+        "/app/departments/worker_model_gateway.py"
+    ) in dockerfile
+
+
 def test_research_images_do_not_ship_retired_factory_sources() -> None:
     for name in ("departments/01-research/Dockerfile", "departments/01-research/Dockerfile.mcp"):
         dockerfile = (ROOT / name).read_text(encoding="utf-8")
