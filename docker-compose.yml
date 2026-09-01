@@ -148,6 +148,20 @@ services:
       # Read-only Kanban CLI cache. Keep this aligned with the Agent Logs
       # polling window; it does not cache or alter any order/Hermes mutation.
       KANBAN_READ_CACHE_TTL_SECONDS: ${KANBAN_READ_CACHE_TTL_SECONDS:-10}
+      # 2026-09-01: `hermes kanban show` on the shared board measured
+      # 1.8-4.0s from this container (43MB db / 16k events), while the code
+      # default for this read is 2s. Every planning/status read was therefore
+      # a coin flip, and a lost flip surfaces as HTTP 503
+      # `paper_order_kanban_unavailable` on /ui/ceo/ask - three PAPER order
+      # requests failed that way at 01:33-01:35 (CEO_ROOT_CREATE_FAILED,
+      # CEO_ROOT_SCOPE_FAILED, TRADING_TASK_CREATE_FAILED). Give the read the
+      # same headroom the mutation path already has; retention keeps the board
+      # small enough that this ceiling is never reached in a healthy run.
+      CEO_PLANNING_READ_TIMEOUT_SECONDS: ${CEO_PLANNING_READ_TIMEOUT_SECONDS:-8}
+      # Kanban create/comment/complete/unblock. A timeout here strands a
+      # blocked root with no Trading primary, so keep it above the observed
+      # worst case rather than at the 8s code default.
+      KANBAN_CLI_TIMEOUT_SECONDS: ${KANBAN_CLI_TIMEOUT_SECONDS:-30}
       HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
       HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
       # The history endpoint reconstructs independent roots in parallel. Keep
@@ -2621,6 +2635,13 @@ services:
       KANBAN_RETENTION_INTERVAL_SECONDS: ${KANBAN_RETENTION_INTERVAL_SECONDS:-900}
       KANBAN_RETENTION_MAX_ARCHIVE_ROOTS: ${KANBAN_RETENTION_MAX_ARCHIVE_ROOTS:-5}
       KANBAN_RETENTION_MAX_RUN_SECONDS: ${KANBAN_RETENTION_MAX_RUN_SECONDS:-1800}
+      # 2026-09-01: keep only the last five days on the shared board. At 7d
+      # it had grown to 43MB / 1703 tasks / 16k events, and `kanban show` from
+      # the BFF took 1.8-4.0s - past the read timeout, which is what surfaced
+      # as HTTP 503 on PAPER order submission. Archive guards are unchanged;
+      # this only moves the purge/blocked-archive cutoffs earlier.
+      KANBAN_RETENTION_PURGE_AGE_DAYS: ${KANBAN_RETENTION_PURGE_AGE_DAYS:-5}
+      KANBAN_RETENTION_BLOCKED_AGE_DAYS: ${KANBAN_RETENTION_BLOCKED_AGE_DAYS:-5}
       KANBAN_RETENTION_ROOT_WORKERS: ${KANBAN_RETENTION_ROOT_WORKERS:-2}
       KANBAN_CLI_TIMEOUT_SECONDS: ${KANBAN_CLI_TIMEOUT_SECONDS:-30}
       # Retention reconstructs authoritative workflows in a long-lived

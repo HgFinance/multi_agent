@@ -56,12 +56,33 @@ from orchestration.kanban_retention_lock import (
 
 LOG = logging.getLogger(__name__)
 
+
+def _age_days(name: str, default_days: float) -> int:
+    """Resolve one retention window, in days, from the maintenance environment.
+
+    These are read once at import because the only caller is the long-lived
+    maintenance container, whose environment is fixed for the life of the
+    process.  Keeping them overridable matters operationally: the board's size
+    is what makes `hermes kanban show` slow, and a slow show is what turns a
+    PAPER order into HTTP 503 `paper_order_kanban_unavailable` at the BFF.
+    Shrinking the window is therefore a latency lever, not just housekeeping.
+    """
+
+    try:
+        days = float(os.getenv(name, "") or default_days)
+    except ValueError:
+        days = default_days
+    # Never let a typo purge the live board out from under a running workflow;
+    # one day is already below every archive guard in this module.
+    return int(max(1.0, days) * 24 * 60 * 60)
+
+
 ACTIVE_AGE_SECONDS = 24 * 60 * 60
-PURGE_AGE_SECONDS = 7 * 24 * 60 * 60
-# A blocked/triage card remains actionable for seven days.  After that it is
-# archived like the rest of its root graph, including user-input/approval
+PURGE_AGE_SECONDS = _age_days("KANBAN_RETENTION_PURGE_AGE_DAYS", 7)
+# A blocked/triage card remains actionable for the archive window.  After that
+# it is archived like the rest of its root graph, including user-input/approval
 # blocks, so abandoned conversations cannot accumulate forever.
-BLOCKED_ARCHIVE_AGE_SECONDS = 7 * 24 * 60 * 60
+BLOCKED_ARCHIVE_AGE_SECONDS = _age_days("KANBAN_RETENTION_BLOCKED_AGE_DAYS", 7)
 ARCHIVED_STATUS = "archived"
 AUDIT_CAPSULE_SCHEMA_VERSION = "qa-hr.audit.v1"
 ACTIVE_RUN_STATUSES = frozenset({"running", "claimed", "spawned", "processing"})
