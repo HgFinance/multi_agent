@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import sys
 import time
+from types import ModuleType
 
 import pytest
 
 from apps.api import ls_account_stream as ls
-from apps.api.ceo import CeoAsk, _expand_dynamic_universe_request
+from apps.api.ceo import (
+    _LS_ACCOUNT_STREAM_NAMES,
+    CeoAsk,
+    _expand_dynamic_universe_request,
+    _live_ls_account_stream,
+)
 from orchestration.user_order_language import deterministic_order_candidate
 
 
@@ -28,10 +35,35 @@ QUERY = "현재 기준 시가총액 상위 10종목 300만원씩 매수해줘"
 
 @pytest.fixture(autouse=True)
 def _clear_snapshot():
-    original = ls._market_cap_universe
-    ls._market_cap_universe = None
+    """Clear every ls_account_stream copy this interpreter has loaded.
+
+    PYTHONPATH makes `ls_account_stream` and `apps.api.ls_account_stream`
+    separate module objects; a test that seeded only one of them would pass
+    while production read the other.
+    """
+
+    modules = [
+        module
+        for module in (
+            sys.modules.get("ls_account_stream"),
+            sys.modules.get("apps.api.ls_account_stream"),
+        )
+        if module is not None
+    ]
+    original = [(module, module._market_cap_universe) for module in modules]
+    for module in modules:
+        module._market_cap_universe = None
     yield
-    ls._market_cap_universe = original
+    for module, value in original:
+        module._market_cap_universe = value
+
+
+def _seed(snapshot: object) -> None:
+    """Seed the copy the expansion actually reads, whichever one that is."""
+
+    live = _live_ls_account_stream()
+    assert live is not None
+    live._market_cap_universe = snapshot
 
 
 def _ask(query: str = QUERY) -> CeoAsk:
@@ -39,7 +71,7 @@ def _ask(query: str = QUERY) -> CeoAsk:
 
 
 def test_a_fresh_snapshot_turns_the_ranking_into_an_explicit_basket() -> None:
-    ls._market_cap_universe = (time.time(), "2026-09-01T05:30:00+00:00", TOP_ROWS)
+    _seed((time.time(), "2026-09-01T05:30:00+00:00", TOP_ROWS))
     expanded = _expand_dynamic_universe_request(_ask())
 
     assert expanded.query != QUERY
@@ -74,12 +106,12 @@ def test_the_sentence_is_left_alone_when_the_ranking_cannot_be_trusted(
     shortened one would have been admitted as a different order (개발 원칙 9).
     """
 
-    ls._market_cap_universe = snapshot
+    _seed(snapshot)
     assert _expand_dynamic_universe_request(_ask()).query == QUERY, label
 
 
 def test_an_ordinary_question_is_never_rewritten() -> None:
-    ls._market_cap_universe = (time.time(), "fresh", TOP_ROWS)
+    _seed((time.time(), "fresh", TOP_ROWS))
     ask = _ask("시가총액 상위 종목이 뭐야?")
     assert _expand_dynamic_universe_request(ask).query == ask.query
 
@@ -100,3 +132,32 @@ def test_the_widget_row_count_and_the_order_path_limit_are_separate() -> None:
     assert (
         len(ls.normalize_market_ranking(payload, "market_cap", limit=3)["rows"]) == 3
     )
+
+
+def test_the_expansion_reads_the_copy_main_py_imported(monkeypatch) -> None:
+    """The 2026-09-01 silent no-op, after the fix was already deployed.
+
+    PYTHONPATH carries /app and /app/apps/api, so `ls_account_stream` and
+    `apps.api.ls_account_stream` are separate module objects with separate
+    globals. `main.py` imports the top-level one, so only that copy runs the
+    lifespan that fills the snapshot. The helper imported the package-relative
+    one, reached a second module whose snapshot is permanently None, and every
+    ranking order fell through to the conditional lane with no error anywhere.
+    """
+
+    live = ModuleType("ls_account_stream")
+    live._market_cap_universe = (time.time(), "live", TOP_ROWS)
+    live.market_cap_universe_rows = lambda **_: (list(TOP_ROWS), "live")
+    monkeypatch.setitem(sys.modules, "ls_account_stream", live)
+
+    # The package-relative copy stays empty, exactly as in production.
+    pkg = sys.modules.get("apps.api.ls_account_stream")
+    if pkg is not None:
+        monkeypatch.setattr(pkg, "_market_cap_universe", None, raising=False)
+
+    assert _live_ls_account_stream() is live
+    assert _expand_dynamic_universe_request(_ask()).query != QUERY
+
+
+def test_the_resolution_order_names_the_module_main_py_imports() -> None:
+    assert _LS_ACCOUNT_STREAM_NAMES[0] == "ls_account_stream"

@@ -13,7 +13,9 @@ import json
 import logging
 import os
 import re
+import sys
 import time
+from types import ModuleType
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -303,6 +305,28 @@ def _user_paper_order_workflow_enabled() -> bool:
     }
 
 
+# PYTHONPATH가 /app 과 /app/apps/api 를 함께 담고 있어 `ls_account_stream` 과
+# `apps.api.ls_account_stream` 은 전역이 분리된 서로 다른 모듈 객체다. `main.py`
+# 는 최상위 쪽을 들여오므로 lifespan이 돌고 순위 스냅샷이 채워지는 것도 그쪽
+# 사본뿐이다. 패키지 상대 경로로 새로 들여오면 스냅샷이 영원히 None인 두 번째
+# 사본을 잡게 되고, 확장은 아무 소리 없이 건너뛰어진다(2026-09-01).
+_LS_ACCOUNT_STREAM_NAMES = ("ls_account_stream", "apps.api.ls_account_stream")
+
+
+def _live_ls_account_stream() -> ModuleType | None:
+    """Return the already-imported ls_account_stream the running app uses.
+
+    Only ``sys.modules`` is consulted: importing here is what would create the
+    second, permanently empty copy this function exists to avoid.
+    """
+
+    for name in _LS_ACCOUNT_STREAM_NAMES:
+        module = sys.modules.get(name)
+        if module is not None and hasattr(module, "market_cap_universe_rows"):
+            return module
+    return None
+
+
 def _expand_dynamic_universe_request(req: CeoAsk) -> CeoAsk:
     """Rewrite a market-cap ranking request into the explicit basket sentence.
 
@@ -315,16 +339,10 @@ def _expand_dynamic_universe_request(req: CeoAsk) -> CeoAsk:
     plan = parse_dynamic_universe_order(req.query)
     if plan is None:
         return req
-    # `ls_account_stream`은 이 모듈의 저장소 접근자를 되읽으므로 최상위에서
-    # 들여오면 순환이 된다. 순위를 실제로 볼 때만 들여온다.
-    try:
-        from .ls_account_stream import market_cap_universe_rows
-    except ImportError:  # pragma: no cover - 스크립트 실행 경로
-        try:
-            from ls_account_stream import market_cap_universe_rows  # type: ignore[no-redef]
-        except ImportError:
-            return req
-    snapshot = market_cap_universe_rows()
+    module = _live_ls_account_stream()
+    if module is None:
+        return req
+    snapshot = module.market_cap_universe_rows()
     if snapshot is None:
         return req
     rows, _as_of = snapshot
