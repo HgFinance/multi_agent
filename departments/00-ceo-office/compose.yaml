@@ -107,9 +107,13 @@ services:
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 0.0.0.0
       API_SERVER_PORT: "8642"
-      API_SERVER_KEY: ${CEO_HERMES_API_KEY:-}
+      API_SERVER_KEY: ${CEO_HERMES_API_KEY:?CEO_HERMES_API_KEY is required}
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1 && test -r /opt/data/config.yaml && test -d /opt/kanban && test -r /opt/kanban/kanban.db"]
+      # Probe the authenticated API boundary with the exact key supplied by
+      # Compose. Hermes loads /opt/data/.env with override=True, so a stale
+      # profile API_SERVER_KEY must make readiness fail instead of leaving a
+      # healthy-looking gateway that returns 401 to portfolio-bff.
+      test: ["CMD-SHELL", "kill -0 1 && test -r /opt/data/config.yaml && test -d /opt/kanban && test -r /opt/kanban/kanban.db && curl --fail --silent --show-error --max-time 5 -H \"Authorization: Bearer $$API_SERVER_KEY\" http://127.0.0.1:8642/v1/models >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3

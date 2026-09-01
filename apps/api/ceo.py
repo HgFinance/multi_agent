@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from hashlib import sha256
 
+import anyio
+
 from orchestration.discord_delivery import humanize_user_facing_text
 from orchestration.kanban_retention import (
     AuditStore,
@@ -330,10 +332,10 @@ def _live_ls_account_stream() -> ModuleType | None:
 def _expand_dynamic_universe_request(req: CeoAsk) -> CeoAsk:
     """Rewrite a market-cap ranking request into the explicit basket sentence.
 
-    Returns the request unchanged whenever the phrase is not recognised, the
-    snapshot is missing or stale, or the ranking is shorter than the requested
-    member count. Failing closed keeps a half-filled basket - a different order
-    from the one the user asked for - from ever being admitted (개발 원칙 9).
+    A recognised phrase must either become a fixed explicit basket or fail
+    before admission.  Passing the dynamic sentence onward is unsafe: it can be
+    mistaken for a conditional rule and, even on the immediate lane, does not
+    carry the exact instruments the user is about to trade.
     """
 
     plan = parse_dynamic_universe_order(req.query)
@@ -341,14 +343,29 @@ def _expand_dynamic_universe_request(req: CeoAsk) -> CeoAsk:
         return req
     module = _live_ls_account_stream()
     if module is None:
-        return req
+        raise HTTPException(503, detail="market_cap_universe_unavailable")
     snapshot = module.market_cap_universe_rows()
     if snapshot is None:
-        return req
+        acquire = getattr(module, "acquire_market_cap_universe_rows", None)
+        if callable(acquire):
+            try:
+                # ``/ui/ceo/ask`` is a synchronous FastAPI route, so this code
+                # runs in AnyIO's worker thread.  Hop back to the app event
+                # loop and await the existing LS ranking owner exactly once.
+                snapshot = anyio.from_thread.run(acquire)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "market-cap-universe-acquire-failed request=%s type=%s",
+                    req.request_id,
+                    type(exc).__name__,
+                )
+                snapshot = None
+        if snapshot is None:
+            raise HTTPException(503, detail="market_cap_universe_unavailable")
     rows, _as_of = snapshot
     expanded = expand_to_basket_instruction(plan, rows)
     if not expanded:
-        return req
+        raise HTTPException(503, detail="market_cap_universe_incomplete")
     return req.model_copy(update={"query": expanded})
 
 
@@ -2610,8 +2627,8 @@ def ceo_query(
     # 지금이다. 그런데 종목이 열거되지 않아 주문 문법이 집지 못했고, 남은
     # 레인이 조건주문이라 실행 시점 동적 유니버스로 읽혀 거부됐다(2026-09-01).
     # 여기서 순위를 한 번 읽어 평범한 열거 문장으로 바꾸면, 라우팅·검증·admission이
-    # 손으로 적은 목록과 완전히 같은 경로를 탄다. 확장에 실패하면 문장을 그대로
-    # 두어 기존 거부 사유가 그대로 남는다.
+    # 손으로 적은 목록과 완전히 같은 경로를 탄다. 인식한 동적 유니버스를 안전하게
+    # 고정할 수 없으면 원문을 다른 레인으로 넘기지 않고 요청을 거부한다.
     req = _expand_dynamic_universe_request(req)
     route = classify_ceo_request(
         req.query,

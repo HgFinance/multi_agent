@@ -302,7 +302,7 @@ repository-owned canonical Kanban create boundary를 수행할 때만 사용한�
 HERMES_HOME: /opt/hermes-cli
 HERMES_KANBAN_HOME: /opt/kanban
 HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
-HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
+HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:?CEO_HERMES_API_KEY is required}
 volumes:
   - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
 ```
@@ -312,6 +312,9 @@ BFF command도 `gateway run`이 아니다. 따라서 BFF 재생성으로 CEO gat
 중복 기동되거나 profile reconciliation이 발생하지 않는다. `ceo-hermes`는
 `API_SERVER_ENABLED=true`, `API_SERVER_HOST=0.0.0.0`, `API_SERVER_PORT=8642`,
 `API_SERVER_KEY=${CEO_HERMES_API_KEY}`를 사용하며 host port로 공개하지 않는다.
+CEO healthcheck는 Compose가 공급한 동일 키로 `/v1/models` 인증까지 검증한다.
+따라서 프로필 `.env`의 오래된 `API_SERVER_KEY`가 컨테이너 환경을 덮어쓰면
+gateway를 정상으로 오인하지 않고 unhealthy로 표시한다.
 
 `CEO_HERMES_API_KEY`는 `.env` 또는 AWS secret injection으로만 주입한다. API
 Server가 이 키 없이 기동되지 않도록 Hermes의 최소 16자 인증 조건을 유지한다.

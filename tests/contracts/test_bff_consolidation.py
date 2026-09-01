@@ -18,6 +18,7 @@ _COMPOSE_TEST_ENV = {
     "DATABASE_URL": "postgresql://test:test@localhost/test",
     "HEDGEFUND_RUNTIME_DB_PASSWORD": "compose-control-contract-test",
     "HEDGEFUND_TSDB_PASSWORD": "compose-contract-test",
+    "CEO_HERMES_API_KEY": "compose-contract-ceo-hermes-key-32-bytes",
     "CEO_DISCORD_INGRESS_API_KEY": "compose-discord-ingress-key-0123456789abcdef",
     "NAVER_CLIENT_ID": "compose-contract-test",
     "NAVER_CLIENT_SECRET": "compose-contract-test",

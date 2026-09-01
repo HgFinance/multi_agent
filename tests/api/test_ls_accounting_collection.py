@@ -252,3 +252,46 @@ def test_continuation_pages_merge_rows_and_forward_cts(monkeypatch) -> None:
     assert calls[1][0]["cts_expcode"] == "005930"
     assert calls[1][1] == {"tr_cont": "Y", "tr_cont_key": "next-key"}
     assert result["meta"] == {"pages": 2, "complete": True, "truncated": False}
+
+
+def test_order_events_sort_newest_first_across_mixed_timestamp_formats() -> None:
+    """The 2026-09-01 screenshot: a 15:28 order sat at the bottom of the list.
+
+    `received_at` arrives in three shapes - KST naive from the account history,
+    a UTC offset from the realtime feed, and a bare date from the settled
+    ledger. Comparing them as strings puts `...T06:28:19+00:00` below
+    `...T13:24:09` because `'0' < '1'` at the eleventh character, even though
+    06:28 UTC *is* 15:28 KST and therefore the newest event on the page.
+    """
+
+    history = [
+        {"kind": "FILLED", "received_at": "2026-09-01T13:24:09",
+         "event_time": "13:24:09", "order_no": "27456"},
+        {"kind": "FILLED", "received_at": "2026-09-01T11:37:31",
+         "event_time": "11:37:31", "order_no": "21316"},
+        {"kind": "FILLED", "received_at": "2026-08-31",
+         "event_time": None, "order_no": None},
+    ]
+    realtime = [
+        {"kind": "ACCEPTED", "received_at": "2026-09-01T06:28:19.632013+00:00",
+         "event_time": "152819479", "order_no": "39736"},
+    ]
+
+    merged = ls_account_stream.merge_order_events(history, realtime, 50)
+
+    assert [event.get("order_no") for event in merged] == [
+        "39736",  # 15:28:19 KST - newest, and it must lead
+        "27456",
+        "21316",
+        None,      # settled ledger day roll-up is oldest
+    ]
+
+
+def test_order_event_instant_reads_naive_timestamps_as_kst() -> None:
+    naive = ls_account_stream.order_event_instant("2026-09-01T15:28:19")
+    aware = ls_account_stream.order_event_instant("2026-09-01T06:28:19+00:00")
+    assert naive == aware
+
+    # An unusable value must not sort ahead of a real one.
+    assert ls_account_stream.order_event_instant("") < aware
+    assert ls_account_stream.order_event_instant("not-a-time") < aware

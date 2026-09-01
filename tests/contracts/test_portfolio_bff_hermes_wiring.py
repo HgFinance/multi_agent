@@ -53,7 +53,16 @@ def test_ceo_gateway_exposes_only_authenticated_internal_api() -> None:
     assert 'API_SERVER_ENABLED: "true"' in ceo
     assert "API_SERVER_HOST: 0.0.0.0" in ceo
     assert 'API_SERVER_PORT: "8642"' in ceo
-    assert "API_SERVER_KEY: ${CEO_HERMES_API_KEY:-}" in ceo
+    assert (
+        "API_SERVER_KEY: "
+        "${CEO_HERMES_API_KEY:?CEO_HERMES_API_KEY is required}"
+    ) in ceo
+    assert "Authorization: Bearer $$API_SERVER_KEY" in ceo
+    assert "http://127.0.0.1:8642/v1/models" in ceo
+    assert (
+        "HERMES_CEO_API_KEY: "
+        "${CEO_HERMES_API_KEY:?CEO_HERMES_API_KEY is required}"
+    ) in bff
     assert (
         "HGFINANCE_DISCORD_INGRESS_URL: "
         "http://portfolio-bff:8000/ui/ceo/ingress"

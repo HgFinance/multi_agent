@@ -191,6 +191,85 @@ def test_exact_sample_is_durably_bound_before_either_card_is_finalized(
     assert response["task"]["status"] == "done"
 
 
+def test_market_cap_top_ten_is_frozen_once_and_submitted_as_one_shot_basket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    create = _install_successful_route(
+        monkeypatch, events=events, repository=repository
+    )
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("USER_PAPER_ORDER_WORKFLOW_ENABLED", "true")
+    monkeypatch.setenv("USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "true")
+
+    rows = [
+        {"symbol": "005930", "name": "삼성전자"},
+        {"symbol": "000660", "name": "SK하이닉스"},
+        {"symbol": "005935", "name": "삼성전자우"},
+        {"symbol": "402340", "name": "SK스퀘어"},
+        {"symbol": "009150", "name": "삼성전기"},
+        {"symbol": "207940", "name": "삼성바이오로직스"},
+        {"symbol": "373220", "name": "LG에너지솔루션"},
+        {"symbol": "012450", "name": "한화에어로스페이스"},
+        {"symbol": "105560", "name": "KB금융"},
+        {"symbol": "329180", "name": "HD현대중공업"},
+    ]
+    snapshot: dict[str, object | None] = {"value": (rows, "snapshot-1")}
+
+    def read_snapshot():
+        return snapshot["value"]
+
+    monkeypatch.setattr(
+        ceo,
+        "_live_ls_account_stream",
+        lambda: SimpleNamespace(
+            market_cap_universe_rows=read_snapshot,
+        ),
+    )
+
+    execution = {
+        "decision": "EXECUTE",
+        "mode": "PAPER",
+        "binding": True,
+        "order_submitted": True,
+        "order_request_id": "top-ten-by-mock",
+        "request_state": "COMPLETED",
+        "user_message": "PAPER 시가총액 상위 10종목 바스켓 체결을 완료했습니다.",
+    }
+
+    def process(**kwargs: Any) -> dict[str, Any]:
+        events.append("deterministic-process")
+        interpretation = kwargs["interpretation"]
+        assert interpretation["action"] == "PLACE_BASKET"
+        assert interpretation["basket_instrument_mentions"] == [
+            row["symbol"] for row in rows
+        ]
+        assert interpretation["notional_krw"] == "3000000"
+        return execution
+
+    monkeypatch.setattr(ceo, "process_deterministic_user_paper_order", process)
+
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query="현재 기준 시가총액 상위 10종목 300만원씩 시장가로 매수해줘",
+            request_id="request-market-cap-top-ten-1",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert response["order_state"] == "COMPLETED"
+    assert response["conditional_rule"] is False
+    assert snapshot["value"] is not None
+    assert events[0] == "authorize"
+    assert "deterministic-process" in events
+    stored = next(iter(repository._records.values()))
+    assert all(row["symbol"] in stored.raw_instruction for row in rows)
+    assert create.call_count == 2
+
+
 
 def test_account_sell_all_uses_the_deterministic_paper_lane(
     monkeypatch: pytest.MonkeyPatch,

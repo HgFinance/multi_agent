@@ -43,6 +43,7 @@ from orchestration.compound_paper_orders import (
     parse_analysis_then_conditional_paper_order,
     parse_compound_paper_order,
 )
+from orchestration.dynamic_universe_orders import parse_dynamic_universe_order
 from orchestration.query_lexicon import is_negated_order_instruction
 from orchestration.user_order_language import (
     is_clearly_non_executable_order_language,
@@ -188,8 +189,11 @@ def classify_ceo_request(
 
     # 주문 **문법** 감지. 부정·질문·금지 문장도 True다 - 결정론 검증기가
     # 눈에 보이는 안전한 결과를 내도록 일부러 고감도로 잡는다.
+    dynamic_universe = parse_dynamic_universe_order(text)
     order_grammar = bool(
-        looks_like_conditional_paper_rule(text) or looks_like_user_order_request(text)
+        dynamic_universe is not None
+        or looks_like_conditional_paper_rule(text)
+        or looks_like_user_order_request(text)
     )
     negated_order = is_negated_order_instruction(text)
 
@@ -235,6 +239,18 @@ def classify_ceo_request(
                 "compound_order",
                 "order_grammar.compound",
                 order_plan=compound,
+                order_grammar_detected=order_grammar,
+            )
+        # ``상위`` means ranking/top here; it is never a misspelling of the
+        # conditional trigger ``상승``.  CEO normally freezes this plan into an
+        # explicit symbol basket before classification.  Keeping the intent in
+        # the single classifier as well prevents any direct caller from
+        # regressing to the conditional-rule lane.
+        if dynamic_universe is not None:
+            return decide(
+                "immediate_order",
+                "order_grammar.dynamic_universe",
+                order_plan=dynamic_universe,
                 order_grammar_detected=order_grammar,
             )
         if looks_like_conditional_paper_rule(text):

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from apps.api.conditional_rule_language import looks_like_conditional_paper_rule
+from orchestration.ceo_request_classifier import classify_ceo_request
 from orchestration.dynamic_universe_orders import (
     MAX_UNIVERSE_MEMBERS,
     expand_to_basket_instruction,
@@ -55,6 +57,23 @@ def test_the_rejected_sentence_becomes_a_ten_leg_basket() -> None:
     assert len(verified.payload.orders) == 10
     assert {str(item.notional_krw) for item in verified.payload.orders} == {"3000000"}
     assert {item.side.value for item in verified.payload.orders} == {"BUY"}
+
+
+def test_ranking_word_is_top_not_a_conditional_trigger_typo() -> None:
+    query = "현재 기준 시가총액 상위 10종목 300만원씩 시장가로 매수해줘"
+
+    assert looks_like_conditional_paper_rule(query) is False
+    route = classify_ceo_request(query)
+    assert route.lane == "immediate_order"
+    assert route.reason_codes == ("order_grammar.dynamic_universe",)
+
+
+def test_english_top_alias_uses_the_same_dynamic_universe_plan() -> None:
+    korean = parse_dynamic_universe_order("시가총액 상위 10종목 300만원씩 매수")
+    english = parse_dynamic_universe_order("시가총액 TOP 10종목 300만원씩 매수")
+
+    assert korean is not None
+    assert english == korean
 
 
 @pytest.mark.parametrize(

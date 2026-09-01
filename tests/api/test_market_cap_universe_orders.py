@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from types import ModuleType
 
 import pytest
+from fastapi import HTTPException
 
+from apps.api import ceo
 from apps.api import ls_account_stream as ls
 from apps.api.ceo import (
     _LS_ACCOUNT_STREAM_NAMES,
@@ -80,12 +83,13 @@ def test_a_fresh_snapshot_turns_the_ranking_into_an_explicit_basket() -> None:
     assert candidate.action.value == "PLACE_BASKET"
     assert len(candidate.basket_instrument_mentions) == 10
     assert str(candidate.notional_krw) == "3000000"
+    assert _live_ls_account_stream().market_cap_universe_rows() is not None
 
 
 @pytest.mark.parametrize(
-    ("label", "snapshot"),
+    ("label", "snapshot", "detail"),
     (
-        ("no snapshot at all", None),
+        ("no snapshot at all", None, "market_cap_universe_unavailable"),
         (
             "older than the staleness limit",
             (
@@ -93,21 +97,75 @@ def test_a_fresh_snapshot_turns_the_ranking_into_an_explicit_basket() -> None:
                 "stale",
                 TOP_ROWS,
             ),
+            "market_cap_universe_unavailable",
         ),
-        ("fewer names than requested", (time.time(), "short", TOP_ROWS[:9])),
+        (
+            "fewer names than requested",
+            (time.time(), "short", TOP_ROWS[:9]),
+            "market_cap_universe_incomplete",
+        ),
     ),
 )
-def test_the_sentence_is_left_alone_when_the_ranking_cannot_be_trusted(
-    label: str, snapshot: object
+def test_an_untrusted_ranking_fails_before_order_admission(
+    label: str, snapshot: object, detail: str
 ) -> None:
     """Failing closed keeps a basket the user never approved from being admitted.
 
-    An unexpanded sentence is refused downstream exactly as before; a silently
-    shortened one would have been admitted as a different order (개발 원칙 9).
+    It must never pass the original sentence to another order lane. A silently
+    shortened basket would also be a different order (개발 원칙 9).
     """
 
     _seed(snapshot)
-    assert _expand_dynamic_universe_request(_ask()).query == QUERY, label
+    with pytest.raises(HTTPException) as raised:
+        _expand_dynamic_universe_request(_ask())
+    assert raised.value.status_code == 503, label
+    assert raised.value.detail == detail, label
+
+
+def test_missing_snapshot_is_acquired_on_demand_before_expansion(monkeypatch) -> None:
+    live = _live_ls_account_stream()
+    assert live is not None
+    live._market_cap_universe = None
+    calls = 0
+
+    async def acquire():
+        nonlocal calls
+        calls += 1
+        live._market_cap_universe = (time.time(), "on-demand", TOP_ROWS)
+        return list(TOP_ROWS), "on-demand"
+
+    monkeypatch.setattr(live, "acquire_market_cap_universe_rows", acquire)
+    monkeypatch.setattr(
+        ceo.anyio.from_thread,
+        "run",
+        lambda async_fn: asyncio.run(async_fn()),
+    )
+
+    expanded = _expand_dynamic_universe_request(_ask())
+
+    assert calls == 1
+    assert deterministic_order_candidate(expanded.query).action.value == "PLACE_BASKET"
+    assert live.market_cap_universe_rows() is not None
+
+
+def test_ls_acquisition_populates_the_shared_read_only_snapshot(monkeypatch) -> None:
+    calls = 0
+
+    async def load(ranking: str):
+        nonlocal calls
+        calls += 1
+        assert ranking == "market_cap"
+        return {"rows": list(TOP_ROWS)}
+
+    monkeypatch.setattr(ls, "ENABLE_LS_MARKET_DATA", True)
+    monkeypatch.setattr(ls, "_load_market_ranking", load)
+    ls._market_cap_universe = None
+
+    rows, as_of = asyncio.run(ls.acquire_market_cap_universe_rows())
+
+    assert calls == 1
+    assert rows == TOP_ROWS
+    assert ls.market_cap_universe_rows() == (TOP_ROWS, as_of)
 
 
 def test_an_ordinary_question_is_never_rewritten() -> None:

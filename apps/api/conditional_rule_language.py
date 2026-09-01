@@ -114,6 +114,13 @@ _CONDITIONAL_TRIGGER_WORDS = frozenset(
     }
 )
 _HANGUL_WORD = re.compile(r"[가-힣]{2,}")
+# Ranking language is an exact business term, not a typo.  In particular,
+# ``상위`` is one substitution away from the conditional trigger ``상승``.
+# Letting the generic typo fallback compare it routed an immediate
+# "시가총액 상위 10종목" basket into the conditional-rule lane (2026-09-01).
+# Keep this exclusion lexical and narrow: the dynamic-universe parser remains
+# authoritative for whether the whole sentence is a supported top-N order.
+_ONE_EDIT_TRIGGER_EXCLUSIONS = frozenset({"상위"})
 _RELATIVE_TIME_TRIGGER = re.compile(
     r"(?<![\w,])(?:[1-9]\d*|[일이삼사오육칠팔구십한두세네열스물서른마흔쉰예순일흔여든아흔\s]+)"
     rf"\s*(?:초|분|시간)\s*{RELATIVE_DELAY_SUFFIX}(?!\w)"
@@ -193,6 +200,7 @@ def _looks_like_one_edit_conditional_trigger(normalized: str) -> bool:
     return any(
         _one_edit_apart(token, trigger)
         for token in _HANGUL_WORD.findall(normalized)
+        if token not in _ONE_EDIT_TRIGGER_EXCLUSIONS
         for trigger in _CONDITIONAL_TRIGGER_WORDS
     )
 

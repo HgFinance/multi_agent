@@ -179,7 +179,7 @@ services:
       # task through another code path.
       KANBAN_CREATE_RECONCILE_TIMEOUT_SECONDS: ${KANBAN_CREATE_RECONCILE_TIMEOUT_SECONDS:-6}
       HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
-      HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
+      HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:?CEO_HERMES_API_KEY is required}
       # The history endpoint reconstructs independent roots in parallel. Keep
       # the local mock UI responsive when the bounded page contains many
       # completed roots; callers can lower this for constrained hosts.

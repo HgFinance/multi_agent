@@ -1144,6 +1144,30 @@ def ledger_to_order_events(ledger: dict[str, Any], limit: int) -> list[dict[str,
     return events
 
 
+def order_event_instant(value: Any) -> datetime:
+    """주문 사건의 시각을 하나의 절대 시각으로 읽는다.
+
+    `received_at`은 출처마다 형식이 다르다 - 계좌 조회분은 KST naive
+    (`2026-09-01T15:30:21`), 실시간분은 UTC offset
+    (`2026-09-01T06:28:19.632013+00:00`), 정산 원장은 날짜만(`2026-08-31`).
+    문자열로 비교하면 같은 순간이라도 11번째 글자에서 `'0' < '1'`이라 방금
+    접수된 주문이 낮에 체결된 주문보다 아래로 내려간다(2026-09-01 실측:
+    15:28:19 접수분이 목록 맨 끝에 붙었다). naive 값은 KST로 읽는다 - 화면의
+    오늘 필터가 이미 같은 규칙을 쓴다.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=KST)
+    return parsed.astimezone(timezone.utc)
+
+
 def merge_order_events(
     ledger_events: list[dict[str, Any]],
     realtime_events: list[dict[str, Any]],
@@ -1260,10 +1284,13 @@ def merge_order_events(
             continue
         seen.add(key)
         events.append(dict(event))
+    # 최신순. 시각은 절대 시각으로 비교하고, 같은 순간일 때만 HHMMSS로 정규화한
+    # 체결 시각과 순번으로 가른다. `event_time`도 `15:30:21`과 `152819479`가
+    # 섞여 들어오므로 원문 문자열끼리 비교하지 않는다.
     events.sort(
         key=lambda event: (
-            str(event.get("received_at") or ""),
-            str(event.get("event_time") or ""),
+            order_event_instant(event.get("received_at")),
+            event_time_key(event.get("event_time")),
             int(event.get("seq") or 0),
         ),
         reverse=True,
@@ -2577,18 +2604,39 @@ def market_cap_universe_rows(
     return list(rows), as_of
 
 
-async def _market_cap_universe_refresh_loop() -> None:
+async def acquire_market_cap_universe_rows(
+    *, force_refresh: bool = False
+) -> tuple[list[dict[str, Any]], str] | None:
+    """Acquire a fresh-enough market-cap snapshot for one order admission.
+
+    The background refresher is an optimization, not an admission dependency.
+    A top-N order can arrive before the first refresh or after a snapshot has
+    become stale, so the request path must be able to await the same read-only
+    ranking owner once.  This function deliberately reuses
+    ``_load_market_ranking`` and its cache/gate; it does not add a second LS
+    fetcher or an order path.
+    """
+
     global _market_cap_universe
+    snapshot = market_cap_universe_rows()
+    if snapshot is not None and not force_refresh:
+        return snapshot
+    if not ENABLE_LS_MARKET_DATA:
+        return None
+
+    ranking = await _load_market_ranking("market_cap")
+    rows = [row for row in ranking.get("rows", []) if isinstance(row, dict)]
+    if not rows:
+        return None
+    as_of = datetime.now(timezone.utc).isoformat()
+    _market_cap_universe = (time.time(), as_of, rows)
+    return list(rows), as_of
+
+
+async def _market_cap_universe_refresh_loop() -> None:
     while True:
         try:
-            ranking = await _load_market_ranking("market_cap")
-            rows = [row for row in ranking.get("rows", []) if isinstance(row, dict)]
-            if rows:
-                _market_cap_universe = (
-                    time.time(),
-                    datetime.now(timezone.utc).isoformat(),
-                    rows,
-                )
+            await acquire_market_cap_universe_rows(force_refresh=True)
         except Exception:  # noqa: BLE001 - 다음 주기에 다시 시도한다
             pass
         await asyncio.sleep(MARKET_CAP_UNIVERSE_REFRESH_SECONDS)

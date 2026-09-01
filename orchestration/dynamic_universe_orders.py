@@ -36,7 +36,8 @@ _NAME_RE = re.compile(r"^[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,72}$")
 # "시가총액 상위" / "시총 상위" / "시가총액 기준 상위". The ranking word must be
 # present: a bare "상위 10종목" names no metric and stays ambiguous.
 _UNIVERSE_RE = re.compile(
-    r"(?:시가\s*총액|시총)\s*(?:기준\s*)?상위(?![가-힣A-Za-z0-9])"
+    r"(?:시가\s*총액|시총)\s*(?:기준\s*)?(?:상위|top)(?![가-힣A-Za-z0-9])",
+    re.IGNORECASE,
 )
 _TOP_N_RE = re.compile(
     r"(?<![0-9])(?P<n>[1-9][0-9]?)\s*(?:개\s*)?종목(?![가-힣A-Za-z0-9])"
