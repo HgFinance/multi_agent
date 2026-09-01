@@ -174,3 +174,16 @@ def test_workforce_image_packages_api_import_roots_and_worker_loader() -> None:
         "./workforce_api_loader.py"
         in dockerfile
     )
+
+
+def test_workforce_image_packages_hr_review_bridge_dependencies() -> None:
+    dockerfile = (
+        ROOT / "departments/07-agent-workforce/Dockerfile"
+    ).read_text(encoding="utf-8")
+    for module in (
+        "langsmith_egress.py",
+        "langsmith_queries.py",
+        "langsmith_feedback.py",
+        "hr_langfuse_feedback.py",
+    ):
+        assert f"COPY orchestration/{module} /app/orchestration/{module}" in dockerfile

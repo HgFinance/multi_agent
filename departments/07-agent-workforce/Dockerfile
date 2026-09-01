@@ -58,6 +58,7 @@ COPY departments/07-agent-workforce/workforce_api_loader.py ./workforce_api_load
 # coordination and the Discord transport; no trace payload reader is added to
 # the Workforce image.
 COPY orchestration/__init__.py /app/orchestration/__init__.py
+COPY orchestration/langsmith_egress.py /app/orchestration/langsmith_egress.py
 COPY orchestration/langsmith_queries.py /app/orchestration/langsmith_queries.py
 COPY orchestration/langsmith_feedback.py /app/orchestration/langsmith_feedback.py
 COPY orchestration/qa_discord_feedback.py /app/orchestration/qa_discord_feedback.py
