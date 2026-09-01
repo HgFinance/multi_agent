@@ -6,6 +6,7 @@ FROM ${HERMES_BASE_IMAGE}
 ENV PYTHONPATH="/opt/hgfinance"
 
 COPY --chmod=0644 orchestration/__init__.py /opt/hgfinance/orchestration/__init__.py
+COPY --chmod=0644 orchestration/langsmith_egress.py /opt/hgfinance/orchestration/langsmith_egress.py
 COPY --chmod=0644 orchestration/discord_idempotency.py /opt/hgfinance/orchestration/discord_idempotency.py
 COPY --chmod=0644 orchestration/primary_task_idempotency.py /opt/hgfinance/orchestration/primary_task_idempotency.py
 COPY --chmod=0644 orchestration/qa_feedback_contract.py /opt/hgfinance/orchestration/qa_feedback_contract.py

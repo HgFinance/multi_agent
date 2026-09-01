@@ -227,6 +227,15 @@ class DiscordGatewayWiringTests(unittest.TestCase):
             install_index = dockerfile.index("python3 /tmp/install_hermes_discord_patch.py")
             self.assertLess(permission_index, install_index, name)
 
+    def test_discord_observer_image_packages_its_egress_dependency(self) -> None:
+        dockerfile = (ROOT / "Dockerfile.hermes-discord").read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY --chmod=0644 orchestration/langsmith_egress.py ", dockerfile
+        )
+        self.assertIn(
+            "COPY --chmod=0644 scripts/hermes_worker_observability.py ", dockerfile
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
