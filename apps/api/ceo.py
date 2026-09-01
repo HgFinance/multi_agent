@@ -140,6 +140,10 @@ from orchestration.ceo_workflow_scope import (
     requested_by_from_body,
     selected_primary_profiles_from_task,
 )
+from orchestration.dynamic_universe_orders import (
+    expand_to_basket_instruction,
+    parse_dynamic_universe_order,
+)
 from orchestration.compound_paper_orders import (
     AnalysisThenConditionalPaperOrderPlan,
     build_compound_conditional_candidate,
@@ -297,6 +301,37 @@ def _user_paper_order_workflow_enabled() -> bool:
         "production",
         "staging",
     }
+
+
+def _expand_dynamic_universe_request(req: CeoAsk) -> CeoAsk:
+    """Rewrite a market-cap ranking request into the explicit basket sentence.
+
+    Returns the request unchanged whenever the phrase is not recognised, the
+    snapshot is missing or stale, or the ranking is shorter than the requested
+    member count. Failing closed keeps a half-filled basket - a different order
+    from the one the user asked for - from ever being admitted (개발 원칙 9).
+    """
+
+    plan = parse_dynamic_universe_order(req.query)
+    if plan is None:
+        return req
+    # `ls_account_stream`은 이 모듈의 저장소 접근자를 되읽으므로 최상위에서
+    # 들여오면 순환이 된다. 순위를 실제로 볼 때만 들여온다.
+    try:
+        from .ls_account_stream import market_cap_universe_rows
+    except ImportError:  # pragma: no cover - 스크립트 실행 경로
+        try:
+            from ls_account_stream import market_cap_universe_rows  # type: ignore[no-redef]
+        except ImportError:
+            return req
+    snapshot = market_cap_universe_rows()
+    if snapshot is None:
+        return req
+    rows, _as_of = snapshot
+    expanded = expand_to_basket_instruction(plan, rows)
+    if not expanded:
+        return req
+    return req.model_copy(update={"query": expanded})
 
 
 def _deterministic_paper_order_fast_path_enabled() -> bool:
@@ -2553,6 +2588,13 @@ def ceo_query(
     # 주문 문법이 먼저 집어가면 안 된다.
     read_only_hr_e2e = _is_read_only_hr_e2e_request(req.query)
     read_only_risk_e2e = _is_read_only_risk_e2e_request(req.query)
+    # "시가총액 상위 10종목 300만원씩 매수"에는 조건이 없다 - "현재 기준"은
+    # 지금이다. 그런데 종목이 열거되지 않아 주문 문법이 집지 못했고, 남은
+    # 레인이 조건주문이라 실행 시점 동적 유니버스로 읽혀 거부됐다(2026-09-01).
+    # 여기서 순위를 한 번 읽어 평범한 열거 문장으로 바꾸면, 라우팅·검증·admission이
+    # 손으로 적은 목록과 완전히 같은 경로를 탄다. 확장에 실패하면 문장을 그대로
+    # 두어 기존 거부 사유가 그대로 남는다.
+    req = _expand_dynamic_universe_request(req)
     route = classify_ceo_request(
         req.query,
         previous_question_context=getattr(req, "previous_question_context", None),

@@ -96,9 +96,11 @@ except ImportError:  # pragma: no cover - direct module self-check compatibility
 @asynccontextmanager
 async def _portfolio_live_lifespan(_app: Any) -> AsyncIterator[None]:
     await _start_accounting_evidence_refresh()
+    await _start_market_cap_universe_refresh()
     try:
         yield
     finally:
+        await _stop_market_cap_universe_refresh()
         await _stop_accounting_evidence_refresh()
         await _stop_ledger_refresh()
 
@@ -141,7 +143,12 @@ ACCOUNT_EVENT_RESYNC_COOLDOWN_SECONDS = max(
     float(os.getenv("LS_ACCOUNT_EVENT_RESYNC_COOLDOWN_SECONDS", "5")), 1.0
 )
 MARKET_RANKING_CACHE_SECONDS = int(os.getenv("LS_MARKET_RANKING_CACHE_SECONDS", "15"))
-MARKET_RANKING_LIMIT = 5
+# 대시보드 위젯이 보여주는 행 수와, 하나의 TR 응답에서 뽑아 둘 수 있는 최대 행
+# 수는 서로 다른 관심사다. 둘을 한 상수로 묶어 둔 탓에 상위 10종목을 요구하는
+# 주문 경로가 limit=10을 줘도 조용히 5로 잘렸다(2026-09-01). 캐시는 최대치로
+# 정규화해 한 번의 TR로 위젯과 주문 경로를 함께 먹인다.
+MARKET_RANKING_DEFAULT_ROWS = 5
+MARKET_RANKING_MAX_ROWS = 100
 # 회계 Agent는 셸·웹 도구가 없으므로 이 프로세스가 12개 계좌 TR을 미리 읽고
 # 정규화한 증거를 붙인다. 정기 갱신은 초당 1건 제한을 지키며 백그라운드에서 돈다.
 ACCOUNTING_EVIDENCE_CACHE_SECONDS = max(
@@ -331,7 +338,7 @@ def _number(value: Any) -> str | None:
 
 
 def normalize_market_ranking(
-    payload: dict[str, Any], ranking: str, limit: int = MARKET_RANKING_LIMIT
+    payload: dict[str, Any], ranking: str, limit: int = MARKET_RANKING_MAX_ROWS
 ) -> dict[str, Any]:
     """허용된 시장 순위 TR 응답을 화면용 상위 종목 목록으로 줄인다."""
     definition = MARKET_RANKINGS.get(ranking)
@@ -341,7 +348,7 @@ def normalize_market_ranking(
     raw_rows = payload.get(definition["out_block"])
     raw_rows = raw_rows if isinstance(raw_rows, list) else []
     rows: list[dict[str, Any]] = []
-    row_limit = max(1, min(int(limit), MARKET_RANKING_LIMIT))
+    row_limit = max(1, min(int(limit), MARKET_RANKING_MAX_ROWS))
     for index, row in enumerate(raw_rows[:row_limit], start=1):
         if not isinstance(row, dict):
             continue
@@ -2532,6 +2539,80 @@ async def _load_accounting_evidence(
         return evidence
 
 
+# 주문 경로는 동기 코드다. `_load_market_ranking`은 코루틴이고 모듈 수준
+# asyncio.Lock을 쓰므로 `asyncio.run`으로 부르면 그 Lock이 임시 루프에 묶여
+# 두 번째 호출부터 깨진다. 그래서 회계 증거와 같은 방식으로, 백그라운드가
+# 평범한 스냅샷을 갱신하고 동기 호출자는 그것만 읽는다.
+MARKET_CAP_UNIVERSE_REFRESH_SECONDS = max(
+    15, int(os.getenv("LS_MARKET_CAP_UNIVERSE_REFRESH_SECONDS", "60"))
+)
+# 이보다 오래된 순위로는 주문을 만들지 않는다. 사용자가 승인한 구성원과
+# 실제로 체결되는 구성원이 달라지는 쪽이, 주문이 한 번 거부되는 쪽보다 나쁘다.
+MARKET_CAP_UNIVERSE_MAX_AGE_SECONDS = max(
+    60, int(os.getenv("LS_MARKET_CAP_UNIVERSE_MAX_AGE_SECONDS", "300"))
+)
+_market_cap_universe: tuple[float, str, list[dict[str, Any]]] | None = None
+_market_cap_universe_task: "asyncio.Task[None] | None" = None
+
+
+def market_cap_universe_rows(
+    *, max_age_seconds: int | None = None
+) -> tuple[list[dict[str, Any]], str] | None:
+    """시가총액 상위 스냅샷을 동기적으로 읽는다. 없거나 오래되면 None.
+
+    실패는 항상 '주문 없음' 쪽으로 떨어진다(개발 원칙 9).
+    """
+
+    snapshot = _market_cap_universe
+    if snapshot is None:
+        return None
+    fetched_at, as_of, rows = snapshot
+    limit = (
+        MARKET_CAP_UNIVERSE_MAX_AGE_SECONDS
+        if max_age_seconds is None
+        else max(1, int(max_age_seconds))
+    )
+    if time.time() - fetched_at > limit:
+        return None
+    return list(rows), as_of
+
+
+async def _market_cap_universe_refresh_loop() -> None:
+    global _market_cap_universe
+    while True:
+        try:
+            ranking = await _load_market_ranking("market_cap")
+            rows = [row for row in ranking.get("rows", []) if isinstance(row, dict)]
+            if rows:
+                _market_cap_universe = (
+                    time.time(),
+                    datetime.now(timezone.utc).isoformat(),
+                    rows,
+                )
+        except Exception:  # noqa: BLE001 - 다음 주기에 다시 시도한다
+            pass
+        await asyncio.sleep(MARKET_CAP_UNIVERSE_REFRESH_SECONDS)
+
+
+async def _start_market_cap_universe_refresh() -> None:
+    global _market_cap_universe_task
+    if ENABLE_LS_MARKET_DATA and _market_cap_universe_task is None:
+        _market_cap_universe_task = asyncio.create_task(
+            _market_cap_universe_refresh_loop(), name="ls-market-cap-universe-refresh"
+        )
+
+
+async def _stop_market_cap_universe_refresh() -> None:
+    global _market_cap_universe_task
+    if _market_cap_universe_task is not None:
+        _market_cap_universe_task.cancel()
+        try:
+            await _market_cap_universe_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        _market_cap_universe_task = None
+
+
 async def _accounting_evidence_refresh_loop() -> None:
     while True:
         try:
@@ -2731,8 +2812,14 @@ async def accounting_broker_evidence(
 
 
 @router.get("/ui/market/rankings", operation_id="market_rankings")
-async def market_rankings(kind: str = "volume") -> dict[str, Any]:
-    """시장 상위 종목 한 종류만 조회한다. 화면의 버튼 전환용 얇은 BFF다."""
+async def market_rankings(
+    kind: str = "volume", limit: int = MARKET_RANKING_DEFAULT_ROWS
+) -> dict[str, Any]:
+    """시장 상위 종목 한 종류만 조회한다. 화면의 버튼 전환용 얇은 BFF다.
+
+    `limit`을 주지 않으면 위젯이 쓰던 행 수 그대로다. 캐시는 최대치로 채워져
+    있으므로 더 긴 목록을 요구해도 추가 TR이 나가지 않는다.
+    """
     if not ENABLE_LS_MARKET_DATA:
         raise HTTPException(
             503,
@@ -2747,11 +2834,13 @@ async def market_rankings(kind: str = "volume") -> dict[str, Any]:
         raise HTTPException(
             502, ("시장 상위 종목 조회 실패: " + _ls_error_detail(exc))[:400]
         ) from exc
+    row_limit = max(1, min(int(limit), MARKET_RANKING_MAX_ROWS))
     return {
         "schema_version": "market.rankings.v1",
         "as_of": datetime.now(timezone.utc).isoformat(),
         "source": "LS /stock/high-item",
         **ranking,
+        "rows": list(ranking.get("rows", []))[:row_limit],
     }
 
 
