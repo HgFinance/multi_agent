@@ -38,6 +38,7 @@ const STATE_LABEL: Record<PaperDirective["state"], string> = {
 const ACTION_LABEL: Record<PaperDirective["action"], string> = {
   PLACE_ORDER: "개별 주문",
   PLACE_BASKET: "복수 종목 바스켓 주문",
+  SELL_POSITION: "보유 종목 매도",
   SELL_ALL: "보유 종목 전량 매도",
   CANCEL_ALL: "미체결 주문 전체 취소",
 };

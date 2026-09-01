@@ -73,8 +73,8 @@ function employmentView(status: string) {
 }
 
 function compareRosterAgents(left: RosterAgent, right: RosterAgent) {
-  const leftStatusRank = EMPLOYMENT_STATUS_RANK.get(left.employment_status) ?? EMPLOYMENT_STATUS_ORDER.length;
-  const rightStatusRank = EMPLOYMENT_STATUS_RANK.get(right.employment_status) ?? EMPLOYMENT_STATUS_ORDER.length;
+  const leftStatusRank = EMPLOYMENT_STATUS_RANK.get(left.employment_status as EmploymentStatus) ?? EMPLOYMENT_STATUS_ORDER.length;
+  const rightStatusRank = EMPLOYMENT_STATUS_RANK.get(right.employment_status as EmploymentStatus) ?? EMPLOYMENT_STATUS_ORDER.length;
   if (leftStatusRank !== rightStatusRank) return leftStatusRank - rightStatusRank;
 
   const departmentOrder = left.department_code.localeCompare(right.department_code);
