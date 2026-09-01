@@ -38,6 +38,12 @@ dest_for() {
 }
 
 MODE="${1:-push}"   # push (repo -> ~/.hermes, default) | pull (~/.hermes -> repo)
+PROFILE_FILTER="${2:-}"  # optional single profile; avoids unrelated runtime writes
+
+profile_is_selected() {
+  local profile="$1"
+  [[ -z "$PROFILE_FILTER" || "$profile" == "$PROFILE_FILTER" ]]
+}
 
 sync_one() {
   local profile="$1" src_dir="$2" dest_dir="$3"
@@ -62,9 +68,14 @@ sync_one() {
 sync_repository_profiles() {
   local direction="$1"
   local profile folder kind container source_dir source_path target_path
+  local matched=0
 
   while IFS='|' read -r profile folder kind container; do
     [[ -z "$profile" || "$profile" == \#* ]] && continue
+    if ! profile_is_selected "$profile"; then
+      continue
+    fi
+    matched=1
     case "$kind" in
       department) source_dir="$SRC_ROOT/$folder/hermes" ;;
       liaison) source_dir="$SRC_ROOT/$folder/hermes-liaison" ;;
@@ -86,6 +97,11 @@ sync_repository_profiles() {
     fi
     sync_one "$profile" "$source_path" "$target_path"
   done < "$PROFILE_REGISTRY"
+
+  if [[ -n "$PROFILE_FILTER" && "$matched" -ne 1 ]]; then
+    echo "unknown Hermes profile: $PROFILE_FILTER" >&2
+    return 1
+  fi
 }
 
 # Only repository-owned, profile-specific skills are copied into a profile.
@@ -149,28 +165,40 @@ case "$MODE" in
   push)
     echo "Syncing repo -> ~/.hermes/profiles (config.yaml, SOUL.md, owned skills)"
     sync_repository_profiles push
-    sync_local_skill "ceo-agent" "ceo/hermes-multi-agent-pipelines" "orchestration/hermes-multi-agent-pipelines"
-    sync_local_skill "ceo-agent" "ceo/hermes-memory" "orchestration/hermes-memory"
+    if profile_is_selected "ceo-agent"; then
+      sync_local_skill "ceo-agent" "ceo/hermes-multi-agent-pipelines" "orchestration/hermes-multi-agent-pipelines"
+      sync_local_skill "ceo-agent" "ceo/hermes-memory" "orchestration/hermes-memory"
+    fi
     # autonomous-quant-research belongs to the direct strategy-hermes runtime,
     # not the Research HQ profile. Strategy Hermes receives it from the shared
     # /opt/shared-skills mount; do not copy it into research-department.
-    sync_local_skill "research-department" "methodology-scout" "research/methodology-scout"
+    if profile_is_selected "research-department"; then
+      sync_local_skill "research-department" "methodology-scout" "research/methodology-scout"
+    fi
     # QA feedback review is a single shared skill. Retire the two old,
     # profile-local trigger matches so Hermes cannot choose an obsolete
     # duplicate instead of /opt/shared-skills/qa-feedback-bottleneck-review.
-    retire_legacy_skill "qa-department" "qa/metadata-only-qa-feedback-review"
-    retire_legacy_skill "qa-department" "qa/skill-create-latency-control"
+    if profile_is_selected "qa-department"; then
+      retire_legacy_skill "qa-department" "qa/metadata-only-qa-feedback-review"
+      retire_legacy_skill "qa-department" "qa/skill-create-latency-control"
+    fi
     # Shared /opt/shared-skills is the canonical copy for this byte-identical
     # research skill; retire only an identical profile duplicate so qualified
     # and categorized skill_view names do not become ambiguous.
-    retire_duplicate_skill_if_identical "research-department" "research/financial-equity-research"
+    if profile_is_selected "research-department"; then
+      retire_duplicate_skill_if_identical "research-department" "research/financial-equity-research"
+    fi
     # The same byte-identical skill is mounted at /opt/shared-skills in the
     # runtime. Keeping a profile mirror makes Hermes skill_view report an
     # ambiguity and forces an avoidable provider re-plan. The shared copy is
     # canonical; retire only an identical profile duplicate into the existing
     # recoverable backup area.
-    retire_duplicate_skill_if_identical "quant-backtest-department" "quant/equity-quant-assessment"
-    retire_legacy_skill "risk-management" "autonomous-ai-agents/hermes-multi-agent-pipelines"
+    if profile_is_selected "quant-backtest-department"; then
+      retire_duplicate_skill_if_identical "quant-backtest-department" "quant/equity-quant-assessment"
+    fi
+    if profile_is_selected "risk-management"; then
+      retire_legacy_skill "risk-management" "autonomous-ai-agents/hermes-multi-agent-pipelines"
+    fi
   ;;
   pull)
     echo "Syncing ~/.hermes/profiles -> repo (config.yaml, SOUL.md only)"
@@ -178,9 +206,10 @@ case "$MODE" in
     echo "Review with 'git diff' before committing."
     ;;
   *)
-    echo "usage: $0 [push|pull]" >&2
+    echo "usage: $0 [push|pull] [profile]" >&2
     echo "  push  copy repo -> ~/.hermes/profiles (default, run after git pull)" >&2
     echo "  pull  copy ~/.hermes/profiles -> repo (run before git commit, after local edits)" >&2
+    echo "  profile  optionally limit the operation to one registered profile" >&2
     exit 1
     ;;
 esac

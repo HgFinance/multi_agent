@@ -21,6 +21,7 @@ def _clear_process_retention_scope(monkeypatch) -> None:
     """Keep repository defaults independent from a developer's .env file."""
 
     monkeypatch.delenv("LANGSMITH_RETENTION_SCOPES", raising=False)
+    monkeypatch.setenv("HGFINANCE_LANGSMITH_EGRESS_ENABLED", "true")
 
 
 class _Response:
@@ -84,6 +85,15 @@ def test_retention_dry_run_targets_only_named_projects(monkeypatch) -> None:
     assert summary.queued == 0
     assert summary.visible_overflow == 3
     assert summary.dry_run is True
+
+
+def test_retention_does_not_construct_client_when_egress_is_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("HGFINANCE_LANGSMITH_EGRESS_ENABLED", "false")
+    worker = LangSmithRetentionWorker(api_key="key", enabled=True, dry_run=False)
+
+    summary = worker.run_once(now=datetime(2026, 8, 26, tzinfo=timezone.utc))
+
+    assert summary.error_code == "LANGSMITH_EGRESS_DISABLED"
 
 
 def test_retention_delete_is_bounded_and_uses_trace_delete_endpoint(monkeypatch) -> None:

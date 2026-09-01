@@ -9,6 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 COPY requirements.txt ./requirements.txt
 COPY requirements.lock ./requirements.lock
+COPY deploy/hermes-patches/install_sticky_initial_block.py /tmp/install_sticky_initial_block.py
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 RUN mkdir -p /opt/hermes-cli
 
@@ -19,6 +20,11 @@ RUN mkdir -p /opt/hermes-cli
 # (commit 3c27eb6234bf91b8ceee9e9071591b31e9b148cb).
 ARG HERMES_AGENT_REF=v2026.8.3
 
+# Hermes v0.20.0 accepts --initial-status blocked but only writes a `created`
+# event. Its ready reconciler then treats parentless blocked cards as
+# dependency-blocked and promotes them before the BFF finishes binding
+# authority. Apply the narrow upstream-compatible semantic patch; the script
+# refuses unknown source so a Hermes upgrade cannot drift silently.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git \
     && curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-installer.sh \
@@ -26,13 +32,14 @@ RUN apt-get update \
     && git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent \
     && git -C /opt/hermes-agent fetch --depth 1 origin "${HERMES_AGENT_REF}" \
     && git -C /opt/hermes-agent checkout --detach FETCH_HEAD \
+    && python /tmp/install_sticky_initial_block.py \
     && UV_NO_CONFIG=1 uv pip install --system --no-cache -e "/opt/hermes-agent[all]" \
     && command -v hermes \
     && test -x /usr/local/bin/hermes \
     && test "$(command -v hermes)" = /usr/local/bin/hermes \
     && hermes --version \
     && hermes kanban --help >/dev/null \
-    && rm -rf /tmp/uv-installer.sh /root/.cache/uv /var/lib/apt/lists/*
+    && rm -rf /tmp/uv-installer.sh /tmp/install_sticky_initial_block.py /root/.cache/uv /var/lib/apt/lists/*
 
 COPY . .
 

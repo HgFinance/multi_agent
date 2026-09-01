@@ -38,9 +38,21 @@ name: hedgefund
 x-langsmith-redaction: &langsmith-redaction
   LANGSMITH_HIDE_INPUTS: "true"
   LANGSMITH_HIDE_OUTPUTS: "true"
+  # Some transitive LangChain integrations still read LANGCHAIN_PROJECT while
+  # direct LangSmith clients read LANGSMITH_PROJECT.  Set both to the one
+  # canonical workflow project so an enabled callback cannot create `default`.
+  LANGCHAIN_PROJECT: ${LANGSMITH_PROJECT:-First}
+  # SmithDB v2 run queries need UUIDs. Supplying provisioned IDs prevents
+  # pollers from resolving names through the legacy /sessions route.
+  LANGSMITH_PROJECT_ID: ${LANGSMITH_PROJECT_ID:-}
+  LANGSMITH_METRICS_PROJECT_ID: ${LANGSMITH_METRICS_PROJECT_ID:-}
+  LANGSMITH_EVALS_PROJECT_ID: ${LANGSMITH_EVALS_PROJECT_ID:-}
   # Keep SDK callbacks off; explicit application-owned publishers use the
   # separate switch below and emit only bounded operational envelopes.
   LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+  # Master circuit breaker. false blocks every HgFinance LangSmith reader and
+  # publisher even if an individual tracing flag is enabled later.
+  HGFINANCE_LANGSMITH_EGRESS_ENABLED: ${HGFINANCE_LANGSMITH_EGRESS_ENABLED:-false}
   HGFINANCE_LANGSMITH_PUBLISH_ENABLED: ${HGFINANCE_LANGSMITH_PUBLISH_ENABLED:-false}
   LANGSMITH_TRACE_SAMPLE_RATE: ${LANGSMITH_TRACE_SAMPLE_RATE:-0.05}
   LANGSMITH_METRIC_AGGREGATION_WINDOW_SECONDS: ${LANGSMITH_METRIC_AGGREGATION_WINDOW_SECONDS:-300}
@@ -162,6 +174,11 @@ services:
       # blocked root with no Trading primary, so keep it above the observed
       # worst case rather than at the 8s code default.
       KANBAN_CLI_TIMEOUT_SECONDS: ${KANBAN_CLI_TIMEOUT_SECONDS:-30}
+      # A create timeout has an unknown commit state. Replay the identical
+      # idempotent CLI request once with a short bounded reconciliation window
+      # instead of declaring the Paper request failed or creating a second
+      # task through another code path.
+      KANBAN_CREATE_RECONCILE_TIMEOUT_SECONDS: ${KANBAN_CREATE_RECONCILE_TIMEOUT_SECONDS:-6}
       HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
       HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
       # The history endpoint reconstructs independent roots in parallel. Keep
@@ -219,6 +236,7 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      HGFINANCE_LANGSMITH_EGRESS_ENABLED: ${HGFINANCE_LANGSMITH_EGRESS_ENABLED:-false}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
       LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
@@ -1772,6 +1790,11 @@ services:
       HERMES_GID: 1000
       HERMES_HOME: /opt/data
       HERMES_PROFILE: quant-backtest-department
+      <<: *langsmith-redaction
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
@@ -2102,6 +2125,11 @@ services:
       HERMES_GID: 1000
       HERMES_HOME: /opt/data
       HERMES_PROFILE: risk-management
+      <<: *langsmith-redaction
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
@@ -2492,7 +2520,10 @@ services:
         max-size: "10m"
         max-file: "3"
     init: true
-    command: ["python3", "/opt/hgfinance/scripts/run_ceo_supervisor.py", "--interval", "1"]
+    # The image entrypoint sanitizes PATH. Use the venv interpreter explicitly
+    # so the upgraded SmithDB-capable LangSmith SDK is the runtime SDK, not
+    # merely a package installed during image build.
+    command: ["/opt/hermes/.venv/bin/python3", "/opt/hgfinance/scripts/run_ceo_supervisor.py", "--interval", "1"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - .:/opt/hgfinance:ro
@@ -2617,7 +2648,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    command: ["python3", "-m", "orchestration.maintenance_retention"]
+    command: ["/opt/hermes/.venv/bin/python3", "-m", "orchestration.maintenance_retention"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - .:/opt/hgfinance:ro
@@ -2681,11 +2712,16 @@ services:
       # LangSmith cleanup is named-project-only; default is intentionally never
       # queried. Retention caps complete run rows at 1,000 per named project;
       # whole trace trees are deleted and hourly provider limits are respected.
+      HGFINANCE_LANGSMITH_EGRESS_ENABLED: ${HGFINANCE_LANGSMITH_EGRESS_ENABLED:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGCHAIN_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_PROJECT_ID: ${LANGSMITH_PROJECT_ID:-}
       LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
+      LANGSMITH_METRICS_PROJECT_ID: ${LANGSMITH_METRICS_PROJECT_ID:-}
       LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
+      LANGSMITH_EVALS_PROJECT_ID: ${LANGSMITH_EVALS_PROJECT_ID:-}
       LANGSMITH_RETENTION_ENABLED: ${LANGSMITH_RETENTION_ENABLED:-true}
       # Clean the three named application projects. `default` and other named
       # projects remain untouched unless an operator explicitly opts in.
@@ -2718,7 +2754,9 @@ services:
       DISCORD_RETENTION_MAX_RUN_SECONDS: ${DISCORD_RETENTION_MAX_RUN_SECONDS:-900}
       MAINTENANCE_RETENTION_HEALTH_PATH: /tmp/hgfinance-maintenance-retention-health.json
     healthcheck:
-      test: ["CMD", "python3", "-m", "orchestration.maintenance_retention", "--healthcheck"]
+      # Use the same interpreter as the resident process. The image's system
+      # Python intentionally lacks LangSmith and other runtime dependencies.
+      test: ["CMD", "/opt/hermes/.venv/bin/python3", "-m", "orchestration.maintenance_retention", "--healthcheck"]
       interval: 15s
       timeout: 5s
       retries: 3

@@ -238,34 +238,53 @@ def create_kanban_task(
     cli_environment = os.environ.copy()
     cli_environment.setdefault("HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban"))
     try:
-        proc = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            # 컨테이너 안 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면
-            # 한국어 제목이 깨진 채로 보드에 들어간다.
-            encoding="utf-8", errors="replace",
-            timeout=float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8")),
-            check=False,
-            cwd=ROOT,
-            env=cli_environment,
+        command_timeout = max(0.1, float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8")))
+        reconcile_timeout = max(
+            0.1,
+            float(os.getenv("KANBAN_CREATE_RECONCILE_TIMEOUT_SECONDS", "5")),
         )
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+    except ValueError:
         return None
-    if proc.returncode != 0:
-        return None
-    try:
-        payload = json.loads(proc.stdout)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    task_id = payload.get("id") or payload.get("task_id")
-    return {
-        "task_id": str(task_id) if task_id else None,
-        "status": str(payload.get("status", "TODO")),
-        "source": "hermes-kanban",
-    }
+
+    # ``kanban create`` is idempotent at the CLI/board boundary.  A timeout
+    # does not prove that SQLite rolled the write back: the process can commit
+    # before its final JSON output or teardown. Replaying the *same* command
+    # once therefore either returns that durable card or creates the one card
+    # that did not commit. Do not add a BFF-side board lookup or second task
+    # creator here; the canonical CLI retains ownership of both concerns.
+    for timeout in (command_timeout, reconcile_timeout):
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                # 컨테이너 안 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면
+                # 한국어 제목이 깨진 채로 보드에 들어간다.
+                encoding="utf-8", errors="replace",
+                timeout=timeout,
+                check=False,
+                cwd=ROOT,
+                env=cli_environment,
+            )
+        except (FileNotFoundError, OSError):
+            return None
+        except subprocess.TimeoutExpired:
+            continue
+        if proc.returncode != 0:
+            return None
+        try:
+            payload = json.loads(proc.stdout)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        task_id = payload.get("id") or payload.get("task_id")
+        return {
+            "task_id": str(task_id) if task_id else None,
+            "status": str(payload.get("status", "TODO")),
+            "source": "hermes-kanban",
+        }
+    return None
 
 
 def unblock_kanban_task(*, task_id: str) -> bool:

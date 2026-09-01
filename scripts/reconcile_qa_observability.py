@@ -138,11 +138,13 @@ def reconcile_pending_langsmith(
 
         from orchestration.llm_observability import (
             close_root_trace,
+            langsmith_batch_ingest_info,
             langsmith_project,
         )
 
         now = datetime.now(timezone.utc)
         client = Client(
+            info=langsmith_batch_ingest_info(),
             hide_inputs=True,
             hide_outputs=True,
             hide_metadata=False,

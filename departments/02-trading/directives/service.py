@@ -9,12 +9,17 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
-from broker.ls_paper_broker import LSPaperBroker, LSPaperBrokerError, LSPaperHolding
+from broker.ls_paper_broker import (
+    KST,
+    LSPaperBroker,
+    LSPaperBrokerError,
+    LSPaperHolding,
+)
 from broker.paper_policy import participation_cap
 
 from .auth import (
@@ -37,6 +42,56 @@ from .repository import DirectiveRecord, DirectiveRepository, DirectiveRepositor
 
 
 logger = logging.getLogger(__name__)
+
+DEFERRED_MARKET_SESSION_CODES = frozenset(
+    {
+        "TRADING_MARKET_SESSION_CLOSED",
+        "TRADING_MARKET_SESSION_UNAVAILABLE",
+    }
+)
+_MARKET_SESSION_REQUIRED_ACTIONS = frozenset(
+    {
+        DirectiveAction.PLACE_ORDER,
+        DirectiveAction.PLACE_BASKET,
+        DirectiveAction.SELL_POSITION,
+        DirectiveAction.SELL_ALL,
+    }
+)
+
+
+def is_market_session_deferred(record: DirectiveRecord) -> bool:
+    """Return whether a no-effect directive is waiting for a KRX session."""
+
+    return (
+        record.state is DirectiveState.RECEIVED
+        and record.action in _MARKET_SESSION_REQUIRED_ACTIONS
+        and not record.legs
+        and record.error_code in DEFERRED_MARKET_SESSION_CODES
+    )
+
+
+def leg_order_date(record: DirectiveRecord, leg: Any) -> date | None:
+    """Resolve the KST trading day whose LS order book holds this leg.
+
+    CSPAQ13700 is a per-day account query.  Asking about today for a leg
+    placed on an earlier session returns no row at all, and the caller reads
+    that as "no news" and leaves the leg ACKNOWLEDGED forever - which keeps
+    its directive IN_PROGRESS and its priority-2000 book barrier held, so
+    every later user order queues behind it (observed 2026-09-01: a SELL_ALL
+    placed 17 minutes before the close held the book for 19.8 hours).
+
+    A DAY leg's expiry is the canonical KRX session close of the day it was
+    placed, so its KST date is the order date.  Legacy rows without an expiry
+    fall back to the directive's creation time; ``None`` lets the broker keep
+    its own "today" default.
+    """
+
+    stamp = getattr(leg, "expires_at", None) or record.created_at
+    if stamp is None:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(KST).date()
 
 
 @dataclass(frozen=True)
@@ -123,6 +178,20 @@ def _external_close_reconciliation_grace_seconds() -> float:
     if not math.isfinite(configured):
         return 120.0
     return min(300.0, max(30.0, configured))
+
+
+def _external_day_leg_is_past_close_grace(
+    leg: Any, now: datetime | None
+) -> bool:
+    """Return whether a DAY leg can no longer execute in its source session."""
+
+    expires_at = getattr(leg, "expires_at", None)
+    if now is None or expires_at is None:
+        return False
+    return now.astimezone(timezone.utc) >= (
+        expires_at.astimezone(timezone.utc)
+        + timedelta(seconds=_external_close_reconciliation_grace_seconds())
+    )
 
 
 def _mechanical_order_rules(
@@ -327,6 +396,34 @@ class UserDirectiveService:
                             "is reconciled"
                         ),
                     )
+                if (
+                    failure.code in DEFERRED_MARKET_SESSION_CODES
+                    and record.action in _MARKET_SESSION_REQUIRED_ACTIONS
+                    and not current.legs
+                ):
+                    # Same policy ``reconcile_active`` already applies: a
+                    # closed/unavailable KRX session is an admission wait, not
+                    # a rejection.  Only the worker had it, so an order placed
+                    # outside the session died on submission instead of being
+                    # carried to the next open (2026-09-01).
+                    #
+                    # ``_sell_all``/``_sell_position`` take the book barrier
+                    # *before* resolving the session close, so this row may
+                    # already own it.  Release before parking - holding a
+                    # priority-2000 barrier while waiting for tomorrow's open
+                    # would stall the whole book.  ``release_barrier`` only
+                    # acts when this directive is the owner, so the
+                    # PLACE_ORDER path (which never acquired it) is unaffected.
+                    self.repository.release_barrier(record)
+                    return self.repository.set_state(
+                        record.directive_id,
+                        DirectiveState.RECEIVED,
+                        error_code=failure.code,
+                        error_message=(
+                            "queued until the canonical KRX REGULAR session "
+                            "is available"
+                        ),
+                    )
                 active_order_effect = any(
                     leg.side is not None
                     and leg.state in {
@@ -412,6 +509,19 @@ class UserDirectiveService:
                         queued.fund_id, queued.book_id, now=current_time
                     )
                     current = self.repository.get(queued.directive_id) or queued
+                    if is_market_session_deferred(current):
+                        try:
+                            self.repository.market_session_close(now=current_time)
+                        except Exception as exc:
+                            translated = _translate(exc, current.directive_id)
+                            if translated.code in DEFERRED_MARKET_SESSION_CODES:
+                                # No broker/order effect exists yet. Keep the
+                                # durable row stable until the canonical KRX
+                                # calendar says the session is open; do not
+                                # claim/touch it on every worker poll.
+                                reconciled.append(current)
+                                continue
+                            raise
                     if current.state is DirectiveState.RECEIVED:
                         self.repository.claim(current.directive_id)
                         current = self.repository.get(current.directive_id) or current
@@ -477,6 +587,27 @@ class UserDirectiveService:
                         )
                     )
                     continue
+                if (
+                    translated.code in DEFERRED_MARKET_SESSION_CODES
+                    and current.action in _MARKET_SESSION_REQUIRED_ACTIONS
+                    and not current.legs
+                ):
+                    # A closed/unavailable session is a retryable admission
+                    # wait, not a failed reconciliation. Persist it once as a
+                    # RECEIVED row; subsequent cycles use the read-only check
+                    # above and avoid repeated claim/touch writes.
+                    reconciled.append(
+                        self.repository.set_state(
+                            queued.directive_id,
+                            DirectiveState.RECEIVED,
+                            error_code=translated.code,
+                            error_message=(
+                                "queued until the canonical KRX REGULAR "
+                                "session is available"
+                            ),
+                        )
+                    )
+                    continue
                 errors.append(f"{queued.directive_id}:{translated.code}")
                 try:
                     # A bad/stale quote for one row must not permanently occupy
@@ -523,6 +654,28 @@ class UserDirectiveService:
                     error_code="TRADING_PAPER_ORDER_EXPIRED",
                     error_message="SELL_ALL remains incomplete after a DAY leg expired",
                 )
+                self.repository.release_barrier(expired)
+            elif expired.action is DirectiveAction.SELL_POSITION:
+                # SELL_POSITION was the one expiring action with no branch here,
+                # so its legs expired while the row stayed IN_PROGRESS and kept
+                # the priority-2000 book barrier forever; every later user order
+                # queued behind it as TRADING_HIGHER_PRIORITY_ACTIVE and the
+                # queue never drained (2026-09-01).  One instrument means the
+                # fill count is the whole story: nothing filled, nothing sold.
+                if any(leg.filled_quantity > 0 for leg in expired.legs):
+                    self.repository.set_state(
+                        expired.directive_id,
+                        DirectiveState.PARTIAL,
+                        error_code="TRADING_PAPER_ORDER_EXPIRED",
+                        error_message="SELL_POSITION expired after a partial fill",
+                    )
+                else:
+                    self.repository.set_state(
+                        expired.directive_id,
+                        DirectiveState.FAILED,
+                        error_code="TRADING_PAPER_ORDER_EXPIRED",
+                        error_message="SELL_POSITION expired before any fill",
+                    )
                 self.repository.release_barrier(expired)
 
     def _fill_from_quote(
@@ -680,12 +833,44 @@ class UserDirectiveService:
             return leg
         raw_order_id = broker_order_id.split(":", 1)[1]
         try:
-            status = self.external_broker.order_status(raw_order_id)
-        except LSPaperBrokerError:
+            status = self.external_broker.order_status(
+                raw_order_id, order_date=leg_order_date(record, leg)
+            )
+        except LSPaperBrokerError as exc:
             # An acknowledged broker id remains authoritative.  A transient
             # status-query failure must not turn into a second placement.
+            # LS can reject a prior-session CSPAQ13700 lookup (00704). Once
+            # the DAY session and closing-reconciliation grace have elapsed,
+            # that order cannot execute again; expire it without inferring a
+            # fill or retrying placement. Other broker failures remain
+            # non-terminal because they can still be transient.
+            if (
+                exc.code == "LS_PAPER_QUERY_REJECTED"
+                and _external_day_leg_is_past_close_grace(leg, now)
+            ):
+                return self.repository.terminate_broker_leg(
+                    record,
+                    leg,
+                    state=DirectiveLegState.EXPIRED,
+                    error_code="TRADING_PAPER_ORDER_EXPIRED",
+                    error_message=(
+                        "LS PAPER DAY order status was unavailable after the "
+                        "closing reconciliation grace period"
+                    ),
+                )
             return leg
         if status is None:
+            if _external_day_leg_is_past_close_grace(leg, now):
+                return self.repository.terminate_broker_leg(
+                    record,
+                    leg,
+                    state=DirectiveLegState.EXPIRED,
+                    error_code="TRADING_PAPER_ORDER_EXPIRED",
+                    error_message=(
+                        "LS PAPER DAY order was absent after the closing "
+                        "reconciliation grace period"
+                    ),
+                )
             return leg
         delta = status.filled_quantity - Decimal(leg.filled_quantity)
         if delta > 0:
@@ -730,14 +915,9 @@ class UserDirectiveService:
                 error_code="LS_PAPER_ORDER_" + status.state,
                 error_message="LS PAPER broker reported a terminal order state",
             )
-        expires_at = leg.expires_at
         if (
-            now is not None
-            and status.state == "ACKNOWLEDGED"
-            and expires_at is not None
-            and now.astimezone(timezone.utc)
-            >= expires_at.astimezone(timezone.utc)
-            + timedelta(seconds=_external_close_reconciliation_grace_seconds())
+            status.state == "ACKNOWLEDGED"
+            and _external_day_leg_is_past_close_grace(leg, now)
         ):
             return self.repository.terminate_broker_leg(
                 record,

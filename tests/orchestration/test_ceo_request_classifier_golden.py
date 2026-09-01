@@ -132,6 +132,11 @@ STABLE_CASES: tuple[GoldenCase, ...] = (
         note="이전 질의 플랜 승계",
     ),
     GoldenCase("안녕", "clarification"),
+    GoldenCase(
+        "7만 원 안 넘으면 사지 마",
+        "no_action",
+        note="순수 부정 주문은 추가 질문이나 부서 위임 없이 종료한다",
+    ),
     # 아래 네 건은 main이 나중에 추가한 문법이다. 부정 가드가 이 레인들을
     # 막지 않는지 고정한다.
     GoldenCase(
@@ -148,6 +153,11 @@ STABLE_CASES: tuple[GoldenCase, ...] = (
         "평균 매입가 대비 2% 수익이 난 뒤 고점 대비 1% 하락하면 전량 매도",
         "conditional_order",
         note="트레일링 청산",
+    ),
+    GoldenCase(
+        "현대약품 오르면 사줘",
+        "conditional_order",
+        note="구어체 매수 동사도 조건값 확인을 위해 조건주문 레인으로 보낸다",
     ),
     GoldenCase(
         "시스템 상태 알려줘",

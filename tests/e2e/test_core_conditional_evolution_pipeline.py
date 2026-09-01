@@ -369,6 +369,63 @@ def test_user_query_reaches_conditional_paper_result_and_evolution_approval(
     )
 
 
+def test_front_loaded_quantity_reaches_active_conditional_paper_status(
+    monkeypatch,
+) -> None:
+    """Preserve the exact reported sentence through CEO, Trading, and status."""
+
+    raw = "원익 10주 1분봉 엔빌로프(20,5) 상단선 돌파시 시장가 매도"
+    orders, rules, tasks = _install_workflow(monkeypatch, raw_instruction=raw)
+    admission = next(iter(orders._records.values()))
+
+    assert admission.raw_instruction == raw
+    assert raw in tasks["t_root1"]["body"]
+    assert raw in tasks["t_trade1"]["body"]
+
+    candidate = ConditionalRuleCandidate.model_validate(
+        {
+            "symbol": "원익",
+            "condition": {
+                "type": "CROSS",
+                "operator": "ABOVE",
+                "left": {"type": "MARKET", "field": "CLOSE"},
+                "right": {
+                    "type": "INDICATOR",
+                    "name": "ENVELOPE",
+                    "output": "UPPER",
+                    "timeframe": "1M",
+                    "parameters": {"PERIOD": 20, "PERCENT": 5},
+                },
+            },
+            "action": {
+                "side": "SELL",
+                "sizing": {"type": "FIXED_SHARES", "value": "10"},
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            },
+            "evaluation": {"clock": "BAR_CLOSE", "primary_timeframe": "1M"},
+        }
+    )
+    activation = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidate=candidate,
+    )
+
+    assert activation["binding"] is True
+    assert activation["state"] == "ACTIVE"
+    assert activation["summary"]["side"] == "SELL"
+    assert activation["summary"]["sizing_value"] == "10"
+    assert len(rules.list_for_user(USER_ID)) == 1
+
+    status = orchestrator.get_user_conditional_paper_rule_status(
+        root_task_id="t_root1", trading_task_id="t_trade1"
+    )
+    assert status["authority_verified"] is True
+    assert status["mode"] == "PAPER"
+    assert status["workflow_state"] == "WAITING_FOR_TRIGGER"
+
+
 def test_short_relative_move_pair_reaches_safe_clarification(
     monkeypatch,
 ) -> None:

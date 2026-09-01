@@ -461,7 +461,7 @@ class CeoRootFastPathTest(unittest.TestCase):
 
             self.assertEqual(client.workflow_calls, 0)
             self.assertEqual(client.show_calls, ["root-delegated-fast"])
-            self.assertEqual(
+            self.assertCountEqual(
                 [item["assignee"] for item in client.created],
                 ["risk-management", "accounting-portfolio-department"],
             )

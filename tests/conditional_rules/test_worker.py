@@ -16,6 +16,7 @@ from apps.api.conditional_rule_worker import (
     RuntimeInputs,
     _cycle_sleep_seconds,
     _align_completed_bars,
+    _project_intrabar_quote,
 )
 from orchestration.conditional_rules.market_data import (
     MarketPriceResolverError,
@@ -75,6 +76,24 @@ def test_multi_timeframe_alignment_excludes_bars_newer_than_primary_close() -> N
     assert [item.bucket_time for item in aligned[Timeframe.M15]] == [at(8, 45)]
 
 
+def test_intrabar_quote_projection_replaces_only_the_open_primary_candle() -> None:
+    kst = timezone(timedelta(hours=9))
+    at = lambda hour, minute: datetime(2026, 8, 20, hour, minute, tzinfo=kst)
+    projected = _project_intrabar_quote(
+        {Timeframe.M1: [_candle(at(9, 0), "100"), _candle(at(9, 1), "101")]},
+        primary=Timeframe.M1,
+        price=Decimal("105"),
+        observed_at=at(9, 2),
+    )
+
+    assert [item.close for item in projected[Timeframe.M1]] == [
+        Decimal("100"),
+        Decimal("101"),
+        Decimal("105"),
+    ]
+    assert projected[Timeframe.M1][-1].bucket_time == at(9, 2)
+
+
 NOW = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
 
 
@@ -94,6 +113,8 @@ def active_rule(
     trailing_drawdown_mode: str | None = None,
     trailing_activation_return: str | None = None,
     trailing_expected_position_quantity: str | None = None,
+    clock: str = "QUOTE",
+    primary_timeframe: str | None = None,
 ) -> ActiveRule:
     condition: dict[str, object] = {
         "type": "COMPARISON",
@@ -125,7 +146,11 @@ def active_rule(
                 "side": side,
                 "sizing": {"type": "FIXED_SHARES", "value": "2"},
             },
-            "evaluation": {"clock": "QUOTE", "max_data_age_seconds": 10},
+            "evaluation": {
+                "clock": clock,
+                "primary_timeframe": primary_timeframe,
+                "max_data_age_seconds": 10,
+            },
             "execution_mode": "PAPER",
             "repeat_policy": "ONCE",
             "expires_at": (NOW + timedelta(days=30)).isoformat(),
@@ -149,6 +174,7 @@ def inputs(
     position_quantity: str = "10",
     sellable_quantity: str = "10",
     observed: datetime | None = None,
+    evaluation_key: str | None = None,
 ) -> RuntimeInputs:
     observed = observed or datetime.now(timezone.utc)
     frame = EvaluationFrame(
@@ -159,7 +185,7 @@ def inputs(
     )
     return RuntimeInputs(
         evaluation_context=EvaluationContext(current=frame),
-        evaluation_key=f"QUOTE:{observed.isoformat()}",
+        evaluation_key=evaluation_key or f"QUOTE:{observed.isoformat()}",
         context_sha256="b" * 64,
         data_watermark=observed,
         membership_active=True,
@@ -439,6 +465,38 @@ def test_false_condition_is_recorded_without_trigger() -> None:
     assert store.false == 1
     assert store.claims == 0
     assert client.submit_calls == 0
+
+
+def test_intrabar_false_audit_is_sampled_once_per_open_primary_bar() -> None:
+    rule = active_rule(
+        threshold="100",
+        clock="INTRABAR",
+        primary_timeframe="1M",
+    )
+    store = FakeStore(rule)
+    start = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
+    client = FakeClient(
+        inputs(
+            price="90",
+            observed=start,
+            evaluation_key=f"INTRABAR:1M:{start.isoformat()}",
+        )
+    )
+    worker = ConditionalRuleWorker(store, client)
+
+    first = worker.process_once()
+    observed_again = start + timedelta(seconds=20)
+    client.runtime_inputs = inputs(
+        price="90",
+        observed=observed_again,
+        evaluation_key=f"INTRABAR:1M:{observed_again.isoformat()}",
+    )
+    second = worker.process_once()
+
+    assert first["evaluated"] == 1
+    assert second["evaluated"] == 1
+    assert store.false == 1
+    assert store.claims == 0
 
 
 def test_active_rules_are_evaluated_with_bounded_parallelism() -> None:
@@ -814,3 +872,65 @@ def test_trading_conflict_is_terminal_and_preserves_upstream_code(monkeypatch) -
 
     assert raised.value.code == "TRADING_MARKET_SESSION_CLOSED"
     assert raised.value.retryable is False
+
+
+def test_trading_stale_quote_conflict_is_retryable_once_on_same_execution(monkeypatch) -> None:
+    response = io.BytesIO(
+        b'{"error_code":"TRADING_MARKET_QUOTE_STALE","message":"stale"}'
+    )
+
+    def rejected(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            "http://trading.test/submit", 409, "Conflict", {}, response
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", rejected)
+    client = HttpRuntimeClient(
+        trading_api_url="http://trading.test",
+        market_api_url="http://market.test",
+    )
+
+    with pytest.raises(RuntimeDataError) as raised:
+        client._json("http://trading.test/submit", method="POST")
+
+    assert raised.value.code == "TRADING_MARKET_QUOTE_STALE"
+    assert raised.value.retryable is True
+
+
+def test_stale_submission_requeues_only_the_existing_execution() -> None:
+    class StaleClient(FakeClient):
+        def submit(self, execution: SubmitReadyExecution) -> UUID:
+            self.submit_calls += 1
+            raise RuntimeDataError(
+                "TRADING_MARKET_QUOTE_STALE", "stale", retryable=True
+            )
+
+    class RetryStore(FakeStore):
+        def __init__(self, rule):
+            super().__init__(rule)
+            self.retry_calls: list[tuple[UUID, dict]] = []
+
+        def mark_retryable_failure(self, rule_execution_id: UUID, **kwargs) -> None:
+            self.retry_calls.append((rule_execution_id, kwargs))
+
+    rule = active_rule(threshold="100")
+    store = RetryStore(rule)
+    execution = SubmitReadyExecution(
+        rule_execution_id=UUID("60000000-0000-0000-0000-000000000001"),
+        trigger_id="trg_stale",
+        rule_id=rule.rule_id,
+        rule_version=rule.rule_version,
+        idempotency_key="rule:test:stale",
+    )
+
+    assert not ConditionalRuleWorker(store, StaleClient(inputs(price="110")))._submit(execution)
+    assert store.retry_calls == [
+        (
+            execution.rule_execution_id,
+            {
+                "code": "TRADING_MARKET_QUOTE_STALE",
+                "message": "stale",
+                "max_attempts": 2,
+            },
+        )
+    ]

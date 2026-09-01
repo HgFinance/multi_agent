@@ -1087,5 +1087,55 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(web_view[0].task_id, "t_shared")
 
 
+class CanonicalEnvelopeCarriesEveryForwardedField(unittest.TestCase):
+    """`_ceo_query` rebuilds a CeoAsk out of the canonical envelope.
+
+    `mirror_ask` takes `ceo.CeoAsk` as its own request model precisely so the
+    HTTP schema cannot drift, but CanonicalIngress is a third schema in the
+    middle that no test covered.  Forwarding `confirm_order` into CeoAsk
+    without declaring it on the envelope turned every `/ui/ceo/ask` call into
+    an AttributeError - HTTP 500 on the first order of the day (2026-09-01).
+    """
+
+    def _forwarded_attributes(self) -> set[str]:
+        import ast
+        import inspect
+        import textwrap
+
+        source = textwrap.dedent(inspect.getsource(ceo_mirror_api._ceo_query))
+        tree = ast.parse(source)
+        return {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "request"
+        }
+
+    def test_every_attribute_read_off_the_envelope_is_declared_on_it(self) -> None:
+        forwarded = self._forwarded_attributes()
+        self.assertIn("confirm_order", forwarded)
+        missing = forwarded - set(CanonicalIngress.model_fields)
+        self.assertEqual(missing, set(), f"not declared on CanonicalIngress: {missing}")
+
+    def test_web_ask_carries_the_users_confirmation_into_the_envelope(self) -> None:
+        envelope = CanonicalIngress(
+            query="현대약품 100주 시장가 매수",
+            request_id="request-confirm-1",
+            source="web",
+            actor_id="web-user",
+            confirm_order=True,
+        )
+        self.assertTrue(envelope.confirm_order)
+        self.assertFalse(
+            CanonicalIngress(
+                query="현대약품 100주 시장가 매수",
+                request_id="request-confirm-2",
+                source="web",
+                actor_id="web-user",
+            ).confirm_order
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

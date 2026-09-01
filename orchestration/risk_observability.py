@@ -26,6 +26,7 @@ from orchestration.llm_observability import (
     langsmith_enabled,
     langsmith_project,
 )
+from orchestration.langsmith_egress import langsmith_egress_enabled
 
 RISK_SPANS = frozenset(
     {
@@ -329,7 +330,8 @@ def publish_risk_hermes_profile(
 
     env = environment or os.environ
     if not (
-        (
+        langsmith_egress_enabled(env)
+        and (
             str(env.get("LANGSMITH_TRACING", "")).casefold()
             in {"1", "true", "yes", "on"}
             or str(env.get("HGFINANCE_LANGSMITH_PUBLISH_ENABLED", "")).casefold()

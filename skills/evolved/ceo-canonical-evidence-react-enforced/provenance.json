@@ -1,0 +1,46 @@
+{
+  "activated_at": "2026-08-31T13:49:18.940693+00:00",
+  "adapter_id": null,
+  "approved_by": "discord:910921055172960286",
+  "base_model": "qwen2.5-14b-instruct-awq",
+  "benchmark_ids": [
+    "hermes-ceo-evolved-skill-enforced-v1"
+  ],
+  "candidate_id": "ceo-canonical-evidence-react-enforced-v1-2b38dc7de3ec",
+  "classification": "evolved",
+  "content_hash": "2bf5e44047d68e58e99fe76ba1796a8b354be5e637b9515c2f36f162bf3f6f86",
+  "department": "00-ceo-office",
+  "generated_at": "2026-08-31T13:36:50.099815+00:00",
+  "generated_by": "skill-evolution-pipeline",
+  "generation_model": "qwen2.5-14b-instruct-awq",
+  "improvement_type": "SKILL_CREATE",
+  "kind": "ceo-canonical-evidence-react-enforced",
+  "mandatory_controls": [
+    "evidence_refs에는 관측 패킷에 명시된 증거 식별자만 원문 그대로 넣고, 없으면 빈 배열을 반환한다.",
+    "targets에는 정본 assignee 이름만 사용하며 liaison·별칭은 사용하지 않는다.",
+    "주문, 승인, 외부 변경을 만들지 않는다."
+  ],
+  "occurrences": 3,
+  "owner_profile": "ceo-agent",
+  "parent_version": null,
+  "proposal_diff_hash": "5c72ab3db8462c0b23c32591b87f535b3780c9b62a0b0a43ef9a1f978f9cdf76",
+  "qa_verdict": "PASS",
+  "runs": [
+    "ceo-enforced-boundary-v1",
+    "ceo-enforced-canonical-targets-v1",
+    "ceo-enforced-evidence-ids-v1"
+  ],
+  "samples": [
+    "QA evidence ID regression: no prose or department name may enter evidence_refs.",
+    "QA canonical target regression: only canonical assignees are valid targets.",
+    "QA authority regression: CEO keeps the no-order, no-approval, no-external-change boundary."
+  ],
+  "schema_version": "hgfinance.evolution-skills.v1",
+  "slug": "ceo-canonical-evidence-react-enforced",
+  "source_artifact_ids": [
+    "ceo-enforced-boundary-v1",
+    "ceo-enforced-canonical-targets-v1",
+    "ceo-enforced-evidence-ids-v1"
+  ],
+  "version": 1
+}

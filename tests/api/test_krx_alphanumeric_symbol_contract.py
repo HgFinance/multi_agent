@@ -112,8 +112,69 @@ def test_ls_account_projection_has_periodic_rest_resync():
     assert "socket.recv(), timeout=ACCOUNT_PROJECTION_RESYNC_SECONDS" in source
     assert "except asyncio.TimeoutError:" in source
     timeout_branch = source.split("except asyncio.TimeoutError:", 1)[1]
-    assert "await _resync(config, token)" in timeout_branch
-    assert "await _resync_today_activity(config, token)" in timeout_branch
+    assert "await _resync_projection(config, token)" in timeout_branch
+
+
+def test_ls_fill_projection_resync_is_coalesced_and_non_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    config = SimpleNamespace(environment="PAPER")
+
+    async def resync(_config: SimpleNamespace, _token: str) -> None:
+        calls.append("holdings")
+
+    async def resync_today(_config: SimpleNamespace, _token: str) -> None:
+        calls.append("today")
+
+    monkeypatch.setattr(ls_account_stream, "_resync", resync)
+    monkeypatch.setattr(ls_account_stream, "_resync_today_activity", resync_today)
+    monkeypatch.setattr(ls_account_stream, "ACCOUNT_EVENT_RESYNC_COOLDOWN_SECONDS", 0.0)
+    monkeypatch.setattr(ls_account_stream, "_projection_resync_task", None)
+    monkeypatch.setattr(ls_account_stream, "_projection_resync_started_at", 0.0)
+
+    async def scenario() -> None:
+        ls_account_stream._schedule_event_projection_resync(config, "token")
+        first = ls_account_stream._projection_resync_task
+        assert first is not None
+        # A burst of fills reuses the same scheduled refresh rather than
+        # creating one REST pair per event.
+        ls_account_stream._schedule_event_projection_resync(config, "token")
+        assert ls_account_stream._projection_resync_task is first
+        await first
+
+    asyncio.run(scenario())
+    assert calls == ["holdings", "today"]
+
+
+def test_portfolio_live_serves_stale_ledger_while_refreshing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    today = ls_account_stream.date.today()
+    cached_ledger = {"rows": [], "totals": {"count": 0}}
+    scheduled: list[int] = []
+    monkeypatch.setattr(
+        ls_account_stream,
+        "_ledger_cache",
+        {(today.isoformat(), today.isoformat()): (time.time() - 120, cached_ledger)},
+    )
+    monkeypatch.setattr(
+        ls_account_stream,
+        "_schedule_ledger_refresh",
+        lambda days: scheduled.append(days),
+    )
+
+    async def scenario() -> tuple[dict[str, object], object, object]:
+        return await ls_account_stream._load_ledger(
+            days=1,
+            cache_seconds=10,
+            stale_if_available=True,
+        )
+
+    ledger, start, end = asyncio.run(scenario())
+    assert ledger is cached_ledger
+    assert start == today == end
+    assert scheduled == [1]
 
 
 def test_ls_realtime_disables_protocol_ping_keepalive(

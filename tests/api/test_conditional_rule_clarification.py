@@ -13,6 +13,7 @@ from apps.api.conditional_rule_clarification import (
     classify_code,
     extract_code,
     should_ask,
+    split_codes,
 )
 
 
@@ -60,6 +61,20 @@ def test_capability_gap_states_the_limit_and_never_asks() -> None:
     assert "명시해 주세요" not in message
 
 
+@pytest.mark.parametrize(
+    "code",
+    (
+        "INTRABAR_TIMEFRAME_UNSUPPORTED",
+        "INTRABAR_TIMEFRAME_MISMATCH",
+        "INTRABAR_FIELD_UNSUPPORTED",
+        "INTRABAR_INDICATOR_UNSUPPORTED",
+    ),
+)
+def test_intrabar_runtime_limits_are_capability_gaps(code: str) -> None:
+    assert classify_code(code) is ClarificationClass.CAPABILITY_GAP
+    assert should_ask((code,)) is False
+
+
 def test_ambiguous_sentence_is_asked_with_an_open_question() -> None:
     codes = ("QUANTITY_REQUIRED", "TIMEFRAME_NOT_IN_INSTRUCTION")
     assert should_ask(codes, source=ClarificationSource.HERMES_REASON) is True
@@ -69,6 +84,27 @@ def test_ambiguous_sentence_is_asked_with_an_open_question() -> None:
     assert "매수 수량을 명시해 주세요" in message
     assert "지표의 봉 주기를 명시해 주세요" in message
     assert "거부됩니다" not in message
+
+
+def test_missing_conditional_threshold_has_a_specific_open_question() -> None:
+    code = "CONDITION_THRESHOLD_REQUIRED"
+
+    assert should_ask((code,)) is True
+    assert "상승·하락 조건 값" in clarification_message((code,))
+
+
+def test_unresolved_conditional_instrument_is_an_open_question_not_a_defect() -> None:
+    code = "paper_order_instrument_clarification_required"
+
+    assert should_ask((code,)) is True
+    assert "6자리 코드" in clarification_message((code,))
+
+
+def test_misspelled_condition_expression_requests_one_correction() -> None:
+    code = "CONDITION_EXPRESSION_CLARIFICATION_REQUIRED"
+
+    assert should_ask((code,)) is True
+    assert "지표 철자" in clarification_message((code,))
 
 
 def test_ambiguity_labels_never_propose_a_value_of_their_own() -> None:
@@ -135,3 +171,68 @@ def test_unknown_code_defaults_to_the_safe_class_for_its_source(
     source: ClarificationSource, expected: ClarificationClass
 ) -> None:
     assert classify_code("SOMETHING_NOBODY_CLASSIFIED", source=source) is expected
+
+
+def test_joined_hermes_reason_is_split_into_the_codes_it_carries() -> None:
+    """What the user actually saw on 2026-09-01.
+
+    Hermes answered with four reasons in one string.  Classifying the join as
+    a single unknown code made it a USER_AMBIGUITY question and printed the
+    raw enum blob, so two registered codes silently lost their Korean labels
+    and a capability gap was served back as "rephrase it".
+    """
+
+    reason = (
+        "UNSUPPORTED_MULTI_STAGE_POSITION_MANAGEMENT; AMBIGUOUS_RETURN_BASELINE; "
+        "QUANTITY_REQUIRED; UNSUPPORTED_COMBINED_TRAILING_OR_MOVING_AVERAGE_EXIT"
+    )
+    codes = split_codes(reason)
+    assert len(codes) == 4
+    assert should_ask(codes, source=ClarificationSource.HERMES_REASON) is False
+
+    message = clarification_message(
+        codes, source=ClarificationSource.HERMES_REASON
+    )
+    assert "UNSUPPORTED" not in message and "_" not in message
+    assert "다시 요청하셔도 동일하게 거부됩니다" in message
+
+
+def test_split_keeps_an_annotated_detail_line_whole() -> None:
+    """"CODE: offending detail" may contain a semicolon of its own."""
+
+    annotated = "UNSUPPORTED_PORTFOLIO_FIELD: unsupported field 'X'; see registry"
+    assert split_codes(annotated) == (annotated,)
+    assert classify_code(annotated) is ClarificationClass.CAPABILITY_GAP
+
+
+def test_unregistered_unsupported_name_states_the_limit_without_leaking() -> None:
+    code = "UNSUPPORTED_SOMETHING_NOBODY_REGISTERED"
+    assert (
+        classify_code(code, source=ClarificationSource.HERMES_REASON)
+        is ClarificationClass.CAPABILITY_GAP
+    )
+    message = clarification_message(
+        (code,), source=ClarificationSource.HERMES_REASON
+    )
+    assert code not in message
+    assert "요청하신 조건을 현재 지원하지 않습니다" in message
+
+
+def test_hermes_prose_reason_still_reaches_the_user() -> None:
+    """Only enum tokens are withheld; a written reason is the point of it."""
+
+    reason = "종목을 하나로 확정하지 못했습니다"
+    assert reason in clarification_message(
+        (reason,), source=ClarificationSource.HERMES_REASON
+    )
+
+
+def test_capability_gap_answer_drops_the_ambiguity_prompts() -> None:
+    """Asking for a quantity beside "a retype changes nothing" is the loop."""
+
+    codes = ("QUANTITY_REQUIRED", "UNSUPPORTED_MULTI_STAGE_POSITION_MANAGEMENT")
+    message = clarification_message(
+        codes, source=ClarificationSource.HERMES_REASON
+    )
+    assert "매수 수량을 명시해 주세요" not in message
+    assert "독립 규칙으로 나눠 주세요" in message

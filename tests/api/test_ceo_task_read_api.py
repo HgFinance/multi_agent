@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import os
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import patch
 
@@ -194,6 +196,24 @@ class WorkflowReadModelTest(unittest.TestCase):
         workflow = load_workflow(QA_ID, fetch=_fetch_from(_board()))
 
         self.assertEqual(workflow.root_task_id, ROOT_ID)
+
+    def test_child_resolution_reuses_the_initial_show_response(self) -> None:
+        board = _board()
+        board[ROOT_ID]["body"] = build_root_body(
+            "엔비디아 최신 사업 리스크만 분석해줘.",
+            "req-child-cache",
+            producer="portfolio-bff-deterministic",
+        )
+        calls: list[str] = []
+
+        def fetch(task_id: str) -> dict[str, Any]:
+            calls.append(task_id)
+            return board[task_id]
+
+        workflow = load_workflow(QA_ID, fetch=fetch)
+
+        self.assertEqual(workflow.root_task_id, ROOT_ID)
+        self.assertEqual(calls.count(QA_ID), 1)
 
     def test_edges_only_keep_parents_inside_the_graph(self) -> None:
         board = _board()
@@ -743,14 +763,28 @@ class CeoTaskApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_status_endpoint_reports_progress(self) -> None:
-        with patch.object(
-            ceo,
-            "load_workflow",
-            return_value=load_workflow(ROOT_ID, fetch=_fetch_from(_board())),
+        workflow = load_workflow(ROOT_ID, fetch=_fetch_from(_board()))
+        # A legacy root without the current producer marker previously caused
+        # the status route to scan the full board even though the normalized
+        # workflow had already hydrated every descendant.
+        legacy_root = dict(workflow.root_payload)
+        legacy_root["body"] = str(legacy_root["body"]).replace(
+            "producer=portfolio-bff-deterministic\n", ""
+        )
+        workflow = ceo_kanban_read.Workflow(
+            root_task_id=workflow.root_task_id,
+            nodes=workflow.nodes,
+            metadata=workflow.metadata,
+            root_payload=legacy_root,
+        )
+        with (
+            patch.object(ceo, "load_workflow", return_value=workflow),
+            patch.object(ceo.hermes_boundary, "list_kanban_tasks") as list_tasks,
         ):
             response = self.client.get(f"/ui/ceo/tasks/{ROOT_ID}")
 
         self.assertEqual(response.status_code, 200)
+        list_tasks.assert_not_called()
         body = response.json()
         self.assertEqual(body["schema_version"], "ceo.task-status.v1")
         self.assertEqual(body["status"], "running")
@@ -1184,6 +1218,126 @@ class KanbanReadCacheTest(unittest.TestCase):
 
         self.assertEqual(len(calls), 2, f"고유 명령 2개만 실행돼야 한다: {calls}")
 
+    def test_concurrent_identical_misses_share_one_cli_call(self) -> None:
+        """프론트의 status와 graph가 같은 Task를 같이 열어도 CLI는 한 번만 부른다."""
+
+        calls: list[tuple[str, ...]] = []
+        first_call_started = threading.Event()
+        allow_first_call_to_finish = threading.Event()
+
+        def run(command, **_kwargs):
+            calls.append(tuple(command))
+            first_call_started.set()
+            self.assertTrue(allow_first_call_to_finish.wait(timeout=2))
+            return self._ok('{"task":{"id":"t_a","status":"running"}}')
+
+        with (
+            patch.object(ceo_kanban_read.subprocess, "run", side_effect=run),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            first = executor.submit(
+                ceo_kanban_read.run_kanban, ("show", "t_a", "--json")
+            )
+            self.assertTrue(first_call_started.wait(timeout=2))
+            second = executor.submit(
+                ceo_kanban_read.run_kanban, ("show", "t_a", "--json")
+            )
+            allow_first_call_to_finish.set()
+            futures = [first, second]
+            results = [future.result(timeout=2) for future in futures]
+
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(len(calls), 1)
+
+    def test_expired_success_returns_immediately_while_one_refresh_runs(self) -> None:
+        key = ("show", "t_a", "--json")
+        old = '{"task":{"id":"t_a","status":"running"}}'
+        new = '{"task":{"id":"t_a","status":"done"}}'
+        refresh_started = threading.Event()
+        allow_refresh = threading.Event()
+        calls: list[tuple[str, ...]] = []
+
+        def run(command, **_kwargs):
+            calls.append(tuple(command))
+            refresh_started.set()
+            self.assertTrue(allow_refresh.wait(timeout=2))
+            return self._ok(new)
+
+        now = ceo_kanban_read.time.monotonic()
+        with ceo_kanban_read._cache_lock:
+            ceo_kanban_read._cache[key] = (now - 1, now + 10, old)
+
+        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+            self.assertEqual(ceo_kanban_read.run_kanban(key), old)
+            self.assertTrue(refresh_started.wait(timeout=2))
+            # Concurrent stale readers share the same scheduled refresh.
+            self.assertEqual(ceo_kanban_read.run_kanban(key), old)
+            self.assertEqual(len(calls), 1)
+            allow_refresh.set()
+            for _ in range(200):
+                with ceo_kanban_read._cache_lock:
+                    if key not in ceo_kanban_read._cache_refreshing:
+                        break
+                threading.Event().wait(0.005)
+            self.assertEqual(ceo_kanban_read.run_kanban(key), new)
+
+        self.assertEqual(len(calls), 1)
+
+    def test_stale_deadline_keeps_persistent_outage_fail_closed(self) -> None:
+        key = ("list", "--json")
+        now = ceo_kanban_read.time.monotonic()
+        with ceo_kanban_read._cache_lock:
+            ceo_kanban_read._cache[key] = (now - 2, now - 1, "[]")
+        failed = type(
+            "P", (), {"returncode": 2, "stdout": "", "stderr": "database is locked"}
+        )()
+
+        with (
+            patch.object(ceo_kanban_read.subprocess, "run", return_value=failed),
+            self.assertRaises(KanbanUnavailable),
+        ):
+            ceo_kanban_read.run_kanban(key)
+
+    def test_completed_workflow_projection_is_shared_by_task_and_root(self) -> None:
+        board = _board(
+            risk_status="done",
+            qa_status="done",
+            qa_summary="verdict: PASS",
+            synthesis_status="done",
+            synthesis_summary="종합 결과. decision: HOLD",
+        )
+        board[ROOT_ID]["status"] = "done"
+        stable = load_workflow(ROOT_ID, fetch=_fetch_from(board))
+        self.assertEqual(stable.status, "completed")
+        self.assertTrue(stable.qa_materialized)
+
+        with patch.object(
+            ceo_kanban_read,
+            "_load_workflow_uncached",
+            return_value=stable,
+        ) as load:
+            first = ceo_kanban_read.load_workflow(QA_ID)
+            second = ceo_kanban_read.load_workflow(QA_ID)
+            by_root = ceo_kanban_read.load_workflow(ROOT_ID)
+
+        self.assertIs(first, second)
+        self.assertIs(first, by_root)
+        load.assert_called_once_with(QA_ID)
+
+    def test_running_workflow_projection_is_not_cached(self) -> None:
+        running = load_workflow(ROOT_ID, fetch=_fetch_from(_board()))
+        self.assertEqual(running.status, "running")
+
+        with patch.object(
+            ceo_kanban_read,
+            "_load_workflow_uncached",
+            return_value=running,
+        ) as load:
+            ceo_kanban_read.load_workflow(ROOT_ID)
+            ceo_kanban_read.load_workflow(ROOT_ID)
+
+        self.assertEqual(load.call_count, 2)
+
     def test_failures_are_not_cached(self) -> None:
         """실패를 캐시하면 일시 장애가 TTL 동안 고정된다(fail-closed가 아니라 fail-stuck)."""
 
@@ -1246,6 +1400,7 @@ class KanbanReadCacheTest(unittest.TestCase):
         env = {
             "KANBAN_READ_CACHE_TTL_SECONDS": "0.3",
             "KANBAN_DONE_CACHE_TTL_SECONDS": "60",
+            "KANBAN_READ_STALE_SECONDS": "0",
         }
         ceo_kanban_read.clear_kanban_cache()
         with (
@@ -1301,6 +1456,7 @@ class KanbanReadCacheTest(unittest.TestCase):
         env = {
             "KANBAN_READ_CACHE_TTL_SECONDS": "0.3",
             "KANBAN_DONE_CACHE_TTL_SECONDS": "60",
+            "KANBAN_READ_STALE_SECONDS": "0",
         }
         with (
             patch.dict(ceo_kanban_read.os.environ, env),

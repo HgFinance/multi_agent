@@ -15,6 +15,7 @@ import {
   strategyResearchStatus,
   strategyDeploymentStatus,
   type CardOutcome,
+  type CeoOrderConfirmation,
   type CeoQueryPlanning,
   type StrategyDeploymentAccepted,
   type StrategyResearchAccepted,
@@ -97,6 +98,7 @@ type SubmittedRequest = {
   planning: CeoQueryPlanning | null;
   orderRequestId: string | null;
   orderState: string | null;
+  orderConfirmation: CeoOrderConfirmation | null;
   researchRequestId: string | null;
   deploymentId: string | null;
   deploymentStatus: StrategyDeploymentAccepted["status"] | null;
@@ -229,27 +231,27 @@ function CeoControlRoomChatSession() {
   }
 
   const sendMutation = useMutation({
-    mutationFn: ({ text, bookId, fundId }: { text: string; bookId?: string; fundId?: string }) => {
+    mutationFn: ({ text, bookId, fundId, confirmOrder = false }: { text: string; bookId?: string; fundId?: string; confirmOrder?: boolean }) => {
       const scope = orderScope(fundId, bookId);
       const storage = scope ? browserSessionStorage() : null;
-      if (!scope || !storage) return askCeo(text, undefined, bookId, fundId);
+      if (!scope || !storage) return askCeo(text, undefined, bookId, fundId, confirmOrder);
 
       const input = { fundId: scope.fundId, bookId: scope.bookId, query: text };
       let requestId: string;
       try {
         const action = preparePaperOrderAction(
           input,
-          loadRetryablePaperOrderAction(storage, scope),
+          confirmOrder ? null : loadRetryablePaperOrderAction(storage, scope),
         );
         // 전송 전에 저장한다. 새로고침이 같은 주문에 두 번째 키를 뽑지 못한다.
         if (!persistRetryablePaperOrderAction(storage, scope, action)) {
-          return askCeo(text, undefined, bookId, fundId);
+          return askCeo(text, undefined, bookId, fundId, confirmOrder);
         }
         requestId = action.submission.idempotencyKey;
       } catch {
-        return askCeo(text, undefined, bookId, fundId);
+        return askCeo(text, undefined, bookId, fundId, confirmOrder);
       }
-      return askCeo(text, requestId, bookId, fundId);
+      return askCeo(text, requestId, bookId, fundId, confirmOrder);
     },
     onSuccess: (_response, variables) => {
       const scope = orderScope(variables.fundId, variables.bookId);
@@ -300,7 +302,7 @@ function CeoControlRoomChatSession() {
           }),
   });
 
-  async function send(text: string) {
+  async function send(text: string, confirmOrder = false) {
     const value = text.trim();
     if (!value || sendMutation.isPending) return;
     if (PAPER_ORDER_LANGUAGE.test(value) && !selectedBookId) {
@@ -322,6 +324,7 @@ function CeoControlRoomChatSession() {
       planning: null,
       orderRequestId: null,
       orderState: null,
+      orderConfirmation: null,
       researchRequestId: null,
       deploymentId: null,
       deploymentStatus: null,
@@ -335,6 +338,7 @@ function CeoControlRoomChatSession() {
         text: value,
         fundId: effectiveFundId ?? undefined,
         ...(selectedBookId ? { bookId: selectedBookId } : {}),
+        confirmOrder,
       });
       if ("deployment_id" in response) {
         const deployment = response as StrategyDeploymentAccepted;
@@ -345,6 +349,7 @@ function CeoControlRoomChatSession() {
           planning: null,
           orderRequestId: null,
           orderState: null,
+          orderConfirmation: null,
           // Deployment responses carry the same research request ID. Keep it
           // so approval can target the exact request and the research status
           // card remains visible while the release gate is open.
@@ -364,6 +369,7 @@ function CeoControlRoomChatSession() {
           planning: null,
           orderRequestId: null,
           orderState: null,
+          orderConfirmation: null,
           researchRequestId: research.request_id,
           deploymentId: null,
           deploymentStatus: null,
@@ -379,6 +385,7 @@ function CeoControlRoomChatSession() {
           planning: response.planning ?? null,
           orderRequestId: response.order_request_id ?? null,
           orderState: response.order_state ?? null,
+          orderConfirmation: response.order_confirmation ?? null,
           researchRequestId: null,
           deploymentId: null,
           deploymentStatus: null,
@@ -630,6 +637,23 @@ function CeoControlRoomChatSession() {
                 <code className="block text-right text-[10px] text-outline mt-1">{submitted.taskId}</code>
               ) : null}
             </div>
+
+            {submitted.orderConfirmation ? (
+              <div className="self-start max-w-[92%] border-2 border-primary/30 rounded p-3 bg-secondary-container/20" aria-live="polite">
+                <div className="text-xs font-bold text-primary">주문 내용 확인</div>
+                <p className="mt-1 mb-2 text-xs text-on-surface">
+                  {submitted.orderConfirmation.instrument_mention} {submitted.orderConfirmation.quantity}주 {submitted.orderConfirmation.order_type === "MARKET" ? "시장가" : "지정가"} {submitted.orderConfirmation.side === "BUY" ? "매수" : "매도"}
+                </p>
+                <button
+                  type="button"
+                  className="rounded bg-primary px-3 py-1.5 text-xs font-bold text-on-primary disabled:opacity-50"
+                  disabled={busy}
+                  onClick={() => void send(submitted.orderConfirmation?.query ?? submitted.query, true)}
+                >
+                  {busy ? "제출 중…" : "이 내용으로 PAPER 주문 제출"}
+                </button>
+              </div>
+            ) : null}
 
             {progress?.final_answer ? (
               <div

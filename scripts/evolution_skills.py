@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -33,6 +34,7 @@ from orchestration.evolution_skills import (  # noqa: E402
     load_registry,
     promote_proposal,
     retire_skill,
+    validate_artifacts,
     validate_canonical_registry,
 )
 
@@ -481,6 +483,72 @@ def cmd_report(args: argparse.Namespace) -> None:
     _print(build_resolution_report(_store(args), args.proposal_id))
 
 
+def cmd_verify_proposal(args: argparse.Namespace) -> None:
+    """Emit a read-only, independently recomputed QA verification manifest."""
+
+    store = _store(args)
+    target, state = store.load_proposal(args.proposal_id)
+    files = {
+        name: (target / name).read_bytes()
+        for name in ("SKILL.md", "provenance.json", "state.json", "diff.patch")
+    }
+    provenance = json.loads(files["provenance.json"].decode("utf-8"))
+    validation = validate_artifacts(
+        files["SKILL.md"].decode("utf-8"),
+        provenance,
+        expected_slug=str(state["slug"]),
+        expected_version=int(state["version"]),
+        mandatory_controls=provenance.get("mandatory_controls") or (),
+    )
+    report = build_resolution_report(store, args.proposal_id)
+    source_runs = list(report["problem_evidence"]["source_run_ids"])
+    source_artifacts = list(report["problem_evidence"]["source_artifact_ids"])
+    # `validation.stages` is the immutable pre-promotion snapshot.  Once a
+    # proposal is ACTIVE, report the regression that promotion actually ran
+    # against the canonical registry instead of that stale snapshot.
+    promotion_regression = state.get("regression_validation")
+    if state.get("status") == "ACTIVE" and isinstance(promotion_regression, dict):
+        canonical_regression: object = {
+            "status": "PASS" if promotion_regression.get("ok") else "FAIL",
+            "checked": promotion_regression.get("checked", []),
+            "errors": promotion_regression.get("errors", []),
+            "validated_at": promotion_regression.get("validated_at"),
+        }
+    else:
+        canonical_regression = (
+            state.get("validation", {}).get("stages", {}).get("canonical_regression")
+        )
+    _print(
+        {
+            "schema_version": "hgfinance.skill-proposal-verification.v1",
+            "proposal_id": args.proposal_id,
+            "read_only_verifier": "skill-evolution-worker",
+            "file_sha256": {
+                name: hashlib.sha256(payload).hexdigest() for name, payload in files.items()
+            },
+            "card_hashes_match": {
+                "SKILL.md": hashlib.sha256(files["SKILL.md"]).hexdigest()
+                == str(state.get("content_hash") or ""),
+                "provenance.json": hashlib.sha256(files["provenance.json"]).hexdigest()
+                == str(state.get("provenance_hash") or ""),
+                "diff.patch": hashlib.sha256(files["diff.patch"]).hexdigest()
+                == str(state.get("diff_hash") or ""),
+            },
+            "owner_profile": state.get("owner_profile"),
+            "version": state.get("version"),
+            "parent_version": provenance.get("parent_version"),
+            "source_run_ids": source_runs,
+            "source_artifact_ids": source_artifacts,
+            "three_independent_sources": len(set(source_runs)) >= 3
+            and len(set(source_artifacts)) >= 3,
+            "benchmark_ids": report["problem_evidence"]["baseline_benchmark_ids"],
+            "structure_and_provenance_recomputed": validation["ok"],
+            "canonical_regression": canonical_regression,
+            "lifecycle": state.get("status"),
+        }
+    )
+
+
 def cmd_inventory(args: argparse.Namespace) -> None:
     roots = [Path(value) for value in (args.root or [])]
     if not roots:
@@ -592,6 +660,10 @@ def _parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report")
     report.add_argument("proposal_id")
     report.set_defaults(func=cmd_report)
+
+    verify_proposal = sub.add_parser("verify-proposal")
+    verify_proposal.add_argument("proposal_id")
+    verify_proposal.set_defaults(func=cmd_verify_proposal)
 
     inventory = sub.add_parser("inventory")
     inventory.add_argument("--root", action="append")

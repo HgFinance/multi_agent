@@ -425,6 +425,27 @@ def test_order_status_accepts_ls_account_query_success_code_and_caches_snapshot(
     assert history_requests == 1
 
 
+def test_order_history_failure_is_memoized_for_the_rate_limit_window() -> None:
+    history_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal history_requests
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token"})
+        history_requests += 1
+        return httpx.Response(500, json={"rsp_cd": "IGW00201"})
+
+    broker = _broker(handler)
+    with pytest.raises(LSPaperBrokerError) as first:
+        broker.order_status("6439", order_date=date(2026, 8, 20))
+    with pytest.raises(LSPaperBrokerError) as second:
+        broker.order_status("6440", order_date=date(2026, 8, 20))
+
+    assert first.value.code == "LS_PAPER_ORDER_REJECTED"
+    assert second.value.code == first.value.code
+    assert history_requests == 1
+
+
 def test_success_response_without_order_confirmation_is_ambiguous() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/oauth2/token":

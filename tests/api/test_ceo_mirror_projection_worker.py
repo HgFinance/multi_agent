@@ -74,3 +74,22 @@ def test_changed_request_ids_maps_child_event_to_existing_root_request() -> None
             },
         ],
     ) == ["request-1"]
+
+
+def test_changed_request_ids_ignores_a_root_removed_by_retention() -> None:
+    store = InMemoryMirrorStore()
+    request = CanonicalIngress(
+        query="historical status",
+        request_id="request-purged",
+        source="web",
+        source_message_id="web:purged",
+        actor_id="user-1",
+    )
+    store.claim_request(request)
+    store.save_response(request.request_id, {"task_id": "root-purged"})
+
+    assert _changed_request_ids(
+        store,
+        {"root-purged"},
+        [{"id": "root-current", "body": "workflow_role=root"}],
+    ) == []

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 
+import pytest
+
 from apps.api import ls_account_stream
 
 
@@ -98,6 +100,114 @@ def test_realtime_fill_is_deduplicated_when_account_history_arrives() -> None:
 
     assert len(merged) == 1
     assert merged[0]["source"] == "LS_ORDER_HISTORY"
+
+
+def test_today_activity_reuses_trade_rows_when_summary_is_omitted() -> None:
+    activity = ls_account_stream.normalize_today_activity(
+        {
+            "t0150OutBlock1": [
+                {
+                    "medosu": "매수",
+                    "expcode": "005930",
+                    "qty": "2",
+                    "price": "70000",
+                    "amt": "140000",
+                },
+                {
+                    "medosu": "종목소계",
+                    "qty": "2",
+                    "price": "70000",
+                    "amt": "140000",
+                    "fee": "100",
+                    "tax": "0",
+                    "argtax": "0",
+                    "adjamt": "140100",
+                },
+            ]
+        }
+    )
+
+    assert activity == {
+        "trade_count": 1,
+        "summary": {
+            "buy_quantity": "2",
+            "sell_quantity": "0",
+            "buy_amount": "140000",
+            "sell_amount": "0",
+            "total_amount": "140000",
+            "total_fee": "100",
+            "total_tax": "0",
+            "total_settlement": "-140100",
+        },
+    }
+
+
+def test_today_activity_without_summary_or_rows_fails_closed() -> None:
+    with pytest.raises(RuntimeError, match="요약과 거래 행이 없습니다"):
+        ls_account_stream.normalize_today_activity({"rsp_cd": "ERROR"})
+
+
+def test_fetch_today_activity_uses_one_t0150_request(monkeypatch) -> None:
+    calls: list[str] = []
+
+    async def post_tr(config, token, tr_cd, payload, path="/stock/accno"):
+        del config, token, payload, path
+        calls.append(tr_cd)
+        return {"rsp_cd": "00000", "rsp_msg": "조회가 완료되었습니다."}
+
+    monkeypatch.setattr(ls_account_stream, "_post_tr", post_tr)
+
+    activity = asyncio.run(
+        ls_account_stream._fetch_today_activity(object(), "paper-token")
+    )
+
+    assert calls == ["t0150"]
+    assert activity["trade_count"] == 0
+
+
+
+def test_account_tr_request_sends_normalized_mac_header(monkeypatch) -> None:
+    import ls_http
+    from types import SimpleNamespace
+
+    seen: dict[str, object] = {}
+
+    class FakeResponse:
+        text = "{\"rsp_cd\":\"00000\"}"
+        headers: dict[str, str] = {}
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, json, headers):
+            seen.update(url=url, json=json, headers=headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(ls_http, "ls_async_client", lambda **_kwargs: FakeClient())
+
+    body, metadata = asyncio.run(
+        ls_account_stream._post_tr_page(
+            SimpleNamespace(
+                base_url="https://broker.example",
+                timeout_seconds=5,
+                mac_address="0a:c5:e7-48-30-0f",
+            ),
+            "paper-token",
+            "t0150",
+            {"t0150InBlock": {}},
+        )
+    )
+
+    assert body == {"rsp_cd": "00000"}
+    assert metadata == {"tr_cont": "", "tr_cont_key": ""}
+    assert seen["headers"]["mac_address"] == "0AC5E748300F"
 
 
 def test_continuation_pages_merge_rows_and_forward_cts(monkeypatch) -> None:

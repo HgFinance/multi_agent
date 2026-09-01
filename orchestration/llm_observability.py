@@ -20,6 +20,8 @@ from threading import Event, Lock, Thread
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from orchestration.langsmith_egress import langsmith_egress_enabled
+
 
 @dataclass
 class WorkerMetric:
@@ -227,6 +229,29 @@ _LANGSMITH_ROOT_CONTEXT_RE = re.compile(
 WORKFLOW_LANGSMITH_PROJECT = "First"
 _LANGSMITH_QUOTA_LOCK = Lock()
 _LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
+# Keep SDK-owned root/QA writes on the same documented ``/runs/batch`` ingest
+# route as the dispatcher publisher. Without /info discovery, the SDK defaults
+# to multipart; make the complete queue configuration explicit instead.
+_LANGSMITH_BATCH_INGEST_CONFIG = {
+    "use_multipart_endpoint": False,
+    "size_limit": 100,
+    "size_limit_bytes": None,
+    "scale_up_nthreads_limit": 10,
+    "scale_up_qsize_trigger": 1000,
+    "scale_down_nempty_trigger": 4,
+}
+
+
+def langsmith_batch_ingest_info() -> dict[str, Any]:
+    """Return a fresh SDK capability payload for the supported batch writer.
+
+    Every application-owned LangSmith client uses this one payload.  It avoids
+    an SDK capability probe on the hot path and prevents a client constructed
+    by a low-frequency reader/poller from silently selecting multipart ingest.
+    A fresh mapping is intentional because SDK clients may mutate ``info``.
+    """
+
+    return {"batch_ingest_config": dict(_LANGSMITH_BATCH_INGEST_CONFIG)}
 # A monthly unique-trace limit cannot recover during a short cooldown. Keep a
 # process-local hard latch so the observer does not schedule one futile retry
 # every few minutes. Business execution remains independent of this latch.
@@ -440,7 +465,8 @@ def langsmith_tracing_enabled() -> bool:
     """Whether LangChain/LangGraph may emit ambient callback traces."""
 
     return (
-        _env_flag("LANGSMITH_TRACING")
+        langsmith_egress_enabled()
+        and _env_flag("LANGSMITH_TRACING")
         and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
         and not _langsmith_quota_paused()
     )
@@ -455,7 +481,8 @@ def langsmith_enabled() -> bool:
     """
 
     return (
-        (
+        langsmith_egress_enabled()
+        and (
             _env_flag("LANGSMITH_TRACING")
             or _env_flag("HGFINANCE_LANGSMITH_PUBLISH_ENABLED")
         )
@@ -1034,10 +1061,9 @@ def _safe_langsmith_client() -> Any:
     from langsmith import Client
 
     return Client(
-        # The SDK otherwise performs a background GET /info before it can
-        # drain its first batch. The application uses the stable default
-        # batch contract and does not need server-tuned fields here.
-        info={},
+        # Avoid a request-path /info discovery while explicitly selecting the
+        # supported batch ingest route.
+        info=langsmith_batch_ingest_info(),
         hide_inputs=True,
         hide_outputs=True,
         hide_metadata=False,
@@ -1060,9 +1086,9 @@ def _structured_langsmith_client() -> Any:
     from langsmith import Client
 
     return Client(
-        # Root lifecycle writes use the same stable default batch contract;
-        # avoid a per-process /info discovery request on the observer path.
-        info={},
+        # Root lifecycle writes use the supported batch ingest route without
+        # a per-process /info discovery request on the observer path.
+        info=langsmith_batch_ingest_info(),
         hide_inputs=False,
         hide_outputs=False,
         hide_metadata=False,

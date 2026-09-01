@@ -26,11 +26,17 @@ from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
+
+from orchestration.langsmith_egress import langsmith_egress_enabled
+from weakref import WeakKeyDictionary
 
 logger = logging.getLogger(__name__)
 
 _PROJECT_ID_CACHE_TTL_SECONDS = 600.0
-_PROJECT_ID_CACHE: dict[str, tuple[float, str]] = {}
+_PROJECT_ID_CACHE: WeakKeyDictionary[Any, dict[str, tuple[float, str]]] = (
+    WeakKeyDictionary()
+)
 _PROJECT_ID_CACHE_LOCK = threading.Lock()
 
 
@@ -108,40 +114,72 @@ def _is_sdk_transport_compatibility_error(error: BaseException) -> bool:
     )
 
 
-def _cache_key(client: Any, project_name: str) -> str:
-    # The endpoint is non-secret and prevents a long-lived process that talks
-    # to more than one workspace from reusing the wrong UUID.
-    endpoint = str(getattr(client, "api_url", "") or "").strip()
-    return f"{endpoint}|{project_name}"
-
-
 def _cached_project_id(client: Any, project_name: str) -> str | None:
-    cache_key = _cache_key(client, project_name)
     now = time.monotonic()
     with _PROJECT_ID_CACHE_LOCK:
-        cached = _PROJECT_ID_CACHE.get(cache_key)
+        try:
+            client_cache = _PROJECT_ID_CACHE.get(client)
+        except TypeError:
+            # A non-weak-referenceable compatibility client remains correct;
+            # it merely resolves the project again instead of caching it.
+            return None
+        cached = client_cache.get(project_name) if client_cache else None
         if cached is None:
             return None
         expires_at, project_id = cached
         if expires_at <= now:
-            _PROJECT_ID_CACHE.pop(cache_key, None)
+            client_cache.pop(project_name, None)
             return None
         return project_id
 
 
 def _cache_project_id(client: Any, project_name: str, project_id: str) -> None:
-    cache_key = _cache_key(client, project_name)
     with _PROJECT_ID_CACHE_LOCK:
-        _PROJECT_ID_CACHE[cache_key] = (
+        try:
+            client_cache = _PROJECT_ID_CACHE.setdefault(client, {})
+        except TypeError:
+            return
+        client_cache[project_name] = (
             time.monotonic() + _PROJECT_ID_CACHE_TTL_SECONDS,
             project_id,
         )
+
+
+def _configured_project_id(project_name: str) -> str | None:
+    """Return an explicitly provisioned SmithDB project UUID when available.
+
+    SmithDB v2 run APIs require a project UUID. Older ``Client.aread_project``
+    implementations resolve a name through the legacy ``/sessions`` route, so
+    deployed pollers use provisioned UUIDs instead of making that lookup.
+    """
+
+    name = str(project_name or "").strip()
+    bindings = (
+        ("LANGSMITH_PROJECT", "LANGSMITH_PROJECT_ID"),
+        ("LANGSMITH_METRICS_PROJECT", "LANGSMITH_METRICS_PROJECT_ID"),
+        ("LANGSMITH_EVALS_PROJECT", "LANGSMITH_EVALS_PROJECT_ID"),
+    )
+    for name_key, id_key in bindings:
+        if str(os.getenv(name_key, "")).strip() != name:
+            continue
+        configured_id = str(os.getenv(id_key, "")).strip()
+        if not configured_id:
+            return None
+        try:
+            return str(UUID(configured_id))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"{id_key.casefold()}_invalid") from exc
+    return None
 
 
 async def _resolve_project_id(client: Any, project_name: str) -> str:
     name = str(project_name or "").strip()
     if not name:
         raise ValueError("langsmith_project_name_required")
+    configured = _configured_project_id(name)
+    if configured:
+        _cache_project_id(client, name, configured)
+        return configured
     cached = _cached_project_id(client, name)
     if cached:
         return cached
@@ -154,18 +192,15 @@ async def _resolve_project_id(client: Any, project_name: str) -> str:
     try:
         project = await reader(project_name=name)
     except Exception as exc:
-        # langsmith 0.11.x can load a workspace through the synchronous
-        # client while its generated async transport fails under some
-        # httpx2/anyio combinations. Project listing is not a run-query path;
-        # use it only to resolve the UUID and keep the v2 query boundary below.
-        if not _is_sdk_transport_compatibility_error(exc):
-            raise
-
-        def _read_sync() -> Any:
-            projects = list(client.list_projects(name=name, limit=1))
-            return projects[0] if projects else None
-
-        project = await asyncio.to_thread(_read_sync)
+        # Do not use a second, synchronous project-listing request as a
+        # compatibility fallback.  The official migration guide still permits
+        # project resolution separately; this boundary deliberately has one
+        # bounded async resolution path so an SDK transport failure cannot
+        # double query latency or mask an observability outage. Read-only
+        # callers already fail open at their boundary.
+        if _is_sdk_transport_compatibility_error(exc):
+            raise RuntimeError("langsmith_v2_project_resolution_unavailable") from exc
+        raise
     if project is None:
         raise RuntimeError("langsmith_project_not_found")
     project_id = str(getattr(project, "id", "") or "").strip()
@@ -505,7 +540,7 @@ def query_correlated_trace_metadata(
             "trace_count": 0,
             "traces": [],
         }
-    if str(os.getenv("LANGSMITH_TRACING", "")).casefold() not in {
+    if not langsmith_egress_enabled() or str(os.getenv("LANGSMITH_TRACING", "")).casefold() not in {
         "1",
         "true",
         "yes",
@@ -523,8 +558,10 @@ def query_correlated_trace_metadata(
     client: Any | None = None
     try:
         from langsmith import Client
+        from orchestration.llm_observability import langsmith_batch_ingest_info
 
         client = Client(
+            info=langsmith_batch_ingest_info(),
             hide_inputs=True,
             hide_outputs=True,
             hide_metadata=False,

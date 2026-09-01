@@ -416,7 +416,12 @@ Case:
 """
 
 
-def _prepare_home(profile_key: str, variant: str) -> Path:
+def _prepare_home(
+    profile_key: str,
+    variant: str,
+    *,
+    react_skill_path: Path | None = None,
+) -> Path:
     profile_name = PROFILES[profile_key]["profile"]
     source = HOME_ROOT / profile_name
     if not source.is_dir():
@@ -428,10 +433,27 @@ def _prepare_home(profile_key: str, variant: str) -> Path:
             shutil.copy2(candidate, home / filename)
     for dirname in ("memories", "sessions", "skills", "logs", "plans", "workspace", "cron", "home"):
         (home / dirname).mkdir(parents=True, exist_ok=True)
-    if variant == "react":
+    if variant == "react" and react_skill_path is None:
         soul = (home / "SOUL.md").read_text(encoding="utf-8")
         policy = REACT_POLICY + "\n\n" + PROFILE_REACT_POLICIES[profile_key]
         (home / "SOUL.md").write_text(soul.rstrip() + "\n\n" + policy + "\n", encoding="utf-8")
+    if variant == "react" and react_skill_path is not None:
+        skill_path = react_skill_path.expanduser().resolve()
+        if skill_path.name != "SKILL.md" or not skill_path.is_file():
+            raise FileNotFoundError("--react-skill-path must name an existing SKILL.md")
+        # Hermes discovers a skill from an external root containing
+        # <skill-name>/SKILL.md.  This rewrites only the temporary benchmark
+        # profile, never the production profile or canonical registry.
+        external_root = skill_path.parent.parent
+        config_path = home / "config.yaml"
+        config = config_path.read_text(encoding="utf-8")
+        original = "    - /opt/shared-skills"
+        if original not in config:
+            raise ValueError("benchmark profile has no replaceable shared skill root")
+        config_path.write_text(
+            config.replace(original, f"    - {external_root}", 1),
+            encoding="utf-8",
+        )
     return home
 
 
@@ -801,13 +823,22 @@ def requested_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _run_one(task: dict[str, Any], output_dir: Path) -> dict[str, Any]:
+def _run_one(
+    task: dict[str, Any],
+    output_dir: Path,
+    react_skill_path: Path | None = None,
+) -> dict[str, Any]:
     started = time.perf_counter()
     profile_key = task["profile_key"]
     variant = task["variant"]
     profile_name = PROFILES[profile_key]["profile"]
     case = task["case"]
-    home = _prepare_home(profile_key, variant)
+    loaded_skill = (
+        react_skill_path.parent.name
+        if variant == "react" and react_skill_path is not None
+        else None
+    )
+    home = _prepare_home(profile_key, variant, react_skill_path=react_skill_path)
     usage_path = home / "usage.json"
     query = _evaluation_prompt(profile_key, case)
     env = os.environ.copy()
@@ -818,6 +849,8 @@ def _run_one(task: dict[str, Any], output_dir: Path) -> dict[str, Any]:
         "-t", "",
         "--usage-file", str(usage_path),
     ]
+    if loaded_skill:
+        cmd.extend(("--skills", loaded_skill))
     stdout = ""
     stderr = ""
     returncode = None
@@ -854,6 +887,7 @@ def _run_one(task: dict[str, Any], output_dir: Path) -> dict[str, Any]:
         "profile": profile_name,
         "persona": PROFILES[profile_key]["persona"],
         "variant": variant,
+        "loaded_skill": loaded_skill,
         "case_id": case["case_id"],
         "repeat": task["repeat"],
         "completed": error is None and returncode == 0,
@@ -964,6 +998,36 @@ def _fmt(value: Any) -> str:
 
 def render_report(rows: list[dict[str, Any]], summary: dict[str, Any], repeats: int, workers: int | str) -> str:
     started = datetime.now(timezone.utc).isoformat()
+    profile_keys = [
+        key
+        for key in PROFILES
+        if summary[key]["baseline"]["runs"] or summary[key]["react"]["runs"]
+    ]
+    candidate_skills = sorted({
+        str(row["loaded_skill"])
+        for row in rows
+        if row.get("variant") == "react" and row.get("loaded_skill")
+    })
+    if candidate_skills:
+        treatment_name = "QA 개선 스킬 주입군"
+        treatment_short = "주입군"
+        intervention = (
+            "처리군에 승인 가정의 QA 개선 스킬을 Hermes `--skills`로 직접 로드했습니다. "
+            "이 실행에서는 `SOUL.md` ReAct 정책을 덧붙이지 않았습니다."
+        )
+        intervention_detail = (
+            "차이는 처리군에만 후보 `SKILL.md`를 임시 Hermes profile의 skills root에 배치하고 "
+            "`--skills`로 명시 로드한 것입니다. Baseline에는 이 스킬을 제공하지 않았습니다. "
+            f"대상 스킬: {', '.join(f'`{skill}`' for skill in candidate_skills)}."
+        )
+    else:
+        treatment_name = "Bounded ReAct군"
+        treatment_short = "ReAct"
+        intervention = "ReAct 변형은 Supervisor에 bounded state/action/observation/stop 규칙을 추가했습니다."
+        intervention_detail = (
+            "차이는 ReAct군의 `SOUL.md`에 공통 `bounded-react-supervisor-v1` 정책과 "
+            "각 Supervisor의 역할별 ReAct addendum을 추가한 것입니다."
+        )
     lines = [
         "# Hermes Supervisor Bounded ReAct A/B 테스트",
         "",
@@ -972,17 +1036,11 @@ def render_report(rows: list[dict[str, Any]], summary: dict[str, Any], repeats: 
         "",
         "## 결론",
         "",
-        "이 문서는 현재 Hermes Supervisor Prompt와 Bounded ReAct Prompt를 동일한 합성 Observation Packet에 실행한 파일럿 A/B 결과입니다. ReAct 변형은 세 Supervisor에 공통으로 bounded state/action/observation/stop 규칙을 추가했습니다.",
+        f"이 문서는 현재 Hermes Supervisor와 {treatment_name}을 동일한 합성 Observation Packet에 실행한 파일럿 A/B 결과입니다. {intervention}",
         "",
         "실제 Tool 호출과 외부 상태 변경은 차단했습니다. 따라서 아래 결과는 주문·Kanban 위임·실제 검색 성능이 아니라, **감독자 프롬프트가 근거 부족·충돌·에스컬레이션·라우팅·종료를 얼마나 정확하게 선택하는지**를 측정한 결과입니다.",
         "",
-        f"이번 파일럿의 도입 판단은 Research={_fmt(summary['research']['delta_case_pass_pct'])}%p, QA={_fmt(summary['qa']['delta_case_pass_pct'])}%p, CEO={_fmt(summary['ceo']['delta_case_pass_pct'])}%p의 Case-pass 변화로 분리했습니다. 운영 반영은 QA ReAct를 제외하고 CEO ReAct만 유지하며, Research도 현행 프롬프트를 유지합니다.",
-        "",
-        "## 운영 반영 상태",
-        "",
-        "- `qa-audit-supervisor`: ReAct 운영 적용에서 제외했습니다. QA 본래의 결정론 Engine과 감사 기능은 유지합니다.",
-        "- `executive-orchestrator`: 역할별 Bounded ReAct 정책을 `/home/ubuntu/.hermes/profiles/ceo-agent/SOUL.md`에 반영했습니다.",
-        "- `research-methodology-head`: 이번 운영 반영에서 제외했으며 Research 프로필은 변경하지 않았습니다.",
+        "이번 파일럿의 도입 판단은 supervisor별 Case-pass 변화와 안전·근거 처리·지연을 함께 비교해 분리합니다.",
         "",
         "## 요약 지표",
         "",
@@ -994,7 +1052,7 @@ def render_report(rows: list[dict[str, Any]], summary: dict[str, Any], repeats: 
         "qa": "QA/Audit",
         "ceo": "CEO",
     }
-    for profile_key in PROFILES:
+    for profile_key in profile_keys:
         for variant in ("baseline", "react"):
             item = summary[profile_key][variant]
             lines.append(
@@ -1004,12 +1062,12 @@ def render_report(rows: list[dict[str, Any]], summary: dict[str, Any], repeats: 
             )
     lines += [
         "",
-        "## ReAct 효과 Delta (ReAct - Baseline)",
+        f"## 처리 효과 Delta ({treatment_short} - Baseline)",
         "",
         "| Supervisor | Case pass | Decision | Evidence handling | Safety | Mean latency | Mean tokens |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
-    for profile_key in PROFILES:
+    for profile_key in profile_keys:
         lines.append(
             f"| {labels[profile_key]} | {_fmt(summary[profile_key]['delta_case_pass_pct'])}%p | "
             f"{_fmt(summary[profile_key]['delta_decision_correct_pct'])}%p | "
@@ -1022,10 +1080,10 @@ def render_report(rows: list[dict[str, Any]], summary: dict[str, Any], repeats: 
         "",
         "## Paired 비교 (동일 Case·동일 반복)",
         "",
-        "| Supervisor | ReAct wins | Ties | ReAct losses |",
+        f"| Supervisor | {treatment_short} wins | Ties | {treatment_short} losses |",
         "|---|---:|---:|---:|",
     ]
-    for profile_key in PROFILES:
+    for profile_key in profile_keys:
         paired = summary[profile_key]["paired_case_pass"]
         lines.append(
             f"| {labels[profile_key]} | {paired['react_wins']} | {paired['ties']} | {paired['react_losses']} |"
@@ -1035,11 +1093,11 @@ def render_report(rows: list[dict[str, Any]], summary: dict[str, Any], repeats: 
         "## 케이스별 안정성",
         "",
     ]
-    for profile_key in PROFILES:
+    for profile_key in profile_keys:
         lines += [
             f"### {labels[profile_key]}",
             "",
-            "| Case | Baseline pass | ReAct pass | Delta |",
+            f"| Case | Baseline pass | {treatment_short} pass | Delta |",
             "|---|---:|---:|---:|",
         ]
         case_ids = sorted(
@@ -1093,11 +1151,11 @@ def render_report(rows: list[dict[str, Any]], summary: dict[str, Any], repeats: 
         "",
         "분모는 지표별 유효 Case 수입니다. 실제 Tool 호출이 필요한 항목은 이번 안전한 합성 패킷 실험에서 프록시로 표시했습니다.",
         "",
-        "| 영역 | 지표 | Baseline | ReAct |",
+        f"| 영역 | 지표 | Baseline | {treatment_short} |",
         "|---|---|---:|---:|",
     ]
     requested = summary["requested_metrics"]
-    for profile_key in ("ceo", "qa", "research"):
+    for profile_key in profile_keys:
         for metric_key, metric_label in metric_labels[profile_key]:
             baseline_metric = requested[profile_key]["baseline"][metric_key]
             react_metric = requested[profile_key]["react"][metric_key]
@@ -1115,8 +1173,8 @@ def render_report(rows: list[dict[str, Any]], summary: dict[str, Any], repeats: 
         "",
         "## 측정 설계",
         "",
-        "- Baseline과 ReAct는 같은 모델, 같은 프로필 Persona, 같은 Case, 같은 반복 횟수로 실행했습니다.",
-        "- 차이는 ReAct군의 `SOUL.md`에 공통 `bounded-react-supervisor-v1` 정책과 각 Supervisor의 역할별 ReAct addendum을 추가한 것입니다.",
+        f"- Baseline과 {treatment_short}은 같은 모델, 같은 프로필 Persona, 같은 Case, 같은 반복 횟수로 실행했습니다.",
+        f"- {intervention_detail}",
         "- 프로필별로 근거 충분·부족·PIT stale·충돌·권한 경계·결정론 판정·신선 상태·병렬 위임 Case를 포함했습니다.",
         "- 각 실행은 새 임시 Hermes Home에서 시작해 이전 대화·메모리·세션 오염을 막았습니다.",
         "- `-t ''`로 Toolset을 비워 실제 검색·Kanban·승인·쓰기 경로를 사용하지 않았습니다.",
@@ -1134,14 +1192,13 @@ def render_report(rows: list[dict[str, Any]], summary: dict[str, Any], repeats: 
         "## 해석 주의사항",
         "",
         "1. 이번 결과만으로 실제 Research 검색 품질이나 CEO의 실제 부서 생성 품질을 확정할 수 없습니다. 실제 read-only Tool 결과를 연결한 2차 Shadow Test가 필요합니다.",
-        "2. ReAct가 품질을 개선하더라도 지연·토큰 증가가 도입 기준을 넘으면 적용하지 않습니다.",
+        f"2. {treatment_short}이 품질을 개선하더라도 지연·토큰 증가가 도입 기준을 넘으면 적용하지 않습니다.",
         "3. QA의 결정론 PASS/WARN/FAIL, Risk/OMS, Ledger, NAV 권한은 ReAct 평가 대상이 아니며 계속 코드와 독립 통제 계층이 소유합니다.",
         "4. 내부 추론 전문을 평가하거나 저장하지 않고, 구조화된 최종 JSON과 usage/latency만 평가했습니다.",
         "",
         "## 원자료",
         "",
-        "- 상세 실행 행: `artifacts/hermes-react-ab-20260831/results.jsonl`",
-        "- 집계 JSON: `artifacts/hermes-react-ab-20260831/summary.json`",
+        "- 상세 실행 행과 집계 JSON은 실행 시 지정한 output directory에만 생성됩니다.",
         "- 실행기: `scripts/benchmark_hermes_react_ab.py`",
         "",
     ]
@@ -1152,7 +1209,22 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--profiles",
+        nargs="+",
+        choices=tuple(PROFILES),
+        default=tuple(PROFILES),
+        help="supervisor profiles to measure; default is every profile",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--react-skill-path",
+        type=Path,
+        help=(
+            "load this candidate SKILL.md through Hermes --skills for the React "
+            "variant; intended for a read-only pre-promotion verification"
+        ),
+    )
     parser.add_argument(
         "--rescore-existing",
         action="store_true",
@@ -1201,7 +1273,11 @@ def main() -> int:
             + "\n",
             encoding="utf-8",
         )
-        report_path = REPO_ROOT / "docs" / "02-engineering" / "HERMES_REACT_AB_TEST_20260831.md"
+        report_path = (
+            REPO_ROOT / "docs" / "02-engineering" / "HERMES_REACT_AB_TEST_20260831.md"
+            if args.output_dir.resolve() == DEFAULT_OUTPUT_DIR.resolve()
+            else args.output_dir / "REPORT.md"
+        )
         report_path.write_text(render_report(rows, summary, repeats, workers), encoding="utf-8")
         print(f"Rescored {len(rows)} existing runs without model calls.", flush=True)
         print(f"Wrote {report_path}", flush=True)
@@ -1209,7 +1285,8 @@ def main() -> int:
         return 0
 
     tasks: list[dict[str, Any]] = []
-    for profile_key, cases in CASES.items():
+    for profile_key in args.profiles:
+        cases = CASES[profile_key]
         for variant in ("baseline", "react"):
             for repeat in range(1, args.repeats + 1):
                 for case in cases:
@@ -1224,7 +1301,15 @@ def main() -> int:
     print(f"Starting {total} Hermes A/B runs ({args.workers} workers)...", flush=True)
     rows: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = [executor.submit(_run_one, task, args.output_dir) for task in tasks]
+        futures = [
+            executor.submit(
+                _run_one,
+                task,
+                args.output_dir,
+                args.react_skill_path if task["profile_key"] == "ceo" else None,
+            )
+            for task in tasks
+        ]
         for index, future in enumerate(as_completed(futures), start=1):
             row = future.result()
             rows.append(row)
@@ -1244,7 +1329,11 @@ def main() -> int:
         json.dumps({"benchmark_version": BENCHMARK_VERSION, "rows": len(rows), "summary": summary}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    report_path = REPO_ROOT / "docs" / "02-engineering" / "HERMES_REACT_AB_TEST_20260831.md"
+    report_path = (
+        REPO_ROOT / "docs" / "02-engineering" / "HERMES_REACT_AB_TEST_20260831.md"
+        if args.output_dir.resolve() == DEFAULT_OUTPUT_DIR.resolve()
+        else args.output_dir / "REPORT.md"
+    )
     report_path.write_text(render_report(rows, summary, args.repeats, args.workers), encoding="utf-8")
     print(f"Wrote {report_path}", flush=True)
     print(f"Wrote {args.output_dir / 'summary.json'}", flush=True)

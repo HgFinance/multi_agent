@@ -26,6 +26,7 @@ try:
         clarification_message,
         extract_code,
         should_ask,
+        split_codes,
     )
     from .conditional_rule_language import condition_overview
     from .conditional_rule_status import build_conditional_execution_status
@@ -38,6 +39,7 @@ try:
         ConditionalRuleCandidate,
         ConditionalRulePreviewRequest,
         _build_preview,
+        conditional_status_message,
         relative_time_trigger_at,
     )
     from .user_order_orchestrator import (
@@ -63,6 +65,7 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
         clarification_message,
         extract_code,
         should_ask,
+        split_codes,
     )
     from conditional_rule_language import condition_overview  # type: ignore[no-redef]
     from conditional_rule_status import (
@@ -77,6 +80,7 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
         ConditionalRuleCandidate,
         ConditionalRulePreviewRequest,
         _build_preview,
+        conditional_status_message,
         relative_time_trigger_at,
     )
     from user_order_orchestrator import (  # type: ignore[no-redef]
@@ -102,7 +106,9 @@ RESULT_SCHEMA_VERSION = "conditional-paper-rule-orchestration.v1"
 _ROOT_EXECUTABLE = frozenset({"ready", "running", "done"})
 _TRADING_NEW = frozenset({"blocked", "running"})
 _TRADING_REPLAY = frozenset({"done"})
-_MAX_RULES_PER_REQUEST = 4
+# Admission limit for one natural-language request.  This is deliberately
+# separate from the worker's ACTIVE-rule scan page size (default: 100).
+_MAX_RULES_PER_REQUEST = 10
 
 
 def _reject(code: str) -> None:
@@ -434,6 +440,11 @@ def process_user_conditional_paper_rule(
     batch = _candidate_batch(candidate=candidate, candidates=candidates)
     if not batch:
         reason = str(clarification_reason or "CONDITIONAL_RULE_AST_REQUIRED")[:500]
+        # Hermes answers with every reason at once, so the joined string is the
+        # code list.  Classifying it whole made a capability gap read as one
+        # unknown ambiguity and asked the user to rephrase (2026-09-01); the
+        # audit line keeps the reason verbatim either way.
+        codes = split_codes(reason) or (reason,)
         orders.mark_outcome(
             admission.order_request_id,
             state="CLARIFICATION_REQUIRED",
@@ -444,12 +455,12 @@ def process_user_conditional_paper_rule(
             "binding": False,
             "mode": "PAPER",
             "rule_active": False,
-            "reason_codes": [reason],
+            "reason_codes": list(codes),
             "awaiting_user_reply": should_ask(
-                (reason,), source=ClarificationSource.HERMES_REASON
+                codes, source=ClarificationSource.HERMES_REASON
             ),
             "user_message": _clarification_message(
-                (reason,),
+                codes,
                 source=ClarificationSource.HERMES_REASON,
                 raw_instruction=admission.raw_instruction,
             ),
@@ -761,10 +772,20 @@ def get_user_conditional_paper_rule_status(
                 if rule.state is RuleState.ACTIVE
                 else rule_state
             )
+            status_message = conditional_status_message(
+                last_error_code=rule.last_error_code,
+                last_guard_code=rule.last_guard_code,
+                state=rule.state,
+            )
             if rule.state is RuleState.ACTIVE:
+                evaluation_wait = (
+                    f"{rule.spec.evaluation.primary_timeframe.value} 완성봉 평가를 기다리고 있습니다."
+                    if rule.spec.evaluation.clock.value == "BAR_CLOSE"
+                    else "신선한 현재가를 감시하고 있습니다."
+                )
                 answer = (
                     "PAPER 조건주문은 활성 상태이지만 Trading 제출 이벤트는 "
-                    "아직 발생하지 않았습니다."
+                    f"아직 발생하지 않았습니다. {evaluation_wait}"
                 )
             else:
                 answer = (
@@ -781,7 +802,17 @@ def get_user_conditional_paper_rule_status(
                     "rule_state": rule_state,
                     "directive_id": None,
                     "workflow_state": workflow_state,
-                    "final_answer": answer,
+                    "evaluation_clock": rule.spec.evaluation.clock.value,
+                    "primary_timeframe": (
+                        rule.spec.evaluation.primary_timeframe.value
+                        if rule.spec.evaluation.primary_timeframe is not None
+                        else None
+                    ),
+                    "last_execution_state": rule.last_execution_state,
+                    "last_guard_code": rule.last_guard_code,
+                    "last_error_code": rule.last_error_code,
+                    "status_message": status_message,
+                    "final_answer": f"{answer} {status_message}" if status_message else answer,
                 }
             )
             continue

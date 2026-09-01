@@ -82,7 +82,7 @@ single-Trading-primary lane but it creates a deterministic one-shot PAPER rule
 instead of submitting an immediate order.
 
 1. Read only the exact original instruction and its frozen root scope. Build
-   one `ConditionalRuleCandidate`, or an ordered `candidates` list for 2-4
+   one `ConditionalRuleCandidate`, or an ordered `candidates` list for 2-10
    independent conditional actions, using the MCP tool schema. Hermes
    structures the ASTs but never calculates an indicator or decides whether
    one triggered. A leading symbol shared by coordinated clauses applies to
@@ -93,6 +93,10 @@ instead of submitting an immediate order.
    `clarification_reason`. Multiple actions are valid only when every clause
    independently supplies an unambiguous condition and action. Preserve each
    comparator, threshold, side, and sizing; never merge different actions into
+   one rule. If a condition expression or indicator name appears misspelled or
+   cannot be matched exactly, do not correct it: return `candidate=null`,
+   `candidates=null`, and
+   `clarification_reason=CONDITION_EXPRESSION_CLARIFICATION_REQUIRED`.
    one `LOGICAL OR` rule.
    An explicit existing-position 익절/손절 OCO (or "한 쪽 실행 시 나머지 취소")
    is the only exception to independent action grouping: pass exactly two
@@ -199,10 +203,15 @@ price-source argument is the default and adds no parameter; any other price
 source returns `candidate=null` with
 `clarification_reason=UNSUPPORTED_INDICATOR_PRICE_SOURCE`.
 
-터치/닿으면 against a band or line means the completed bar spans it: build a
-`LOGICAL AND` of `MARKET LOW LTE <line>` and `MARKET HIGH GTE <line>` on
-`BAR_CLOSE`. A `COMPARISON EQ` against a computed band would essentially never
-trigger and is not a touch.
+An explicit price target such as `7만원에 도달/닿으면/터치하면` is a realtime
+level condition: build `MARKET LAST_PRICE GTE/LTE LITERAL(70000, PRICE)` with
+`evaluation.clock=QUOTE`, choosing the direction stated by the user. It must
+not be silently converted to a completed-bar rule.
+
+터치/닿으면 against a chart band or indicator line (for example 볼린저 중심선,
+20이평) means the completed bar spans it: build a `LOGICAL AND` of `MARKET LOW
+LTE <line>` and `MARKET HIGH GTE <line>` on `BAR_CLOSE`. A `COMPARISON EQ`
+against a computed band would essentially never trigger and is not a touch.
 
 An explicit `3분봉` plus `N선` or `N일선` means SMA with
 `parameters={"PERIOD":N}` and `timeframe="3M"`; do not derive or rewrite a
@@ -210,10 +219,21 @@ new timeframe. A cross requires both operands to use that one timeframe; use
 `LOGICAL AND` for a 3M cross plus a 15M/1H confirmation. For a BUY rule without quantity, return
 `candidate=null` with `QUANTITY_REQUIRED` and never assume one share.
 
-`CROSS` is edge-triggered and always uses `BAR_CLOSE` plus an explicit
-`primary_timeframe`. If a price-only cross instruction omits its timeframe,
+`CROSS` is edge-triggered and normally uses `BAR_CLOSE` plus an explicit
+`primary_timeframe`. For an explicit request such as `장중 실시간 RSI 70 돌파 즉시`
+or `1분봉 RSI를 장중 값으로 추적`, use `evaluation.clock=INTRABAR` with that
+explicit intraday `primary_timeframe`. INTRABAR evaluates the fresh quote in an
+ephemeral current candle and is allowed only for one timeframe and local
+close-price indicators (`SMA`, `EMA`, `RSI`, `MACD`, `BOLLINGER`, `ENVELOPE`,
+`ROC`); volume/high/low, broker indicators, multi-timeframe filters, daily
+frames, and temporal sequences remain `BAR_CLOSE`. Never select INTRABAR
+unless the user explicitly requests intraday realtime behavior. If a price-only cross instruction omits its timeframe,
 return `candidate=null` with `TIMEFRAME_REQUIRED_FOR_CROSS`; never guess a bar
 interval. Perform this field/units/clock self-check before calling the tool.
+For every indicator condition (RSI, moving average, Bollinger, MACD, volume
+average), an omitted timeframe must return `candidate=null` with
+`TIMEFRAME_NOT_IN_INSTRUCTION`; never default to `1D`. This includes a plain
+`현대약품 RSI 70 돌파시` request.
 The tool may be called exactly once, so do not send a draft AST as a probe.
 Use the trusted `max_data_age_seconds=30` default and never reduce it unless the
 user explicitly asks for a stricter freshness window.

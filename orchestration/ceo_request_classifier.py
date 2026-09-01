@@ -59,6 +59,7 @@ except ImportError:  # pragma: no cover - ``python apps/api/main.py`` 직접 실
 
 CeoLane = Literal[
     "clarification",  # 입력 불명확 - 부서 선택 안 함
+    "no_action",  # 순수 부정 주문 - 실행·질문·부서 위임 없음
     "immediate_order",  # 즉시 PAPER 주문
     "conditional_order",  # 조건/예약 PAPER 주문
     "compound_order",  # 즉시 + 조건 매도
@@ -190,8 +191,19 @@ def classify_ceo_request(
     order_grammar = bool(
         looks_like_conditional_paper_rule(text) or looks_like_user_order_request(text)
     )
+    negated_order = is_negated_order_instruction(text)
 
     # ── Stage 6 ─────────────────────────────────────────────────────────
+    # 순수 부정 주문은 실행할 대상도 분석 의도도 없으므로 질문으로 되돌리지
+    # 않는다. 분석 목적이 있으면 deterministic plan이 free_query가 되어 아래
+    # 일반 분석 레인을 그대로 사용한다.
+    if plan.get("mode") == "clarification_required" and negated_order:
+        return decide(
+            "no_action",
+            "negated_order_instruction",
+            order_grammar_detected=order_grammar,
+        )
+
     # 되묻기가 주문 레인보다 먼저다. 단, 주문 문법이 잡힌 문장은 엄격 PAPER
     # 레인의 결정론 검증기가 명시적 사유를 내도록 넘긴다.
     if plan.get("mode") == "clarification_required" and not order_grammar:
@@ -208,7 +220,6 @@ def classify_ceo_request(
     # 있었고, 그래서 `"이평 깨지면 매도하지 마"`가 조건주문 카드가 됐다.
     # 가드는 문장 전체가 아니라 부정이 지배하는 구간만 보므로 부정 없는
     # 정상 조건주문은 그대로 통과한다.
-    negated_order = is_negated_order_instruction(text)
     if not read_only_scope and not negated_order:
         analysis_then = parse_analysis_then_conditional_paper_order(text)
         if analysis_then is not None:

@@ -73,6 +73,10 @@ COPY orchestration/readiness_cache.py /app/orchestration/readiness_cache.py
 # package that canonical module instead of weakening the import or duplicating
 # its redaction and sampling rules in this image.
 COPY orchestration/llm_observability.py ./orchestration/llm_observability.py
+# The tracing policy imports the shared egress circuit breaker. Keep the
+# standalone Research image on that one implementation rather than adding a
+# local copy of the flag logic.
+COPY orchestration/langsmith_egress.py ./orchestration/langsmith_egress.py
 # evidence/ 는 research-api /evidence/stories 가 story_cluster(결정론 군집)를
 # import 하기 위해 필요하다 - 표준 라이브러리만 써서 의존성은 늘지 않는다
 COPY departments/01-research/evidence ./evidence

@@ -52,7 +52,10 @@ def build_accounting_sections(repo: LedgerRepository, book_id: UUID) -> dict | N
             """
             select as_of, nav, cash, positions, gross_exposure, net_exposure,
                    quality_status, currency
-              from api.portfolio_snapshot_latest where book_id = %s
+              from accounting.portfolio_snapshots
+             where book_id = %s
+             order by as_of desc, created_at desc
+             limit 1
             """,
             (book_id,),
         )

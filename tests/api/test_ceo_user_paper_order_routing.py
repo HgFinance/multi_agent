@@ -32,6 +32,24 @@ def test_hr_read_only_e2e_marker_bypasses_order_high_recall_router() -> None:
     assert ceo._is_read_only_hr_e2e_request("삼성전자 매수 10주 시장가") is False
 
 
+def test_pure_negated_order_finishes_without_question_or_kanban(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_task = Mock()
+    monkeypatch.setattr(ceo, "fetch_current_mandate_by_fund", lambda _fund: None)
+    monkeypatch.setattr(ceo.hermes_boundary, "create_kanban_task", create_task)
+
+    response = ceo.ceo_query(
+        ceo.CeoAsk(query="7만 원 안 넘으면 사지 마", request_id="no-action-1")
+    )
+
+    create_task.assert_not_called()
+    assert response["task_id"] == ""
+    assert response["task"]["status"] == "completed"
+    assert "만들지 않았습니다" in response["answer"]
+    assert response["planning"]["selected_departments"] == []
+
+
 def test_risk_read_only_e2e_marker_bypasses_legal_example_order_router() -> None:
     raw = (
         "[RISK-E2E] Risk 부서만 수행하세요. PAPER 읽기 전용 분석입니다. "
@@ -549,7 +567,8 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     assert "TIMEFRAME_REQUIRED_FOR_CROSS" in trading_body
     assert "max_data_age_seconds=30" in trading_body
     assert "trusted KRX regular-session close default" in trading_body
-    assert "For 2-4 independent conditional actions" in trading_body
+    assert "For 2-10 independent conditional actions" in trading_body
+    assert "CONDITION_EXPRESSION_CLARIFICATION_REQUIRED" in trading_body
     assert "pass candidates in source-text order" in trading_body
     assert "oco_mode=EXIT_BRACKET" in trading_body
     assert "oco_group_id: the trusted boundary derives it" in trading_body

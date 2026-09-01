@@ -68,6 +68,10 @@ services:
       HERMES_GID: 1000
       HERMES_HOME: /opt/data
       HERMES_PROFILE: ceo-agent
+      # Explicitly set both names: Hermes/LangChain extensions may otherwise
+      # choose LangSmith's implicit `default` project when tracing is enabled.
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGCHAIN_PROJECT: ${LANGSMITH_PROJECT:-First}
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"

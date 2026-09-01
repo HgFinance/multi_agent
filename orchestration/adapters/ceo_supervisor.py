@@ -109,6 +109,7 @@ from orchestration.kanban_root_index import (
     kanban_db_path,
 )
 from orchestration.langsmith_feedback import FeedbackLedger
+from orchestration.langsmith_egress import langsmith_egress_enabled
 from orchestration.primary_task_idempotency import (
     REQUEST_USER_INPUT_ACTION_BODY,
     is_analysis_primary_eligible,
@@ -8627,6 +8628,8 @@ class CeoSupervisorService:
 
     def _langsmith_publisher_configured(self) -> bool:
         environment = getattr(self.client, "environment", os.environ)
+        if not langsmith_egress_enabled(environment):
+            return False
         enabled_values = (
             environment.get("HGFINANCE_LANGSMITH_PUBLISH_ENABLED"),
             environment.get("LANGSMITH_TRACING"),

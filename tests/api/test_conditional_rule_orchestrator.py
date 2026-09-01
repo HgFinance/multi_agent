@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
 from apps.api import ceo, conditional_rules, user_order_orchestrator
 from apps.api import conditional_rule_orchestrator as orchestrator
@@ -321,6 +322,42 @@ def test_missing_ast_requires_clarification_without_creating_a_rule(
     assert record.state == "CLARIFICATION_REQUIRED"
 
 
+def test_unresolved_conditional_instrument_asks_without_activating_a_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo reaches the existing exact catalog boundary and becomes one ask."""
+
+    orders, rules, _tasks = _install_workflow(
+        monkeypatch,
+        raw_instruction="삼성전짜 현재가가 100원 초과하면 1주 매수",
+    )
+    candidate = _candidate().model_copy(update={"symbol": "삼성전짜"})
+
+    def unresolved_instrument(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise HTTPException(
+            status_code=422,
+            detail="paper_order_instrument_clarification_required",
+        )
+
+    monkeypatch.setattr(
+        conditional_rules, "resolve_active_trading_instrument", unresolved_instrument
+    )
+
+    result = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidate=candidate,
+    )
+
+    assert result["binding"] is False
+    assert result["rule_active"] is False
+    assert result["awaiting_user_reply"] is True
+    assert "paper_order_instrument_clarification_required" in result["reason_codes"][0]
+    assert "6자리 코드" in result["user_message"]
+    assert rules.list_for_user(USER_ID) == []
+    assert next(iter(orders._records.values())).state == "CLARIFICATION_REQUIRED"
+
+
 def test_capability_gap_rejection_reaches_the_user_as_a_sentence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -409,6 +446,53 @@ def test_multiple_price_actions_activate_as_independent_one_shot_rules(
     assert {item["workflow_state"] for item in status["rules"]} == {
         "WAITING_FOR_TRIGGER"
     }
+
+
+def test_ten_independent_actions_activate_and_remain_trackable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One request may register ten distinct ACTIVE rules through the one boundary."""
+
+    raw = " 그리고 ".join(
+        f"하이닉스 현재가가 {1_600_000 + index}원 초과하면 1주 매수"
+        for index in range(10)
+    )
+    _orders, rules, _tasks = _install_workflow(monkeypatch, raw_instruction=raw)
+    candidates = tuple(
+        _price_candidate(
+            threshold=str(1_600_000 + index), quantity="1", operator="GT"
+        )
+        for index in range(10)
+    )
+
+    result = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidates=candidates,
+    )
+
+    stored = rules.list_for_user(USER_ID)
+    assert result["binding"] is True
+    assert result["rule_active"] is True
+    assert len(result["rule_ids"]) == 10
+    assert len(stored) == 10
+    assert {item.state for item in stored} == {RuleState.ACTIVE}
+    assert len({item.spec.condition.right.value for item in stored}) == 10
+
+
+def test_eleventh_independent_action_is_rejected_at_admission_boundary() -> None:
+    candidates = tuple(
+        _price_candidate(
+            threshold=str(1_600_000 + index), quantity="1", operator="GT"
+        )
+        for index in range(11)
+    )
+
+    with pytest.raises(
+        user_order_orchestrator.PaperOrderOrchestrationRejected,
+        match="TOO_MANY_CONDITIONAL_ACTIONS",
+    ):
+        orchestrator._candidate_batch(candidate=None, candidates=candidates)
 
 
 def test_relative_move_pair_preserves_opposite_actions_as_two_rules(
@@ -602,3 +686,33 @@ def test_status_reader_does_not_describe_expired_rule_as_active(
     assert status["workflow_state"] == "EXPIRED"
     assert "현재 EXPIRED 상태" in status["final_answer"]
     assert "활성 상태" not in status["final_answer"]
+
+
+def test_active_quote_rule_status_exposes_recheck_wait_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _orders, rules, _tasks = _install_workflow(monkeypatch)
+    activated = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidate=_price_candidate(threshold="70000", quantity="1", operator="GTE"),
+    )
+    stored = rules.get(activated["rule_id"], user_id=USER_ID)
+    assert stored is not None
+    rules._records[stored.rule_id] = stored.__class__(
+        **{
+            **stored.__dict__,
+            "last_execution_state": "PENDING",
+            "last_error_code": "TRADING_MARKET_QUOTE_STALE",
+        }
+    )
+
+    status = orchestrator.get_user_conditional_paper_rule_status(
+        root_task_id="t_root1", trading_task_id="t_trade1"
+    )
+
+    assert status["evaluation_clock"] == "QUOTE"
+    assert status["primary_timeframe"] is None
+    assert status["last_error_code"] == "TRADING_MARKET_QUOTE_STALE"
+    assert "신선한 현재가를 감시" in status["final_answer"]
+    assert "한 번만 다시 확인" in status["final_answer"]

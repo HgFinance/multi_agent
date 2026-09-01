@@ -42,7 +42,10 @@ pgvector
 langgraph
 # Directly imported by the production tracing/adapters; do not rely on a
 # transitive install from langgraph.
-langsmith>=0.3,<1
+# SmithDB query/retrieve APIs require >=0.10.15. Keep this floor aligned with
+# the production image so a clean rebuild cannot silently restore deprecated
+# run-query helpers.
+langsmith>=0.10.15,<1
 # langgraph-checkpoint-postgres: TECH_STACK_DECISIONS.md 39행 "LangGraph Persistence" P0 필수.
 # PostgresSaver가 psycopg(v3)를 쓴다 - 위 psycopg2-binary(Repository 직접 접근용)와는 별개 드라이버다.
 # HITL Mandate 변경 Workflow(change_workflow.py)의 interrupt()/재개에 사용(2026-08-05).

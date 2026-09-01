@@ -48,7 +48,49 @@ def test_monthly_unique_trace_limit_stops_observer_retries(
     finally:
         with observability._LANGSMITH_QUOTA_LOCK:
             observability._LANGSMITH_QUOTA_PAUSED_UNTIL = 0.0
-            observability._LANGSMITH_USAGE_LIMITED = False
+        observability._LANGSMITH_USAGE_LIMITED = False
+
+
+def test_langsmith_clients_use_batch_ingest_without_multipart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import orchestration.llm_observability as observability
+
+    calls: list[dict] = []
+
+    class _Client:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setitem(sys.modules, "langsmith", SimpleNamespace(Client=_Client))
+    observability._safe_langsmith_client.cache_clear()
+    observability._structured_langsmith_client.cache_clear()
+    try:
+        observability._safe_langsmith_client()
+        observability._structured_langsmith_client()
+    finally:
+        observability._safe_langsmith_client.cache_clear()
+        observability._structured_langsmith_client.cache_clear()
+
+    assert len(calls) == 2
+    for kwargs in calls:
+        config = kwargs["info"]["batch_ingest_config"]
+        assert config["use_multipart_endpoint"] is False
+        assert config["size_limit"] == 100
+
+
+def test_langsmith_egress_circuit_breaker_overrides_all_enable_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import orchestration.llm_observability as observability
+
+    monkeypatch.setenv("LANGSMITH_API_KEY", "configured")
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("HGFINANCE_LANGSMITH_PUBLISH_ENABLED", "true")
+    monkeypatch.setenv("HGFINANCE_LANGSMITH_EGRESS_ENABLED", "false")
+
+    assert not observability.langsmith_enabled()
+    assert not observability.langsmith_tracing_enabled()
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +99,7 @@ def _emit_observability_events_in_unit_tests(
 ) -> None:
     """Keep contract tests deterministic while production uses sampling."""
 
+    monkeypatch.setenv("HGFINANCE_LANGSMITH_EGRESS_ENABLED", "true")
     monkeypatch.setenv("LANGSMITH_TRACE_SAMPLE_RATE", "1")
     monkeypatch.setenv("LANGSMITH_METRIC_SAMPLE_RATE", "1")
 

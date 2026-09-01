@@ -102,7 +102,16 @@ def _changed_request_ids(
 ) -> list[str]:
     """Map changed Kanban task ids to existing mirror request ids."""
 
-    changed_roots = set(changed_task_ids)
+    # Retention emits delete events too. A deleted root is no longer in the
+    # authoritative board snapshot and must not be sent to ``kanban show``;
+    # doing so only produces a predictable no-such-task traceback. Existing
+    # mirror events remain durable, so skipping that read loses no UI result.
+    listed_task_ids = {
+        str(row.get("id") or row.get("task_id") or "").strip()
+        for row in listed_rows
+    }
+    listed_task_ids.discard("")
+    changed_roots = set(changed_task_ids) & listed_task_ids
     for row in listed_rows:
         row_id = str(row.get("id") or row.get("task_id") or "").strip()
         if row_id not in changed_task_ids:

@@ -95,6 +95,8 @@ def preview_request(raw: str, candidate: dict | None = None):
         "네이버 주가가 200000원 아래로 떨어지면 1주 매도",
         "삼성전자 볼린저밴드 상단에 닿으면 1주 매도",
         "삼성전자 1퍼 오르면 매도해주고 1퍼 내리면 매수해",
+        "현대약품 오르면 사줘",
+        "삼성전자 1% 오르먼 1주 매수",
     ),
 )
 def test_explicit_korean_condition_endings_route_to_conditional_lane(raw: str) -> None:
@@ -139,6 +141,57 @@ def test_semantic_rejection_is_a_client_error_that_names_the_field(monkeypatch) 
     assert "AVG_BUY_PRICE" in raised.value.detail["message"]
 
 
+def test_explicit_intrabar_rsi_cross_keeps_one_existing_conditional_route(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    candidate = {
+        "symbol": "삼성전자",
+        "condition": {
+            "type": "CROSS",
+            "operator": "ABOVE",
+            "left": {"type": "INDICATOR", "name": "RSI", "timeframe": "1M"},
+            "right": {"type": "LITERAL", "value": "70", "unit": "NUMBER"},
+        },
+        "action": {"side": "SELL", "sizing": {"type": "FIXED_SHARES", "value": "1"}},
+        "evaluation": {"clock": "INTRABAR", "primary_timeframe": "1M"},
+        "expires_at": (NOW + timedelta(days=1)).isoformat(),
+    }
+
+    preview = api._build_preview(
+        preview_request("삼성전자 1분봉 RSI 70을 장중 실시간 돌파하면 1주 매도", candidate),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.spec.evaluation.clock.value == "INTRABAR"
+    assert preview.spec.evaluation.primary_timeframe.value == "1M"
+
+
+def test_intrabar_rejects_unfinished_volume_input(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    candidate = {
+        "symbol": "삼성전자",
+        "condition": {
+            "type": "COMPARISON",
+            "operator": "GTE",
+            "left": {"type": "MARKET", "field": "VOLUME"},
+            "right": {"type": "LITERAL", "value": "100", "unit": "VOLUME"},
+        },
+        "action": {"side": "SELL", "sizing": {"type": "FIXED_SHARES", "value": "1"}},
+        "evaluation": {"clock": "INTRABAR", "primary_timeframe": "1M"},
+        "expires_at": (NOW + timedelta(days=1)).isoformat(),
+    }
+
+    with pytest.raises(api.HTTPException) as raised:
+        api._build_preview(
+            preview_request("삼성전자 장중 거래량이 100 이상이면 1주 매도", candidate),
+            subject=USER_ID,
+            now=NOW,
+        )
+
+    assert raised.value.status_code == 422
+    assert raised.value.detail["code"] == "INTRABAR_FIELD_UNSUPPORTED"
+
+
 def test_korean_relative_move_without_baseline_or_quantity_is_not_activated(monkeypatch) -> None:
     """A relative move pair must not invent its baseline or share counts."""
 
@@ -172,6 +225,88 @@ def test_korean_relative_move_without_baseline_or_quantity_is_not_activated(monk
         "QUANTITY_REQUIRED",
         "AMBIGUOUS_RETURN_BASELINE",
     )
+
+
+def test_front_loaded_single_share_quantity_is_bound_to_later_sell_action(monkeypatch) -> None:
+    """A trigger between ``10주`` and ``매도`` must not erase the sizing."""
+
+    install_scope(monkeypatch)
+    raw = "원익 10주 1분봉 엔빌로프(20,5) 상단선 돌파시 시장가 매도"
+    candidate = {
+        "symbol": "원익",
+        "condition": {
+            "type": "CROSS",
+            "operator": "ABOVE",
+            "left": {"type": "MARKET", "field": "CLOSE"},
+            "right": {
+                "type": "INDICATOR",
+                "name": "ENVELOPE",
+                "output": "UPPER",
+                "timeframe": "1M",
+                "parameters": {"PERIOD": 20, "PERCENT": 5},
+            },
+        },
+        "action": {
+            "side": "SELL",
+            "sizing": {"type": "FIXED_SHARES", "value": "10"},
+            "order_type": "MARKET",
+            "time_in_force": "DAY",
+        },
+        "evaluation": {"clock": "BAR_CLOSE", "primary_timeframe": "1M"},
+    }
+
+    preview = api._build_preview(
+        preview_request(raw, candidate),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is True
+    assert preview.clarification_codes == ()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "원익 10주 20주 1분봉 엔빌로프 상단선 돌파시 시장가 매도",
+        "원익 10주 1분봉 엔빌로프 상단선 돌파시 시장가 매도 후 매수",
+    ),
+)
+def test_front_loaded_quantity_stays_ambiguous_for_multiple_sizes_or_actions(
+    monkeypatch, raw: str
+) -> None:
+    """The fallback may bind only a unique quantity to a unique action."""
+
+    install_scope(monkeypatch)
+    candidate = {
+        "symbol": "원익",
+        "condition": {
+            "type": "CROSS",
+            "operator": "ABOVE",
+            "left": {"type": "MARKET", "field": "CLOSE"},
+            "right": {
+                "type": "INDICATOR",
+                "name": "ENVELOPE",
+                "output": "UPPER",
+                "timeframe": "1M",
+                "parameters": {"PERIOD": 20, "PERCENT": 5},
+            },
+        },
+        "action": {
+            "side": "SELL",
+            "sizing": {"type": "FIXED_SHARES", "value": "10"},
+        },
+        "evaluation": {"clock": "BAR_CLOSE", "primary_timeframe": "1M"},
+    }
+
+    preview = api._build_preview(
+        preview_request(raw, candidate),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is False
+    assert preview.clarification_codes == ("QUANTITY_REQUIRED",)
 
 
 @pytest.mark.parametrize(
@@ -671,7 +806,7 @@ def test_omitted_expiry_after_close_uses_next_weekday_close() -> None:
     )
 
 
-def test_unqualified_daily_indicator_is_visible_confirmation_assumption(monkeypatch) -> None:
+def test_unqualified_indicator_requires_timeframe_clarification(monkeypatch) -> None:
     install_scope(monkeypatch)
     candidate = {
         "symbol": "삼성전자",
@@ -692,8 +827,8 @@ def test_unqualified_daily_indicator_is_visible_confirmation_assumption(monkeypa
         now=NOW,
     )
 
-    assert preview.activatable is True
-    assert "DEFAULTED_TO_DAILY_COMPLETED_BAR" in preview.assumptions
+    assert preview.activatable is False
+    assert preview.clarification_codes == ("TIMEFRAME_NOT_IN_INSTRUCTION",)
 
 
 def test_non_daily_timeframe_without_text_evidence_requires_clarification(monkeypatch) -> None:
@@ -971,6 +1106,7 @@ def test_unparsed_duration_is_not_reported_as_an_instrument_problem() -> None:
         "UNSUPPORTED_DELAY_EXPRESSION",
         "MISSING_OR_CONFLICTING_INSTRUMENT",
         "MISSING_OR_CONFLICTING_QUANTITY",
+        "paper_order_instrument_clarification_required",
         "trading_market_no_ask",
         "trading_market_no_bid",
         "trading_market_quote_stale",

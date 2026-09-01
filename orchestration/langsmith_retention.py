@@ -30,6 +30,7 @@ from orchestration.langsmith_queries import (
     query_runs,
     resolve_project_id,
 )
+from orchestration.langsmith_egress import langsmith_egress_enabled
 
 LOG = logging.getLogger(__name__)
 TRACE_DELETE_BATCH_SIZE = 100
@@ -326,6 +327,13 @@ class LangSmithRetentionWorker:
         now: datetime | None = None,
     ) -> LangSmithRetentionSummary:
         effective_dry_run = self.dry_run if dry_run is None else bool(dry_run)
+        if not langsmith_egress_enabled():
+            return LangSmithRetentionSummary(
+                True,
+                False,
+                effective_dry_run,
+                error_code="LANGSMITH_EGRESS_DISABLED",
+            )
         if not self.enabled:
             return LangSmithRetentionSummary(True, False, effective_dry_run, error_code="DISABLED")
         if not self.api_key:
@@ -340,8 +348,14 @@ class LangSmithRetentionWorker:
         client: Any | None = None
         try:
             from langsmith import Client
+            from orchestration.llm_observability import langsmith_batch_ingest_info
 
-            client = Client(hide_inputs=True, hide_outputs=True, hide_metadata=True)
+            client = Client(
+                info=langsmith_batch_ingest_info(),
+                hide_inputs=True,
+                hide_outputs=True,
+                hide_metadata=True,
+            )
             for scope, project_name, default_days in self._projects():
                 retention_days = self._retention_days(scope, default_days)
                 scan_start = current - timedelta(days=max(self.scan_window_days, retention_days))

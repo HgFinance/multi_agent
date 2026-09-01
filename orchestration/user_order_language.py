@@ -360,14 +360,27 @@ _PLACE_ORDER_ADORNMENT_PATTERNS = (
 )
 _EXAMPLE_RE = re.compile(
     r"(?:예시|예를\s*들|라고\s*(?:입력|말|쓰|하면)|문구|무슨\s*뜻|"
-    r"프롬프트|테스트|따옴표|[\"'“”‘’])"
+    r"프롬프트|테스트|따옴표)"
 )
+_QUOTE_MARKER_RE = re.compile(r"[\"“”‘’]")
 _COMPOUND_RE = re.compile(
     r"(?:그리고|그\s*다음|동시에|각각|;|/|\n|\r|"
     r"(?:매수하|매도하|사|팔)고\s+)"
 )
 _APPROXIMATE_RE = re.compile(
-    r"(?:약|대략|대충|정도|쯤|한두|두세|십여|가능한\s*만큼|적당히|조금)"
+    r"(?:"
+    # `약` is also part of valid instrument names such as `현대약품`;
+    # only treat it as approximate language when it is not embedded in a
+    # Korean name. Digits remain allowed so `약10주` is still rejected.
+    r"(?<![가-힣A-Za-z0-9])약(?![가-힣])"
+    r"|(?<![가-힣A-Za-z0-9])"
+    r"(?:대략|대충|정도|쯤|한두|두세|십여|가능한\s*만큼|적당히|조금)"
+    r"(?![가-힣A-Za-z0-9])"
+    r")"
+)
+_BARE_AMBIGUOUS_INSTRUMENT_RE = re.compile(
+    rf"^\s*약\s+{_INTEGER_TOKEN}\s*(?:주식|주|개)\b.*?(?:매수|매도|사|팔)",
+    re.IGNORECASE,
 )
 _NOTIONAL_RE = re.compile(r"(?:원\s*어치|만원\s*어치|금액으로)")
 _BASKET_NOTIONAL_RE = re.compile(
@@ -433,6 +446,86 @@ _INSTRUMENT_RE = re.compile(
     r"|[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,79}"
     r")"
 )
+def quoted_instrument_spans(
+    raw_text: str,
+) -> tuple[tuple[int, int, int, int], ...] | None:
+    """Return quote container and exact inner spans for strong instrument hints."""
+
+    spans: list[tuple[int, int, int, int]] = []
+    index = 0
+    while index < len(raw_text):
+        opener = raw_text[index]
+        if opener not in {"\"", "“"}:
+            if opener in {"”", "‘", "’"}:
+                return None
+            index += 1
+            continue
+        closer = "\"" if opener == "\"" else "”"
+        close_index = raw_text.find(closer, index + 1)
+        if close_index < 0:
+            return None
+        inner_start = index + 1
+        inner_end = close_index
+        while inner_start < inner_end and raw_text[inner_start].isspace():
+            inner_start += 1
+        while inner_end > inner_start and raw_text[inner_end - 1].isspace():
+            inner_end -= 1
+        inner = raw_text[inner_start:inner_end]
+        if (
+            not inner
+            or _INSTRUMENT_RE.fullmatch(inner) is None
+            or _ROUTING_ORDER_RE.search(inner) is not None
+            or _QUANTITY_RE.search(inner) is not None
+            or _MARKET_RE.search(inner) is not None
+            or _LIMIT_MARKER_RE.search(inner) is not None
+            or _NOTIONAL_RE.search(inner) is not None
+        ):
+            return None
+        spans.append((index, inner_start, inner_end, close_index + 1))
+        index = close_index + 1
+    return tuple(spans)
+
+
+def normalize_quoted_instrument_mention(mention: str) -> str | None:
+    """Remove one complete double-quoted instrument boundary."""
+
+    cleaned = mention.strip()
+    if not _QUOTE_MARKER_RE.search(cleaned):
+        return cleaned
+    spans = quoted_instrument_spans(cleaned)
+    if spans is None or len(spans) != 1:
+        return None
+    container_start, inner_start, inner_end, container_end = spans[0]
+    if container_start != 0 or container_end != len(cleaned):
+        return None
+    return cleaned[inner_start:inner_end]
+
+
+def _masked_quoted_instrument_text(raw_text: str) -> str:
+    """Mask valid quoted names while scanning for approximate language."""
+
+    spans = quoted_instrument_spans(raw_text)
+    if not spans:
+        return raw_text
+    masked = list(raw_text)
+    for _, inner_start, inner_end, _ in spans:
+        masked[inner_start:inner_end] = " " * (inner_end - inner_start)
+    return "".join(masked)
+
+
+def _instrument_consumption_span(
+    raw_text: str, instrument_span: tuple[int, int]
+) -> tuple[int, int]:
+    """Consume quote delimiters while preserving inner evidence offsets."""
+
+    for container_start, inner_start, inner_end, container_end in (
+        quoted_instrument_spans(raw_text) or ()
+    ):
+        if (inner_start, inner_end) == instrument_span:
+            return container_start, container_end
+    return instrument_span
+
+
 _ALLOWED_RESIDUAL_RE = re.compile(
     r"^(?:(?:을|를|은|는|이|가|에|에서|로|으로|좀|만|내|현재|계좌|"
     r"보유|종목|주식|주문|주세요|줘)\s*)*$"
@@ -552,6 +645,8 @@ def _unsafe_language(raw_text: str) -> OrderReasonCode | None:
     if any(ord(character) < 32 and character not in {"\t"} for character in raw_text):
         return OrderReasonCode.EXAMPLE_OR_QUOTED_TEXT
     if _EXAMPLE_RE.search(raw_text):
+        return OrderReasonCode.EXAMPLE_OR_QUOTED_TEXT
+    if _QUOTE_MARKER_RE.search(raw_text) and quoted_instrument_spans(raw_text) is None:
         return OrderReasonCode.EXAMPLE_OR_QUOTED_TEXT
     if order_negation_match(raw_text) is not None:
         return OrderReasonCode.NEGATED_OR_PROHIBITED
@@ -816,7 +911,11 @@ def _basket_match(raw_text: str) -> _BasketMatch | None:
 
 
 def _member_notional_basket_match(raw_text: str) -> _BasketMatch | None:
-    """Return a strict per-member KRW notional BUY basket grammar."""
+    """Return one or more strict per-member KRW allocation BUY legs.
+
+    A single ``종목 N만원어치 매수`` reuses the existing fresh-quote allocation
+    executor. It remains BUY/MARKET only and never infers a share quantity.
+    """
 
     if (
         _BASKET_NOTIONAL_RE.search(raw_text)
@@ -848,9 +947,6 @@ def _member_notional_basket_match(raw_text: str) -> _BasketMatch | None:
     if list_end <= list_start:
         return None
     list_text = raw_text[list_start:list_end]
-    if "," not in list_text:
-        return None
-
     instruments: list[str] = []
     notionals_krw: list[int] = []
     cursor = 0
@@ -888,7 +984,7 @@ def _member_notional_basket_match(raw_text: str) -> _BasketMatch | None:
         if cursor == len(list_text):
             return None
     if (
-        not 2 <= len(instruments) <= 20
+        not 1 <= len(instruments) <= 20
         or len(set(instruments)) != len(instruments)
     ):
         return None
@@ -1597,7 +1693,7 @@ def _verify_place_order(
     ):
         return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
 
-    consumed.append(authoritative_instrument_span)
+    consumed.append(_instrument_consumption_span(raw_text, authoritative_instrument_span))
     if not _residual_supported(raw_text, list(dict.fromkeys(consumed))):
         return _clarify(digest, OrderReasonCode.UNSUPPORTED_TEXT)
 
@@ -1660,7 +1756,9 @@ def verify_order_candidate(
     )
     if _NOTIONAL_RE.search(raw_text) and basket is None:
         return _clarify(digest, OrderReasonCode.NOTIONAL_UNSUPPORTED)
-    if _APPROXIMATE_RE.search(raw_text):
+    if _BARE_AMBIGUOUS_INSTRUMENT_RE.search(raw_text):
+        return _clarify(digest, OrderReasonCode.MISSING_OR_CONFLICTING_INSTRUMENT)
+    if _APPROXIMATE_RE.search(_masked_quoted_instrument_text(raw_text)):
         return _clarify(digest, OrderReasonCode.APPROXIMATE_VALUE)
     if (
         (_COMPOUND_RE.search(raw_text) or re.search(r"(?<!\d)[.!]\s*\S", raw_text))
@@ -1670,6 +1768,24 @@ def verify_order_candidate(
 
     aggregate = _aggregate_match(raw_text)
     if structured.decision is not CandidateDecision.EXECUTE:
+        # Do not expose a generic model non-execution message when the source
+        # text itself proves that only the sizing is absent.
+        if (
+            structured.decision is CandidateDecision.CLARIFY
+            and structured.reason_codes
+            == (OrderReasonCode.MISSING_OR_CONFLICTING_QUANTITY,)
+            and len(_BUY_RE.findall(raw_text)) + len(_SELL_RE.findall(raw_text)) == 1
+            and not _QUANTITY_RE.search(raw_text)
+            and not _NOTIONAL_RE.search(raw_text)
+        ):
+            return _clarify(digest, OrderReasonCode.MISSING_OR_CONFLICTING_QUANTITY)
+        if (
+            structured.decision is CandidateDecision.CLARIFY
+            and structured.reason_codes
+            == (OrderReasonCode.MISSING_OR_CONFLICTING_INSTRUMENT,)
+            and _BARE_AMBIGUOUS_INSTRUMENT_RE.search(raw_text)
+        ):
+            return _clarify(digest, OrderReasonCode.MISSING_OR_CONFLICTING_INSTRUMENT)
         if (
             basket
             or aggregate
@@ -1740,6 +1856,27 @@ def _deterministic_instrument_span(
     consumed: list[tuple[int, int]],
 ) -> tuple[int, int] | None:
     """Extract the one residual instrument phrase without normalizing offsets."""
+
+    quoted = quoted_instrument_spans(raw_text)
+    if _QUOTE_MARKER_RE.search(raw_text):
+        if quoted is None:
+            return None
+        available = [
+            span
+            for span in quoted
+            if not any(
+                span[0] < consumed_end and span[3] > consumed_start
+                for consumed_start, consumed_end in consumed
+            )
+        ]
+        if len(available) != 1:
+            return None
+        container_start, inner_start, inner_end, container_end = available[0]
+        if not _residual_supported(
+            raw_text, [*consumed, (container_start, container_end)]
+        ):
+            return None
+        return inner_start, inner_end
 
     remaining = list(raw_text)
     for start, end in consumed:
@@ -1892,6 +2029,12 @@ def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
     numbers, and any residual text it cannot account for exactly.
     """
 
+    if isinstance(raw_text, str) and _BARE_AMBIGUOUS_INSTRUMENT_RE.search(raw_text):
+        return HermesOrderCandidate(
+            raw_text_sha256=raw_text_sha256(raw_text),
+            decision=CandidateDecision.CLARIFY,
+            reason_codes=(OrderReasonCode.MISSING_OR_CONFLICTING_INSTRUMENT,),
+        )
     if (
         not isinstance(raw_text, str)
         or not raw_text.strip()
@@ -1899,7 +2042,7 @@ def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
         or _unsafe_language(raw_text) is not None
         or _LIVE_MODE_RE.search(raw_text)
         or _RELATIVE_DELAY_RE.search(raw_text)
-        or _APPROXIMATE_RE.search(raw_text)
+        or _APPROXIMATE_RE.search(_masked_quoted_instrument_text(raw_text))
         or _COMPOUND_RE.search(raw_text)
         or re.search(r"(?<!\d)[.!]\s*\S", raw_text)
     ):
@@ -1923,6 +2066,19 @@ def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
     quantities = list(_QUANTITY_RE.finditer(raw_text))
     market_markers = list(_MARKET_RE.finditer(raw_text))
     limit_markers = list(_LIMIT_MARKER_RE.finditer(raw_text))
+    if len(side_matches) == 1 and not quantities:
+        # A complete instrument/action phrase with no sizing is safely
+        # actionable only as a clarification. Keep it on the existing
+        # deterministic interpreter and never delegate this missing fact to a
+        # model.
+        consumed = [side_matches[0].span(), *_place_order_adornment_spans(raw_text)]
+        if _deterministic_instrument_span(raw_text, list(dict.fromkeys(consumed))):
+            return HermesOrderCandidate(
+                raw_text_sha256=raw_text_sha256(raw_text),
+                decision=CandidateDecision.CLARIFY,
+                reason_codes=(OrderReasonCode.MISSING_OR_CONFLICTING_QUANTITY,),
+            )
+        return None
     if (
         len(side_matches) != 1
         or len(quantities) != 1
@@ -2090,6 +2246,8 @@ __all__ = [
     "DelayedPaperOrderPlan",
     "deterministic_delayed_order_plan",
     "deterministic_order_candidate",
+    "normalize_quoted_instrument_mention",
+    "quoted_instrument_spans",
     "is_clearly_non_executable_order_language",
     "looks_like_user_order_request",
     "parse_strict_positive_integer",

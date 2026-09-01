@@ -38,6 +38,10 @@ RAW_STRESS_2 = (
     "삼성전자 볼린저밴드 상단 돌파 + RSI 70 이상 또는 "
     "거래량 2배 이상이면 보유 수량 50% 매도"
 )
+RAW_STRESS_2_COMPLETE = (
+    "삼성전자 일봉 볼린저밴드 상단 돌파 + RSI 70 이상 또는 "
+    "거래량 2배 이상이면 보유 수량 50% 매도"
+)
 RAW_STRESS_3 = (
     "삼성전자 일봉이 20일 이평 위에 있을 때, "
     "5분봉 RSI가 30을 재돌파하면 5주 매수"
@@ -50,8 +54,16 @@ RAW_STRESS_5 = (
     "삼성전자 MACD 골든크로스 발생 시 가용 현금의 10%를 매수하되, "
     "최대 주문금액은 100만원으로 제한"
 )
-RAW_STRESS_6_COMPLETE = (
+RAW_STRESS_5_COMPLETE = (
+    "삼성전자 일봉 MACD 골든크로스 발생 시 가용 현금의 10%를 매수하되, "
+    "최대 주문금액은 100만원으로 제한"
+)
+RAW_STRESS_6_AMBIGUOUS = (
     "삼성전자 RSI(14)가 30을 하향 돌파한 이후 20봉 이내 20이평을 "
+    "상향 돌파하면 5주 매수, 그 전에 RSI(14)가 70을 상향 돌파하면 조건 취소"
+)
+RAW_STRESS_6_COMPLETE = (
+    "삼성전자 일봉 RSI(14)가 30을 하향 돌파한 이후 20봉 이내 20일 이평을 "
     "상향 돌파하면 5주 매수, 그 전에 RSI(14)가 70을 상향 돌파하면 조건 취소"
 )
 RAW_STRESS_7 = (
@@ -564,10 +576,10 @@ def _runtime_inputs(spec, *, case: int) -> RuntimeInputs:
     ("case", "raw", "candidate_factory", "expected_quantity"),
     (
         (1, RAW_STRESS_1, _candidate_1, Decimal("10")),
-        (2, RAW_STRESS_2, _candidate_2, Decimal("10")),
+        (2, RAW_STRESS_2_COMPLETE, _candidate_2, Decimal("10")),
         (3, RAW_STRESS_3, _candidate_3, Decimal("5")),
         (4, RAW_STRESS_4, _candidate_4, Decimal("77")),
-        (5, RAW_STRESS_5, _candidate_5, Decimal("10")),
+        (5, RAW_STRESS_5_COMPLETE, _candidate_5, Decimal("10")),
     ),
 )
 def test_stress_rule_reaches_one_guarded_paper_submission(
@@ -620,6 +632,33 @@ def test_stress_rule_reaches_one_guarded_paper_submission(
     assert store.execution_decisions == [
         (True, "READY_FOR_PAPER_DIRECTIVE", expected_quantity)
     ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "candidate_factory"),
+    (
+        (RAW_STRESS_2, _candidate_2),
+        (RAW_STRESS_5, _candidate_5),
+        (RAW_STRESS_6_AMBIGUOUS, _candidate_6),
+    ),
+)
+def test_indicator_stress_rule_without_timeframe_stays_unbound(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    candidate_factory,
+) -> None:
+    """A canonical 1D AST must not silently supply a missing user timeframe."""
+
+    _install_workflow(monkeypatch, raw_instruction=raw)
+    activation = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidate=candidate_factory(),
+    )
+
+    assert activation["binding"] is False
+    assert activation["rule_active"] is False
+    assert activation["reason_codes"] == ["TIMEFRAME_NOT_IN_INSTRUCTION"]
 
 
 def _temporal_inputs(spec, *, armed: bool) -> RuntimeInputs:

@@ -273,22 +273,27 @@ test("CEO chat unifies advice and PAPER commands while keeping book scope explic
   assert.match(controlRoom, /질문과 안내는 계속 사용할 수 있습니다/);
   assert.doesNotMatch(controlRoom, /PAPER ONLY · LIVE 아님/);
   assert.doesNotMatch(controlRoom, /LIVE 아님/);
-  assert.match(controlRoom, /askCeo\(text, undefined, bookId, fundId\)/);
+  assert.match(
+    controlRoom,
+    /askCeo\(text, undefined, bookId, fundId, confirmOrder\)/,
+  );
   assert.doesNotMatch(controlRoom, /PaperOrderConsole|setMode\("paper"\)|role="tablist"/);
   assert.match(ceoClient, /fundId\?: string/);
   assert.match(ceoClient, /bookId\?: string/);
   assert.match(ceoClient, /bookId \? \{ book_id: bookId \} : \{\}/);
+  assert.match(ceoClient, /confirmOrder \? \{ confirm_order: true \} : \{\}/);
 });
 
 test("모든 백엔드 directive action을 파싱한다", () => {
   // PLACE_BASKET이 허용목록에서 빠져 있으면 백엔드가 성공시킨 바스켓 주문을
   // UI가 paper_order_invalid_response로 던져버린다. 백엔드 계약
   // (orchestration/contracts/user_paper_order.py DirectiveAction)과 어긋나지
-  // 않도록 네 액션을 모두 고정한다.
+  // 않도록 다섯 액션을 모두 고정한다.
   for (const action of [
     "PLACE_ORDER",
     "PLACE_BASKET",
     "SELL_ALL",
+    "SELL_POSITION",
     "CANCEL_ALL",
   ]) {
     const parsed = parsePaperDirective(directive({ action }));

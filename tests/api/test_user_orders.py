@@ -123,6 +123,25 @@ def test_deterministic_parser_accepts_exact_same_notional_buy_basket() -> None:
     }
 
 
+def test_deterministic_parser_reuses_allocation_path_for_one_notional_buy() -> None:
+    action, payload = user_orders.parse_user_order_query("현대약품 300만원어치 사줘")
+
+    assert action is user_orders.DirectiveAction.PLACE_BASKET
+    assert payload == {
+        "orders": [
+            {
+                "instrument_id": None,
+                "symbol": "현대약품",
+                "notional_krw": "3000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            }
+        ]
+    }
+
+
 def test_deterministic_parser_accepts_shared_allocation_qualifier_after_final_name() -> None:
     action, payload = user_orders.parse_user_order_query(
         "삼성전자, sk하이닉스, 삼성전자우, sk스퀘어, 삼성전기, "

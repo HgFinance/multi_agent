@@ -224,6 +224,18 @@ class CeoQueryAcceptedTask(BaseModel):
     source: Literal["hermes-kanban"] = "hermes-kanban"
 
 
+class CeoOrderConfirmation(BaseModel):
+    """Non-mutating parsed PAPER order preview awaiting a user click."""
+
+    required: Literal[True] = True
+    query: str
+    instrument_mention: str
+    side: Literal["BUY", "SELL"]
+    quantity: str
+    order_type: Literal["MARKET", "LIMIT"]
+    limit_price: str | None = None
+
+
 class CeoQueryAcceptedResponse(BaseModel):
     """POST /ui/ceo/ask"""
 
@@ -247,10 +259,12 @@ class CeoQueryAcceptedResponse(BaseModel):
     order_state: str | None = None
     order_mode: Literal["PAPER"] | None = None
     trading_task_id: str | None = None
+    order_confirmation: CeoOrderConfirmation | None = None
 
 
 __all__ = [
     "CeoPlanning",
+    "CeoOrderConfirmation",
     "CeoQueryAcceptedResponse",
     "CeoQueryAcceptedTask",
     "GraphNode",

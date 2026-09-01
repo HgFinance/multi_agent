@@ -238,6 +238,7 @@ class SubmitReadyExecution:
     rule_id: UUID
     rule_version: int
     idempotency_key: str
+    submission_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -2307,7 +2308,7 @@ class PostgresRuleWorkerStore:
                     """
                     select execution.rule_execution_id,execution.trigger_id,
                            execution.rule_id,execution.rule_version,
-                           execution.idempotency_key
+                           execution.idempotency_key,execution.submission_attempts
                       from execution.conditional_rule_executions execution
                       join execution.conditional_trade_rules rule
                         on rule.rule_id=execution.rule_id
@@ -2326,6 +2327,7 @@ class PostgresRuleWorkerStore:
                         rule_id=UUID(str(row[2])),
                         rule_version=int(row[3]),
                         idempotency_key=str(row[4]),
+                        submission_attempts=int(row[5] or 0),
                     )
                     for row in cursor.fetchall()
                 ]
@@ -2647,7 +2649,8 @@ class PostgresRuleWorkerStore:
                 cursor.execute(
                     """
                     update execution.conditional_rule_executions
-                       set state='SUBMITTING',error_code=null,error_message=null
+                       set state='SUBMITTING',error_code=null,error_message=null,
+                           submission_attempts=submission_attempts+1
                      where rule_execution_id=%s
                        and (
                          state='PENDING'
@@ -2668,9 +2671,100 @@ class PostgresRuleWorkerStore:
             ) from exc
 
     def mark_retryable_failure(
-        self, rule_execution_id: UUID, *, code: str, message: str
+        self,
+        rule_execution_id: UUID,
+        *,
+        code: str,
+        message: str,
+        max_attempts: int | None = None,
     ) -> None:
-        self._set_execution_retry_state(rule_execution_id, "PENDING", code, message)
+        """Requeue one unsubmitted execution, or close it at its retry cap."""
+
+        if max_attempts is None:
+            self._set_execution_retry_state(rule_execution_id, "PENDING", code, message)
+            return
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                row = self._select_submission_row(cursor, rule_execution_id, for_update=True)
+                if row is None:
+                    return
+                (
+                    rule_id,
+                    trigger_identity,
+                    rule_version,
+                    state,
+                    _updated_at,
+                    _group_id,
+                    _user_id,
+                    _fund_id,
+                    _book_id,
+                ) = row
+                if state not in {"PENDING", "SUBMITTING"}:
+                    return
+                cursor.execute(
+                    """
+                    select submission_attempts
+                      from execution.conditional_rule_executions
+                     where rule_execution_id=%s
+                     for update
+                    """,
+                    (rule_execution_id,),
+                )
+                attempt_row = cursor.fetchone()
+                attempts = int(attempt_row[0] or 0) if attempt_row else 0
+                if attempts < max_attempts:
+                    cursor.execute(
+                        """
+                        update execution.conditional_rule_executions
+                           set state='PENDING',error_code=%s,error_message=%s
+                         where rule_execution_id=%s and state in ('PENDING','SUBMITTING')
+                        """,
+                        (code, message[:1000], rule_execution_id),
+                    )
+                    return
+
+                exhausted_code = f"{code}_RETRY_EXHAUSTED"
+                cursor.execute(
+                    """
+                    update execution.conditional_rule_executions
+                       set state='FAILED',error_code=%s,error_message=%s,
+                           completed_at=now()
+                     where rule_execution_id=%s and state in ('PENDING','SUBMITTING')
+                    """,
+                    (
+                        exhausted_code,
+                        f"{message[:850]} (fresh-quote retry limit {max_attempts} exhausted)",
+                        rule_execution_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    return
+                cursor.execute(
+                    """
+                    update execution.conditional_rule_triggers set state='FAILED'
+                     where trigger_id=%s and state='EXECUTION_PENDING'
+                    """,
+                    (trigger_identity,),
+                )
+                cursor.execute(
+                    """
+                    update execution.conditional_trade_rules
+                       set state='FAILED',version=version+1,completed_at=now()
+                     where rule_id=%s and current_version=%s
+                       and state='EXECUTION_PENDING'
+                    """,
+                    (rule_id, rule_version),
+                )
+                self._release_oco_siblings(cursor, rule_id=rule_id)
+        except psycopg2.Error as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not update conditional execution retry state",
+                retryable=True,
+            ) from exc
 
     def mark_terminal_failure(
         self, rule_execution_id: UUID, *, code: str, message: str

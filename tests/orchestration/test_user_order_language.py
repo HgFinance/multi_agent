@@ -132,6 +132,14 @@ def test_relative_time_order_does_not_ignore_non_ceo_or_embedded_mentions() -> N
             OrderType.MARKET,
             None,
         ),
+        (
+            "현대약품 10주 시장가 매수",
+            "현대약품",
+            OrderSide.BUY,
+            "10",
+            OrderType.MARKET,
+            None,
+        ),
     ],
 )
 def test_deterministic_candidate_builds_exact_verified_order_evidence(
@@ -197,6 +205,50 @@ def test_deterministic_candidate_builds_exact_verified_same_notional_basket() ->
             },
         ]
     }
+
+
+def test_deterministic_candidate_reuses_allocation_path_for_one_notional_buy() -> None:
+    raw = "현대약품 300만원어치 사줘"
+
+    candidate = deterministic_order_candidate(raw)
+
+    assert candidate is not None
+    assert candidate.action is DirectiveAction.PLACE_BASKET
+    assert candidate.basket_instrument_mentions == ("현대약품",)
+    assert candidate.basket_notionals_krw == ("3000000",)
+    verified = verify_order_candidate(raw, candidate)
+    assert isinstance(verified, VerifiedPaperDirective)
+    assert verified.canonical_payload() == {
+        "orders": [
+            {
+                "instrument_mention": "현대약품",
+                "notional_krw": "3000000",
+                "quantity": None,
+                "side": "BUY",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        ("현대약품 매수해줘", OrderReasonCode.MISSING_OR_CONFLICTING_QUANTITY),
+        ("약 1주 사줘", OrderReasonCode.MISSING_OR_CONFLICTING_INSTRUMENT),
+    ],
+)
+def test_deterministic_incomplete_order_asks_only_for_the_missing_fact(
+    raw: str, reason: OrderReasonCode
+) -> None:
+    candidate = deterministic_order_candidate(raw)
+
+    assert candidate is not None
+    assert candidate.decision is CandidateDecision.CLARIFY
+    result = verify_order_candidate(raw, candidate)
+    assert isinstance(result, OrderClarification)
+    assert result.reason_codes == (reason,)
 
 
 def test_same_notional_basket_drops_final_allocation_particle_from_instrument() -> None:
@@ -362,7 +414,6 @@ def test_deterministic_basket_rejects_unsafe_or_ambiguous_language(raw: str) -> 
         "삼성전자가 오르면 3주 매수",
         "예시: 삼성전자 3주 매수",
         "삼성전자와 SK하이닉스 각각 1주 매수",
-        "삼성전자 100만원어치 매수",
         "LIVE 계좌로 삼성전자 3주 매수",
         "삼성전자 3주 매수하고 1주 매도",
     ],
@@ -952,7 +1003,6 @@ def test_non_imperative_language_never_executes(
     [
         ("삼성전자 10주 시장가 매수하고 현대차 2주 시장가 매도", OrderReasonCode.MULTIPLE_COMMANDS),
         ("삼성전자 약 10주 시장가 매수", OrderReasonCode.APPROXIMATE_VALUE),
-        ("삼성전자 100만원어치 시장가 매수", OrderReasonCode.NOTIONAL_UNSUPPORTED),
     ],
 )
 def test_compound_approximate_and_notional_language_requires_clarification(

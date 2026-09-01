@@ -40,6 +40,14 @@ _EXPLICIT_ACTION_QUANTITY = re.compile(
     r"(?:시장가(?:로|에)?\s*)?(?P<side>매수|매도|buy|sell)",
     re.IGNORECASE,
 )
+_EXPLICIT_SHARE_QUANTITY = re.compile(
+    rf"(?P<quantity>{_KRW_INTEGER})\s*(?:주|주식|개)(?:을|를)?",
+    re.IGNORECASE,
+)
+_EXPLICIT_ORDER_SIDE = re.compile(
+    r"(?P<side>매수|매도|buy|sell)",
+    re.IGNORECASE,
+)
 _AVAILABLE_CASH_PERCENT = re.compile(
     rf"가용\s*현금(?:의|에서)?\s*(?P<percent>\d+(?:\.\d+)?)\s*{_PERCENT_SUFFIX}",
     re.IGNORECASE,
@@ -77,7 +85,14 @@ _SUPPORTED_INDICATOR_TERMS = sorted(
 )
 _SUPPORTED_INDICATOR_PATTERN = "|".join(re.escape(term) for term in _SUPPORTED_INDICATOR_TERMS)
 
-_ORDER_ACTION = re.compile(r"(?:매수|매도|buy|sell)", re.IGNORECASE)
+# Keep the conditional lane aligned with the existing immediate-order grammar:
+# a user who says "오르면 사줘" has still expressed a buy action, even though
+# the threshold is incomplete and must be clarified by Hermes.  This selector
+# only routes the text; it never activates a rule or supplies the threshold.
+_ORDER_ACTION = re.compile(
+    r"(?:매수|매도|buy|sell|사\s*(?:줘|주|요|라)|팔\s*(?:아|아줘|아주|아라|아주세요))",
+    re.IGNORECASE,
+)
 _CONDITIONAL_TRIGGER = re.compile(
     r"(?:조건\s*주문|이면|라면|할\s*때|경우|이상|이하|초과|미만|"
     r"높으면|낮으면|오르면|내리면|넘으면|떨어지면|도달하면|닿으면|터치하면|"
@@ -86,6 +101,19 @@ _CONDITIONAL_TRIGGER = re.compile(
     r"상승\s*시|하락\s*시|트레일링|추적\s*손절|고점\s*(?:대비|에서)|" + _SUPPORTED_INDICATOR_PATTERN + r")",
     re.IGNORECASE,
 )
+_CONDITIONAL_TRIGGER_WORDS = frozenset(
+    {
+        "오르면",
+        "내리면",
+        "넘으면",
+        "떨어지면",
+        "돌파",
+        "이탈",
+        "상승",
+        "하락",
+    }
+)
+_HANGUL_WORD = re.compile(r"[가-힣]{2,}")
 _RELATIVE_TIME_TRIGGER = re.compile(
     r"(?<![\w,])(?:[1-9]\d*|[일이삼사오육칠팔구십한두세네열스물서른마흔쉰예순일흔여든아흔\s]+)"
     rf"\s*(?:초|분|시간)\s*{RELATIVE_DELAY_SUFFIX}(?!\w)"
@@ -120,15 +148,52 @@ def looks_like_conditional_paper_rule(raw_instruction: str) -> bool:
     """
 
     normalized = " ".join(str(raw_instruction or "").strip().split())
-    return bool(
-        normalized
-        and _ORDER_ACTION.search(normalized)
-        and (
-            _CONDITIONAL_TRIGGER.search(normalized)
-            or _RELATIVE_TIME_TRIGGER.search(normalized)
-            or _ABSOLUTE_TIME_TRIGGER.search(normalized)
-        )
-        and not _NON_BINDING_CONDITIONAL.search(normalized)
+    if not normalized or not _ORDER_ACTION.search(normalized):
+        return False
+    trigger = (
+        _CONDITIONAL_TRIGGER.search(normalized)
+        or _RELATIVE_TIME_TRIGGER.search(normalized)
+        or _ABSOLUTE_TIME_TRIGGER.search(normalized)
+        or _looks_like_one_edit_conditional_trigger(normalized)
+    )
+    return bool(trigger and not _NON_BINDING_CONDITIONAL.search(normalized))
+
+
+def _one_edit_apart(left: str, right: str) -> bool:
+    """True only for a one-character insertion, deletion, or substitution."""
+
+    if left == right or abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right, strict=True)) == 1
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    short_index = 0
+    long_index = 0
+    edits = 0
+    while short_index < len(shorter) and long_index < len(longer):
+        if shorter[short_index] == longer[long_index]:
+            short_index += 1
+            long_index += 1
+            continue
+        if edits:
+            return False
+        edits = 1
+        long_index += 1
+    return True
+
+
+def _looks_like_one_edit_conditional_trigger(normalized: str) -> bool:
+    """Route a likely misspelled trigger to clarification, never execution.
+
+    This is deliberately only a lane-selection fallback.  Hermes must still
+    return a null AST and the named clarification code; no typo is corrected,
+    no threshold is inferred, and no rule can become ACTIVE from this match.
+    """
+
+    return any(
+        _one_edit_apart(token, trigger)
+        for token in _HANGUL_WORD.findall(normalized)
+        for trigger in _CONDITIONAL_TRIGGER_WORDS
     )
 
 
@@ -172,6 +237,21 @@ def _explicit_action_quantities(
         side = match.group("side").upper()
         side = {"매수": "BUY", "매도": "SELL"}.get(side, side)
         values.setdefault(side, []).append(int(match.group("quantity").replace(",", "")))
+
+    # Korean conditional orders commonly front-load sizing before the trigger:
+    # ``10주 1분봉 RSI 70 돌파시 시장가 매도``.  The direct grammar above
+    # deliberately binds only adjacent quantity/action pairs.  Recover the
+    # front-loaded form only when the whole instruction contains exactly one
+    # explicit share quantity and exactly one canonical order side.  Multiple
+    # quantities or actions remain ambiguous and fail closed.
+    if not any(values.values()):
+        quantities = tuple(_EXPLICIT_SHARE_QUANTITY.finditer(raw_instruction))
+        sides = tuple(_EXPLICIT_ORDER_SIDE.finditer(raw_instruction))
+        if len(quantities) == 1 and len(sides) == 1:
+            side = sides[0].group("side").upper()
+            side = {"매수": "BUY", "매도": "SELL"}.get(side, side)
+            quantity = int(quantities[0].group("quantity").replace(",", ""))
+            values.setdefault(side, []).append(quantity)
     return {side: tuple(items) for side, items in values.items()}
 
 
@@ -242,8 +322,10 @@ def clarification_codes(raw_instruction: str, rule: ConditionalRuleSpec) -> tupl
         if node.type is ExpressionType.INDICATOR and node.timeframe is not None
     }
     if indicator_timeframes and not _TIMEFRAME.search(normalized):
-        if indicator_timeframes != {"1D"}:
-            codes.append("TIMEFRAME_NOT_IN_INSTRUCTION")
+        # A default daily bar turns an intraday intent into a different order
+        # without any visible error. Every indicator condition must therefore
+        # carry its timeframe in the user's own instruction.
+        codes.append("TIMEFRAME_NOT_IN_INSTRUCTION")
 
     return tuple(dict.fromkeys(codes))
 
@@ -318,8 +400,6 @@ def preview_assumptions(raw_instruction: str, rule: ConditionalRuleSpec) -> tupl
                 "SELL_EXCESS_TO_TARGET_WEIGHT",
             )
         )
-    if indicator_timeframes == {"1D"} and not _TIMEFRAME.search(normalized):
-        assumptions.append("DEFAULTED_TO_DAILY_COMPLETED_BAR")
     return tuple(assumptions)
 
 

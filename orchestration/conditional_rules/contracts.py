@@ -64,6 +64,10 @@ class Timeframe(StrEnum):
 
 class EvaluationClock(StrEnum):
     BAR_CLOSE = "BAR_CLOSE"
+    # Evaluate a declared intraday indicator from the fresh quote projected
+    # into the current, still-open primary candle.  This is deliberately a
+    # separate clock: completed-bar rules retain their no-repaint contract.
+    INTRABAR = "INTRABAR"
     QUOTE = "QUOTE"
 
 
@@ -328,8 +332,8 @@ class EvaluationPolicy(BaseModel):
 
     @model_validator(mode="after")
     def _clock_contract(self) -> "EvaluationPolicy":
-        if self.clock is EvaluationClock.BAR_CLOSE and self.primary_timeframe is None:
-            raise ValueError("BAR_CLOSE requires primary_timeframe")
+        if self.clock in {EvaluationClock.BAR_CLOSE, EvaluationClock.INTRABAR} and self.primary_timeframe is None:
+            raise ValueError(f"{self.clock.value} requires primary_timeframe")
         if self.clock is EvaluationClock.QUOTE and self.primary_timeframe is not None:
             raise ValueError("QUOTE must not include primary_timeframe")
         return self

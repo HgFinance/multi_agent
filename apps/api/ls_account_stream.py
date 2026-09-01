@@ -100,6 +100,7 @@ async def _portfolio_live_lifespan(_app: Any) -> AsyncIterator[None]:
         yield
     finally:
         await _stop_accounting_evidence_refresh()
+        await _stop_ledger_refresh()
 
 
 router = APIRouter(tags=["portfolio-live"], lifespan=_portfolio_live_lifespan)
@@ -131,6 +132,13 @@ LEDGER_CACHE_SECONDS = int(os.getenv("ACCOUNTING_LEDGER_CACHE_SECONDS", "60"))
 ORDER_HISTORY_CACHE_SECONDS = int(os.getenv("LS_ORDER_HISTORY_CACHE_SECONDS", "10"))
 ACCOUNT_PROJECTION_RESYNC_SECONDS = max(
     float(os.getenv("LS_ACCOUNT_PROJECTION_RESYNC_SECONDS", "30")), 5.0
+)
+# A fill already updates the in-process projection synchronously.  The broker
+# REST snapshot is still useful for drift detection, but it must not block the
+# WebSocket receive loop or make one REST pair per fill.  Coalesce fill-triggered
+# refreshes into at most one snapshot per cooldown window.
+ACCOUNT_EVENT_RESYNC_COOLDOWN_SECONDS = max(
+    float(os.getenv("LS_ACCOUNT_EVENT_RESYNC_COOLDOWN_SECONDS", "5")), 1.0
 )
 MARKET_RANKING_CACHE_SECONDS = int(os.getenv("LS_MARKET_RANKING_CACHE_SECONDS", "15"))
 MARKET_RANKING_LIMIT = 5
@@ -502,7 +510,19 @@ def normalize_today_activity(payload: dict[str, Any]) -> dict[str, Any]:
     summary = payload.get("t0150OutBlock")
     rows = payload.get("t0150OutBlock1")
     if not isinstance(summary, dict):
-        raise RuntimeError("t0150 응답에 당일 매매 요약 블록이 없습니다.")
+        # LS PAPER returns only {rsp_cd, rsp_msg} for a successful empty day.
+        # Treat exactly that observed success code as zero trades; an error or
+        # malformed payload must still remain visible instead of becoming 0.
+        if rows is None and payload.get("rsp_cd") == "00000":
+            rows = []
+        elif not isinstance(rows, list):
+            raise RuntimeError(
+                "t0150 응답에 당일 매매 요약과 거래 행이 없습니다."
+            )
+        normalized_rows = normalize_today_trades(
+            payload, date.today().isoformat()
+        )["rows"]
+        return summarize_today_trade_rows(normalized_rows)
     rows = rows if isinstance(rows, list) else []
     return {
         "trade_count": len([row for row in rows if isinstance(row, dict)]),
@@ -1506,6 +1526,40 @@ class _Feed:
 
 FEED = _Feed()
 
+_projection_resync_task: asyncio.Task[None] | None = None
+_projection_resync_started_at = 0.0
+_projection_resync_lock = asyncio.Lock()
+
+
+async def _resync_projection(config: Any, token: str) -> None:
+    """Refresh the two read-only account projections as one serialized unit."""
+    async with _projection_resync_lock:
+        await _resync(config, token)
+        await _resync_today_activity(config, token)
+
+
+async def _run_event_projection_resync(
+    config: Any, token: str, delay: float
+) -> None:
+    global _projection_resync_started_at
+    if delay > 0:
+        await asyncio.sleep(delay)
+    _projection_resync_started_at = time.monotonic()
+    await _resync_projection(config, token)
+
+
+def _schedule_event_projection_resync(config: Any, token: str) -> None:
+    """Schedule one non-blocking broker snapshot for a burst of fills."""
+    global _projection_resync_task
+    if _projection_resync_task is not None and not _projection_resync_task.done():
+        return
+    elapsed = time.monotonic() - _projection_resync_started_at
+    delay = max(0.0, ACCOUNT_EVENT_RESYNC_COOLDOWN_SECONDS - elapsed)
+    _projection_resync_task = asyncio.create_task(
+        _run_event_projection_resync(config, token, delay),
+        name="ls-account-event-resync",
+    )
+
 
 def _config(
     *,
@@ -1620,17 +1674,24 @@ async def _post_tr_page(
     # h11은 그런 헤더를 가진 응답을 통째로 버린다. 근거는 `ls_http` docstring.
     from ls_http import ls_async_client  # type: ignore[import-not-found]
 
+    headers = {
+        "content-type": "application/json; charset=UTF-8",
+        "authorization": "Bearer " + token,
+        "tr_cd": tr_cd,
+        "tr_cont": tr_cont,
+        "tr_cont_key": tr_cont_key,
+    }
+    # LS 계좌 TRs (including t0150/t0424) require the 12-digit MAC header.
+    # The synchronous LS clients already send it; keep the async account-feed
+    # path consistent so the gateway does not answer with a generic HTTP 500.
+    if getattr(config, "mac_address", None):
+        headers["mac_address"] = str(config.mac_address).replace(":", "").replace("-", "").upper()
+
     async with ls_async_client(timeout=config.timeout_seconds) as client:
         response = await client.post(
             config.base_url + path,
             json=payload,
-            headers={
-                "content-type": "application/json; charset=UTF-8",
-                "authorization": "Bearer " + token,
-                "tr_cd": tr_cd,
-                "tr_cont": tr_cont,
-                "tr_cont_key": tr_cont_key,
-            },
+            headers=headers,
         )
     response.raise_for_status()
     # JSON number는 double이라 Decimal이 깨진다. 금액·수량은 Decimal로 받는다.
@@ -1717,13 +1778,6 @@ async def _fetch_today_activity(config: Any, token: str) -> dict[str, Any]:
         },
     )
     return normalize_today_activity(body)
-
-
-async def _fetch_today_activity_fallback(config: Any, token: str) -> dict[str, Any]:
-    """Use the working normalized trade ledger when t0150 omits its summary."""
-
-    payload = await _fetch_today_trades(config, token)
-    return summarize_today_trade_rows(payload)
 
 
 async def _fetch_today_executions(
@@ -1816,15 +1870,8 @@ async def _resync_today_activity(config: Any, token: str) -> None:
     """당일 매매 요약 실패가 계좌 잔고 스트림을 막지 않게 별도로 기록한다."""
     try:
         FEED.sync_today_activity(await _fetch_today_activity(config, token))
-    except Exception as exc:  # noqa: BLE001 - PAPER 응답 변형은 행 기반으로 복구한다
-        try:
-            FEED.sync_today_activity(
-                await _fetch_today_activity_fallback(config, token)
-            )
-        except Exception:  # noqa: BLE001 - 카드만 비활성화하고 계좌 스트림은 유지한다
-            FEED.today_activity_error = _ls_error_detail(exc)[:300]
-        else:
-            FEED.today_activity_error = None
+    except Exception as exc:  # noqa: BLE001 - 카드만 비활성화하고 계좌 스트림은 유지한다
+        FEED.today_activity_error = _ls_error_detail(exc)[:300]
     else:
         FEED.today_activity_error = None
 
@@ -1858,8 +1905,7 @@ async def _run_feed() -> None:
 
             # 잔고와 당일 거래는 REST 조회다. WebSocket opening handshake가
             # 지연되거나 실패해도 대시보드의 계좌 Projection까지 비우지 않는다.
-            await _resync(config, token)
-            await _resync_today_activity(config, token)
+            await _resync_projection(config, token)
 
             # 계좌등록 (tr_type = 1)
             #
@@ -1892,20 +1938,30 @@ async def _run_feed() -> None:
                     except asyncio.TimeoutError:
                         # 주문 push가 누락되거나 조용한 장에서도 브로커 잔고가
                         # 최초 접속 시각에 고정되지 않게 REST 정본을 주기 갱신한다.
-                        await _resync(config, token)
-                        await _resync_today_activity(config, token)
+                        await _resync_projection(config, token)
                         continue
                     try:
                         message = json.loads(raw)
                     except (ValueError, TypeError):
                         continue
                     if FEED.ingest(message) == "FILLED":
-                        # ponytail: 체결 처리 중에는 수신이 잠깐 멈춘다. 우리
-                        # 주문량에서는 문제가 안 된다. 체결이 몰려 밀리면 별도
-                        # 태스크로 빼고 연속 체결을 하나로 합친다.
-                        await _resync(config, token)
-                        await _resync_today_activity(config, token)
+                        # FEED.events/local_positions already expose the fill
+                        # synchronously.  Reconcile the broker snapshot in a
+                        # coalesced background task so a burst of fills cannot
+                        # stall the WebSocket receive loop.
+                        _schedule_event_projection_resync(config, token)
         except asyncio.CancelledError:
+            global _projection_resync_task
+            if (
+                _projection_resync_task is not None
+                and not _projection_resync_task.done()
+            ):
+                _projection_resync_task.cancel()
+                try:
+                    await _projection_resync_task
+                except asyncio.CancelledError:
+                    pass
+            _projection_resync_task = None
             FEED.status = "STOPPED"
             raise
         except Exception as exc:  # noqa: BLE001 - 끊김을 "사건 없음"으로 위장하지 않는다
@@ -2005,7 +2061,10 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
         # 체결은 계좌 거래내역을 기준으로 삼고, 접수·정정·취소·거부는
         # 실시간 피드에서 보충한다. 3초 폴링과 TR 호출 제한을 함께 고려한
         # 짧은 캐시다.
-        ledger, _, _ = await _load_ledger(cache_seconds=ORDER_HISTORY_CACHE_SECONDS)
+        ledger, _, _ = await _load_ledger(
+            cache_seconds=ORDER_HISTORY_CACHE_SECONDS,
+            stale_if_available=True,
+        )
         cached_day, accepted_orders = _accepted_order_cache
         if cached_day != date.today().isoformat():
             accepted_orders = []
@@ -2086,6 +2145,7 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
 
 _ledger_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _accepted_order_cache: tuple[str, list[dict[str, Any]]] = ("", [])
+_ledger_refresh_task: asyncio.Task[None] | None = None
 # 계좌 조회 TR은 초당 1~2건이다. 대시보드와 회계 화면이 동시에 폴링하면 캐시
 # 키가 달라 두 호출이 같은 초에 나가고 그대로 거부당한다(오늘 90일 조회 502의
 # 원인). 실제 호출만 직렬화하고 최소 간격을 둔다.
@@ -2102,6 +2162,45 @@ async def _tr_slot() -> None:
     if wait > 0:
         await asyncio.sleep(wait)
     _tr_last_call = time.monotonic()
+
+
+async def _refresh_ledger_cache(days: int) -> None:
+    global _ledger_refresh_task
+    try:
+        # cache_seconds=0 forces the one background refresh to use the broker
+        # read path.  The foreground portfolio request keeps serving the last
+        # snapshot while this runs.
+        await _load_ledger(days=days, cache_seconds=0)
+    except Exception:
+        # The foreground route already has a valid last-known snapshot.  A
+        # refresh failure is retried by the next expired request and must not
+        # become an unhandled task exception.
+        pass
+    finally:
+        if _ledger_refresh_task is asyncio.current_task():
+            _ledger_refresh_task = None
+
+
+def _schedule_ledger_refresh(days: int) -> None:
+    global _ledger_refresh_task
+    if _ledger_refresh_task is not None and not _ledger_refresh_task.done():
+        return
+    _ledger_refresh_task = asyncio.create_task(
+        _refresh_ledger_cache(days),
+        name="ls-ledger-stale-while-revalidate",
+    )
+
+
+async def _stop_ledger_refresh() -> None:
+    global _ledger_refresh_task
+    task = _ledger_refresh_task
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    _ledger_refresh_task = None
 
 
 def _accounting_tr_requests(
@@ -2465,6 +2564,7 @@ async def _load_ledger(
     days: int = LEDGER_DAYS,
     *,
     cache_seconds: int = LEDGER_CACHE_SECONDS,
+    stale_if_available: bool = False,
 ) -> tuple[dict[str, Any], date, date]:
     """기간 원장을 공용 캐시에서 읽거나 새로 조회한다.
 
@@ -2482,12 +2582,18 @@ async def _load_ledger(
     cached = _ledger_cache.get(key)
     if cached and time.time() - cached[0] < max(0, cache_seconds):
         return cached[1], start, end
+    if stale_if_available and cached:
+        _schedule_ledger_refresh(span)
+        return cached[1], start, end
 
     async with _tr_gate:
         # 잠금 안에서 캐시를 다시 본다. 두 화면이 같이 들어오면 뒤차는 앞차가
         # 채워 둔 값을 쓰면 되고, 굳이 브로커를 한 번 더 때릴 이유가 없다.
         cached = _ledger_cache.get(key)
         if cached and time.time() - cached[0] < max(0, cache_seconds):
+            return cached[1], start, end
+        if stale_if_available and cached:
+            _schedule_ledger_refresh(span)
             return cached[1], start, end
 
         try:
@@ -2893,7 +2999,10 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     )
     assert any(event["kind"] == "ACCEPTED" for event in merged_orders)
     assert sum(event["kind"] == "ACCEPTED" for event in merged_orders) == 1
-    assert sum(event["kind"] == "FILLED" for event in merged_orders) == len(ledger_events)
+    # The sample SC1 event is a separate provisional fill (its order number is
+    # not present in the two historical ledger rows), so it remains visible
+    # until a later broker-history refresh covers that exact fill.
+    assert sum(event["kind"] == "FILLED" for event in merged_orders) == len(ledger_events) + 1
     assert len({event["seq"] for event in merged_orders}) == len(merged_orders)
 
     # 합계 필드가 오면 그것을 쓰고 개별 세금과 이중 계상하지 않는가

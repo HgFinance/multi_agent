@@ -259,7 +259,10 @@ class HermesOrderCandidate(BaseModel):
         elif self.action is DirectiveAction.PLACE_BASKET:
             if (
                 self.instrument_mention is not None
-                or len(self.basket_instrument_mentions) < 2
+                # A KRW allocation uses the existing basket executor even for
+                # one member: it is the only path that derives a whole-share
+                # BUY size from a fresh executable ask.
+                or len(self.basket_instrument_mentions) < 1
                 or self.quantity is not None
                 or self.order_type is not OrderType.MARKET
                 or self.limit_price is not None
@@ -385,11 +388,11 @@ class CanonicalBasketOrderItem(BaseModel):
 
 
 class CanonicalPlaceBasketPayload(BaseModel):
-    """A list of unresolved catalog mentions and explicit sizing policies."""
+    """One or more unresolved catalog mentions and explicit sizing policies."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    orders: tuple[CanonicalBasketOrderItem, ...] = Field(min_length=2, max_length=20)
+    orders: tuple[CanonicalBasketOrderItem, ...] = Field(min_length=1, max_length=20)
 
     @model_validator(mode="after")
     def _unique_mentions(self) -> "CanonicalPlaceBasketPayload":

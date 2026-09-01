@@ -29,6 +29,7 @@ from pydantic import (
 )
 from orchestration.user_order_language import (
     normalize_shared_allocation_instrument_mention,
+    quoted_instrument_spans,
 )
 
 try:
@@ -235,11 +236,11 @@ class PaperBasketOrderInput(BaseModel):
 
 
 class PaperBasketInput(BaseModel):
-    """A non-atomic but single-tracked group of at most twenty PAPER legs."""
+    """One or more allocation legs tracked through the shared PAPER path."""
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    orders: tuple[PaperBasketOrderInput, ...] = Field(min_length=2, max_length=20)
+    orders: tuple[PaperBasketOrderInput, ...] = Field(min_length=1, max_length=20)
 
     @model_validator(mode="after")
     def _unique_symbols(self) -> "PaperBasketInput":
@@ -562,7 +563,7 @@ def _basket_payload_from_query(normalized: str) -> dict[str, Any] | None:
 def _member_notional_basket_payload_from_query(
     normalized: str,
 ) -> dict[str, Any] | None:
-    """Parse ``A 100만원, B 50만원 시장가 매수`` without allocation inference."""
+    """Parse one or more explicit-KRW BUY allocations without inference."""
 
     if (
         _BASKET_NOTIONAL_PATTERN.search(normalized)
@@ -582,7 +583,7 @@ def _member_notional_basket_payload_from_query(
     )
     list_text = normalized[:list_end].strip(" ,")
     list_text = re.sub(r"^(?:종목|주식)\s+", "", list_text)
-    if not list_text or "," not in list_text:
+    if not list_text:
         return None
 
     orders: list[PaperBasketOrderInput] = []
@@ -618,7 +619,7 @@ def _member_notional_basket_payload_from_query(
         cursor += separator.end()
         if cursor == len(list_text):
             return None
-    if not 2 <= len(orders) <= 20:
+    if not 1 <= len(orders) <= 20:
         return None
 
     consumed_spans = [
@@ -744,6 +745,17 @@ def parse_user_order_query(query: str) -> tuple[DirectiveAction, dict[str, Any]]
     limit_price_matches = list(_LIMIT_PRICE_PATTERN.finditer(normalized))
     price_matches = won_price_matches if won_price_matches else limit_price_matches
 
+    quoted_spans = quoted_instrument_spans(normalized)
+    if quoted_spans is None:
+        raise ClarificationRequired("instrument")
+    if len(quoted_spans) > 1:
+        raise ClarificationRequired("instrument")
+    quoted_symbol = (
+        normalized[quoted_spans[0][1] : quoted_spans[0][2]]
+        if quoted_spans
+        else None
+    )
+
     # A six-digit price (for example 700000원) is not a stock code.  Exclude
     # every numeric span already consumed as quantity or price before resolving
     # an instrument code.
@@ -759,7 +771,7 @@ def parse_user_order_query(query: str) -> tuple[DirectiveAction, dict[str, Any]]
     codes = list(dict.fromkeys(match.group(1).upper() for match in code_matches))
     if len(codes) > 1:
         raise ClarificationRequired("instrument")
-    symbol = codes[0] if codes else _natural_name(normalized, quantities[0])
+    symbol = codes[0] if codes else (quoted_symbol or _natural_name(normalized, quantities[0]))
 
     market_matches = list(_MARKET_PATTERN.finditer(normalized))
     limit_marker_matches = list(_LIMIT_MARKER_PATTERN.finditer(normalized))
@@ -791,13 +803,20 @@ def parse_user_order_query(query: str) -> tuple[DirectiveAction, dict[str, Any]]
         selected_price_match = None
 
     consumed_spans = [quantities[0].span(), side_matches[0].span()]
+    consumed_spans.extend(
+        (container_start, container_end)
+        for container_start, _, _, container_end in quoted_spans
+    )
     if codes:
         consumed_spans.append(code_matches[0].span())
     else:
-        symbol_start = normalized.find(symbol)
-        if symbol_start < 0:
-            raise ClarificationRequired("instrument")
-        consumed_spans.append((symbol_start, symbol_start + len(symbol)))
+        if quoted_spans:
+            consumed_spans.append((quoted_spans[0][1], quoted_spans[0][2]))
+        else:
+            symbol_start = normalized.find(symbol)
+            if symbol_start < 0:
+                raise ClarificationRequired("instrument")
+            consumed_spans.append((symbol_start, symbol_start + len(symbol)))
     if market_matches:
         consumed_spans.append(market_matches[0].span())
     elif selected_price_match is not None:

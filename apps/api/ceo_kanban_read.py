@@ -249,9 +249,29 @@ def _timeout() -> float:
 #   변하지 않는 것만 오래 들고 있는다.
 _READ_ONLY_KANBAN_COMMANDS = frozenset({"show", "list"})
 _cache_lock = threading.Lock()
-# key -> (만료 시각, stdout). 항목마다 TTL 이 다르므로 저장 시각이 아니라 만료
-# 시각을 넣는다.
-_cache: dict[tuple[str, ...], tuple[float, str]] = {}
+# Identical cold reads share one CLI execution.  Striped locks keep this
+# bounded without creating a second cache or an ever-growing per-key registry.
+_cache_flight_locks = tuple(threading.Lock() for _ in range(32))
+_workflow_flight_locks = tuple(threading.Lock() for _ in range(32))
+# key -> (fresh 만료 시각, stale 만료 시각, stdout). 성공한 마지막 값이 있을 때만
+# 짧은 stale-while-revalidate를 허용한다. 최초 조회와 stale 상한 이후는 기존처럼
+# 동기 fail-closed다.
+_cache: dict[tuple[str, ...], tuple[float, float, str]] = {}
+_cache_generation = 0
+_cache_refreshing: set[tuple[str, ...]] = set()
+_CACHE_REFRESH_WORKERS = min(
+    4, max(1, int(os.getenv("KANBAN_CACHE_REFRESH_WORKERS", "2")))
+)
+_cache_refresh_slots = threading.BoundedSemaphore(_CACHE_REFRESH_WORKERS * 2)
+_cache_refresh_executor = ThreadPoolExecutor(
+    max_workers=_CACHE_REFRESH_WORKERS,
+    thread_name_prefix="kanban-cache-refresh",
+)
+# Stable, fully terminal workflow projections. This is the composite value of
+# the same read model above, not a second Kanban data owner. Only the requested
+# task alias and canonical root alias are retained, with a hard bound.
+_workflow_cache: dict[str, tuple[float, Any]] = {}
+_MAX_WORKFLOW_CACHE_ALIASES = 256
 
 
 def _cache_ttl() -> float:
@@ -268,6 +288,16 @@ def _terminal_cache_ttl() -> float:
         return max(0.0, float(os.getenv("KANBAN_DONE_CACHE_TTL_SECONDS", "300")))
     except ValueError:
         return 300.0
+
+
+def _stale_cache_ttl() -> float:
+    """Bound how long a last successful read may mask a refresh failure."""
+
+    try:
+        configured = float(os.getenv("KANBAN_READ_STALE_SECONDS", "30"))
+    except ValueError:
+        return 30.0
+    return min(60.0, max(0.0, configured))
 
 
 def _entry_ttl(key: tuple[str, ...], stdout: str, base_ttl: float) -> float:
@@ -311,8 +341,61 @@ def _entry_ttl(key: tuple[str, ...], stdout: str, base_ttl: float) -> float:
 def clear_kanban_cache() -> None:
     """캐시를 비운다. 보드를 바꾼 직후(archive)와 테스트가 부른다."""
 
+    global _cache_generation
     with _cache_lock:
+        _cache_generation += 1
         _cache.clear()
+        _workflow_cache.clear()
+
+
+def _refresh_kanban_cache(
+    key: tuple[str, ...], args: Sequence[str], ttl: float, generation: int
+) -> None:
+    """Refresh one stale successful value through the canonical CLI boundary."""
+
+    try:
+        stdout = _run_kanban_uncached(args)
+        entry_ttl = _entry_ttl(key, stdout, ttl)
+        refreshed_at = time.monotonic()
+        with _cache_lock:
+            # Archive/cache clear must win over an older in-flight read.
+            if generation == _cache_generation:
+                _cache[key] = (
+                    refreshed_at + entry_ttl,
+                    refreshed_at + entry_ttl + _stale_cache_ttl(),
+                    stdout,
+                )
+    except (KanbanUnavailable, KanbanTaskNotFound):
+        # A failed refresh never replaces the last successful value. Its
+        # bounded stale deadline still forces a later synchronous fail-closed
+        # read if the outage persists.
+        pass
+    finally:
+        with _cache_lock:
+            _cache_refreshing.discard(key)
+        _cache_refresh_slots.release()
+
+
+def _schedule_kanban_refresh(
+    key: tuple[str, ...], args: Sequence[str], ttl: float
+) -> None:
+    """Schedule at most a bounded number of deduplicated background reads."""
+
+    with _cache_lock:
+        if key in _cache_refreshing:
+            return
+        if not _cache_refresh_slots.acquire(blocking=False):
+            return
+        _cache_refreshing.add(key)
+        generation = _cache_generation
+    try:
+        _cache_refresh_executor.submit(
+            _refresh_kanban_cache, key, tuple(args), ttl, generation
+        )
+    except RuntimeError:
+        with _cache_lock:
+            _cache_refreshing.discard(key)
+        _cache_refresh_slots.release()
 
 
 def _cli_environment() -> dict[str, str]:
@@ -347,31 +430,8 @@ def _cli_environment() -> dict[str, str]:
     return environment
 
 
-def run_kanban(args: Sequence[str]) -> str:
-    """`hermes kanban ...`를 실행하고 stdout을 준다. shell=False로만 부른다.
-
-    argv 조립은 `hermes_boundary.argv_for(None, ...)`에 맡긴다 - 여기서 직접
-    `[HERMES_BIN, "kanban", ...]`을 만들면 `HERMES_EXEC_MODE=docker` 환경에서
-    이 경로만 호스트의 `hermes`를 찾아 실패한다(2026-08-14 발견). 쓰기 경로
-    (`hermes_boundary.create_kanban_task`)는 이미 그 모드를 존중하고 있었으므로,
-    같은 보드를 읽는 이 경로만 규칙이 달랐던 것이다. `department=None`은 부서에
-    매이지 않는 kanban 명령을 뜻하고, docker 모드에서는 `KANBAN_CLI_CONTAINER`
-    안에서 실행된다.
-
-    읽기 명령(`show`/`list`)의 성공 결과만 짧은 TTL 동안 캐시한다 - 근거는
-    `_READ_ONLY_KANBAN_COMMANDS` 위 주석 참고.
-    """
-
-    key = tuple(str(arg) for arg in args)
-    cacheable = bool(key) and key[0] in _READ_ONLY_KANBAN_COMMANDS
-    ttl = _cache_ttl()
-    if cacheable and ttl > 0:
-        now = time.monotonic()
-        with _cache_lock:
-            hit = _cache.get(key)
-            if hit is not None and now < hit[0]:
-                return hit[1]
-
+def _run_kanban_uncached(args: Sequence[str]) -> str:
+    """Execute the one canonical Hermes CLI read/write boundary."""
     command = hermes_boundary.argv_for(None, ["kanban", *args])
     try:
         process = subprocess.run(
@@ -408,11 +468,68 @@ def run_kanban(args: Sequence[str]) -> str:
         raise KanbanUnavailable(
             message[:200] or f"hermes kanban {args[0]} exited {process.returncode}"
         )
-    if cacheable and ttl > 0:
-        entry_ttl = _entry_ttl(key, process.stdout, ttl)
-        with _cache_lock:
-            _cache[key] = (time.monotonic() + entry_ttl, process.stdout)
     return process.stdout
+
+
+def run_kanban(args: Sequence[str]) -> str:
+    """`hermes kanban ...`를 실행하고 stdout을 준다. shell=False로만 부른다.
+
+    argv 조립은 `hermes_boundary.argv_for(None, ...)`에 맡긴다 - 여기서 직접
+    `[HERMES_BIN, "kanban", ...]`을 만들면 `HERMES_EXEC_MODE=docker` 환경에서
+    이 경로만 호스트의 `hermes`를 찾아 실패한다(2026-08-14 발견). 쓰기 경로
+    (`hermes_boundary.create_kanban_task`)는 이미 그 모드를 존중하고 있었으므로,
+    같은 보드를 읽는 이 경로만 규칙이 달랐던 것이다. `department=None`은 부서에
+    매이지 않는 kanban 명령을 뜻하고, docker 모드에서는 `KANBAN_CLI_CONTAINER`
+    안에서 실행된다.
+
+    읽기 명령(`show`/`list`)의 성공 결과만 짧은 TTL 동안 캐시한다 - 근거는
+    `_READ_ONLY_KANBAN_COMMANDS` 위 주석 참고. 동일한 cold miss가 겹치면
+    기존 캐시 키를 기준으로 CLI 호출 하나만 실행한다.
+    """
+
+    key = tuple(str(arg) for arg in args)
+    cacheable = bool(key) and key[0] in _READ_ONLY_KANBAN_COMMANDS
+    ttl = _cache_ttl()
+    if not cacheable or ttl <= 0:
+        return _run_kanban_uncached(args)
+
+    now = time.monotonic()
+    with _cache_lock:
+        hit = _cache.get(key)
+    if hit is not None:
+        fresh_until, stale_until, stdout = hit
+        if now < fresh_until:
+            return stdout
+        if now < stale_until:
+            _schedule_kanban_refresh(key, args, ttl)
+            return stdout
+
+    flight_lock = _cache_flight_locks[hash(key) % len(_cache_flight_locks)]
+    with flight_lock:
+        now = time.monotonic()
+        stale_stdout: str | None = None
+        with _cache_lock:
+            hit = _cache.get(key)
+            if hit is not None:
+                fresh_until, stale_until, stdout = hit
+                if now < fresh_until:
+                    return stdout
+                if now < stale_until:
+                    stale_stdout = stdout
+        if stale_stdout is not None:
+            _schedule_kanban_refresh(key, args, ttl)
+            return stale_stdout
+
+        stdout = _run_kanban_uncached(args)
+        entry_ttl = _entry_ttl(key, stdout, ttl)
+        refreshed_at = time.monotonic()
+        with _cache_lock:
+            _cache[key] = (
+                refreshed_at + entry_ttl,
+                refreshed_at + entry_ttl + _stale_cache_ttl(),
+                stdout,
+            )
+        return stdout
 
 
 def _load_json(payload: str, *, what: str) -> Any:
@@ -1064,7 +1181,7 @@ def resolve_root_id(task_id: str, *, fetch: Fetch = show_task) -> str:
     return current
 
 
-def load_workflow(
+def _load_workflow_uncached(
     task_id: str,
     *,
     fetch: Fetch = show_task,
@@ -1088,24 +1205,29 @@ def load_workflow(
     if known_root:
         root_id = task_id
         root_payload = fetch(root_id)
+        traversal_fetch = fetch
     else:
         # `resolve_root_id` historically fetched a root once to validate it and
         # `load_workflow` fetched the same root again. Keep the first response
         # in a request-local cache; this removes one Hermes process from every
         # status/result poll without changing child-ID resolution semantics.
         initial_payload = fetch(task_id)
-        fetched: dict[str, dict[str, Any]] = {task_id: initial_payload}
+        request_cache: dict[str, dict[str, Any]] = {task_id: initial_payload}
 
         def cached_fetch(candidate_id: str) -> dict[str, Any]:
-            if candidate_id not in fetched:
-                fetched[candidate_id] = fetch(candidate_id)
-            return fetched[candidate_id]
+            if candidate_id not in request_cache:
+                request_cache[candidate_id] = fetch(candidate_id)
+            return request_cache[candidate_id]
 
         if is_ceo_root_body(str(initial_payload.get("body") or "")):
             root_id = task_id
         else:
             root_id = resolve_root_id(task_id, fetch=cached_fetch)
         root_payload = cached_fetch(root_id)
+        # The starting child can appear again in the root's marker/link
+        # frontier. Keep the request-local response instead of paying for the
+        # same `kanban show` process twice.
+        traversal_fetch = cached_fetch
     payloads: dict[str, dict[str, Any]] = {root_id: root_payload}
     # Active reconstruction must not pay for the historical board. An
     # explicitly archived root is the one exception: operator/debug reads of
@@ -1170,9 +1292,9 @@ def load_workflow(
             pending = pending[: max(0, _MAX_NODES - len(payloads))]
             if not pending:
                 break
-            fetched = list(pool.map(fetch, pending))
+            layer_payloads = list(pool.map(traversal_fetch, pending))
             frontier = []
-            for child_id, payload in zip(pending, fetched, strict=True):
+            for child_id, payload in zip(pending, layer_payloads, strict=True):
                 payloads[child_id] = payload
                 frontier.extend(_ids(payload.get("children")))
                 # Legacy workflows sometimes persisted a synthesis marker but
@@ -1198,6 +1320,100 @@ def load_workflow(
         metadata=_run_metadata(payloads[root_id]),
         root_payload=payloads[root_id],
     )
+
+
+def _workflow_cacheable(workflow: Workflow) -> bool:
+    """Return true only after the response and enabled post-response QA end."""
+
+    if workflow.status != STATUS_COMPLETED:
+        return False
+    if not all(node.terminal for node in workflow.nodes):
+        return False
+    if workflow.qa_enabled:
+        return workflow.qa_materialized and all(
+            node.terminal for node in workflow.qa_nodes
+        )
+    return True
+
+
+def _cached_workflow(task_id: str) -> Workflow | None:
+    now = time.monotonic()
+    with _cache_lock:
+        hit = _workflow_cache.get(task_id)
+        if hit is None:
+            return None
+        if now >= hit[0]:
+            _workflow_cache.pop(task_id, None)
+            return None
+        return hit[1]
+
+
+def _store_workflow_aliases(task_id: str, workflow: Workflow, ttl: float) -> None:
+    expires_at = time.monotonic() + ttl
+    aliases = {task_id, workflow.root_task_id}
+    with _cache_lock:
+        now = time.monotonic()
+        for alias, (expiry, _) in tuple(_workflow_cache.items()):
+            if expiry <= now:
+                _workflow_cache.pop(alias, None)
+        required = max(
+            0,
+            len(_workflow_cache) + len(aliases - _workflow_cache.keys())
+            - _MAX_WORKFLOW_CACHE_ALIASES,
+        )
+        if required:
+            oldest = sorted(_workflow_cache, key=lambda key: _workflow_cache[key][0])
+            for alias in oldest[:required]:
+                _workflow_cache.pop(alias, None)
+        for alias in aliases:
+            _workflow_cache[alias] = (expires_at, workflow)
+
+
+def load_workflow(
+    task_id: str,
+    *,
+    fetch: Fetch = show_task,
+    max_workers: int | None = None,
+    include_archived: bool | None = None,
+    listed_rows: Sequence[Mapping[str, Any]] | None = None,
+    known_root: bool = False,
+) -> Workflow:
+    """Load one workflow, sharing only a proven-stable terminal projection."""
+
+    cacheable_read = (
+        fetch is show_task
+        and max_workers is None
+        and include_archived is None
+        and listed_rows is None
+        and not known_root
+        and _cache_ttl() > 0
+        and _terminal_cache_ttl() > 0
+    )
+    if not cacheable_read:
+        return _load_workflow_uncached(
+            task_id,
+            fetch=fetch,
+            max_workers=max_workers,
+            include_archived=include_archived,
+            listed_rows=listed_rows,
+            known_root=known_root,
+        )
+
+    hit = _cached_workflow(task_id)
+    if hit is not None:
+        return hit
+
+    flight_lock = _workflow_flight_locks[
+        hash(task_id) % len(_workflow_flight_locks)
+    ]
+    with flight_lock:
+        hit = _cached_workflow(task_id)
+        if hit is not None:
+            return hit
+        workflow = _load_workflow_uncached(task_id)
+        if _workflow_cacheable(workflow):
+            _store_workflow_aliases(task_id, workflow, _terminal_cache_ttl())
+        return workflow
 
 
 def list_ceo_roots(

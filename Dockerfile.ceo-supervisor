@@ -35,9 +35,9 @@ RUN python3 /tmp/install_primary_idempotency.py \
 # Hermes venv를 명시한다. system Python은 PEP 668 externally-managed 상태다.
 ENV PATH="/opt/hermes/.venv/bin:${PATH}"
 
-# 0.10.17 is the newest version available in the Hermes build index. The
-# application uses the SmithDB v2 query boundary explicitly and does not rely
-# on the deprecated list_runs compatibility method.
+# Keep the LangSmith SDK new enough to expose the SmithDB v2 client.  Pinning
+# the old Hermes-index build here left runtime containers on legacy helpers.
+# The application itself never calls list_runs/read_run compatibility methods.
 RUN test -x /opt/hermes/.venv/bin/python3 \
     && uv pip install \
         --python /opt/hermes/.venv/bin/python3 \
@@ -47,5 +47,5 @@ RUN test -x /opt/hermes/.venv/bin/python3 \
         pydantic \
         redis==7.0.1 \
         langfuse==4.14.3 \
-        langsmith==0.10.17 \
+        langsmith==0.11.0 \
     && /opt/hermes/.venv/bin/python3 -c "import fastapi, pydantic, psycopg2, redis, langfuse, langsmith"

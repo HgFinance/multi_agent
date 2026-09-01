@@ -14,10 +14,15 @@ from orchestration.service_health import probe_http, probe_postgres
 from .market_data import HttpMarketDataProvider, with_quote_fallback
 from .repository import PostgresDirectiveRepository
 from .service import (
+    DEFERRED_MARKET_SESSION_CODES,
     DirectiveServiceError,
     UserDirectiveService,
+    is_market_session_deferred,
     require_paper_execution_mode,
 )
+
+_CLOSED_SESSION_BACKOFF_SECONDS = 5.0
+_LOG_REPEAT_SECONDS = 60.0
 
 
 def _settings() -> tuple[float, int]:
@@ -103,11 +108,72 @@ def run_once(
     records, errors = service.reconcile_active(
         now=current_time, limit=batch
     )
+    deferred = [
+        f"{record.directive_id}:{record.error_code}"
+        for record in records
+        if is_market_session_deferred(record)
+    ]
     return {
         "reconciled": len(records),
+        "deferred": deferred,
         "errors": errors,
         "at": current_time.isoformat(),
     }
+
+
+def _sleep_seconds(result: dict[str, object], poll: float) -> float:
+    """Avoid hammering the session gate while preserving short open latency."""
+
+    signals: list[object] = []
+    for key in ("errors", "deferred"):
+        values = result.get(key)
+        if isinstance(values, list):
+            signals.extend(values)
+    if not signals:
+        return poll
+    codes = [str(signal).rsplit(":", 1)[-1] for signal in signals]
+    if codes and all(code in DEFERRED_MARKET_SESSION_CODES for code in codes):
+        return max(poll, _CLOSED_SESSION_BACKOFF_SECONDS)
+    return poll
+
+
+def _log_signature(result: dict[str, object]) -> str | None:
+    """Fingerprint operationally meaningful fields, excluding wall time."""
+
+    reconciled = int(result.get("reconciled") or 0)
+    errors = result.get("errors")
+    deferred = result.get("deferred")
+    errors = errors if isinstance(errors, list) else []
+    deferred = deferred if isinstance(deferred, list) else []
+    if not reconciled and not errors and not deferred:
+        return None
+    return json.dumps(
+        {
+            "reconciled": reconciled,
+            "errors": errors,
+            "deferred": deferred,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _should_log(
+    result: dict[str, object],
+    *,
+    previous_signature: str | None,
+    previous_at: float,
+    now: float,
+) -> tuple[bool, str | None]:
+    """Log state changes immediately and identical steady state once a minute."""
+
+    signature = _log_signature(result)
+    if signature is None:
+        return False, None
+    return (
+        signature != previous_signature or now - previous_at >= _LOG_REPEAT_SECONDS,
+        signature,
+    )
 
 
 def healthcheck() -> None:
@@ -137,13 +203,24 @@ def main() -> int:
         return 0
     poll, batch = _settings()
     service = build_service()
+    last_log_signature: str | None = None
+    last_log_at = 0.0
     while True:
         result = run_once(service, batch=batch)
-        if result["reconciled"] or result["errors"]:
+        log_now = time.monotonic()
+        should_log, signature = _should_log(
+            result,
+            previous_signature=last_log_signature,
+            previous_at=last_log_at,
+            now=log_now,
+        )
+        if should_log:
             print(json.dumps(result, sort_keys=True), flush=True)
+            last_log_at = log_now
+        last_log_signature = signature
         if args.once:
             return 1 if result["errors"] else 0
-        time.sleep(poll)
+        time.sleep(_sleep_seconds(result, poll))
 
 
 if __name__ == "__main__":

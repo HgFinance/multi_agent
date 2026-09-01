@@ -37,7 +37,9 @@ from directives.market_data import (
     TrustedQuote,
 )  # noqa: E402
 from directives.repository import (  # noqa: E402
+    BARRIER_STALE_AFTER,
     DirectiveLeg,
+    DirectiveRepositoryError,
     InMemoryDirectiveRepository,
     InstrumentRef,
     PostgresDirectiveRepository,
@@ -45,6 +47,7 @@ from directives.repository import (  # noqa: E402
     _load_driver,
 )
 from broker.ls_paper_broker import (  # noqa: E402
+    KST,
     LSPaperBrokerError,
     LSPaperHolding,
     LSPaperOrderAck,
@@ -52,7 +55,11 @@ from broker.ls_paper_broker import (  # noqa: E402
 )
 import directives.service as directive_service_module  # noqa: E402
 from directives.service import DirectiveServiceError, UserDirectiveService  # noqa: E402
-from directives.worker import run_once as run_directive_worker_once  # noqa: E402
+from directives.worker import (  # noqa: E402
+    _should_log,
+    _sleep_seconds,
+    run_once as run_directive_worker_once,
+)
 from api.directive_routes import (  # noqa: E402
     set_directive_service_for_tests,
     submit_user_directive,
@@ -391,7 +398,12 @@ def test_execute_binding_one_time_jti_idempotency_and_user_risk_bypass():
     # A worker retry before accounting acknowledgement must be harmless and
     # must not manufacture a second Fill from the already-consumed quote.
     pending = run_directive_worker_once(h.service, batch=100, now=NOW)
-    assert pending == {"reconciled": 1, "errors": [], "at": NOW.isoformat()}
+    assert pending == {
+        "reconciled": 1,
+        "deferred": [],
+        "errors": [],
+        "at": NOW.isoformat(),
+    }
     assert record.state is DirectiveState.IN_PROGRESS
     assert len(h.repository.state.direct_fills) == 1
 
@@ -659,7 +671,7 @@ def test_external_basket_stops_before_unattempted_member_after_terminal_result()
                 raise LSPaperBrokerError("LS_PAPER_REJECTED", "broker rejected")
             return LSPaperOrderAck(symbol + "-order", "111951000", symbol)
 
-        def order_status(self, broker_order_id):
+        def order_status(self, broker_order_id, *, order_date=None):
             symbol = broker_order_id.removesuffix("-order")
             return LSPaperOrderStatus(
                 broker_order_id=broker_order_id,
@@ -728,7 +740,7 @@ def test_ls_paper_sell_all_sizes_each_child_from_current_broker_holdings() -> No
             self.quantities[symbol] = quantity
             return LSPaperOrderAck(f"order-{symbol}", "090000", symbol)
 
-        def order_status(self, broker_order_id):
+        def order_status(self, broker_order_id, *, order_date=None):
             symbol = broker_order_id.removeprefix("order-")
             return LSPaperOrderStatus(
                 broker_order_id=broker_order_id,
@@ -774,7 +786,7 @@ def test_ls_paper_adapter_uses_broker_fill_and_never_resubmits() -> None:
             self.placements += 1
             return LSPaperOrderAck("6439", "111951000", "005930")
 
-        def order_status(self, broker_order_id):
+        def order_status(self, broker_order_id, *, order_date=None):
             assert broker_order_id == "6439"
             return LSPaperOrderStatus(
                 broker_order_id="6439",
@@ -826,7 +838,7 @@ def test_ls_paper_ambiguous_submission_stays_unknown_without_retry() -> None:
                 ambiguous=True,
             )
 
-        def order_status(self, _broker_order_id):
+        def order_status(self, _broker_order_id, *, order_date=None):
             raise AssertionError("an order without broker id cannot be queried")
 
     h = Harness()
@@ -859,7 +871,7 @@ def test_ls_paper_unexpected_placement_error_returns_durable_unknown() -> None:
             self.placements += 1
             raise RuntimeError("unexpected adapter failure")
 
-        def order_status(self, _broker_order_id):
+        def order_status(self, _broker_order_id, *, order_date=None):
             raise AssertionError("an order without broker id cannot be queried")
 
     h = Harness()
@@ -891,7 +903,7 @@ def test_ls_paper_closing_auction_fill_is_reconciled_before_local_expiry() -> No
         def place_order(self, **_kwargs):
             return LSPaperOrderAck("17566", "152759000", "005930")
 
-        def order_status(self, _broker_order_id):
+        def order_status(self, _broker_order_id, *, order_date=None):
             return LSPaperOrderStatus(
                 broker_order_id="17566",
                 state="FILLED" if self.filled else "ACKNOWLEDGED",
@@ -944,7 +956,7 @@ def test_ls_paper_unfilled_day_order_expires_after_broker_grace() -> None:
         def place_order(self, **_kwargs):
             return LSPaperOrderAck("17567", "152759000", "005930")
 
-        def order_status(self, _broker_order_id):
+        def order_status(self, _broker_order_id, *, order_date=None):
             return LSPaperOrderStatus(
                 broker_order_id="17567",
                 state="ACKNOWLEDGED",
@@ -976,6 +988,152 @@ def test_ls_paper_unfilled_day_order_expires_after_broker_grace() -> None:
     assert record.legs[0].error_code == "TRADING_PAPER_ORDER_EXPIRED"
 
 
+@pytest.mark.parametrize("historical_result", ["query_rejected", "missing"])
+def test_ls_paper_historical_day_order_expires_when_status_is_unavailable(
+    historical_result: str,
+) -> None:
+    class Broker:
+        historical = False
+
+        def place_order(self, **_kwargs):
+            return LSPaperOrderAck("17568", "152759000", "005930")
+
+        def order_status(self, _broker_order_id, *, order_date=None):
+            if self.historical:
+                if historical_result == "query_rejected":
+                    raise LSPaperBrokerError(
+                        "LS_PAPER_QUERY_REJECTED", "historical query rejected"
+                    )
+                return None
+            return LSPaperOrderStatus(
+                broker_order_id="17568",
+                state="ACKNOWLEDGED",
+                requested_quantity=Decimal(1),
+                filled_quantity=Decimal(0),
+                fill_price=None,
+                order_date=NOW.date(),
+            )
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=broker,  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("500000"))
+    request = h.request(
+        DirectiveAction.PLACE_ORDER,
+        key=f"idem-ls-paper-historical-{historical_result}",
+    )
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+    expires_at = record.legs[0].expires_at
+    assert expires_at is not None
+    broker.historical = True
+
+    h.service.reconcile_active(now=expires_at + timedelta(seconds=121))
+
+    assert record.state is DirectiveState.FAILED
+    assert record.legs[0].state is DirectiveLegState.EXPIRED
+    assert record.legs[0].error_code == "TRADING_PAPER_ORDER_EXPIRED"
+    assert h.repository.state.barriers == {}
+
+
+def test_ls_paper_transient_status_error_does_not_expire_acknowledged_leg() -> None:
+    class Broker:
+        transient_error = False
+
+        def place_order(self, **_kwargs):
+            return LSPaperOrderAck("17569", "152759000", "005930")
+
+        def order_status(self, _broker_order_id, *, order_date=None):
+            if self.transient_error:
+                raise LSPaperBrokerError("LS_PAPER_HTTP_ERROR", "temporary outage")
+            return LSPaperOrderStatus(
+                broker_order_id="17569",
+                state="ACKNOWLEDGED",
+                requested_quantity=Decimal(1),
+                filled_quantity=Decimal(0),
+                fill_price=None,
+                order_date=NOW.date(),
+            )
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=broker,  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("500000"))
+    request = h.request(
+        DirectiveAction.PLACE_ORDER, key="idem-ls-paper-transient-query"
+    )
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+    expires_at = record.legs[0].expires_at
+    assert expires_at is not None
+    broker.transient_error = True
+
+    h.service.reconcile_active(now=expires_at + timedelta(seconds=121))
+
+    assert record.state is DirectiveState.IN_PROGRESS
+    assert record.legs[0].state is DirectiveLegState.ACKNOWLEDGED
+
+
+def test_ls_paper_sell_all_releases_barrier_after_historical_day_expiry() -> None:
+    class Broker:
+        historical = False
+        holdings_empty = False
+        placements = 0
+
+        def get_holdings(self):
+            if self.holdings_empty:
+                return ()
+            return (LSPaperHolding("005930", "삼성전자", Decimal(1), Decimal(1)),)
+
+        def place_order(self, **_kwargs):
+            self.placements += 1
+            return LSPaperOrderAck("17570", "152759000", "005930")
+
+        def order_status(self, _broker_order_id, *, order_date=None):
+            if self.historical:
+                raise LSPaperBrokerError(
+                    "LS_PAPER_QUERY_REJECTED", "historical query rejected"
+                )
+            return LSPaperOrderStatus(
+                broker_order_id="17570",
+                state="ACKNOWLEDGED",
+                requested_quantity=Decimal(1),
+                filled_quantity=Decimal(0),
+                fill_price=None,
+                order_date=NOW.date(),
+            )
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=broker,  # type: ignore[arg-type]
+    )
+    request = h.request(
+        DirectiveAction.SELL_ALL, key="idem-ls-sell-all-historical-expiry"
+    )
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+    expires_at = record.legs[0].expires_at
+    assert expires_at is not None
+    assert h.repository.state.barriers
+    broker.historical = True
+    broker.holdings_empty = True
+
+    h.service.reconcile_active(now=expires_at + timedelta(seconds=121))
+
+    assert record.state is DirectiveState.COMPLETED
+    assert record.legs[0].state is DirectiveLegState.EXPIRED
+    assert broker.placements == 1
+    assert h.repository.state.barriers == {}
+
+
 def test_ls_paper_cancel_all_calls_broker_before_terminal_projection() -> None:
     class Broker:
         def __init__(self) -> None:
@@ -986,7 +1144,7 @@ def test_ls_paper_cancel_all_calls_broker_before_terminal_projection() -> None:
             self.placements += 1
             return LSPaperOrderAck("6439", "111951000", "005930")
 
-        def order_status(self, broker_order_id):
+        def order_status(self, broker_order_id, *, order_date=None):
             assert broker_order_id == "6439"
             return LSPaperOrderStatus(
                 broker_order_id="6439",
@@ -1050,7 +1208,7 @@ def test_ls_paper_ambiguous_cancel_is_never_reissued() -> None:
         def place_order(self, **_kwargs):
             return LSPaperOrderAck("6439", "111951000", "005930")
 
-        def order_status(self, _broker_order_id):
+        def order_status(self, _broker_order_id, *, order_date=None):
             return LSPaperOrderStatus(
                 broker_order_id="6439",
                 state="ACKNOWLEDGED",
@@ -1795,6 +1953,117 @@ def test_worker_queue_prioritizes_emergency_directive_over_older_place():
     assert queued[0].priority > old_record.priority
 
 
+def test_worker_backs_off_only_for_closed_session_errors():
+    assert _sleep_seconds(
+        {"errors": ["directive:TRADING_MARKET_SESSION_UNAVAILABLE"]},
+        1.0,
+    ) == 5.0
+    assert _sleep_seconds(
+        {"errors": ["directive:TRADING_MARKET_SESSION_CLOSED"]},
+        10.0,
+    ) == 10.0
+    assert _sleep_seconds(
+        {"errors": [], "deferred": ["directive:TRADING_MARKET_SESSION_CLOSED"]},
+        1.0,
+    ) == 5.0
+    assert _sleep_seconds(
+        {
+            "errors": [
+                "directive:TRADING_MARKET_SESSION_UNAVAILABLE",
+                "directive:OTHER",
+            ]
+        },
+        1.0,
+    ) == 1.0
+
+
+def test_worker_defers_closed_session_without_repeated_state_writes():
+    h = Harness()
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+    request = h.request(DirectiveAction.PLACE_ORDER, key="idem-worker-session-wait")
+    record, _ = h.repository.accept(
+        request,
+        _proof_object(request, h.user, "worker-session-wait-jti"),
+    )
+    h.repository.set_market_session(
+        NOW - timedelta(hours=2), NOW - timedelta(hours=1)
+    )
+
+    first = run_directive_worker_once(h.service, batch=100, now=NOW)
+    waiting = h.repository.get(record.directive_id)
+    assert waiting is not None
+    assert first["errors"] == []
+    assert first["deferred"] == [
+        f"{record.directive_id}:TRADING_MARKET_SESSION_CLOSED"
+    ]
+    assert waiting.state is DirectiveState.RECEIVED
+    assert waiting.legs == []
+    first_updated_at = waiting.updated_at
+
+    second = run_directive_worker_once(
+        h.service, batch=100, now=NOW + timedelta(seconds=1)
+    )
+    still_waiting = h.repository.get(record.directive_id)
+    assert still_waiting is not None
+    assert second["errors"] == []
+    assert second["deferred"] == first["deferred"]
+    assert still_waiting.updated_at == first_updated_at
+
+    h.repository.set_market_session(
+        NOW - timedelta(hours=1), NOW + timedelta(hours=4)
+    )
+    resumed = run_directive_worker_once(
+        h.service, batch=100, now=NOW + timedelta(seconds=1)
+    )
+    executed = h.repository.get(record.directive_id)
+    assert resumed["errors"] == []
+    assert resumed["deferred"] == []
+    assert executed is not None
+    assert executed.state is DirectiveState.IN_PROGRESS
+    assert len(executed.legs) == 1
+
+
+def test_worker_log_throttle_keeps_changes_immediate_and_dedupes_steady_state():
+    result = {
+        "reconciled": 2,
+        "deferred": ["directive:TRADING_MARKET_SESSION_CLOSED"],
+        "errors": [],
+        "at": NOW.isoformat(),
+    }
+    first, signature = _should_log(
+        result,
+        previous_signature=None,
+        previous_at=0.0,
+        now=100.0,
+    )
+    assert first is True
+    assert signature is not None
+
+    repeated, repeated_signature = _should_log(
+        {**result, "at": (NOW + timedelta(seconds=5)).isoformat()},
+        previous_signature=signature,
+        previous_at=100.0,
+        now=105.0,
+    )
+    assert repeated is False
+    assert repeated_signature == signature
+
+    periodic, _ = _should_log(
+        result,
+        previous_signature=signature,
+        previous_at=100.0,
+        now=160.0,
+    )
+    assert periodic is True
+    changed, _ = _should_log(
+        {**result, "errors": ["directive:OTHER"]},
+        previous_signature=signature,
+        previous_at=159.0,
+        now=160.0,
+    )
+    assert changed is True
+
+
 def test_worker_retry_touch_rotates_same_priority_rows_without_state_rewrite():
     h = Harness()
     first_request = h.request(DirectiveAction.PLACE_ORDER, key="idem-worker-first")
@@ -1812,3 +2081,281 @@ def test_worker_retry_touch_rotates_same_priority_rows_without_state_rewrite():
     assert h.repository.touch_active(first.directive_id)
     assert first.state is DirectiveState.RECEIVED
     assert h.repository.active_directives(limit=1)[0].directive_id == second.directive_id
+
+
+def _sell_position_payload(symbol: str = "005930") -> dict:
+    return {
+        "instrument_id": None,
+        "symbol": symbol,
+        "side": "SELL",
+        "order_type": "MARKET",
+        "time_in_force": "DAY",
+        "reduce_only": True,
+    }
+
+
+def test_expired_sell_position_releases_the_book_barrier() -> None:
+    """The stall behind repeated TRADING_HIGHER_PRIORITY_ACTIVE (2026-09-01).
+
+    SELL_POSITION was the one expiring action with no branch in
+    _reconcile_expired_scope, so its legs expired while the row stayed
+    IN_PROGRESS - an active state - and kept the priority-2000 barrier. Every
+    later user order queued behind a directive that could never finish.
+    """
+
+    h = Harness()
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("1000000"))
+    request = h.request(
+        DirectiveAction.SELL_POSITION,
+        key="idem-sell-position-expiry",
+        payload=_sell_position_payload(),
+    )
+    record, _ = h.repository.accept(
+        request, _proof_object(request, h.user, "sell-position-expiry-jti")
+    )
+    h.repository.set_state(record.directive_id, DirectiveState.IN_PROGRESS)
+    h.repository.activate_barrier(record, reduce_only=True)
+    h.repository.create_acknowledged_leg(
+        record,
+        h.instrument,
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("1"),
+        limit_price=None,
+        reserve_cash=None,
+        reduce_only=True,
+        expires_at=NOW + timedelta(hours=1),
+    )
+    assert h.repository.state.barriers[(h.fund, h.book)][0] == record.directive_id
+
+    h.service.reconcile_active(now=NOW + timedelta(hours=2))
+
+    settled = h.repository.get(record.directive_id)
+    assert settled.legs[0].state is DirectiveLegState.EXPIRED
+    assert settled.state is DirectiveState.FAILED
+    assert settled.error_code == "TRADING_PAPER_ORDER_EXPIRED"
+    assert (h.fund, h.book) not in h.repository.state.barriers
+
+
+def test_partially_filled_sell_position_expiry_is_partial_not_failed() -> None:
+    h = Harness()
+    request = h.request(
+        DirectiveAction.SELL_POSITION,
+        key="idem-sell-position-partial",
+        payload=_sell_position_payload(),
+    )
+    record, _ = h.repository.accept(
+        request, _proof_object(request, h.user, "sell-position-partial-jti")
+    )
+    h.repository.set_state(record.directive_id, DirectiveState.IN_PROGRESS)
+    h.repository.activate_barrier(record, reduce_only=True)
+    leg = h.repository.create_acknowledged_leg(
+        record,
+        h.instrument,
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal("2"),
+        limit_price=None,
+        reserve_cash=None,
+        reduce_only=True,
+        expires_at=NOW + timedelta(hours=1),
+    )
+    leg.state = DirectiveLegState.PARTIALLY_FILLED
+    leg.filled_quantity = Decimal("1")
+
+    h.service.reconcile_active(now=NOW + timedelta(hours=2))
+
+    settled = h.repository.get(record.directive_id)
+    assert settled.state is DirectiveState.PARTIAL
+    assert (h.fund, h.book) not in h.repository.state.barriers
+
+
+def test_barrier_is_reclaimed_from_an_owner_that_holds_nothing_open() -> None:
+    """A worker that dies between activate_barrier and its first leg.
+
+    IN_PROGRESS and UNKNOWN both count as active, so the terminal-state check
+    alone never freed the book and the whole scope stayed locked.
+    """
+
+    h = Harness()
+    owner_request = h.request(DirectiveAction.SELL_ALL, key="idem-dead-owner")
+    owner, _ = h.repository.accept(
+        owner_request, _proof_object(owner_request, h.user, "dead-owner-jti")
+    )
+    h.repository.set_state(owner.directive_id, DirectiveState.IN_PROGRESS)
+    h.repository.activate_barrier(owner, reduce_only=True)
+    owner.updated_at = datetime.now(timezone.utc) - BARRIER_STALE_AFTER - timedelta(seconds=1)
+
+    later_request = h.request(DirectiveAction.PLACE_ORDER, key="idem-after-dead-owner")
+    later, _ = h.repository.accept(
+        later_request, _proof_object(later_request, h.user, "after-dead-owner-jti")
+    )
+    h.repository.activate_barrier(later, reduce_only=False)
+
+    assert h.repository.state.barriers[(h.fund, h.book)][0] == later.directive_id
+
+
+def test_a_live_owner_keeps_the_barrier_however_long_it_waits() -> None:
+    """Open legs, not the clock, are what make holding the book legitimate.
+
+    A resting broker order can outlive any deadline; reclaiming from it would
+    reintroduce exactly the buy-during-liquidation race the barrier prevents.
+    """
+
+    h = Harness()
+    owner_request = h.request(DirectiveAction.SELL_ALL, key="idem-live-owner")
+    owner, _ = h.repository.accept(
+        owner_request, _proof_object(owner_request, h.user, "live-owner-jti")
+    )
+    h.repository.set_state(owner.directive_id, DirectiveState.IN_PROGRESS)
+    h.repository.activate_barrier(owner, reduce_only=True)
+    h.repository.create_acknowledged_leg(
+        owner,
+        h.instrument,
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("1"),
+        limit_price=Decimal("70000"),
+        reserve_cash=None,
+        reduce_only=True,
+        expires_at=NOW + timedelta(days=1),
+    )
+    owner.updated_at = datetime.now(timezone.utc) - BARRIER_STALE_AFTER - timedelta(hours=9)
+
+    later_request = h.request(DirectiveAction.PLACE_ORDER, key="idem-blocked-by-live")
+    later, _ = h.repository.accept(
+        later_request, _proof_object(later_request, h.user, "blocked-by-live-jti")
+    )
+    with pytest.raises(DirectiveRepositoryError) as excinfo:
+        h.repository.activate_barrier(later, reduce_only=False)
+    assert excinfo.value.code == "TRADING_HIGHER_PRIORITY_ACTIVE"
+    assert h.repository.state.barriers[(h.fund, h.book)][0] == owner.directive_id
+
+
+def test_ls_paper_status_query_targets_the_leg_order_day_not_today() -> None:
+    """CSPAQ13700 is per-day; asking about today loses yesterday's order.
+
+    Regression for 2026-09-01: a SELL_ALL placed 17 minutes before the close
+    was reconciled the next morning against *that* morning's order book, so
+    LS returned no row, the leg stayed ACKNOWLEDGED, its directive stayed
+    IN_PROGRESS and its priority-2000 barrier held the book for 19.8 hours.
+    """
+
+    class Broker:
+        def __init__(self) -> None:
+            self.asked_dates: list[object] = []
+            self.rolled = False
+
+        def place_order(self, **_kwargs):
+            return LSPaperOrderAck("42139", "152759000", "005930")
+
+        def order_status(self, broker_order_id, *, order_date=None):
+            self.asked_dates.append(order_date)
+            # Only the placement day's book knows this order. Querying any
+            # other day returns nothing at all - which the caller must not
+            # read as "still working".
+            if order_date != NOW.astimezone(KST).date():
+                return None
+            return LSPaperOrderStatus(
+                broker_order_id=broker_order_id,
+                state="CANCELLED" if self.rolled else "ACKNOWLEDGED",
+                requested_quantity=Decimal(1),
+                filled_quantity=Decimal(0),
+                fill_price=None,
+                order_date=order_date,
+            )
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository, h.market, external_broker=broker  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("500000"))
+    request = h.request(DirectiveAction.PLACE_ORDER, key="idem-ls-prior-session")
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+    assert record.legs[0].state is DirectiveLegState.ACKNOWLEDGED
+
+    # Next session: the KRX calendar has moved on, the leg has not, and the
+    # exchange has since cancelled the unfilled DAY order.
+    broker.rolled = True
+    next_day = NOW + timedelta(days=1)
+    h.repository.set_market_session(next_day - timedelta(hours=1), next_day + timedelta(hours=4))
+    h.service.reconcile_active(now=next_day)
+
+    assert broker.asked_dates, "the leg must be reconciled against the broker"
+    assert broker.asked_dates[-1] == NOW.astimezone(KST).date()
+    assert broker.asked_dates[-1] != next_day.astimezone(KST).date()
+    assert record.legs[0].state is DirectiveLegState.CANCELLED
+
+
+def test_leg_order_date_prefers_day_expiry_and_falls_back_to_creation() -> None:
+    """The DAY expiry is the canonical session close of the placement day."""
+
+    h = Harness()
+    request = h.request(DirectiveAction.PLACE_ORDER, key="idem-order-date-helper")
+    record, _ = h.repository.accept(
+        request, _proof_object(request, h.user, "order-date-helper-jti")
+    )
+    close = datetime(2026, 8, 31, 6, 30, tzinfo=timezone.utc)  # 15:30 KST
+    leg = DirectiveLeg(
+        leg_id=uuid4(),
+        directive_id=record.directive_id,
+        leg_index=0,
+        instrument_id=h.instrument.instrument_id,
+        symbol="005930",
+        side="BUY",
+        order_type="MARKET",
+        requested_quantity=Decimal(1),
+        limit_price=None,
+        expires_at=close,
+    )
+    assert directive_service_module.leg_order_date(record, leg) == close.astimezone(KST).date()
+
+    legacy = DirectiveLeg(
+        leg_id=uuid4(),
+        directive_id=record.directive_id,
+        leg_index=1,
+        instrument_id=h.instrument.instrument_id,
+        symbol="005930",
+        side="BUY",
+        order_type="MARKET",
+        requested_quantity=Decimal(1),
+        limit_price=None,
+        expires_at=None,
+    )
+    assert directive_service_module.leg_order_date(record, legacy) == (
+        record.created_at.astimezone(KST).date()
+    )
+
+
+def test_submit_outside_the_session_parks_received_without_holding_the_barrier() -> None:
+    """A closed session is an admission wait at accept, exactly as in the worker.
+
+    Regression for 2026-09-01: only ``reconcile_active`` applied this policy,
+    so an order placed outside the session was terminally FAILED on
+    submission instead of waiting for the next open.  ``_sell_all`` also takes
+    the book barrier before resolving the session close, so parking must
+    release it or the whole book stalls until the next open.
+    """
+
+    h = Harness()
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("500000"))
+    # A holding is required, or SELL_ALL is an honest no-op that completes
+    # before it ever resolves the session close.
+    h.repository.set_position(
+        h.fund, h.book, h.instrument.instrument_id, Decimal(10),
+        average_cost=Decimal("60000"),
+    )
+    closed = NOW + timedelta(hours=6)  # past the fixture session close
+    request = h.request(DirectiveAction.SELL_ALL, key="idem-session-closed-accept")
+
+    record = h.service.submit(
+        request, _execute_token(request, h.user, now=closed), now=closed
+    )
+
+    assert record.state is DirectiveState.RECEIVED
+    assert record.error_code == "TRADING_MARKET_SESSION_CLOSED"
+    assert not record.legs
+    assert directive_service_module.is_market_session_deferred(record)
+    # The barrier must not survive the park, or every later order queues.
+    assert h.repository.state.barriers == {}

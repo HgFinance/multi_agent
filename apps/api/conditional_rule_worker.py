@@ -21,7 +21,7 @@ import urllib.request
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -74,6 +74,9 @@ from orchestration.conditional_rules.semantic import (
 
 LOG = logging.getLogger("conditional-rule-worker")
 INTERNAL_SCOPE = "trading.conditional_rule.execute"
+# A trigger is already claimed durably before submission. A stale quote is
+# transient, but recovery must reuse that exact execution and stop quickly.
+_STALE_QUOTE_MAX_SUBMISSION_ATTEMPTS = 2
 
 
 class RuntimeDataError(RuntimeError):
@@ -206,7 +209,12 @@ class WorkerStore(Protocol):
     def list_submit_ready(self, *, limit: int = 100) -> list[SubmitReadyExecution]: ...
     def mark_submitting(self, rule_execution_id: UUID) -> bool: ...
     def mark_retryable_failure(
-        self, rule_execution_id: UUID, *, code: str, message: str
+        self,
+        rule_execution_id: UUID,
+        *,
+        code: str,
+        message: str,
+        max_attempts: int | None = None,
     ) -> None: ...
     def mark_terminal_failure(
         self, rule_execution_id: UUID, *, code: str, message: str
@@ -411,6 +419,78 @@ def _align_completed_bars(
             and timeframe_close_at(item.bucket_time, timeframe) <= watermark
         ]
     return aligned, watermark
+
+
+_INTRABAR_STEP_MINUTES = {
+    Timeframe.M1: 1,
+    Timeframe.M3: 3,
+    Timeframe.M5: 5,
+    Timeframe.M10: 10,
+    Timeframe.M15: 15,
+    Timeframe.M30: 30,
+    Timeframe.H1: 60,
+}
+
+
+def _intrabar_bucket_start(observed_at: datetime, *, primary: Timeframe) -> datetime:
+    """Return the KRX-local open candle bucket containing ``observed_at``."""
+
+    step = _INTRABAR_STEP_MINUTES.get(primary)
+    if step is None:
+        raise EvaluationError(
+            "INTRABAR_TIMEFRAME_UNSUPPORTED",
+            "INTRABAR supports intraday timeframes only",
+        )
+    if observed_at.tzinfo is None:
+        raise RuntimeDataError(
+            "MARKET_TIME_INVALID", "quote timestamp has no timezone", retryable=False
+        )
+    local = observed_at.astimezone(timezone(timedelta(hours=9)))
+    return local.replace(
+        minute=(local.minute // step) * step if step < 60 else 0,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _project_intrabar_quote(
+    bars: Mapping[Timeframe, list[Candle]],
+    *,
+    primary: Timeframe,
+    price: Decimal,
+    observed_at: datetime,
+) -> dict[Timeframe, list[Candle]]:
+    """Append one ephemeral quote-priced candle for INTRABAR evaluation.
+
+    No provider bar is mutated or stored as final.  The projection is used
+    only in this evaluation frame, while the trigger claim remains keyed by
+    the fresh quote and therefore remains exactly-once.
+    """
+
+    bucket = _intrabar_bucket_start(observed_at, primary=primary)
+    projected = {
+        timeframe: [item for item in series]
+        for timeframe, series in bars.items()
+    }
+    completed = [
+        item
+        for item in projected.get(primary, [])
+        if item.is_final and item.bucket_time < bucket
+    ]
+    projected[primary] = completed + [
+        Candle(
+            bucket_time=bucket,
+            open=price,
+            high=price,
+            low=price,
+            close=price,
+            volume=Decimal("0"),
+            # IndicatorEngine intentionally consumes this ephemeral candle as
+            # the current observation. It is never persisted as a final bar.
+            is_final=True,
+        )
+    ]
+    return projected
 
 
 def _portfolio_fields(node: ExpressionNode) -> frozenset[str]:
@@ -678,7 +758,14 @@ class HttpRuntimeClient:
                 # A 409 from Trading is a deterministic admission rejection
                 # (closed market, insufficient funds, changed authority, ...).
                 # Retrying it later could submit a stale trigger.
-                retryable=exc.code >= 500 or exc.code in {408, 425, 429},
+                retryable=(
+                    exc.code >= 500
+                    or exc.code in {408, 425, 429}
+                    or (
+                        exc.code == 409
+                        and error_code == "TRADING_MARKET_QUOTE_STALE"
+                    )
+                ),
                 status_code=exc.code,
             ) from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
@@ -907,6 +994,15 @@ class HttpRuntimeClient:
             primary = rule.spec.evaluation.primary_timeframe
             assert primary is not None
             bars, bar_watermark = _align_completed_bars(bars, primary=primary)
+        elif rule.spec.evaluation.clock is EvaluationClock.INTRABAR:
+            primary = rule.spec.evaluation.primary_timeframe
+            assert primary is not None
+            bars = _project_intrabar_quote(
+                bars,
+                primary=primary,
+                price=current_price,
+                observed_at=quote_at,
+            )
         for timeframe, required in history.items():
             final_count = sum(1 for candle in bars[timeframe] if candle.is_final)
             if final_count < required:
@@ -1021,7 +1117,10 @@ class HttpRuntimeClient:
             calculation_profile=str(context.get("calculation_profile", "DEFAULT")),
             current_observed_at=(
                 quote_at
-                if rule.spec.evaluation.clock is EvaluationClock.QUOTE
+                if rule.spec.evaluation.clock in {
+                    EvaluationClock.QUOTE,
+                    EvaluationClock.INTRABAR,
+                }
                 else bar_watermark
             ),
         )
@@ -1033,7 +1132,11 @@ class HttpRuntimeClient:
         key = (
             f"BAR_CLOSE:{rule.spec.evaluation.primary_timeframe.value}:{watermark.isoformat()}"
             if rule.spec.evaluation.clock is EvaluationClock.BAR_CLOSE
-            else f"QUOTE:{quote_at.isoformat()}"
+            else (
+                f"INTRABAR:{rule.spec.evaluation.primary_timeframe.value}:{quote_at.isoformat()}"
+                if rule.spec.evaluation.clock is EvaluationClock.INTRABAR
+                else f"QUOTE:{quote_at.isoformat()}"
+            )
         )
         hash_payload = {
             "rule_id": str(rule.rule_id),
@@ -1133,6 +1236,13 @@ class ConditionalRuleWorker:
             30.0, min(float(history_backoff_seconds), 3600.0)
         )
         self._history_backoff_until: dict[tuple[UUID, int], float] = {}
+        # INTRABAR evaluates every fresh quote, but persisting a false result
+        # per tick would turn an idle rule into thousands of database writes.
+        # Execution correctness does not rely on false records: a true result
+        # still takes the durable per-quote trigger claim below.  Keep one
+        # audit observation per open primary bar instead.
+        self._intrabar_false_watermarks: dict[tuple[UUID, int], datetime] = {}
+        self._intrabar_false_lock = threading.Lock()
         self._active_offset = 0
 
     @staticmethod
@@ -1180,7 +1290,14 @@ class ConditionalRuleWorker:
         except RuntimeDataError as exc:
             if exc.retryable:
                 self.store.mark_retryable_failure(
-                    execution.rule_execution_id, code=exc.code, message=str(exc)
+                    execution.rule_execution_id,
+                    code=exc.code,
+                    message=str(exc),
+                    max_attempts=(
+                        _STALE_QUOTE_MAX_SUBMISSION_ATTEMPTS
+                        if exc.code == "TRADING_MARKET_QUOTE_STALE"
+                        else None
+                    ),
                 )
             else:
                 self.store.mark_terminal_failure(
@@ -1238,6 +1355,19 @@ class ConditionalRuleWorker:
             quantity=decision.quantity,
         )
         return execution is not None and self._submit(execution)
+
+    def _should_record_false(self, rule: ActiveRule, inputs: RuntimeInputs) -> bool:
+        if rule.spec.evaluation.clock is not EvaluationClock.INTRABAR:
+            return True
+        primary = rule.spec.evaluation.primary_timeframe
+        assert primary is not None
+        bucket = _intrabar_bucket_start(inputs.data_watermark, primary=primary)
+        key = (rule.rule_id, rule.rule_version)
+        with self._intrabar_false_lock:
+            if self._intrabar_false_watermarks.get(key) == bucket:
+                return False
+            self._intrabar_false_watermarks[key] = bucket
+            return True
 
     def _recover_claimed(self, item: tuple[ActiveRule, TriggerClaim]) -> dict[str, int]:
         rule, claim = item
@@ -1387,12 +1517,13 @@ class ConditionalRuleWorker:
             return counts
         counts["evaluated"] += 1
         if not result:
-            self.store.record_false(
-                rule,
-                evaluation_key=inputs.evaluation_key,
-                context_sha256=inputs.context_sha256,
-                data_watermark=inputs.data_watermark,
-            )
+            if self._should_record_false(rule, inputs):
+                self.store.record_false(
+                    rule,
+                    evaluation_key=inputs.evaluation_key,
+                    context_sha256=inputs.context_sha256,
+                    data_watermark=inputs.data_watermark,
+                )
             return counts
         claim = self.store.claim_true(
             rule,

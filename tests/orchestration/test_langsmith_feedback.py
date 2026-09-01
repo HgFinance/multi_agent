@@ -1078,6 +1078,9 @@ def test_feedback_config_bounds_concurrency_inputs(monkeypatch) -> None:
 def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(
     tmp_path, monkeypatch
 ) -> None:
+    # Another full-suite workflow may load the repository .env. This fixture
+    # intentionally verifies SDK project resolution through the fake client.
+    monkeypatch.delenv("LANGSMITH_PROJECT_ID", raising=False)
     class _Paginator:
         def __init__(self, rows):
             self.rows = rows

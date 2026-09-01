@@ -49,6 +49,12 @@ class MaintenanceResultError(RuntimeError):
         super().__init__(self.error_code)
 
 
+# An operator-disabled integration is an intentional skip, not a failed
+# maintenance domain. Keeping it out of the failed state lets the scheduler
+# remain healthy while the global LangSmith egress circuit breaker is active.
+_EXPECTED_SKIP_RESULT_CODES = frozenset({"DISABLED", "LANGSMITH_EGRESS_DISABLED"})
+
+
 class HealthLedger:
     """Thread-safe, atomic scheduler health projection."""
 
@@ -148,10 +154,16 @@ def _job_loop(
         try:
             result = job.run_once()
             result_error = getattr(result, "error_code", None)
-            if result_error:
+            if result_error and result_error not in _EXPECTED_SKIP_RESULT_CODES:
                 error = MaintenanceResultError(str(result_error))
                 LOG.warning(
                     "maintenance-retention-job-reported-error job=%s error_code=%s",
+                    job.name,
+                    result_error,
+                )
+            elif result_error:
+                LOG.info(
+                    "maintenance-retention-job-skipped job=%s reason=%s",
                     job.name,
                     result_error,
                 )

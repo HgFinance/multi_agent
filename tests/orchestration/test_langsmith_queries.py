@@ -13,6 +13,13 @@ from orchestration.langsmith_queries import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_langsmith_egress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not inherit a developer machine's outbound circuit breaker."""
+
+    monkeypatch.setenv("HGFINANCE_LANGSMITH_EGRESS_ENABLED", "true")
+
+
 class _Paginator:
     def __init__(self, rows):
         self.rows = rows
@@ -82,6 +89,79 @@ def test_query_runs_caches_project_uuid() -> None:
     query_runs(client, project_name="Cached-SmithDB", min_start_time=start, max_results=1)
 
     assert client.project_reads == 1
+
+
+def test_project_uuid_cache_is_scoped_to_one_client_instance(monkeypatch) -> None:
+    # Some workflow tests load the repository .env into the shared pytest
+    # process. This test exercises runtime lookup, not the provisioned-ID path.
+    monkeypatch.delenv("LANGSMITH_PROJECT_ID", raising=False)
+    class _WorkspaceClient(_Client):
+        def __init__(self, project_id: str):
+            super().__init__()
+            self.project_id = project_id
+
+        async def aread_project(self, *, project_name):
+            self.project_reads += 1
+            return SimpleNamespace(id=self.project_id)
+
+    langsmith_queries._PROJECT_ID_CACHE.clear()
+    first = _WorkspaceClient("project-workspace-a")
+    second = _WorkspaceClient("project-workspace-b")
+
+    query_runs(
+        first,
+        project_name="First",
+        min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
+        max_results=1,
+    )
+    query_runs(
+        second,
+        project_name="First",
+        min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
+        max_results=1,
+    )
+
+    assert first.query_calls[0]["project_ids"] == ["project-workspace-a"]
+    assert second.query_calls[0]["project_ids"] == ["project-workspace-b"]
+    assert first.project_reads == second.project_reads == 1
+
+
+def test_query_runs_uses_provisioned_project_uuid_without_legacy_lookup(monkeypatch) -> None:
+    class _NoLookupClient(_Client):
+        async def aread_project(self, *, project_name):
+            pytest.fail(f"legacy project lookup must not run for {project_name}")
+
+    monkeypatch.setenv("LANGSMITH_PROJECT", "First")
+    monkeypatch.setenv("LANGSMITH_PROJECT_ID", "5fa63243-7c10-4b3f-9d8e-25f04b62b2e9")
+    langsmith_queries._PROJECT_ID_CACHE.clear()
+    client = _NoLookupClient()
+
+    query_runs(
+        client,
+        project_name="First",
+        min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
+        max_results=1,
+    )
+
+    assert client.project_reads == 0
+    assert client.query_calls[0]["project_ids"] == ["5fa63243-7c10-4b3f-9d8e-25f04b62b2e9"]
+
+
+def test_project_resolution_never_falls_back_to_legacy_project_listing() -> None:
+    class _LegacyListingClient(_Client):
+        async def aread_project(self, *, project_name):
+            raise RuntimeError("async paginator transport unavailable")
+
+        def list_projects(self, **_kwargs):
+            pytest.fail("legacy /sessions listing must not be called")
+
+    with pytest.raises(RuntimeError, match="langsmith_v2_project_resolution_unavailable"):
+        query_runs(
+            _LegacyListingClient(),
+            project_name="No-Legacy-Project-Listing",
+            min_start_time=datetime(2026, 8, 26, tzinfo=timezone.utc),
+            max_results=1,
+        )
 
 
 class _HttpStatusError(Exception):

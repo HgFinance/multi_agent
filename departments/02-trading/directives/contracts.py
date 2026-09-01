@@ -154,11 +154,11 @@ class BasketOrderItem(BaseModel):
 
 
 class PlaceBasketPayload(BaseModel):
-    """A bounded collection of independently executable same-side PAPER legs."""
+    """One or more independently executable same-side PAPER allocation legs."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    orders: tuple[BasketOrderItem, ...] = Field(min_length=2, max_length=20)
+    orders: tuple[BasketOrderItem, ...] = Field(min_length=1, max_length=20)
 
     @model_validator(mode="after")
     def _unique_symbols(self) -> "PlaceBasketPayload":

@@ -60,6 +60,40 @@ class CreateKanbanTaskCliContractTest(unittest.TestCase):
 
         run.assert_not_called()
 
+    @patch.dict(
+        "os.environ",
+        {
+            "KANBAN_CLI_TIMEOUT_SECONDS": "30",
+            "KANBAN_CREATE_RECONCILE_TIMEOUT_SECONDS": "6",
+        },
+        clear=False,
+    )
+    def test_create_timeout_replays_the_same_idempotent_cli_request_once(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["hermes"],
+            returncode=0,
+            stdout=json.dumps({"id": "t_reconciled", "status": "blocked"}),
+            stderr="",
+        )
+        with patch.object(
+            hermes_boundary.subprocess,
+            "run",
+            side_effect=[subprocess.TimeoutExpired(["hermes"], 30), completed],
+        ) as run:
+            task = hermes_boundary.create_kanban_task(
+                assignee="ceo-agent",
+                title="title",
+                body="body",
+                idempotency_key="idem-timeout",
+                initial_status="blocked",
+            )
+
+        self.assertEqual(task["task_id"], "t_reconciled")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0], run.call_args_list[1].args[0])
+        self.assertEqual(run.call_args_list[0].kwargs["timeout"], 30.0)
+        self.assertEqual(run.call_args_list[1].kwargs["timeout"], 6.0)
+
 
 class CompleteKanbanTaskCliContractTest(unittest.TestCase):
     def test_direct_completion_persists_one_answer_in_all_handoff_fields(self) -> None:

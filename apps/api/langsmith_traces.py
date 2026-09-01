@@ -49,6 +49,7 @@ from typing import Any
 from starlette.concurrency import run_in_threadpool
 
 from orchestration.langsmith_queries import close_query_client, query_runs
+from orchestration.langsmith_egress import langsmith_egress_enabled
 
 _QA_STAGES = frozenset({"qa", "qa-terminal"})
 # AgentLogsView.tsx의 `degraded` 판정과 같은 집합 - 화면 전체에서 "실패"의 뜻을
@@ -65,7 +66,7 @@ _TRACE_CACHE_LOCK = threading.Lock()
 
 
 def _configured() -> bool:
-    tracing = os.getenv("LANGSMITH_TRACING", "").casefold() in {"1", "true", "yes", "on"}
+    tracing = langsmith_egress_enabled() and os.getenv("LANGSMITH_TRACING", "").casefold() in {"1", "true", "yes", "on"}
     return tracing and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
 
 
@@ -122,7 +123,9 @@ def _collect(days: int, project: str | None) -> dict[str, Any]:
 
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
-    client = Client()
+    from orchestration.llm_observability import langsmith_batch_ingest_info
+
+    client = Client(info=langsmith_batch_ingest_info())
     # SmithDB v2 requires a project UUID and an explicit time window. The
     # adapter resolves the configured name once per process and enforces the
     # server page-size bound; the total result cap remains local.

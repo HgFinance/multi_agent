@@ -48,14 +48,11 @@ def test_scripts_consume_registry_instead_of_copying_profile_mappings() -> None:
     registry_name = "hermes_profile_registry.txt"
     for script_name in (
         "scripts/sync_hermes_profiles.sh",
-        "scripts/install_hermes_profile.sh",
         "scripts/check_hermes_profiles.py",
     ):
         source = (ROOT / script_name).read_text(encoding="utf-8")
         assert registry_name in source
 
-    install_script = (ROOT / "scripts/install_hermes_profile.sh").read_text(
-        encoding="utf-8"
-    )
-    assert "workforce-management" not in install_script
-    assert "DEPARTMENTS=(" not in install_script
+    # Direct container-copy installation predates the mounted runtime-profile
+    # contract and could overwrite /opt/data outside the canonical sync path.
+    assert not (ROOT / "scripts/install_hermes_profile.sh").exists()

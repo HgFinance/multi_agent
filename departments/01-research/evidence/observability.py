@@ -18,6 +18,7 @@ from functools import lru_cache
 from typing import Any
 
 from orchestration.llm_observability import langsmith_project, trace_should_publish
+from orchestration.langsmith_egress import langsmith_egress_enabled
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _SENSITIVE_METADATA_PARTS = (
@@ -77,7 +78,7 @@ def langsmith_enabled() -> bool:
     """Return whether Research may emit best-effort LangSmith spans."""
 
     enabled = os.getenv("LANGSMITH_TRACING", "")
-    return enabled.strip().lower() in _TRUE_VALUES and bool(
+    return langsmith_egress_enabled() and enabled.strip().lower() in _TRUE_VALUES and bool(
         os.getenv("LANGSMITH_API_KEY", "").strip()
     )
 
@@ -102,8 +103,10 @@ def _langsmith_client():
     """Create the optional client lazily; missing SDK/config is fail-open."""
 
     from langsmith import Client
+    from orchestration.llm_observability import langsmith_batch_ingest_info
 
     return Client(
+        info=langsmith_batch_ingest_info(),
         hide_inputs=True,
         hide_outputs=True,
         hide_metadata=False,

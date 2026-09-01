@@ -13,7 +13,7 @@ import { DEFAULT_ACCOUNT, type TestAccount } from "../lib/currentAccount";
  * `"use client"`인 이유: `AccountDot`의 색 토큰 계산과 훗날의 상호작용을 위해
  * 클라이언트 컴포넌트로 둔다.
  *
- * 계정은 데모용 Fund Owner 하나로 고정한다. 사용자 전환 UI나 세션 메뉴는
+ * 계정은 Fund Owner 하나로 고정한다. 사용자 전환 UI나 세션 메뉴는
  * 제공하지 않는다.
  */
 
@@ -65,15 +65,9 @@ export default function TopNav({ current }: { current: NavKey }) {
   return (
     <nav className="bg-surface-container-lowest border-b border-outline-variant flex items-center justify-between w-full px-margin-mobile md:px-margin-desktop h-16 shrink-0 z-50 font-sans">
       <div className="flex items-center gap-6">
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center shrink-0">
           <span className="text-headline-md font-headline-md font-bold text-primary tracking-tight whitespace-nowrap">
             {COMPANY.name}
-          </span>
-          <span
-            className="border border-outline text-secondary rounded-full px-3 py-1 text-label-md font-label-md whitespace-nowrap"
-            title="시뮬레이션 데모 화면입니다"
-          >
-            Demo
           </span>
         </div>
         <div className="hidden md:flex gap-4">

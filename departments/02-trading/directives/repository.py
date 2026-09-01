@@ -9,7 +9,7 @@ import threading
 from types import SimpleNamespace
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterator, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -38,6 +38,22 @@ ACTIVE_DIRECTIVE_STATES = {
     DirectiveState.IN_PROGRESS,
     DirectiveState.UNKNOWN,
 }
+
+# How long a barrier owner may hold the book with nothing open before another
+# directive may take it.  Liveness is decided by open legs, not by the clock: an
+# owner still working a broker order always keeps a PENDING/ACKNOWLEDGED/
+# PARTIALLY_FILLED/UNKNOWN leg, so this deadline only covers the gap between
+# activate_barrier and the first leg.  A worker that dies inside that gap used
+# to pin the book forever, because IN_PROGRESS and UNKNOWN both read as active.
+BARRIER_STALE_AFTER = timedelta(minutes=2)
+
+
+def _barrier_owner_stalled(owner: "DirectiveRecord", *, now: datetime) -> bool:
+    """True when the owner can no longer be making progress on this book."""
+
+    if any(leg.state in ACTIVE_LEG_STATES for leg in owner.legs):
+        return False
+    return owner.updated_at <= now - BARRIER_STALE_AFTER
 
 
 def _cash_affordable_quantity(
@@ -379,7 +395,11 @@ class InMemoryDirectiveRepository:
         current = self.state.barriers.get(key)
         if current and current[0] != record.directive_id:
             owner = self.state.directives.get(current[0])
-            if owner is None or owner.state not in ACTIVE_DIRECTIVE_STATES:
+            if (
+                owner is None
+                or owner.state not in ACTIVE_DIRECTIVE_STATES
+                or _barrier_owner_stalled(owner, now=datetime.now(timezone.utc))
+            ):
                 self.state.barriers.pop(key, None)
                 current = None
         if current and current[0] != record.directive_id and current[1] > record.priority:
@@ -1393,22 +1413,35 @@ class PostgresDirectiveRepository:
         with self._cursor() as cur:
             cur.execute(
                 """
-                select barrier.active_directive_id,barrier.priority,directive.state
+                select barrier.active_directive_id,barrier.priority,directive.state,
+                       exists (
+                         select 1 from execution.user_directive_legs leg
+                          where leg.directive_id=barrier.active_directive_id
+                            and leg.state in ('PENDING','ACKNOWLEDGED','PARTIALLY_FILLED','UNKNOWN')
+                       ) as owner_has_open_legs,
+                       directive.updated_at<=now()-%s as owner_idle
                   from execution.paper_directive_barriers barrier
                   left join execution.user_directives directive
                     on directive.directive_id=barrier.active_directive_id
                  where barrier.fund_id=%s and barrier.book_id=%s
                  for update of barrier
                 """,
-                (record.fund_id, record.book_id),
+                (BARRIER_STALE_AFTER, record.fund_id, record.book_id),
             )
             current = cur.fetchone()
-            if current and current[0] != record.directive_id and current[2] not in {
-                "RECEIVED",
-                "RUNNING",
-                "IN_PROGRESS",
-                "UNKNOWN",
-            }:
+            # An owner in a terminal state, or one holding the book with nothing
+            # open past the deadline, has no claim on it.  Without the second
+            # test a worker that died between activate_barrier and its first leg
+            # pinned the book forever: IN_PROGRESS and UNKNOWN both read active.
+            if current and current[0] != record.directive_id and (
+                current[2] not in {
+                    "RECEIVED",
+                    "RUNNING",
+                    "IN_PROGRESS",
+                    "UNKNOWN",
+                }
+                or (not current[3] and current[4])
+            ):
                 cur.execute(
                     "delete from execution.paper_directive_barriers where fund_id=%s and book_id=%s and active_directive_id=%s",
                     (record.fund_id, record.book_id, current[0]),
@@ -2685,6 +2718,7 @@ class PostgresDirectiveRepository:
 __all__ = [
     "ACTIVE_LEG_STATES",
     "ACTIVE_DIRECTIVE_STATES",
+    "BARRIER_STALE_AFTER",
     "DirectiveLeg",
     "DirectiveRecord",
     "DirectiveRepository",

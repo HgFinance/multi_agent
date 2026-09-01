@@ -104,6 +104,7 @@ class Phase0LatencyHygieneTest(unittest.TestCase):
                     "LANGSMITH_API_KEY": "configured-but-not-recorded",
                     "LANGSMITH_PROJECT": "First",
                     "LANGSMITH_RESEARCH_TRACE_MODE": "full",
+                    "HGFINANCE_LANGSMITH_EGRESS_ENABLED": "true",
                 },
             ),
             patch("evidence.observability._langsmith_client", return_value=fake_client),

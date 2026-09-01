@@ -4,7 +4,14 @@ import json
 import sys
 from types import ModuleType
 
+import pytest
+
 from orchestration import risk_observability
+
+
+@pytest.fixture(autouse=True)
+def _isolate_langsmith_egress(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HGFINANCE_LANGSMITH_EGRESS_ENABLED", "true")
 
 
 def test_risk_span_uses_sdk_compatible_tags_and_closes_successfully(monkeypatch):

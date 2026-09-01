@@ -406,6 +406,7 @@ def _ceo_query(
             previous_question_context_source_message_id=(
                 request.previous_question_context_source_message_id
             ),
+            confirm_order=request.confirm_order,
         ),
         owner_id=owner_id,
         discord_channel_id=discord_channel_id,
@@ -572,6 +573,9 @@ def mirror_ask(
         previous_question_context_source_message_id=(
             request.previous_question_context_source_message_id
         ),
+        # 이 레인만 `_ceo_query`로 내려가 `CeoAsk`를 다시 조립한다. 위 전략
+        # 레인들은 확인 카드가 없어 기본값 False가 맞다.
+        confirm_order=request.confirm_order,
     )
     execution = _execute(
         canonical, deterministic_routing_plan=deterministic_routing_plan

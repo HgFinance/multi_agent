@@ -576,7 +576,11 @@ _NON_EXECUTION_MESSAGES: tuple[tuple[str, str], ...] = (
     ),
     (
         "MISSING_OR_CONFLICTING_QUANTITY",
-        "수량을 확정하지 못했습니다. '5주'처럼 적어 주세요. 주문은 없습니다.",
+        "수량 또는 금액을 확정하지 못했습니다. '5주' 또는 '100만원어치'처럼 적어 주세요. 주문은 없습니다.",
+    ),
+    (
+        "paper_order_instrument_clarification_required",
+        "종목을 하나로 확정하지 못했습니다. 종목명이나 6자리 코드를 정확히 적어 주세요. 주문은 없습니다.",
     ),
     (
         "MISSING_LIMIT_PRICE",
@@ -664,6 +668,8 @@ def _submission_failure_state(exc: HTTPException) -> tuple[str, str]:
     # commit status and must never be retried automatically.
     if detail in {"trading_api_unavailable", "trading_api_invalid_response"}:
         return "UNKNOWN", detail
+    if detail == "paper_order_instrument_clarification_required":
+        return "CLARIFICATION_REQUIRED", detail
     if exc.status_code in {409, 422} or detail.startswith("portfolio_"):
         return "REJECTED", detail
     return "FAILED", detail

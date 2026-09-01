@@ -43,6 +43,7 @@ _DEFAULT_SUCCESS_CODES = frozenset({"0000", "00000"})
 # globally could turn an order rejection into a false acknowledgement.
 _TR_SUCCESS_CODES = {"CSPAQ13700": frozenset({"00136"})}
 _ORDER_HISTORY_CACHE_SECONDS = 1.1
+_ORDER_HISTORY_CACHE_DATES = 8
 
 
 
@@ -232,9 +233,21 @@ class LSPaperBroker:
         self._token: str | None = None
         self._token_expires_at = datetime.min.replace(tzinfo=timezone.utc)
         self._history_cache_lock = threading.Lock()
-        self._history_cache_date: date | None = None
-        self._history_cache_at = 0.0
-        self._history_cache_rows: tuple[dict[str, Any], ...] = ()
+        # One account-history TR serves every active leg in a reconciliation
+        # pass.  When LS rejects that read (notably its gateway/rate-limit
+        # response), retrying once per leg creates a request storm and makes
+        # the existing UNKNOWN/ACKNOWLEDGED state harder to recover.  Keep the
+        # read itself serialized and briefly memoize the failure; this never
+        # changes a broker/order state and only suppresses duplicate reads.
+        self._history_request_lock = threading.Lock()
+        # Keyed by trading day.  A single slot used to be enough because every
+        # status query asked about today, but reconciling a leg placed on an
+        # earlier session now asks about that session's book.  With one slot a
+        # mixed batch alternates dates, misses on every call, and serializes
+        # behind CSPAQ13700's one-request-per-second limit.
+        self._history_cache: dict[date, tuple[float, tuple[dict[str, Any], ...]]] = {}
+        self._history_error_at = 0.0
+        self._history_error: tuple[str, str, bool] | None = None
 
     @classmethod
     def from_env(cls) -> "LSPaperBroker":
@@ -731,44 +744,69 @@ class LSPaperBroker:
         batch or hammering the broker.
         """
 
-        now = time.monotonic()
-        with self._history_cache_lock:
-            if (
-                not refresh
-                and self._history_cache_date == target_date
-                and now - self._history_cache_at < _ORDER_HISTORY_CACHE_SECONDS
-            ):
-                return self._history_cache_rows
-            body = self._post_tr(
-                "CSPAQ13700",
-                {
-                    "CSPAQ13700InBlock1": {
-                        "OrdMktCode": "00",
-                        "BnsTpCode": "0",
-                        "IsuNo": "",
-                        "ExecYn": "0",
-                        "OrdDt": target_date.strftime("%Y%m%d"),
-                        "SrtOrdNo2": 0,
-                        "BkseqTpCode": "0",
-                        "OrdPtnCode": "00",
-                    }
-                },
-                path="/stock/accno",
-            )
-            raw_rows = body.get("CSPAQ13700OutBlock3")
-            if isinstance(raw_rows, dict):
-                raw_rows = [raw_rows]
-            if not isinstance(raw_rows, list) or any(
-                not isinstance(row, dict) for row in raw_rows
-            ):
-                raise LSPaperBrokerError(
-                    "LS_PAPER_RESPONSE_INVALID", "LS order history rows are invalid"
+        with self._history_request_lock:
+            now = time.monotonic()
+            with self._history_cache_lock:
+                if (
+                    self._history_error is not None
+                    and now - self._history_error_at < _ORDER_HISTORY_CACHE_SECONDS
+                ):
+                    code, message, ambiguous = self._history_error
+                    raise LSPaperBrokerError(
+                        code, message, ambiguous=ambiguous
+                    )
+                cached = self._history_cache.get(target_date)
+                if (
+                    not refresh
+                    and cached is not None
+                    and now - cached[0] < _ORDER_HISTORY_CACHE_SECONDS
+                ):
+                    return cached[1]
+            try:
+                body = self._post_tr(
+                    "CSPAQ13700",
+                    {
+                        "CSPAQ13700InBlock1": {
+                            "OrdMktCode": "00",
+                            "BnsTpCode": "0",
+                            "IsuNo": "",
+                            "ExecYn": "0",
+                            "OrdDt": target_date.strftime("%Y%m%d"),
+                            "SrtOrdNo2": 0,
+                            "BkseqTpCode": "0",
+                            "OrdPtnCode": "00",
+                        }
+                    },
+                    path="/stock/accno",
                 )
+                raw_rows = body.get("CSPAQ13700OutBlock3")
+                if isinstance(raw_rows, dict):
+                    raw_rows = [raw_rows]
+                if not isinstance(raw_rows, list) or any(
+                    not isinstance(row, dict) for row in raw_rows
+                ):
+                    raise LSPaperBrokerError(
+                        "LS_PAPER_RESPONSE_INVALID", "LS order history rows are invalid"
+                    )
+            except LSPaperBrokerError as exc:
+                with self._history_cache_lock:
+                    self._history_error = (exc.code, str(exc), exc.ambiguous)
+                    self._history_error_at = time.monotonic()
+                raise
+
             rows = tuple(dict(row) for row in raw_rows)
-            self._history_cache_date = target_date
-            self._history_cache_at = time.monotonic()
-            self._history_cache_rows = rows
-            return rows
+            with self._history_cache_lock:
+                self._history_error = None
+                self._history_error_at = 0.0
+                self._history_cache[target_date] = (time.monotonic(), rows)
+                # Bound the map: a worker only ever reconciles the current
+                # session plus the unsettled days behind it.
+                if len(self._history_cache) > _ORDER_HISTORY_CACHE_DATES:
+                    for stale in sorted(self._history_cache)[
+                        : len(self._history_cache) - _ORDER_HISTORY_CACHE_DATES
+                    ]:
+                        self._history_cache.pop(stale, None)
+                return rows
 
     def cancel_order(
         self,

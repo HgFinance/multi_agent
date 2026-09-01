@@ -1,18 +1,36 @@
 {
-  "registry_version": "hgfinance.evolution-skill-registry.v1",
-  "skills": {},
   "project_skills": {
     "mandate-dynamic-risk-controls": {
       "classification": "project-owned",
-      "status": "active",
-      "owner_profiles": ["risk-management"],
-      "current_version": "1.0.0",
-      "source": "skills/risk/mandate-dynamic-risk-controls/SKILL.md",
-      "provenance": "skills/risk/mandate-dynamic-risk-controls/provenance.json",
       "content_hash": "fcd0d829f1b52bd73fd6d50e7beb600c1c3604514f5d5020c38b25eb416a5c5e",
-      "runtime_binding": "departments/03-risk/position_risk_planner.py",
+      "current_version": "1.0.0",
+      "owner_profiles": [
+        "risk-management"
+      ],
+      "provenance": "skills/risk/mandate-dynamic-risk-controls/provenance.json",
       "qa_verdict": "NOT_RUN",
-      "replacement": null
+      "replacement": null,
+      "runtime_binding": "departments/03-risk/position_risk_planner.py",
+      "source": "skills/risk/mandate-dynamic-risk-controls/SKILL.md",
+      "status": "active"
+    }
+  },
+  "registry_version": "hgfinance.evolution-skill-registry.v1",
+  "skills": {
+    "ceo-canonical-evidence-react-enforced": {
+      "activated_at": "2026-08-31T13:49:18.940693+00:00",
+      "approved_by": "discord:910921055172960286",
+      "classification": "evolved",
+      "content_hash": "2bf5e44047d68e58e99fe76ba1796a8b354be5e637b9515c2f36f162bf3f6f86",
+      "current_version": 1,
+      "owner_profiles": [
+        "ceo-agent"
+      ],
+      "proposal_id": "ceo-canonical-evidence-react-enforced-v1-54ffe43145c7",
+      "qa_verdict": "PASS",
+      "replacement": null,
+      "source": "skills/evolved/ceo-canonical-evidence-react-enforced/SKILL.md",
+      "status": "active"
     }
   }
 }

@@ -328,6 +328,24 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  "20260830000200_audit_reproduction_empty_queue_probe.sql",
                  # LangGraph PostgresSaver durable execution checkpoint.
                  "20260831000100_langgraph_postgres_checkpoint.sql",
+                 # Bounded temporal rules keep worker progress across restarts,
+                 # and RETURN_POINTS trailing rules freeze one cost basis.
+                 "20260831000200_conditional_rule_temporal_state.sql",
+                 "20260831000300_conditional_rule_trailing_return_baseline.sql",
+                 # One-book latest snapshot lookup without scanning all history.
+                 "20260901000100_accounting_portfolio_snapshot_latest_book.sql",
+                 # A stale quote retries only the already-claimed conditional
+                 # execution, with a durable submission-attempt counter.
+                 "20260901000200_conditional_stale_quote_retry.sql",
+                 # Align the durable directive checks with the existing
+                 # SELL_POSITION and one-member notional basket contracts.
+                 "20260901000300_paper_sell_position_contract.sql",
+                 # Sector exposure reads the governed issuer classification
+                 # through the existing Accounting read-only capability.
+                 "20260901000400_accounting_issuer_sector_read.sql",
+                 # Fresh-quote projection of one explicit intraday indicator
+                 # candle; BAR_CLOSE and QUOTE remain separate clocks.
+                 "20260901000500_conditional_intrabar_projection.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -447,6 +465,53 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             f"마이그레이션 버전 접두사 중복: {sorted(dup)} - 새 파일을 만들기 전에 "
             f"`ls supabase/migrations | tail` 로 마지막 번호를 확인할 것",
         )
+
+    def test_paper_sell_position_schema_matches_application_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260901000300_paper_sell_position_contract.sql"
+        ).lower()
+
+        self.assertIn("'sell_position'", migration)
+        self.assertIn("jsonb_array_length(payload->'orders') between 1 and 20", migration)
+        self.assertIn("payload->'reduce_only' = 'true'::jsonb", migration)
+        self.assertIn("user_directive_proofs_action_v4_check", migration)
+        self.assertIn("user_order_requests_action_v3_check", migration)
+        self.assertIn("drop constraint if exists user_directives_action_v4_check", migration)
+
+    def test_accounting_sector_read_has_only_the_missing_reference_grant(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260901000400_accounting_issuer_sector_read.sql"
+        ).lower()
+
+        self.assertIn("grant select on reference.issuers to svc_accounting_ledger", migration)
+        self.assertIn("reference_issuers_svc_accounting_ledger_select", migration)
+        self.assertNotIn("grant all", migration)
+        self.assertNotIn("insert", migration)
+        self.assertNotIn("update", migration)
+        self.assertNotIn("delete", migration)
+
+    def test_conditional_intrabar_schema_extends_the_existing_clock_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260901000500_conditional_intrabar_projection.sql"
+        ).lower()
+
+        normalized = re.sub(r"\s+", " ", migration)
+        self.assertIn("'bar_close', 'intrabar', 'quote'", migration)
+        self.assertIn(
+            "evaluation_clock in ('bar_close', 'intrabar') and primary_timeframe is not null",
+            normalized,
+        )
+        self.assertIn(
+            "drop constraint if exists conditional_trade_rules_clock_primary_timeframe_check",
+            migration,
+        )
+        self.assertNotIn("create table", migration)
 
     def test_order_event_constraint_migration_is_idempotent(self) -> None:
         migration = next(
@@ -1157,7 +1222,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # PAPER 요청은 기존 즉시주문/조건부규칙의 합성이며 두 번째
             # 주문 원장이 아니다.
             # +1: 20260829000200_conditional_rule_trailing_stop_state.sql
-            "execution": 32,
+            # +1: 20260831000200_conditional_rule_temporal_state.sql
+            # 20260831000300 only adds a column to the existing trailing table.
+            "execution": 33,
             "governance": 20,
             # LangGraph PostgresSaver uses the public schema because the
             # pinned adapter emits unqualified checkpoint relation names.

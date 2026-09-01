@@ -26,6 +26,7 @@ export type PaperDirectiveAction =
   | "PLACE_ORDER"
   | "PLACE_BASKET"
   | "SELL_ALL"
+  | "SELL_POSITION"
   | "CANCEL_ALL";
 
 export interface PaperDirectiveLeg {
@@ -170,9 +171,13 @@ export function parsePaperDirective(value: unknown): PaperDirective {
   if (
     typeof directive.directive_id !== "string" ||
     !PAPER_DIRECTIVE_STATES.includes(state as PaperDirectiveState) ||
-    !["PLACE_ORDER", "PLACE_BASKET", "SELL_ALL", "CANCEL_ALL"].includes(
-      String(action),
-    ) ||
+    ![
+      "PLACE_ORDER",
+      "PLACE_BASKET",
+      "SELL_ALL",
+      "SELL_POSITION",
+      "CANCEL_ALL",
+    ].includes(String(action)) ||
     (directive.priority !== 1000 && directive.priority !== 2000) ||
     directive.priority_class !== "USER_DIRECTIVE_HIGHEST" ||
     directive.mode !== "PAPER" ||

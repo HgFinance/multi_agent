@@ -52,7 +52,8 @@ _NOT_ABLE_STEM = r"(?=\s|하|되|된|할|함|해|했)"
 # `user_order_language._NEGATION_RE`가 쓰던 어휘. 주문 동사에 직접 붙는 형태다.
 ORDER_NEGATION_PATTERN = (
     r"하지\s*마|하지마|말아(?:\s*줘)?|말(?:아|자)|"
-    rf"{_STANDALONE}안\s*(?:사|팔|매수|매도|취소)|(?:매수|매도|취소)\s*안|"
+    rf"{_STANDALONE}안\s*(?:사|팔|매수|매도|취소)|(?:사|팔)\s*지\s*마|"
+    r"(?:매수|매도|취소)\s*안|"
     r"않(?:아|게|도록)?"
 )
 
@@ -161,7 +162,10 @@ def negated_spans(text: str) -> tuple[tuple[int, int], ...]:
 # 주문 레인이 소유하는 행위 어휘. 부정이 이 어휘를 지배하면 주문이 아니다.
 ORDER_ACTION_PATTERN = (
     r"매수|매도|주문|매매|체결|청산|"
-    r"사\s*(?:줘|주세요|라)|팔아(?:\s*줘|주세요)?|"
+    # Include colloquial negative forms as actions too.  They must be seen by
+    # ``is_negated_order_instruction`` so "사지 마" can terminate as an
+    # explicit no-op rather than fall through to a generic clarification.
+    r"사\s*(?:줘|주세요|라|지\s*마)|팔(?:아(?:\s*줘|주세요)?|지\s*마)|"
     r"\bbuy\b|\bsell\b|\border\b"
 )
 _ORDER_ACTION_RE = re.compile(rf"(?:{ORDER_ACTION_PATTERN})", re.IGNORECASE)

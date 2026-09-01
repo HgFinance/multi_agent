@@ -309,6 +309,12 @@ GUARD_MESSAGES = {
     "MARKET_QUOTE_STALE": (
         "현재가가 최신 상태가 아니어서 주문을 제출하지 않았습니다."
     ),
+    "TRADING_MARKET_QUOTE_STALE": (
+        "주문 직전 현재가 갱신을 기다리는 중입니다. 동일 조건 발생에 대해 한 번만 다시 확인합니다."
+    ),
+    "TRADING_MARKET_QUOTE_STALE_RETRY_EXHAUSTED": (
+        "주문 직전 현재가를 두 번 확인했지만 최신 시세를 확보하지 못해 PAPER 주문을 제출하지 않았습니다."
+    ),
     "MARKET_SESSION_UNAVAILABLE": (
         "장 운영 상태를 확인할 수 없어 주문을 제출하지 않았습니다."
     ),

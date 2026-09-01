@@ -27,6 +27,7 @@ capability gap blocks the rule whatever the user answers.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
@@ -117,6 +118,22 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
         "시간대의 오전·오후 또는 24시간 표기(예: 14:00)를 명시해 주세요",
     ),
     "QUANTITY_REQUIRED": (_ASK, "매수 수량을 명시해 주세요(예: 1주)"),
+    # The exact catalog resolver intentionally does not fuzzy-correct a KRX
+    # name.  A typo and an ambiguous name both arrive through this existing
+    # boundary code, so ask for an exact name/code rather than rendering the
+    # safe no-order outcome as an interpreter defect.
+    "PAPER_ORDER_INSTRUMENT_CLARIFICATION_REQUIRED": (
+        _ASK,
+        "종목을 하나로 확정하지 못했습니다. 종목명이나 6자리 코드를 정확히 적어 주세요",
+    ),
+    "CONDITION_THRESHOLD_REQUIRED": (
+        _ASK,
+        "상승·하락 조건 값을 명시해 주세요(예: 1% 또는 70,000원 이상)",
+    ),
+    "CONDITION_EXPRESSION_CLARIFICATION_REQUIRED": (
+        _ASK,
+        "조건 표현 또는 지표명을 하나로 확정하지 못했습니다. 의도한 조건·지표 철자를 확인해 주세요",
+    ),
     "FIXED_SHARE_QUANTITY_MISMATCH": (
         _DEFECT,
         "원문에 적힌 주식 수량과 조건주문 해석값이 달라 시스템 결함으로 기록했습니다",
@@ -154,6 +171,22 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
         "트레일링 손절 비율이 올바른 범위로 해석되지 않았습니다",
     ),
     # -- the platform cannot express it -----------------------------------
+    "INTRABAR_TIMEFRAME_UNSUPPORTED": (
+        _GAP,
+        "INTRABAR 평가는 분봉 시간축만 지원합니다",
+    ),
+    "INTRABAR_TIMEFRAME_MISMATCH": (
+        _GAP,
+        "INTRABAR 조건은 하나의 주 분봉 시간축만 사용할 수 있습니다",
+    ),
+    "INTRABAR_FIELD_UNSUPPORTED": (
+        _GAP,
+        "열린 봉의 INTRABAR 평가에서는 현재가 기반 필드만 지원합니다",
+    ),
+    "INTRABAR_INDICATOR_UNSUPPORTED": (
+        _GAP,
+        "요청한 지표는 완성봉에서만 계산할 수 있어 INTRABAR 평가를 지원하지 않습니다",
+    ),
     "UNSUPPORTED_INDICATOR": (_GAP, "요청하신 지표를 지원하지 않습니다"),
     "UNSUPPORTED_INDICATOR_PARAMETER": (
         _GAP,
@@ -263,6 +296,16 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
         _GAP,
         "트레일링 손절은 현재 다른 AND·OR 조건이나 시간창과 결합할 수 없습니다",
     ),
+    "UNSUPPORTED_COMBINED_TRAILING_OR_MOVING_AVERAGE_EXIT": (
+        _GAP,
+        "트레일링 손절은 이동평균 이탈 등 다른 청산 조건과 OR로 묶을 수 없습니다. "
+        "잔여 청산 조건을 하나만 남겨 주세요",
+    ),
+    "UNSUPPORTED_MULTI_STAGE_POSITION_MANAGEMENT": (
+        _GAP,
+        "한 규칙 안에서 진입·분할 익절·잔여 청산을 단계로 잇는 주문은 지원하지 않습니다. "
+        "각 단계를 보유분 기준 독립 규칙으로 나눠 주세요",
+    ),
     "TRAILING_STOP_PARAMETER_UNSUPPORTED": (
         _GAP,
         "트레일링 손절에는 고점 대비 하락률, 하락률 방식, 선택적 활성 수익률만 지정할 수 있습니다",
@@ -318,6 +361,37 @@ CLARIFICATION_CODES: dict[str, tuple[ClarificationClass, str]] = {
 }
 
 
+# A reason that matches this is a machine token, not a sentence.  Hermes may
+# still write free-form Korean prose, which passes through unchanged.
+_CODE_TOKEN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _looks_like_code(value: str) -> bool:
+    return bool(_CODE_TOKEN.fullmatch(value.strip()))
+
+
+def split_codes(reason: str) -> tuple[str, ...]:
+    """Split one joined ``clarification_reason`` into the codes it carries.
+
+    Hermes answers with every reason at once ("A; B; C"), and treating that
+    join as a single opaque code is what stripped the Korean label off codes
+    the registry already knew (2026-09-01: QUANTITY_REQUIRED and
+    AMBIGUOUS_RETURN_BASELINE both rendered as part of one raw enum blob).
+    Splitting only when *every* part is a bare token keeps an annotated
+    "CODE: offending detail" line, which may itself contain a semicolon, whole.
+    """
+
+    text = str(reason or "").strip()
+    if not text:
+        return ()
+    parts = [part.strip() for part in text.split(";") if part.strip()]
+    if len(parts) <= 1:
+        return (text,)
+    if all(_looks_like_code(normalize_code(part)) for part in parts):
+        return tuple(dict.fromkeys(normalize_code(part) for part in parts))
+    return (text,)
+
+
 def normalize_code(code: str) -> str:
     """Return the bare code from a possibly annotated rejection string.
 
@@ -347,9 +421,16 @@ def classify_code(
     *,
     source: ClarificationSource = ClarificationSource.SEMANTIC_REJECTION,
 ) -> ClarificationClass:
-    entry = CLARIFICATION_CODES.get(normalize_code(code))
+    normalized = normalize_code(code)
+    entry = CLARIFICATION_CODES.get(normalized)
     if entry is not None:
         return entry[0]
+    # An unregistered UNSUPPORTED_*/UNAVAILABLE_* name still states a platform
+    # limit.  Defaulting it to ambiguity is what sent the user back to rephrase
+    # a sentence no rewording can fix (2026-09-01), so the name decides here
+    # even though the registry has no entry for it.
+    if normalized.startswith(("UNSUPPORTED_", "UNAVAILABLE_")):
+        return ClarificationClass.CAPABILITY_GAP
     return _SOURCE_DEFAULT[source]
 
 
@@ -374,6 +455,14 @@ def _label(code: str, *, source: ClarificationSource) -> str:
         return entry[1]
     if source is ClarificationSource.SEMANTIC_REJECTION:
         return "조건 해석 결과가 검증을 통과하지 못했습니다"
+    # Free-form Korean prose is the reason Hermes may write one, so it passes
+    # through.  An unregistered enum token does not: "확인 필요:
+    # UNSUPPORTED_MULTI_STAGE_POSITION_MANAGEMENT" (2026-09-01) told the user
+    # nothing and hid the registry hole behind it.
+    if _looks_like_code(normalize_code(code)):
+        if classify_code(code, source=source) is ClarificationClass.CAPABILITY_GAP:
+            return "요청하신 조건을 현재 지원하지 않습니다"
+        return "조건을 한 가지 의미로 확정할 수 없습니다"
     return str(code).strip() or "조건을 한 가지 의미로 확정할 수 없습니다"
 
 
@@ -386,6 +475,21 @@ def clarification_message(
     """Render one honest message whose shape follows the strongest class."""
 
     classes = {classify_code(code, source=source) for code in codes}
+    # The strongest class owns the wording too, not just the shape.  Keeping
+    # the ambiguity labels in a capability-gap answer asked for a quantity and
+    # a baseline in the same breath as "a retype changes nothing"
+    # (2026-09-01), which is the re-question loop this module exists to stop.
+    for winner in (
+        ClarificationClass.CAPABILITY_GAP,
+        ClarificationClass.INTERPRETER_DEFECT,
+    ):
+        if winner in classes:
+            codes = tuple(
+                code
+                for code in codes
+                if classify_code(code, source=source) is winner
+            )
+            break
     details = "; ".join(
         dict.fromkeys(_label(code, source=source) for code in codes)
     )
@@ -420,4 +524,5 @@ __all__ = [
     "extract_code",
     "normalize_code",
     "should_ask",
+    "split_codes",
 ]

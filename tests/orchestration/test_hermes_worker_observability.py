@@ -67,6 +67,17 @@ def test_explicit_publisher_can_run_with_automatic_tracing_disabled() -> None:
     )
 
 
+def test_egress_circuit_breaker_blocks_direct_batch_publisher() -> None:
+    assert not worker_observability._enabled(
+        {
+            "LANGSMITH_TRACING": "true",
+            "HGFINANCE_LANGSMITH_PUBLISH_ENABLED": "true",
+            "HGFINANCE_LANGSMITH_EGRESS_ENABLED": "false",
+            "LANGSMITH_API_KEY": "test-key",
+        }
+    )
+
+
 def test_worker_trace_defaults_to_aggregate_tool_children() -> None:
     assert worker_observability._tool_trace_mode({}) == "aggregate"
     assert worker_observability._tool_trace_mode(

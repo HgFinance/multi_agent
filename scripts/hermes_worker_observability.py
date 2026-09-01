@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from orchestration.langsmith_egress import langsmith_egress_enabled
+
 ACCOUNTING_PROFILE = "accounting-portfolio-department"
 QA_PROFILE = "qa-department"
 # Keep one dispatcher-owned registry for every active worker profile. The CEO
@@ -134,7 +136,8 @@ _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 def _enabled(env: Mapping[str, str]) -> bool:
     return (
-        (
+        langsmith_egress_enabled(env)
+        and (
             str(env.get("LANGSMITH_TRACING", "")).casefold()
             in {"1", "true", "yes", "on"}
             or str(env.get("HGFINANCE_LANGSMITH_PUBLISH_ENABLED", "")).casefold()

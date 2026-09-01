@@ -94,6 +94,16 @@ export type CeoQueryPlanning = {
 /** 기존 호출자의 이름을 보존한다. */
 export type CeoPlanning = CeoQueryPlanning;
 
+export type CeoOrderConfirmation = {
+  required: true;
+  query: string;
+  instrument_mention: string;
+  side: "BUY" | "SELL";
+  quantity: string;
+  order_type: "MARKET" | "LIMIT";
+  limit_price: string | null;
+};
+
 export type CeoQueryResult = {
   schema_version: (typeof ACCEPTED_QUERY_VERSIONS)[number];
   department: "ceo-agent";
@@ -115,6 +125,7 @@ export type CeoQueryResult = {
   order_state?: string | null;
   order_mode?: "PAPER" | null;
   trading_task_id?: string | null;
+  order_confirmation?: CeoOrderConfirmation | null;
 };
 
 export type PaperOrderWorkflowStatus = {
@@ -126,6 +137,7 @@ export type PaperOrderWorkflowStatus = {
     | "PLACE_ORDER"
     | "PLACE_BASKET"
     | "SELL_ALL"
+    | "SELL_POSITION"
     | "CANCEL_ALL"
     | null;
   ceo_root_task_id: string | null;
@@ -280,6 +292,7 @@ export async function askCeo(
   requestId?: string,
   bookId?: string,
   fundId?: string,
+  confirmOrder = false,
 ): Promise<CeoQueryResult | StrategyResearchAccepted | StrategyDeploymentAccepted> {
   const resolvedFundId = fundId ?? currentFundId();
   let response: Response;
@@ -302,6 +315,7 @@ export async function askCeo(
         // 주문일 가능성이 있는 자연어를 위해 서버가 검증할 PAPER Book 범위를
         // 전달한다. 선택하지 않았으면 생략해 일반 자문은 그대로 사용할 수 있다.
         ...(bookId ? { book_id: bookId } : {}),
+        ...(confirmOrder ? { confirm_order: true } : {}),
       }),
     });
   } catch {

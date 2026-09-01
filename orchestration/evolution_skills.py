@@ -116,7 +116,7 @@ def _json_bytes(value: object) -> bytes:
     ).encode()
 
 
-def _write_json_atomic(path: Path, value: object) -> None:
+def _write_json_atomic(path: Path, value: object, *, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw_tmp = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -127,13 +127,15 @@ def _write_json_atomic(path: Path, value: object) -> None:
             handle.write(_json_bytes(value))
             handle.flush()
             os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
     finally:
         if tmp.exists():
             tmp.unlink()
 
 
-def _write_text_atomic(path: Path, value: str) -> None:
+def _write_text_atomic(path: Path, value: str, *, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw_tmp = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -144,6 +146,8 @@ def _write_text_atomic(path: Path, value: str) -> None:
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
     finally:
         if tmp.exists():
@@ -1570,9 +1574,12 @@ def promote_proposal(
         "proposal_id": proposal_id,
     }
     try:
-        _write_text_atomic(skill_path, markdown)
-        _write_json_atomic(provenance_path, canonical_provenance)
-        _write_json_atomic(registry_file, existing_registry)
+        # Canonical runtime assets must remain readable by every Hermes worker
+        # and read-only auditors. Proposal state stays private; the promoted
+        # source, provenance and registry are not secrets.
+        _write_text_atomic(skill_path, markdown, mode=0o644)
+        _write_json_atomic(provenance_path, canonical_provenance, mode=0o644)
+        _write_json_atomic(registry_file, existing_registry, mode=0o644)
         regression = validate_canonical_registry(repo, registry_file)
         if not regression["ok"]:
             raise EvolutionSkillError(

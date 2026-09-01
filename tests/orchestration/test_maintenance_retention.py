@@ -97,6 +97,26 @@ def test_scheduler_projects_worker_error_code_into_health(tmp_path: Path) -> Non
     assert state["jobs"]["langsmith"]["error_code"] == "TRACE_DELETE_HOURLY_LIMIT"
 
 
+def test_scheduler_treats_explicit_langsmith_egress_disable_as_a_healthy_skip(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "health.json"
+    ledger = HealthLedger(path)
+    job = MaintenanceJob(
+        "langsmith",
+        10,
+        lambda: SimpleNamespace(error_code="LANGSMITH_EGRESS_DISABLED"),
+        30,
+    )
+
+    _job_loop(job, threading.Event(), ledger, once=True)
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    assert state["jobs"]["langsmith"]["status"] == "ok"
+    assert state["jobs"]["langsmith"]["error_code"] is None
+    assert healthcheck(path)
+
+
 def test_scheduler_exposes_async_langsmith_delete_backlog_without_failing_health(
     tmp_path: Path,
 ) -> None:

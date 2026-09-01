@@ -61,7 +61,7 @@ TIME_FIELDS: dict[str, ValueUnit] = {
 }
 
 
-# Lower rank means a faster completed-bar cadence.  A BAR_CLOSE rule may use
+# Lower rank means a faster bar cadence.  A completed-bar or intrabar rule may use
 # slower confirmation frames (for example 3M entry + 15M trend filter), but
 # its primary clock may never be *slower* than a referenced frame or a stated
 # 3-minute condition would quietly be checked only every five minutes.
@@ -358,7 +358,10 @@ def _bar_timeframes(node: ExpressionNode | None, *, primary: str) -> set[str]:
 def _validate_bar_timeframes(rule: ConditionalRuleSpec) -> None:
     """Make multi-timeframe rules explicit and temporally meaningful."""
 
-    if rule.evaluation.clock is not EvaluationClock.BAR_CLOSE:
+    if rule.evaluation.clock not in {
+        EvaluationClock.BAR_CLOSE,
+        EvaluationClock.INTRABAR,
+    }:
         return
     primary = rule.evaluation.primary_timeframe
     assert primary is not None  # EvaluationPolicy already enforces this.
@@ -379,7 +382,7 @@ def _validate_bar_timeframes(rule: ConditionalRuleSpec) -> None:
             if len(left | right) > 1:
                 raise _error(
                     "CROSS_TIMEFRAME_MISMATCH",
-                    "CROSS operands must use one completed-bar timeframe; use LOGICAL AND for multi-timeframe confirmation",
+                    "CROSS operands must use one bar timeframe; use LOGICAL AND for multi-timeframe confirmation",
                 )
         for child in (node.left, node.right, node.operand, *(node.children or ())):
             visit(child)
@@ -415,6 +418,53 @@ def _validate_runtime_history(rule: ConditionalRuleSpec) -> None:
                 "INDICATOR_HISTORY_UNAVAILABLE",
                 f"{definition.name} on {timeframe} requires {required} completed bars; PAPER resolver limit is {maximum}",
             )
+
+
+_INTRABAR_LOCAL_INDICATORS = frozenset(
+    {"SMA", "EMA", "RSI", "MACD", "BOLLINGER", "ENVELOPE", "ROC"}
+)
+_INTRABAR_MARKET_FIELDS = frozenset({"LAST_PRICE", "CLOSE"})
+
+
+def _validate_intrabar_projection(rule: ConditionalRuleSpec) -> None:
+    """Allow only quote-projectable local indicators on an open intraday bar.
+
+    The runtime projects a fresh quote into the active bar.  Price-close
+    indicators are deterministic under that projection; volume/high/low and
+    provider indicators are not, so they remain completed-bar only.
+    """
+
+    if rule.evaluation.clock is not EvaluationClock.INTRABAR:
+        return
+    primary = rule.evaluation.primary_timeframe
+    assert primary is not None
+    if primary.value == "1D":
+        raise _error(
+            "INTRABAR_TIMEFRAME_UNSUPPORTED",
+            "INTRABAR supports intraday timeframes only",
+        )
+    used = _bar_timeframes(rule.condition, primary=primary.value)
+    if used != {primary.value}:
+        raise _error(
+            "INTRABAR_TIMEFRAME_MISMATCH",
+            "INTRABAR may use only its primary intraday timeframe",
+        )
+    for node in _walk_nodes(rule.condition):
+        if node.type is ExpressionType.MARKET and node.field not in _INTRABAR_MARKET_FIELDS:
+            raise _error(
+                "INTRABAR_FIELD_UNSUPPORTED",
+                f"{node.field} is unavailable on an open intraday bar",
+            )
+        if node.type is ExpressionType.INDICATOR:
+            definition = indicator_definition(node)
+            if (
+                definition.source != "LOCAL"
+                or definition.name not in _INTRABAR_LOCAL_INDICATORS
+            ):
+                raise _error(
+                    "INTRABAR_INDICATOR_UNSUPPORTED",
+                    f"{definition.name} requires a completed bar",
+                )
 
 
 def _validate_time_windows(rule: ConditionalRuleSpec) -> None:
@@ -755,8 +805,11 @@ def _infer(
         )
         if node.operator not in allowed:
             raise _error("UNSUPPORTED_BOOLEAN_OPERATOR", f"unsupported operator {node.operator!r}")
-        if node.type is ExpressionType.CROSS and clock is not EvaluationClock.BAR_CLOSE:
-            raise _error("CROSS_REQUIRES_BAR_CLOSE", "cross requires two completed observations")
+        if node.type is ExpressionType.CROSS and clock not in {
+            EvaluationClock.BAR_CLOSE,
+            EvaluationClock.INTRABAR,
+        }:
+            raise _error("CROSS_REQUIRES_BAR_CLOSE", "cross requires a bar observation")
         if node.type is ExpressionType.CROSS and (
             _contains_type(node.left, ExpressionType.PORTFOLIO)
             or _contains_type(node.right, ExpressionType.PORTFOLIO)
@@ -793,6 +846,7 @@ def validate_rule_spec(rule: ConditionalRuleSpec) -> ConditionalRuleSpec:
         raise _error("CONDITION_NOT_BOOLEAN", "rule condition must evaluate to BOOL")
     _validate_bar_timeframes(rule)
     _validate_runtime_history(rule)
+    _validate_intrabar_projection(rule)
     _validate_time_windows(rule)
     _validate_obvious_contradiction(rule)
     trailing_nodes = [

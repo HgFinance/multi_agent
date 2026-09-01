@@ -91,6 +91,13 @@ class CanonicalIngress(BaseModel):
     previous_question_context_source_message_id: str | None = Field(
         default=None, max_length=512
     )
+    # 미리보기 카드에서 사용자가 누른 명시적 확인. `_ceo_query`가 이 봉투에서
+    # 값을 꺼내 `CeoAsk`를 다시 조립하므로, 여기 없으면 그 재조립이
+    # AttributeError로 터진다 - `/ui/ceo/ask` 전체가 HTTP 500이 됐다
+    # (2026-09-01). 권한이 아니라 요청 정체성이므로 봉투에 함께 둔다: 확인 여부가
+    # 봉투 밖에 있으면 재생된 request id가 확인 안 된 응답을 확인된 것처럼
+    # 돌려줄 수 있다.
+    confirm_order: bool = False
 
     @model_validator(mode="after")
     def default_source_message_id(self) -> CanonicalIngress:

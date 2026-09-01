@@ -780,7 +780,7 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 
 | 드리프트 | 실체 |
 |---|---|
-| HR 프로필명 | `install_hermes_profile.sh`만 `workforce-management`, 나머지 전부 `hr-department` — 설치 스크립트로 깐 프로필에는 카드가 라우팅 안 됨 |
+| HR 프로필명 | 해결됨: 과거 직접 컨테이너 설치기는 제거했고, 모든 프로필은 `hermes_profile_registry.txt`와 `sync_hermes_profiles.sh`만 사용한다. |
 | liaison 반쪽 배선 | §4.5 — MCP surface만 실재, 프로필/sync/마운트/skill_contract 미반영. `hermes_boundary` self-check 현재 실패 |
 | cost_model_version 태그 | 러너·PBO는 `krx-cost-v2`, 워크포워드·IC insert는 하드코딩 `krx-cost-v1` — 한 실험의 지표가 두 비용 태그를 가짐 |
 | 사전등록 fingerprint | `universe_version=v2` 하드코딩 — v3로 돌아도 지문이 실데이터셋 미구속 |

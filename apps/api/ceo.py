@@ -261,6 +261,10 @@ class CeoAsk(hermes_boundary.AgentAsk):
     # copied into LangSmith inputs.
     previous_question_context: str | None = None
     previous_question_context_source_message_id: str | None = None
+    # Explicit user action from the preview card. It only bypasses the
+    # confirmation prompt; the same parser, authorization, and PAPER gates
+    # still run on the confirmed request.
+    confirm_order: bool = False
 
 
 # Hermes Task ID 형식(`t_` + hex). 경로 파라미터가 CLI 인자로 들어가므로
@@ -740,6 +744,36 @@ def _scoped_planning_projection(
     return projection
 
 
+def _hydrated_planning_projection(workflow: Workflow) -> dict[str, object]:
+    """Project planning from the canonical workflow already loaded for this request.
+
+    ``load_workflow`` has resolved both linked and legacy marker-only members.  A
+    second full-board scan here would rediscover the same rows and used to add a
+    Hermes subprocess to every status poll.  Preserve any embedded child rows,
+    then fill the projection from the normalized descendants without opening a
+    second read path or inferring tasks that were not actually materialized.
+    """
+
+    projection = dict(workflow.root_payload)
+    children: list[Mapping[str, object]] = []
+    positions: dict[str, int] = {}
+    for child in _child_records(projection.get("children")):
+        child_id = str(child.get("id") or child.get("task_id") or "").strip()
+        if child_id:
+            positions[child_id] = len(children)
+        children.append(child)
+    for node in workflow.descendants:
+        child_id = str(node.task_id).strip()
+        if child_id and isinstance(node.raw, Mapping):
+            if child_id in positions:
+                children[positions[child_id]] = node.raw
+            else:
+                positions[child_id] = len(children)
+                children.append(node.raw)
+    projection["children"] = children
+    return projection
+
+
 def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
     planned, planned_qa, planned_synthesis = _planning_profiles(task)
     selected, qa_required, synthesis_present = _materialized_planning_profiles(task)
@@ -932,6 +966,43 @@ def _clarification_required_response(
     if not scope_recorded:
         response["warning"] = "clarification_scope_deferred"
     return response
+
+
+def _no_action_response() -> dict[str, object]:
+    """Return an explicit, terminal non-execution response without a task.
+
+    A standalone "do not buy/sell" instruction has no missing fact to ask
+    for and no analysis objective to delegate.  Reuse the ordinary accepted
+    response envelope so Web and Discord render it exactly once, while making
+    no Kanban, order, conditional rule, or ledger mutation.
+    """
+
+    answer = "실행하지 말라는 요청으로 처리했습니다. PAPER 주문·조건주문·부서 작업은 만들지 않았습니다."
+    return _accepted_response(
+        {
+            "task_id": "",
+            "status": "completed",
+            "source": "deterministic-no-action",
+        },
+        {
+            "status": "accepted",
+            "answer": answer,
+            "planning": {
+                "selected_departments": [],
+                "planned_departments": [],
+                "materialized_departments": [],
+                "steps": [],
+                "qa_required": False,
+                "planned_qa_required": False,
+                "qa_enabled": True,
+                "qa_blocks_response": False,
+                "qa_materialized": False,
+                "qa_legacy_primary_present": False,
+                "planned_synthesis": False,
+                "summary": "명시적 비실행 요청으로 작업을 만들지 않았습니다.",
+            },
+        },
+    )
 
 
 def _planning_read_timeout() -> float:
@@ -1135,6 +1206,9 @@ def _paper_order_child_body(
             "exact side and aligned positive integer basket_quantities; the member",
             "notional BUY form has aligned positive basket_notionals_krw. Both set",
             "notional_krw=null. All basket forms are MARKET only and non-atomic;",
+            "A single explicit BUY amount such as '삼성전자 100만원어치 매수' uses",
+            "the same PLACE_BASKET allocation schema with exactly one member; preserve",
+            "the exact mention and notional_krw, and never calculate shares yourself.",
             "members are catalog-resolved and tracked individually. Never infer a",
             "missing member, mixed side, or price/limit basket.",
             "Questions, examples, negations, conditions, ambiguity, multiple commands,",
@@ -1277,7 +1351,17 @@ def _conditional_rule_child_body(
             "Never invent a symbol, condition, threshold, timeframe, side, or sizing value.",
             "Questions, advice, negation, examples, ambiguity, and LIVE requests must",
             "use candidate=null and candidates=null with a concise clarification_reason.",
-            "For one action, pass candidate. For 2-4 independent conditional actions,",
+            "If an 상승/하락/오름/내림 phrase has no numeric threshold, return",
+            "candidate=null and clarification_reason=CONDITION_THRESHOLD_REQUIRED.",
+            "If a condition expression or indicator name appears misspelled or cannot",
+            "be matched exactly, do not normalize it: return candidate=null and",
+            "clarification_reason=CONDITION_EXPRESSION_CLARIFICATION_REQUIRED.",
+            "clarification_reason carries only registered codes; join several with",
+            "'; ' and never invent a new code name. Chaining entry, partial",
+            "take-profit, and a remainder exit as linked stages of one position is",
+            "UNSUPPORTED_MULTI_STAGE_POSITION_MANAGEMENT; a trailing stop OR'd with a",
+            "moving-average exit is UNSUPPORTED_COMBINED_TRAILING_OR_MOVING_AVERAGE_EXIT.",
+            "For one action, pass candidate. For 2-10 independent conditional actions,",
             "pass candidates in source-text order and leave candidate=null. A leading",
             "symbol shared by coordinated clauses applies to each clause; never invent",
             "a different symbol. Each candidate must preserve its own comparator,",
@@ -2479,6 +2563,9 @@ def ceo_query(
     deterministic_routing_plan = dict(route.routing_plan)
     workflow_mode = route.workflow_mode
 
+    if route.lane == "no_action":
+        return _no_action_response()
+
     # Consult D5 before the clarification branch as well.  Ambiguity is a
     # terminal, safe outcome, but its structured failure history is still
     # useful to explain why no department fan-out is being guessed.  This is
@@ -3138,7 +3225,7 @@ def ceo_task_status(
     raw = workflow.root_payload
     if isinstance(raw, Mapping):
         payload["planning"] = _planning_acknowledgement(
-            _scoped_planning_projection(raw, timeout=_planning_read_timeout())
+            _hydrated_planning_projection(workflow)
         )["planning"]
     else:
         try:
