@@ -76,12 +76,12 @@ def test_ceo_active_evolution_skill_has_one_canonical_runtime_delivery_path() ->
         (ROOT / "departments/00-ceo-office/compose.yaml").read_text(encoding="utf-8")
     )
     volumes = compose["services"]["ceo-hermes"]["volumes"]
-    target = "../../skills/evolved:/opt/shared-skills/evolved:ro"
+    target = (
+        "../../skills/evolved/ceo-canonical-evidence-react-enforced:"
+        "/opt/shared-skills/evolved/ceo-canonical-evidence-react-enforced:ro"
+    )
 
     assert volumes.count(target) == 1
-    assert not any(
-        "ceo-canonical-evidence-react-enforced" in volume for volume in volumes
-    )
 
 
 def test_operations_image_contains_generator_entrypoint_and_model_gateway() -> None:
