@@ -62,6 +62,10 @@ services:
     volumes:
       - /home/ubuntu/.hermes/profiles/ceo-agent:/opt/data
       - ../../skills/finance:/opt/shared-skills/finance:ro
+      # The active CEO evolution skill is delivered from its one canonical
+      # repository source. Keep this read-only and do not mirror it into the
+      # profile, otherwise Hermes can load two copies of the same skill.
+      - ../../skills/evolved:/opt/shared-skills/evolved:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban   # 공용 Kanban board, root docker-compose.yml research-hermes 주석 참고
     environment:
       HERMES_UID: 1000

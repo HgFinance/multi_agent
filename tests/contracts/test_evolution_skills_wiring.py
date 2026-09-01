@@ -71,6 +71,19 @@ def test_feedback_producer_and_worker_share_persistent_occurrence_path() -> None
     )
 
 
+def test_ceo_active_evolution_skill_has_one_canonical_runtime_delivery_path() -> None:
+    compose = yaml.safe_load(
+        (ROOT / "departments/00-ceo-office/compose.yaml").read_text(encoding="utf-8")
+    )
+    volumes = compose["services"]["ceo-hermes"]["volumes"]
+    target = "../../skills/evolved:/opt/shared-skills/evolved:ro"
+
+    assert volumes.count(target) == 1
+    assert not any(
+        "ceo-canonical-evidence-react-enforced" in volume for volume in volumes
+    )
+
+
 def test_operations_image_contains_generator_entrypoint_and_model_gateway() -> None:
     dockerfile = (ROOT / "Dockerfile.operations-runtime").read_text(encoding="utf-8")
     assert "COPY scripts/evolution_skills.py" in dockerfile
