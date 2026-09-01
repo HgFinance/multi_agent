@@ -61,13 +61,7 @@ AGENT_VERSION = "research-geopolitical-analyst-v1"
 KST = timezone(timedelta(hours=9))
 
 RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
-OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-MODEL = os.environ.get(
-    "GEOPOLITICAL_MODEL",
-    # 정형 판정·서술 역할이라 J4 실측에서 통과한 EXAONE 을 기본으로 둔다
-    # (감성처럼 다중 인용을 요구하지 않아 qwen 을 쓸 이유가 없다).
-    "exaone3.5:7.8b")
-LLM_TIMEOUT = float(os.environ.get("GEO_LLM_TIMEOUT", "120"))
+MODEL = os.environ.get("WORKER_MODEL_NAME", "qwen2.5-14b-instruct-awq")
 
 WINDOW_DAYS = 120           # 백분위·중앙값 기준 창
 GPR_CODES = ("GPRD", "GPRD_THREAT", "GPRD_ACT")
@@ -369,17 +363,11 @@ def narrate(readout: dict, llm: Callable | None = None) -> GeoNote:
               f"Allowed metric keys: {json.dumps(allowed)}\n"
               f"Geopolitical readout (code-computed, do not alter):\n"
               + json.dumps(readout, ensure_ascii=False, indent=1))
-    return llm_narrate(_SYSTEM, prompt, GeoNote, llm or _ollama_call)
+    return llm_narrate(_SYSTEM, prompt, GeoNote, llm or _hybrid_call)
 
 
-def _ollama_call(system: str, user: str) -> str:
-    """로컬/팀 Ollama. 호출 모양은 evidence/llm_client 가 단일 출처다.
-
-    여기 남는 것은 **이 분석가의 설정**뿐이다(모델·타임아웃). 예전에는 요청
-    조립까지 7곳에 복붙돼 timeout 이 20/30/LLM_TIMEOUT 으로 갈라져 있었다.
-    """
-    return llm_chat(system, user, base=OLLAMA_BASE, model=MODEL,
-                    timeout=LLM_TIMEOUT)
+def _hybrid_call(system: str, user: str) -> str:
+    return llm_chat(system, user, worker_id="research-geopolitical-analyst")
 
 
 # ---------------------------------------------------------------------------

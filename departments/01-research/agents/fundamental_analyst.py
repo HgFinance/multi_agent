@@ -13,7 +13,7 @@
   1. fetch    research-api /evidence/financials 만 읽는다. **DB 직접 접근 금지.**
   2. compute  결정론 - 최신 기간의 핵심 계정, YoY, 영업이익률·부채비율을
               계산하고 각 값에 (period_end, published_at) 출처를 남긴다.
-  3. narrate  LLM(agent-research)은 readout 의 값을 **인용해 서술만** 한다.
+  3. narrate  Qwen AWQ+Hybrid LLM은 readout 의 값을 **인용해 서술만** 한다.
               재계산·외부지식 금지. 출력은 FundamentalNote 로 검증, 실패 1회 재시도.
   4. verify   결정론 검증 - 환각 필드 제거(개수로 드러낸다), 서술 속 % 가
               readout 값 ±0.1%p 밖이면 플래그, YoY 부호와 stance 정면 모순이면
@@ -71,13 +71,7 @@ AGENT_VERSION = "research-fundamental-analyst-v1"
 KST = timezone(timedelta(hours=9))
 
 RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
-OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-# 팀 표준 로컬 모델(departments/01-research/Modelfile). news_sentiment_analyst 와 동일.
-MODEL = os.environ.get(
-    "FUNDAMENTAL_MODEL",
-    # 2026-08-01 역할 분담 실측: 2.3초, 환각 0·미확인 정직 처리. 근거: 가이드 J4.
-    "exaone3.5:7.8b")
-LLM_TIMEOUT = 120  # --run 실측 상한(초)
+MODEL = os.environ.get("WORKER_MODEL_NAME", "qwen2.5-14b-instruct-awq")
 
 # 핵심 계정 -> (매칭 후보 이름들). sj_div 접두사·공백 제거 후 비교한다.
 # 후보에 변형을 두는 이유 - DART 주요계정 이름이 회사·업종(금융업)에 따라 다르다.
@@ -411,17 +405,11 @@ def narrate(readout: dict, symbol: str, llm=None) -> FundamentalNote:
     prompt = (f"인용 가능한 필드 키: {list(readout['fields'])}\n"
               "readout:\n" + json.dumps(payload, ensure_ascii=False, indent=1))
 
-    return llm_narrate(_SYSTEM, prompt, FundamentalNote, llm or _ollama_call)
+    return llm_narrate(_SYSTEM, prompt, FundamentalNote, llm or _hybrid_call)
 
 
-def _ollama_call(system: str, user: str) -> str:
-    """로컬/팀 Ollama. 호출 모양은 evidence/llm_client 가 단일 출처다.
-
-    여기 남는 것은 **이 분석가의 설정**뿐이다(모델·타임아웃). 예전에는 요청
-    조립까지 7곳에 복붙돼 timeout 이 20/30/LLM_TIMEOUT 으로 갈라져 있었다.
-    """
-    return llm_chat(system, user, base=OLLAMA_BASE, model=MODEL,
-                    timeout=LLM_TIMEOUT)
+def _hybrid_call(system: str, user: str) -> str:
+    return llm_chat(system, user, worker_id="research-fundamental-analyst")
 
 
 # ---------------------------------------------------------------------------

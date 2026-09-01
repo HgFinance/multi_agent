@@ -66,9 +66,7 @@ PERSONA = "microstructure-analyst"   # 부서 허용목록 키
 AGENT_VERSION = "research-microstructure-analyst-v1"
 
 MARKET_API = os.environ.get("MARKET_API_URL", "http://127.0.0.1:8036")
-OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-MODEL = os.environ.get("MICRO_ANALYST_MODEL", "agent-research")
-LLM_TIMEOUT = float(os.environ.get("MICRO_LLM_TIMEOUT", "120"))  # 로컬 14b 지연 감안
+MODEL = os.environ.get("WORKER_MODEL_NAME", "qwen2.5-14b-instruct-awq")
 # 유동성 지표(Amihud·Roll)의 관측 창 20일 + 차분·결측 여유
 LIQUIDITY_BARS = 30
 
@@ -288,17 +286,11 @@ def narrate(readout: dict, symbol: str, llm: Callable | None = None) -> MicroNot
               f"Microstructure readout (code-computed, do not alter):\n"
               + json.dumps(readout, ensure_ascii=False, indent=1))
 
-    return llm_narrate(_SYSTEM, prompt, MicroNote, llm or _ollama_call)
+    return llm_narrate(_SYSTEM, prompt, MicroNote, llm or _hybrid_call)
 
 
-def _ollama_call(system: str, user: str) -> str:
-    """로컬/팀 Ollama. 호출 모양은 evidence/llm_client 가 단일 출처다.
-
-    여기 남는 것은 **이 분석가의 설정**뿐이다(모델·타임아웃). 예전에는 요청
-    조립까지 7곳에 복붙돼 timeout 이 20/30/LLM_TIMEOUT 으로 갈라져 있었다.
-    """
-    return llm_chat(system, user, base=OLLAMA_BASE, model=MODEL,
-                    timeout=LLM_TIMEOUT)
+def _hybrid_call(system: str, user: str) -> str:
+    return llm_chat(system, user, worker_id="research-microstructure-analyst")
 
 
 # ---------------------------------------------------------------------------

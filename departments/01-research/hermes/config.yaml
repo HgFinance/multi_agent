@@ -230,7 +230,9 @@ mcp_servers:
   paper-search:
     command: uvx
     args: [paper-search-mcp]
-    enabled: true
+    # Hermes stdio handshake가 반복적으로 끊기는 실측 경로다. 논문 검색은 이미
+    # 내장 web/Exa가 담당하므로, 실패한 보조 서버의 재연결만 제거한다.
+    enabled: false
   # YouTube transcript remains disabled until its upstream package is
   # compatible with the pinned MCP runtime. Do not point a profile at a
   # resident HTTP container: the package is stdio-only and the old service

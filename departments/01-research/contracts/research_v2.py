@@ -342,7 +342,7 @@ def _finding(**kw) -> AnalystFindingV1:
                       claim_type=ClaimType.FACT, evidence_ids=("dart_1",),
                       confidence=0.72),),
         "status": FindingStatus.COMPLETE,
-        "model_version": "agent-research@1", "prompt_version": "res-fundamental@1"}
+        "model_version": "qwen2.5-14b-instruct-awq", "prompt_version": "res-fundamental@1"}
     base.update(kw)
     return AnalystFindingV1(**base)
 

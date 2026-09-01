@@ -17,7 +17,7 @@ QA 패턴과의 차이 - **노드가 프롬프트가 아니라 실구현 직원�
   - LLM 은 판단·서술만. 수치·필터·검증은 코드가 한다.
   - 에이전트는 DB 를 모른다 - research-api/market-api 만 호출한다.
   - 근거 부족은 insufficient_evidence 로 끝낸다. 지어내지 않는다.
-  - LLM 주소는 환경변수(OLLAMA_BASE_URL)다 - 특정 PC 주소를 하드코딩하지 않는다.
+  - 모든 LLM 호출은 공용 Worker Model Gateway를 통해 Qwen AWQ+Hybrid로 간다.
 
 실행:
   python scripts.py               # 자체 점검 (LLM·API 없음)
@@ -59,11 +59,7 @@ PIPELINE_VERSION = "research-department-pipeline-v2"  # v2: 분석가 3인 통�
 KST = timezone(timedelta(hours=9))
 
 # ▶ .env 를 프로세스 환경으로 올린다 (2026-08-03)
-#   실측: .env 에 RESEARCH_SUPERVISOR_BASE/MODEL 을 넣어도 **무시됐다.**
-#   이 모듈은 os.environ 만 봤고, .env 는 수집기(source_registry.load_project_env)
-#   에서만 읽혔다. 그래서 총괄이 Claude 로 도는 줄 알았는데 실제로는 로컬
-#   qwen3:14b 였고, 창작·영어 서술·스키마 이탈이 전부 그 모델에서 났다.
-#   **설정이 있는데 조용히 안 먹는 것이 가장 나쁘다** - 무엇이 도는지 착각하게 된다.
+#   수집기 설정만 보조로 읽는다. 모델 좌표는 Worker Model Gateway가 단일 소유한다.
 #   이미 프로세스에 있는 값은 덮지 않는다(컨테이너 주입이 우선).
 try:
     from source_registry import load_project_env as _load_env
@@ -73,15 +69,7 @@ try:
 except Exception:  # noqa: BLE001, S110 - .env 가 없어도 기본값으로 돈다
     pass
 
-OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-# ▶ 총괄은 별도 엔드포인트를 쓸 수 있다 (2026-08-03)
-#   실측: pipeline_runs 19회 중 10회가 총괄 스키마 이탈로 실패했다
-#   (evidence_quality 에 문장을 넣거나, 키를 통째로 빠뜨리거나, 한 겹 싸거나).
-#   qwen3:14b 가 6인 분석가 readout 을 종합하는 이 자리에서 반복적으로 무너진다.
-#   RESEARCH_SUPERVISOR_BASE 를 Claude Code 프록시로 돌리면 그 자리만 올릴 수
-#   있다 - 분석가 6인은 그대로 로컬 무료다(비용·한도 소모가 예측 가능하다).
-SUPERVISOR_MODEL = os.environ.get("RESEARCH_SUPERVISOR_MODEL", "qwen3:14b")
-SUPERVISOR_BASE = os.environ.get("RESEARCH_SUPERVISOR_BASE", OLLAMA_BASE).rstrip("/")
+SUPERVISOR_MODEL = os.environ.get("WORKER_MODEL_NAME", "qwen2.5-14b-instruct-awq")
 MARKET_API = os.environ.get("MARKET_API_URL", "http://127.0.0.1:8036")
 RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
 
@@ -717,7 +705,7 @@ thesis · facts · interpretation · catalysts · invalidation 의 **값을 전�
 키 이름은 영어 그대로 두고, 숫자·종목코드·[n1] 같은 근거 표시도 그대로 둔다.
 JSON 객체 하나만 반환한다 - 설명 문장이나 코드펜스를 앞뒤에 붙이지 않는다."""
 
-    call = llm or _ollama_chat
+    call = llm or _hybrid_chat
     # symbol 은 뺀다 - 코드가 덮어쓰기로 정했으므로(종목 정체성은 LLM 에게 묻지
     # 않는다) 필수로 요구하면 실패 표면만 넓어진다. 실측 2026-08-03: 4/6 키를
     # 맞춘 응답이 symbol 하나 때문에 버려졌다.
@@ -942,21 +930,8 @@ def quarantine_fabrications(packet: dict, *, as_known_at) -> dict:
     return p
 
 
-SUPERVISOR_TEMPERATURE = 0.2   # 총괄은 분석가(0.1)보다 조금 느슨하게 종합한다
-SUPERVISOR_TIMEOUT = 600       # 14b + <think> - 분석가보다 훨씬 길다
-# 실측: 기본값에서 JSON 이 잘려 스키마 위반 -> 4096 -> 분석가 6인 확장 후
-# <think> 가 길어져 또 잘림(마지막 키 invalidation 소실)이라 8192.
-# 입력 상한(_digest)과 함께 쓴다 - 한쪽만으로는 확장할 때마다 다시 깨진다.
-SUPERVISOR_MAX_TOKENS = 8192
-
-
-def _ollama_chat(system: str, user: str) -> str:
-    """호출 모양은 evidence/llm_client 가 단일 출처다. 여기 남는 것은 총괄의
-    설정뿐 - 이 셋만 분석가와 다를 이유가 실제로 있다."""
-    return llm_chat(system, user, base=SUPERVISOR_BASE, model=SUPERVISOR_MODEL,
-                    timeout=SUPERVISOR_TIMEOUT,
-                    temperature=SUPERVISOR_TEMPERATURE,
-                    max_tokens=SUPERVISOR_MAX_TOKENS)
+def _hybrid_chat(system: str, user: str) -> str:
+    return llm_chat(system, user, worker_id="research-document-synthesis-worker")
 
 
 
@@ -995,7 +970,7 @@ def challenge_packet(state: ResearchState) -> dict:
 
     challenge = verification = None
     try:
-        raw = _ollama_chat(CHALLENGE_SYSTEM, build_challenge_prompt(
+        raw = _hybrid_chat(CHALLENGE_SYSTEM, build_challenge_prompt(
             thesis=str(packet.get("thesis", "")), analysts=analysts,
             disagreements=disagreements, confirmed=confirmed))
         challenge = json.loads(extract_json(raw))
@@ -1195,7 +1170,7 @@ def interpret(state: ResearchState) -> dict:
     }, ensure_ascii=False)
 
     try:
-        raw = _ollama_chat(_INTERPRET_SYSTEM, user)
+        raw = _hybrid_chat(_INTERPRET_SYSTEM, user)
         parsed = json.loads(extract_json(raw))
     except Exception as e:  # noqa: BLE001
         # 해석 실패가 Packet 실패는 아니다. 다만 침묵하지 않는다.
@@ -1296,7 +1271,7 @@ def build_pipeline():
     g.add_conditional_edges("check_data_quality",
                             lambda s: "END" if s.get("halted") else "go",
                             {"END": END, "go": "assemble_evidence"})
-    # 분석가 6인은 순차다 - GPU 하나에 모델 하나(agent-research 공유)라
+    # 분석가 6인은 순차다 - 하나의 Qwen Gateway plane을 공유하므로
     # LLM 호출은 어차피 직렬화된다. 형태만 병렬로 꾸미지 않는다.
     g.add_edge("assemble_evidence", "analyze_sentiment")
     g.add_edge("analyze_sentiment", "analyze_technical")

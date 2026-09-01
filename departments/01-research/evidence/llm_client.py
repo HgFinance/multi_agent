@@ -2,18 +2,14 @@
 """분석가 LLM 호출·서술 재시도의 단일 출처.
 
 소유: 재일 (리서치본부)
-근거: 2026-08-02 중복 조사. `_ollama_call` 이 7곳(분석가 6인 + scripts.py),
-      `narrate` 재시도 루프가 6곳에 글자 그대로 복붙돼 있었다. 그리고
-      **이미 갈라져 있었다** - timeout 이 20/30/LLM_TIMEOUT 으로 셋,
-      max_tokens 는 scripts.py 에만, temperature 는 0.1/0.2 로 둘.
-      복붙은 처음엔 같지만 시간이 지나면 반드시 갈라진다. 갈라진 뒤에는
-      "왜 이 분석가만 다르지?"를 아무도 답할 수 없다.
+근거: 2026-08-02 중복 조사. 분석가별 생성 호출과 `narrate` 재시도 루프가
+      복제돼 모델·timeout·형식 정책이 갈라졌다. 이 모듈은 재시도 규율을
+      유지하면서 생성 요청을 공용 Gateway 한 곳으로 고정한다.
 
-▶ 무엇을 공통화하고 무엇을 남기는가
-  공통: HTTP 호출 모양, 응답에서 텍스트 꺼내기, JSON 조각 추출, 재시도 규율.
-  남김: model / timeout / temperature - **분석가마다 다를 이유가 실제로 있다**
-        (14b 는 느리고 7.8b 는 빠르다). 인자로 받아 호출부가 정한다.
-  추상화를 위한 추상화가 아니라, 갈라지면 안 되는 것만 묶는다.
+▶ 모델 경계
+  모든 생성 호출은 공용 Worker Model Gateway로만 나간다. 따라서 운영에서는
+  Qwen2.5-14B-AWQ + Hybrid Upgrade 정책, 구조 출력 검증과 계측이 한 경로에서
+  적용된다. 호출부는 더 이상 Ollama/EXAONE/외부 모델이나 timeout을 고르지 않는다.
 
 ▶ 재시도 규율 (지어내지 않는다)
   Schema 를 어기면 오류 문구를 붙여 한 번 더 부른다. 두 번 다 어기면 예외다.
@@ -28,47 +24,77 @@ import json
 import sys
 import time
 import os
-import urllib.request
+from pathlib import Path
+from typing import Any
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 try:
     from .observability import current_metrics, redacted_span, update_span_metadata
 except ImportError:  # direct module execution from the Research profile
     from observability import current_metrics, redacted_span, update_span_metadata  # type: ignore
 
-MODULE_VERSION = "research-llm-client-v1"
+MODULE_VERSION = "research-llm-client-v2-gateway-enforced"
 
 DEFAULT_TEMPERATURE = 0.1
 NARRATE_ATTEMPTS = 2       # 처음 + 오류를 알려주고 한 번 더
 _ERR_CLIP = 200            # 재시도 프롬프트에 실을 오류 길이
 
 
-def chat(system: str, user: str, *, base: str, model: str, timeout: float,
-         temperature: float = DEFAULT_TEMPERATURE,
-         max_tokens: int | None = None,
-         json_object: bool = True) -> str:
-    """OpenAI 호환 /v1/chat/completions 한 번. 실패는 예외 - 삼키지 않는다.
+_JSON_OBJECT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": True,
+}
 
-    qwen3 계열은 <think> 사고 텍스트를 앞에 붙일 수 있다. 그건 여기서 자르지
-    않고 extract_json 이 첫 '{'~마지막 '}' 만 취해 견딘다 - 모델별 프리앰블
-    형태를 쫓아다니는 것보다 결과만 보는 쪽이 덜 깨진다.
+
+def _gateway_llm(worker_id: str):
+    """Resolve the sole production LLM boundary without a local fallback."""
+
+    try:
+        from departments.worker_model_gateway import llm_for_worker
+    except ModuleNotFoundError as exc:
+        if exc.name != "departments":
+            raise
+        repo_root = Path(__file__).resolve().parents[3]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        from departments.worker_model_gateway import llm_for_worker
+    return llm_for_worker(worker_id)
+
+
+def _call_gateway(
+    system: str,
+    user: str,
+    *,
+    worker_id: str,
+    json_schema: dict[str, Any] | None,
+) -> tuple[str, str]:
+    worker_llm, binding = _gateway_llm(worker_id)
+    if json_schema is not None and getattr(worker_llm, "_json_schema_capable", False):
+        return worker_llm(system, user, json_schema=json_schema), binding.model
+    return worker_llm(system, user), binding.model
+
+
+def chat(
+    system: str,
+    user: str,
+    *,
+    worker_id: str = "research-document-synthesis-worker",
+    base: str | None = None,
+    model: str | None = None,
+    timeout: float | None = None,
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_tokens: int | None = None,
+    json_object: bool = True,
+) -> str:
+    """Generate through the canonical Qwen AWQ+Hybrid Gateway.
+
+    Legacy keyword arguments remain temporarily source-compatible for callers,
+    but cannot select an endpoint, model, timeout, or temperature.
     """
-    payload: dict = {
-        "model": model,
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": user}],
-        "temperature": temperature,
-    }
-    if json_object:
-        # 소형 모델의 JSON 규율 - 지원 안 하는 서버는 이 키를 무시한다
-        payload["response_format"] = {"type": "json_object"}
-    if max_tokens is not None:
-        payload["max_tokens"] = max_tokens
-
-    req = urllib.request.Request(
-        base.rstrip("/") + "/v1/chat/completions", method="POST",
-        headers={"Content-Type": "application/json",
-                 "Authorization": "Bearer ollama"},
-        data=json.dumps(payload).encode())
+    del base, model, timeout, temperature, max_tokens
     metrics = current_metrics()
     started = time.perf_counter()
     if metrics:
@@ -78,13 +104,19 @@ def chat(system: str, user: str, *, base: str, model: str, timeout: float,
     with redacted_span(
         "research.llm.call",
         run_type="llm",
-        metadata={"model": model, "retry_count": 0, "error": False, "status": "started"},
+        metadata={"worker_id": worker_id, "retry_count": 0, "error": False, "status": "started"},
         tags=("llm", "chat_completions"),
     ) as span:
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                out = json.loads(r.read())
-                return out["choices"][0]["message"]["content"]
+            result, resolved_model = _call_gateway(
+                system,
+                user,
+                worker_id=worker_id,
+                json_schema=_JSON_OBJECT_SCHEMA if json_object else None,
+            )
+            if span is not None:
+                update_span_metadata(span, {"model": resolved_model})
+            return result
         except Exception:
             if span is not None:
                 update_span_metadata(span, {"status": "error"})
@@ -95,24 +127,13 @@ def chat(system: str, user: str, *, base: str, model: str, timeout: float,
                 metrics.mark("generation_finished_at")
 
 
-def chat_structured(system: str, user: str, *, base: str, model: str,
-                    timeout: float, schema: dict,
+def chat_structured(system: str, user: str, *, schema: dict,
+                    worker_id: str = "research-document-synthesis-worker",
+                    base: str | None = None, model: str | None = None,
+                    timeout: float | None = None,
                     temperature: float = DEFAULT_TEMPERATURE) -> str:
-    """Ollama 네이티브 /api/chat + format=JSON Schema (구조 강제 디코딩).
-
-    /v1 경로와 달리 스키마를 디코딩 단계에서 강제하므로 형식 이탈이 거의
-    없다. 대신 Ollama 전용이라 게이트웨이·다른 제공자로 옮길 때 함께 바뀐다.
-    """
-    req = urllib.request.Request(
-        base.rstrip("/") + "/api/chat", method="POST",
-        headers={"Content-Type": "application/json"},
-        data=json.dumps({
-            "model": model, "stream": False,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "options": {"temperature": temperature},
-            "format": schema,
-        }).encode())
+    """Generate schema-constrained output through the canonical Gateway."""
+    del base, model, timeout, temperature
     metrics = current_metrics()
     started = time.perf_counter()
     if metrics:
@@ -122,12 +143,16 @@ def chat_structured(system: str, user: str, *, base: str, model: str,
     with redacted_span(
         "research.llm.call",
         run_type="llm",
-        metadata={"model": model, "retry_count": 0, "error": False, "status": "started"},
+        metadata={"worker_id": worker_id, "retry_count": 0, "error": False, "status": "started"},
         tags=("llm", "structured"),
     ) as span:
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read())["message"]["content"]
+            result, resolved_model = _call_gateway(
+                system, user, worker_id=worker_id, json_schema=schema
+            )
+            if span is not None:
+                update_span_metadata(span, {"model": resolved_model})
+            return result
         except Exception:
             if span is not None:
                 update_span_metadata(span, {"status": "error"})
@@ -177,7 +202,7 @@ def narrate(system: str, prompt: str, model_cls, call,
                 "research.llm.narrate",
                 run_type="llm",
                 metadata={
-                    "model": os.getenv("RESEARCH_SUPERVISOR_MODEL", "unknown"),
+                    "model": os.getenv("WORKER_MODEL_NAME", "qwen2.5-14b-instruct-awq"),
                     "retry_count": attempt,
                     "error": False,
                     "status": "started",
@@ -241,52 +266,30 @@ def _check_narrate_retry():
     print("  서술 재시도 규율         OK")
 
 
-def _check_payload_shape():
-    """HTTP 를 안 타고 payload 만 확인한다 - 갈라졌던 설정이 인자로 오는가."""
+def _check_gateway_contract():
+    """No-network check: legacy arguments cannot escape the Gateway."""
     seen = {}
 
-    class _FakeResp:
-        def __enter__(self):
-            return self
+    def fake_call(system, user, *, worker_id, json_schema):
+        seen.update(
+            system=system,
+            user=user,
+            worker_id=worker_id,
+            json_schema=json_schema,
+        )
+        return "{}", "qwen2.5-14b-instruct-awq"
 
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode()
-
-    def fake_urlopen(req, timeout=None):
-        seen["url"] = req.full_url
-        seen["timeout"] = timeout
-        seen["body"] = json.loads(req.data)
-        return _FakeResp()
-
-    orig = urllib.request.urlopen
-    urllib.request.urlopen = fake_urlopen
+    original = _call_gateway
+    globals()["_call_gateway"] = fake_call
     try:
         chat("s", "u", base="http://x:11434/", model="m1", timeout=42,
              temperature=0.3, max_tokens=8192)
     finally:
-        urllib.request.urlopen = orig
+        globals()["_call_gateway"] = original
 
-    assert seen["url"] == "http://x:11434/v1/chat/completions", seen["url"]
-    assert seen["timeout"] == 42
-    b = seen["body"]
-    assert b["model"] == "m1" and b["temperature"] == 0.3
-    assert b["max_tokens"] == 8192
-    assert b["response_format"] == {"type": "json_object"}
-    assert [m["role"] for m in b["messages"]] == ["system", "user"]
-
-    # max_tokens 를 안 주면 키 자체가 없어야 한다 - 0 이나 기본값을 넣으면
-    # 서버가 그 값으로 잘라버린다
-    urllib.request.urlopen = fake_urlopen
-    try:
-        chat("s", "u", base="http://x", model="m", timeout=1, json_object=False)
-    finally:
-        urllib.request.urlopen = orig
-    assert "max_tokens" not in seen["body"]
-    assert "response_format" not in seen["body"]
-    print("  요청 payload 계약        OK")
+    assert seen["worker_id"] == "research-document-synthesis-worker"
+    assert seen["json_schema"] == _JSON_OBJECT_SCHEMA
+    print("  Gateway 강제 계약        OK")
 
 
 if __name__ == "__main__":
@@ -296,5 +299,5 @@ if __name__ == "__main__":
     print(f"{MODULE_VERSION} 자체 점검 (네트워크 없음)")
     _check_extract_json()
     _check_narrate_retry()
-    _check_payload_shape()
+    _check_gateway_contract()
     print("LLM 클라이언트 3개 영역 통과.")

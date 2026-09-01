@@ -1,7 +1,7 @@
 # 리서치본부 (Research)
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-Hermes Profile은 `research-department`이고 직원은 독립 LangGraph Worker다. 활성 Worker·권한은 [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md), 운영 모델·fallback은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md)가 소유하며 `Modelfile`은 로컬 호환 표면일 뿐 현재 모델 정본이 아니다.
+Hermes Profile은 `research-department`이고 직원은 독립 LangGraph Worker다. 활성 Worker·권한은 [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md), 운영 모델은 [Worker Model Matrix](../../docs/02-engineering/WORKER_MODEL_MATRIX.md)가 소유한다. Research 생성 LLM은 공용 Qwen AWQ+Hybrid Gateway만 사용하며 로컬 `Modelfile` alias는 없다.
 
 실제 실행 상태와 재일님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
 Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 순서는

@@ -363,7 +363,7 @@ ast_contract:
 independent_mentions: 1              # community 렌즈에서 특히 중요
 testability: RULE_EXPRESSIBLE        # RULE_EXPRESSIBLE | VAGUE | UNUSABLE
 status: COMPLETE                     # COMPLETE | PARTIAL | UNUSABLE | BLOCKED
-model_version: agent-research@...
+model_version: qwen2.5-14b-instruct-awq
 prompt_version: res-scout-academic@...
 tool_versions: [research-web-mcp@...]
 ```

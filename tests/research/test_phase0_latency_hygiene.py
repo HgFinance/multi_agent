@@ -295,9 +295,9 @@ class Phase0LatencyHygieneTest(unittest.TestCase):
 
     def test_llm_duration_and_generation_timestamps_are_recorded(self) -> None:
         metrics = ResearchRunMetrics(trace_id="trace-llm")
-        response = _Response({"choices": [{"message": {"content": "{}"}}]})
         with patch(
-            "evidence.llm_client.urllib.request.urlopen", return_value=response
+            "evidence.llm_client._call_gateway",
+            return_value=("{}", "qwen2.5-14b-instruct-awq"),
         ), activate_metrics(metrics):
             self.assertEqual(
                 chat("system", "user", base="http://ollama.test", model="model", timeout=1),

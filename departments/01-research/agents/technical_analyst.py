@@ -5,7 +5,7 @@
 근거: departments/01-research/hermes/config.yaml 의 technical-analyst 페르소나
       ("you never compute feature values yourself" - LLM 은 해석만)
       docs/04-organization/AGENT_EMPLOYEE_PROFILES.md RES-04 직무기술서
-      agents/news_sentiment_analyst.py 의 _ollama_call·Pydantic 검증·verify 패턴
+      agents/news_sentiment_analyst.py 의 Gateway 호출·Pydantic 검증·verify 패턴
       evidence/bundle.py 의 market-api /bars 호출 규약(결정론 가격 컨텍스트)
 
 설계 결정:
@@ -63,13 +63,7 @@ AGENT_VERSION = "research-technical-analyst-v1"
 KST = timezone(timedelta(hours=9))
 
 MARKET_API = os.environ.get("MARKET_API_URL", "http://127.0.0.1:8036")
-OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-MODEL = os.environ.get(
-    "TECH_ANALYST_MODEL",
-    # 2026-08-01 역할 분담 실측: exaone3.5(한국어 특화)가 규율 완전 통과
-    # (환각 0·수치 플래그 0) + 6.0초로 14b 대비 ~40% 단축. 근거: 가이드 J4.
-    "exaone3.5:7.8b")
-LLM_TIMEOUT = float(os.environ.get("TECH_LLM_TIMEOUT", "120"))  # 로컬 14b 지연 감안
+MODEL = os.environ.get("WORKER_MODEL_NAME", "qwen2.5-14b-instruct-awq")
 
 BARS_LIMIT = 120          # sma60+cross(10일 lookback)에 70봉 필요 - 여유 포함
 ANNUALIZE_DAYS = 252      # 한국 거래일 연율화 관례
@@ -269,17 +263,11 @@ def narrate(readout: dict, symbol: str, llm: Callable | None = None) -> Technica
               f"Technical readout (code-computed, do not alter):\n"
               + json.dumps(readout, ensure_ascii=False, indent=1))
 
-    return llm_narrate(_SYSTEM, prompt, TechnicalNote, llm or _ollama_call)
+    return llm_narrate(_SYSTEM, prompt, TechnicalNote, llm or _hybrid_call)
 
 
-def _ollama_call(system: str, user: str) -> str:
-    """로컬/팀 Ollama. 호출 모양은 evidence/llm_client 가 단일 출처다.
-
-    여기 남는 것은 **이 분석가의 설정**뿐이다(모델·타임아웃). 예전에는 요청
-    조립까지 7곳에 복붙돼 timeout 이 20/30/LLM_TIMEOUT 으로 갈라져 있었다.
-    """
-    return llm_chat(system, user, base=OLLAMA_BASE, model=MODEL,
-                    timeout=LLM_TIMEOUT)
+def _hybrid_call(system: str, user: str) -> str:
+    return llm_chat(system, user, worker_id="research-technical-analyst")
 
 
 # ---------------------------------------------------------------------------

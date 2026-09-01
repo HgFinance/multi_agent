@@ -30,13 +30,14 @@
 
 ## 2. GitHub 확인 결과
 
-원격 `main`의 Commit `9d14f12`에서 8개 파일이 추가된 뒤 각 팀이 Alias와 Prompt를 고도화했다.
+원격 `main`의 Commit `9d14f12`에서 8개 파일이 추가됐으나, Research alias는
+Qwen Gateway 통합으로 폐기되어 현재 7개만 유지한다.
 아래 표는 최초 제안이 아니라 2026-08-01 Repository의 실제 `FROM`과 Build 주석을 기준으로 한다.
 
 | 조직 | 파일 | Base Model | 확정 Local Alias | 현재 상태 |
 |---|---|---|---|---|
 | CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `qwen3:1.7b` | `agent-ceo` | local fallback alias; Hermes Head와 분리 |
-| 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen3:1.7b` | `agent-research` | local fallback alias |
+| 리서치본부 | — | `Qwen2.5-14B-Instruct-AWQ` | — | 공용 Gateway 전용; local alias 폐기 |
 | 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen3:1.7b` | `agent-trading` | 호환 alias; 현재 고정 LLM Worker 없음 |
 | 리스크본부 | [`departments/03-risk/Modelfile`](../../departments/03-risk/Modelfile) | `qwen3:1.7b` | `agent-risk` (호환 Alias) | 실제 실행은 LangGraph Worker |
 | 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen3:1.7b` | `agent-quant` | local fallback alias |
@@ -64,7 +65,7 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 
 | 항목 | 상태 |
 |---|---|
-| 8개 `Modelfile` | 완료 |
+| 7개 `Modelfile` | 완료; Research alias는 Qwen Gateway 통합으로 폐기 |
 | `.env.example`의 `OLLAMA_BASE_URL`, Chat·Embedding Model 변수 | 완료 |
 | Ollama Local Runtime 설치 | 감사 Host에는 CLI 없음, 팀 공용 Remote Endpoint는 코드에 존재하나 자동 Health 증거 없음 |
 | Docker Compose `ollama` Service | 미구현 |
@@ -113,7 +114,7 @@ Base Model 선택은 초기 가설이다. 모델 이름만으로 업무 적합�
 
 ## 5. Modelfile과 파인튜닝의 차이
 
-현재 8개 파일은 Base Model 위에 `SYSTEM` Instruction을 추가한 Customized Model이다. 학습 데이터로 Weight를 변경한 파인튜닝이 아니다.
+현재 7개 파일은 Base Model 위에 `SYSTEM` Instruction을 추가한 Customized Model이다. 학습 데이터로 Weight를 변경한 파인튜닝이 아니다.
 
 | 방식 | Weight 변경 | 현재 적용 | 용도 |
 |---|---|---|---|
@@ -141,7 +142,6 @@ Repository Root에서 실행한다.
 
 ```powershell
 ollama create agent-ceo -f departments/00-ceo-office/Modelfile
-ollama create agent-research -f departments/01-research/Modelfile
 ollama create agent-trading -f departments/02-trading/Modelfile
 ollama create agent-risk -f departments/03-risk/Modelfile
 ollama create agent-quant -f departments/04-quant-backtest/Modelfile
@@ -152,7 +152,6 @@ ollama create agent-qa -f departments/06-ai-qa-audit/Modelfile
 ### 6.3 수동 Smoke Test
 
 ```powershell
-ollama run agent-research
 ollama run agent-risk
 ollama ls
 ollama ps
@@ -171,7 +170,7 @@ flowchart LR
     O["ollama:11434"]
     I["ollama-model-init"]
     M["ollama_models Volume"]
-    F["8 Department Modelfiles"]
+    F["7 Department Modelfiles"]
 
     H -->|ModelRequest| G
     G -->|허용된 Alias| O
@@ -343,7 +342,7 @@ Local Model은 Eval에서 실패하면 자동으로 Bedrock에 Fallback하는 �
 | Phase | 상태 | 근거와 다음 Gate |
 |---|---|---|
 | O0 환경 확인 | 부분 | Docker는 확인, 감사 Host Ollama CLI·GPU Budget 미확인 |
-| O1 반복 Build | 부분 | 8개 Modelfile은 있으나 Manifest·Build Script·Digest 없음 |
+| O1 반복 Build | 부분 | 7개 Modelfile은 있으나 Manifest·Build Script·Digest 없음 |
 | O2 Model Gateway | 미착수 | Department Routing, Timeout, Fallback과 Trace 필요 |
 | O3 Eval | 부분 | CEO·HR 수동 Smoke만 존재, 자동 Golden/Adversarial Eval 없음 |
 | O4 Docker 통합 | 미착수 | `ollama`, Init, Gateway Compose Service 없음 |
@@ -439,6 +438,6 @@ Local Model은 Eval에서 실패하면 자동으로 Bedrock에 Fallback하는 �
 
 ## 17. 최종 결정
 
-도현님이 추가하고 각 본부가 고도화한 8개 `Modelfile`을 본부별 Local Model Blueprint로 채택한다.
+Research를 제외한 7개 `Modelfile`을 본부별 Local Model Blueprint로 유지한다. Research 생성 LLM은 공용 Qwen Gateway만 사용한다.
 
-다만 `Modelfile`은 Agent 권한, Hermes Profile, 파인튜닝 결과 또는 Production 승인 자체가 아니다. 공통 Ollama Runtime에서 8개 Alias를 Build하고 Model Gateway로만 호출하며, 본부별 Eval과 Workforce·QA·CEO Gate를 통과한 업무에 한해 Local Model을 사용한다.
+다만 `Modelfile`은 Agent 권한, Hermes Profile, 파인튜닝 결과 또는 Production 승인 자체가 아니다. 공통 Ollama Runtime에서 남은 alias를 Build하고 Model Gateway로만 호출하며, 본부별 Eval과 Workforce·QA·CEO Gate를 통과한 업무에 한해 Local Model을 사용한다.

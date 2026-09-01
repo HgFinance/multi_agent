@@ -85,12 +85,7 @@ KST = timezone(timedelta(hours=9))
 
 MARKET_API = os.environ.get("MARKET_API_URL", "http://127.0.0.1:8036")
 RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
-OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-MODEL = os.environ.get(
-    "SECTOR_REGIME_MODEL",
-    # 2026-08-01 역할 분담 실측: 3.1초, 환각 0·라벨 복원 없음. 근거: 가이드 J4.
-    "exaone3.5:7.8b")
-LLM_TIMEOUT = float(os.environ.get("REGIME_LLM_TIMEOUT", "120"))  # 로컬 14b 지연 감안
+MODEL = os.environ.get("WORKER_MODEL_NAME", "qwen2.5-14b-instruct-awq")
 
 REGIME_DAYS = 40          # 20일 지표 + 휴장/결측 여유
 BREADTH_MARKETS = ("KOSPI", "KOSDAQ")
@@ -373,17 +368,11 @@ def narrate(readout: dict, llm: Callable | None = None) -> RegimeNote:
               f"Regime readout (code-computed, do not alter):\n"
               + json.dumps(readout, ensure_ascii=False, indent=1))
 
-    return llm_narrate(_SYSTEM, prompt, RegimeNote, llm or _ollama_call)
+    return llm_narrate(_SYSTEM, prompt, RegimeNote, llm or _hybrid_call)
 
 
-def _ollama_call(system: str, user: str) -> str:
-    """로컬/팀 Ollama. 호출 모양은 evidence/llm_client 가 단일 출처다.
-
-    여기 남는 것은 **이 분석가의 설정**뿐이다(모델·타임아웃). 예전에는 요청
-    조립까지 7곳에 복붙돼 timeout 이 20/30/LLM_TIMEOUT 으로 갈라져 있었다.
-    """
-    return llm_chat(system, user, base=OLLAMA_BASE, model=MODEL,
-                    timeout=LLM_TIMEOUT)
+def _hybrid_call(system: str, user: str) -> str:
+    return llm_chat(system, user, worker_id="research-sector-regime-analyst")
 
 
 # ---------------------------------------------------------------------------
@@ -829,6 +818,12 @@ def _check_gateway_scope():
         (Path(__file__).resolve().parents[1] / "hermes" / "config.yaml")
         .read_text(encoding="utf-8"))
     allow = cfg["agent"]["tool_allowlist"]
+    if PERSONA not in allow:
+        # RES-07 is retained solely for historical packet lineage. Do not
+        # revive its retired API authority merely to satisfy an offline
+        # self-check; active market-context-worker owns those scopes.
+        print("  게이트웨이 권한 배선     RETIRED (권한 재부여 안 함)")
+        return
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
     from tool_gateway import check_access, scope_for
 

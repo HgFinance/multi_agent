@@ -60,10 +60,9 @@ x-langsmith-redaction: &langsmith-redaction
   LANGSMITH_TRACE_SLOW_MS: ${LANGSMITH_TRACE_SLOW_MS:-45000}
   LANGSMITH_RESEARCH_TRACE_MODE: ${LANGSMITH_RESEARCH_TRACE_MODE:-off}
 
-# Shared only by Risk processes that may execute the conditional compliance
-# worker. Keeping this mapping singular prevents the API and Hermes MCP bridge
+# Shared Worker model plane. Keeping this mapping singular prevents departments
 # from silently selecting different Qwen/Ollama coordinates.
-x-risk-worker-model-environment: &risk-worker-model-environment
+x-worker-model-environment: &worker-model-environment
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-}
   WORKER_MODEL_EXECUTION_CONTEXT: container
@@ -1329,7 +1328,7 @@ services:
       # 찍힌다 - '잊은 것'과 '일부러 연 것'을 구분되게 한다.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
       RESEARCH_MCP_LOOP_STALL_SECONDS: ${RESEARCH_MCP_LOOP_STALL_SECONDS:-90}
-      <<: *langsmith-redaction
+      <<: [*worker-model-environment, *langsmith-redaction]
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -1344,10 +1343,9 @@ services:
       LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
-      # 파이프라인이 부르는 조회면·로컬 모델. Ollama 는 호스트 프로세스다.
+      # 파이프라인이 부르는 조회면. 생성 모델은 공용 Qwen Gateway가 소유한다.
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
-      OLLAMA_BASE_URL: http://host.docker.internal:11434
       # ▶ 외부 정보원 질의 도구 (external_sources.py, 요청형 MCP 전용)
       #   정성 데이터 상주 수집기는 이 키를 받지 않는다. 소스별 일일 상한이
       #   반복 에이전트 호출로 외부 계정 한도가 소진되는 것을 막는다.
@@ -1861,7 +1859,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      <<: [*risk-worker-model-environment, *langsmith-redaction]
+      <<: [*worker-model-environment, *langsmith-redaction]
       DATABASE_URL: ${DATABASE_URL:-}
       REDIS_URL: redis://redis:6379/0
       RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
@@ -1920,7 +1918,7 @@ services:
         max-size: "10m"
         max-file: "3"
     environment:
-      <<: [*risk-worker-model-environment, *langsmith-redaction]
+      <<: [*worker-model-environment, *langsmith-redaction]
       MCP_RISK_API_KEY: ${MCP_RISK_API_KEY:?A generated 32-byte Risk legal MCP key is required}
       REDIS_URL: redis://redis:6379/0
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}

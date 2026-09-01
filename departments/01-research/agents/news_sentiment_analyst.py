@@ -32,31 +32,24 @@ import json
 import os
 import sys
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
+_RESEARCH_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = _RESEARCH_ROOT.parents[1]
+for _path in (str(_REPO_ROOT), str(_RESEARCH_ROOT / "collectors"), str(_RESEARCH_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from source_registry import load_project_env
+from evidence.llm_client import chat_structured
 
 AGENT_VERSION = "research-news-sentiment-analyst-v1"
 KST = timezone(timedelta(hours=9))
 
 RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
-# LLM 백엔드 (2026-07-31 재일님 지시로 Ollama 추가):
-#   ollama    - 부서 로컬 모델 (TECH_STACK: Ollama 는 로컬·저비용 보조 모델로 승인)
-#               팀 표준은 departments/01-research/Modelfile 의 agent-research.
-#               로컬에 없으면 NEWS_SENTIMENT_MODEL 로 기존 모델(qwen3:8b 등) 지정.
-#   anthropic - ANTHROPIC_API_KEY 확보 시 (리서치본부 배정 키 - 아무 키나 안 쓴다)
-LLM_BACKEND = os.environ.get("NEWS_LLM_BACKEND", "ollama").strip().lower()
-OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-MODEL = os.environ.get(
-    "NEWS_SENTIMENT_MODEL",
-    "agent-research" if LLM_BACKEND == "ollama" else "claude-sonnet-5",
-)
+MODEL = os.environ.get("WORKER_MODEL_NAME", "qwen2.5-14b-instruct-awq")
 MAX_ARTICLES = 40  # 한 판정에 넣는 기사 상한 - 초과분은 가중치 상위만
 
 
@@ -164,12 +157,7 @@ def judge_articles(symbol: str, articles: list[dict], *, llm=None) -> JudgementB
     prompt = (f"Stock: {symbol}\nArticles ({len(payload)}):\n"
               + json.dumps(payload, ensure_ascii=False, indent=1))
 
-    if llm is not None:
-        call = llm
-    elif LLM_BACKEND == "ollama":
-        call = _ollama_call_structured if GRAMMAR_DECODE else _ollama_call
-    else:
-        call = _anthropic_call
+    call = llm or _hybrid_call
     last_err = None
     for attempt in range(2):
         text = call(_SYSTEM, prompt if attempt == 0 else
@@ -190,13 +178,6 @@ def judge_articles(symbol: str, articles: list[dict], *, llm=None) -> JudgementB
             last_err = str(e)[:200]
     raise RuntimeError(f"LLM 판정이 Schema 를 두 번 어겼다: {last_err}")
 
-
-# 스키마 강제 디코딩 옵트인 (2026-08-01). 감성 규율에서 4모델(EXAONE·gemma3·
-# kanana·8b)이 연속 탈락한 원인은 "모델이 스키마를 지켜주길 비는" 구조였다 -
-# Ollama /api/chat 의 format 에 JSON Schema 를 주면 **디코더가 구조를 강제**한다.
-# 판정 내용(환각 인용·점수)은 여전히 verify 가 본다 - 이 장치는 구조만 보증.
-# 검증된 qwen 경로와의 상호작용(think 모델)이 미검증이라 기본 OFF.
-GRAMMAR_DECODE = os.environ.get("NEWS_SENTIMENT_GRAMMAR", "0") == "1"
 
 _JUDGEMENT_SCHEMA = {
     "type": "object",
@@ -219,57 +200,13 @@ _JUDGEMENT_SCHEMA = {
 }
 
 
-def _ollama_call_structured(system: str, user: str) -> str:
-    """Ollama 네이티브 /api/chat + format=JSON Schema (구조 강제 디코딩)."""
-    req = urllib.request.Request(
-        OLLAMA_BASE + "/api/chat", method="POST",
-        headers={"Content-Type": "application/json"},
-        data=json.dumps({
-            "model": MODEL, "stream": False,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "options": {"temperature": 0.1},
-            "format": _JUDGEMENT_SCHEMA,
-        }).encode())
-    with urllib.request.urlopen(req, timeout=600) as r:
-        return json.loads(r.read())["message"]["content"]
-
-
-def _ollama_call(system: str, user: str) -> str:
-    """로컬/팀 Ollama (OpenAI 호환). 모델이 없으면 사유가 그대로 예외로 올라온다.
-
-    qwen3 계열은 <think> 사고 텍스트를 앞에 붙일 수 있는데, 호출부 파서가
-    첫 '{'~마지막 '}' 만 취하므로 그대로 견딘다.
-    """
-    req = urllib.request.Request(
-        OLLAMA_BASE + "/v1/chat/completions", method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
-        data=json.dumps({
-            "model": MODEL,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.1,
-            # 소형 모델의 JSON 규율 - 지원 안 하는 서버는 무시한다
-            "response_format": {"type": "json_object"},
-        }).encode(),
+def _hybrid_call(system: str, user: str) -> str:
+    return chat_structured(
+        system,
+        user,
+        worker_id="research-news-sentiment-analyst",
+        schema=_JUDGEMENT_SCHEMA,
     )
-    with urllib.request.urlopen(req, timeout=600) as r:
-        out = json.loads(r.read())
-    return out["choices"][0]["message"]["content"]
-
-
-def _anthropic_call(system: str, user: str) -> str:
-    import anthropic
-
-    key = load_project_env().get("ANTHROPIC_API_KEY", "")
-    if not key:
-        raise RuntimeError("ANTHROPIC_API_KEY 가 없다 (리서치본부 배정 키)")
-    client = anthropic.Anthropic(api_key=key)
-    msg = client.messages.create(
-        model=MODEL, max_tokens=4000, system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return "".join(b.text for b in msg.content if b.type == "text")
 
 
 # ---------------------------------------------------------------------------
