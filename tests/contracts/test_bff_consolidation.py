@@ -14,7 +14,17 @@ from typing import Self
 from apps.api.ceo_mirror import CanonicalIngress, LockedRedisMirrorStore
 
 ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_STACK_COMPOSE_FILES = (
+    ROOT / "docker-compose.yml",
+    ROOT / "departments/00-ceo-office/compose.yaml",
+    ROOT / "departments/02-trading/compose.yaml",
+    ROOT / "departments/05-accounting-portfolio/compose.yaml",
+    ROOT / "departments/07-agent-workforce/compose.yaml",
+)
 _COMPOSE_TEST_ENV = {
+    # CI has no developer .env file. Keep local verification equally isolated
+    # so a workstation secret cannot hide a missing contract-test fixture.
+    "COMPOSE_DISABLE_ENV_FILE": "1",
     "DATABASE_URL": "postgresql://test:test@localhost/test",
     "HEDGEFUND_RUNTIME_DB_PASSWORD": "compose-control-contract-test",
     "HEDGEFUND_TSDB_PASSWORD": "compose-contract-test",
@@ -31,7 +41,9 @@ _COMPOSE_TEST_ENV = {
     "MCP_TRADING_ORDER_API_KEY": "compose-contract-paper-order-mcp-key-32-bytes",
     "MCP_RISK_API_KEY": "compose-contract-risk-legal-mcp-key-32-bytes",
     "STRATEGY_PAPER_ORDER_TOKEN": "compose-contract-strategy-paper-order-token-32b",
+    "HEDGEFUND_ACCOUNTING_DB_PASSWORD": "compose-contract-accounting-db",
     "HEDGEFUND_ORDER_DB_PASSWORD": "compose-contract-order-db",
+    "HEDGEFUND_TRADING_DB_PASSWORD": "compose-contract-trading-db",
     "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD": (
         "compose-contract-conditional-orchestrator-db"
     ),
@@ -40,10 +52,10 @@ _COMPOSE_TEST_ENV = {
     ),
 }
 
-# 이 딕셔너리는 `docker-compose.yml`이 `${VAR:?}`로 **필수**라고 선언한 변수를
-# 전부 담아야 한다. 하나라도 빠지면 렌더 자체가 실패해 계약 검사가 시작도 못 하고,
-# 로컬에서는 개발자의 `.env`가 그 구멍을 메워 줘서 CI에서만 터진다 - 실제로
-# `x-order-database-url`이 추가된 뒤 이 테스트가 CI에서만 계속 깨졌다.
+# 이 딕셔너리는 `docker-compose.yml`과 그 기본 include fragment가 `${VAR:?}`로
+# **필수**라고 선언한 변수를 전부 담아야 한다. 하나라도 빠지면 렌더 자체가 실패해
+# 계약 검사가 시작도 못 하고, 로컬에서는 개발자의 `.env`가 그 구멍을 메워 줘서
+# CI에서만 터진다.
 _REQUIRED_COMPOSE_VARIABLES = re.compile(r"\$\{([A-Z_]+):\?")
 
 
@@ -82,15 +94,17 @@ def _run_compose(*args: str) -> subprocess.CompletedProcess[str]:
 class ComposeTestEnvironmentTest(unittest.TestCase):
     """필수 변수 목록이 갈리면 계약 검사가 CI에서만 깨진다.
 
-    Docker를 부르지 않는다. `docker-compose.yml`이 `${VAR:?}`로 필수라고
-    선언한 변수와 이 파일이 렌더에 넘기는 변수를 대조할 뿐이다. 이 검사가
-    없으면 compose에 필수 변수가 하나 추가될 때 개발자 `.env`가 구멍을
-    메워 로컬은 통과하고 CI만 빨개진다.
+    Docker를 부르지 않는다. 기본 stack의 root와 include fragment가
+    `${VAR:?}`로 필수라고 선언한 변수와 이 파일이 렌더에 넘기는 변수를
+    대조할 뿐이다. 이 검사가 없으면 compose에 필수 변수가 하나 추가될 때
+    개발자 `.env`가 구멍을 메워 로컬은 통과하고 CI만 빨개진다.
     """
 
     def test_every_required_compose_variable_is_supplied(self) -> None:
-        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-        required = set(_REQUIRED_COMPOSE_VARIABLES.findall(compose))
+        required: set[str] = set()
+        for compose_path in _DEFAULT_STACK_COMPOSE_FILES:
+            compose = compose_path.read_text(encoding="utf-8")
+            required.update(_REQUIRED_COMPOSE_VARIABLES.findall(compose))
         missing = sorted(required - set(_COMPOSE_TEST_ENV))
         self.assertEqual(
             missing,
