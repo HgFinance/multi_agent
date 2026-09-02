@@ -26,7 +26,7 @@ ENV PYTHONUNBUFFERED=1 \
 # when a database/object-store feature service replaces that cache contract.
 RUN pip install --no-cache-dir \
     psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 \
-    fastapi==0.116.1 "uvicorn[standard]==0.35.0" \
+    fastapi==0.141.1 starlette==1.6.0 "uvicorn[standard]==0.35.0" \
     numpy==2.3.2 pyarrow==25.0.0
 
 WORKDIR /app
@@ -34,7 +34,6 @@ WORKDIR /app
 COPY departments/04-quant-backtest/api ./departments/04-quant-backtest/api
 COPY departments/04-quant-backtest/pipeline ./departments/04-quant-backtest/pipeline
 COPY departments/04-quant-backtest/contracts ./departments/04-quant-backtest/contracts
-COPY departments/04-quant-backtest/agents ./departments/04-quant-backtest/agents
 # .env 로더. 퀀트가 리서치 모듈을 읽기만 한다(쓰기는 리서치만).
 COPY departments/01-research/collectors/source_registry.py \
      ./departments/01-research/collectors/source_registry.py

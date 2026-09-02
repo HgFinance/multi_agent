@@ -11,6 +11,12 @@ import tempfile
 
 import pytest
 
+# Some legacy department tests prepend their source directory to ``sys.path``
+# and expose a top-level ``scripts.py`` module. Cache the repository's real
+# ``scripts`` package before test collection begins so those modules cannot
+# shadow it when the complete suite is collected.
+from scripts import __path__ as _REPOSITORY_SCRIPTS_PATH  # noqa: F401
+
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("PORTFOLIO_AUTH_MODE", "fixture")
 os.environ.setdefault("PORTFOLIO_DATA_MODE", "test")
