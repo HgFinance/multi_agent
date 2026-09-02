@@ -1,6 +1,7 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchPortfolioLive,
   formatEventTime,
@@ -9,6 +10,7 @@ import {
   formatPercent,
   ORDER_KINDS,
   PortfolioLiveError,
+  subscribePortfolioLiveRevision,
   type Holding,
   type OrderEvent,
   type PortfolioLive,
@@ -293,28 +295,8 @@ function getEventTone(event: OrderEvent): string {
   return KIND_TONE.ACCEPTED;
 }
 
-function getEventOrigin(event: OrderEvent): { label: string; detail: string } {
-  const ids = [
-    event.conditional_rule_id ? `조건 규칙 ${event.conditional_rule_id}` : null,
-    event.directive_id ? `directive ${event.directive_id}` : null,
-    event.order_request_id ? `요청 ${event.order_request_id}` : null,
-  ].filter(Boolean);
-  const detail = ids.join(" · ");
-  if (event.correlation_status === "ATTRIBUTED" && event.conditional_rule_id) {
-    return { label: "조건주문", detail };
-  }
-  if (event.correlation_status === "ATTRIBUTED") {
-    return { label: "사용자 주문", detail };
-  }
-  if (event.origin === "EXTERNAL_HTS") {
-    return { label: "외부 HTS", detail: "LS 계좌에서 직접 발생한 주문" };
-  }
-  return { label: "출처 미확인", detail: "LS 주문은 확인됐지만 내부 요청과 연결되지 않았습니다." };
-}
-
 function EventRow({ event }: { event: OrderEvent }) {
   const side = getEventSide(event.side);
-  const origin = getEventOrigin(event);
   return (
     <tr className="border-b border-outline-variant last:border-b-0">
       <td className="px-3 py-2.5 font-data-mono text-on-surface-variant">{formatEventTime(event.event_time)}</td>
@@ -333,17 +315,6 @@ function EventRow({ event }: { event: OrderEvent }) {
       </td>
       <td className="px-3 py-2.5 text-right font-data-mono text-on-surface">{formatNumber(event.quantity)}</td>
       <td className="px-3 py-2.5 text-right font-data-mono text-on-surface-variant">{formatEventPrice(event)}</td>
-      <td className="px-3 py-2.5 text-on-surface-variant" title={origin.detail || undefined}>
-        <span
-          className={`inline-flex whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
-            event.correlation_status === "ATTRIBUTED"
-              ? "border-primary/30 bg-primary/10 text-primary"
-              : "border-outline-variant bg-surface-container text-on-surface-variant"
-          }`}
-        >
-          {origin.label}
-        </span>
-      </td>
       <td
         className="truncate px-3 py-2.5 text-right font-data-mono text-outline"
         title={event.orig_order_no ? `원주문 ${event.orig_order_no}` : undefined}
@@ -401,6 +372,18 @@ export default function LivePortfolioPanel() {
     // 어차피 POLL_MS마다 다시 부른다. 재시도는 첫 화면만 늦춘다.
     retry: false,
   });
+  // 거래 신호가 확인되면 폴링 주기를 기다리지 않고 곧바로 다시 읽는다.
+  // 폴링은 그대로 살아 있으므로 이 구독이 끊겨도 화면은 계속 갱신된다 -
+  // 신호는 즉시성만 담당하고 정확성은 여전히 폴링이 보장한다.
+  const queryClient = useQueryClient();
+  useEffect(
+    () =>
+      subscribePortfolioLiveRevision(() => {
+        void queryClient.invalidateQueries({ queryKey: ["portfolio-live"] });
+      }),
+    [queryClient],
+  );
+
   const data = query.data ?? null;
   const error = query.error ?? null;
   const loading = query.isPending;
@@ -565,23 +548,17 @@ export default function LivePortfolioPanel() {
                 과거 주문 사건을 불러오지 못해 실시간 수신분만 표시합니다: {data.orders.error}
               </p>
             ) : null}
-            {data?.orders.correlation?.status === "DEGRADED" ? (
-              <p role="alert" className="m-0 border-b border-error/40 bg-error-container px-4 py-2 text-xs text-on-error-container">
-                LS 주문은 표시하지만 내부 조건주문 출처 연결을 확인하지 못했습니다: {data.orders.correlation.error}
-              </p>
-            ) : null}
             <div className="max-h-[17rem] overflow-auto">
-              <table className="w-full min-w-[760px] table-fixed text-left text-xs">
+              <table className="w-full min-w-[680px] table-fixed text-left text-xs">
                 <thead className="sticky top-0 z-10 border-b border-outline-variant bg-surface-container-low text-label-md text-on-surface-variant">
                   <tr>
-                    <th className="w-[11%] px-3 py-2 font-semibold">시각</th>
-                    <th className="w-[10%] px-3 py-2 font-semibold">상태</th>
-                    <th className="w-[19%] px-3 py-2 font-semibold">종목</th>
-                    <th className="w-[9%] px-3 py-2 font-semibold">매매</th>
-                    <th className="w-[10%] px-3 py-2 text-right font-semibold">수량</th>
-                    <th className="w-[15%] px-3 py-2 text-right font-semibold">가격</th>
-                    <th className="w-[14%] px-3 py-2 font-semibold">출처</th>
-                    <th className="w-[12%] px-3 py-2 text-right font-semibold">주문번호</th>
+                    <th className="w-[12%] px-3 py-2 font-semibold">시각</th>
+                    <th className="w-[11%] px-3 py-2 font-semibold">상태</th>
+                    <th className="w-[26%] px-3 py-2 font-semibold">종목</th>
+                    <th className="w-[10%] px-3 py-2 font-semibold">매매</th>
+                    <th className="w-[12%] px-3 py-2 text-right font-semibold">수량</th>
+                    <th className="w-[16%] px-3 py-2 text-right font-semibold">가격</th>
+                    <th className="w-[13%] px-3 py-2 text-right font-semibold">주문번호</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -594,7 +571,7 @@ export default function LivePortfolioPanel() {
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={8} className="px-3 py-7 text-center text-sm text-on-surface-variant">
+                      <td colSpan={7} className="px-3 py-7 text-center text-sm text-on-surface-variant">
                         {data?.stream.status === "CONNECTED"
                           ? "연결되어 있습니다. 주문이 발생하면 여기에 바로 나타납니다."
                           : "아직 수신한 주문 사건이 없습니다."}
@@ -624,7 +601,7 @@ export default function LivePortfolioPanel() {
 
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-outline-variant pt-3 text-xs text-on-surface-variant">
           <span>LS PAPER 계좌 기준 · 주문·체결은 LS 조회, 공식 수치는 회계 원장이 확정합니다</span>
-          <span>{POLL_MS / 1000}초마다 자동 갱신</span>
+          <span>거래 신호 수신 시 즉시 갱신 · {POLL_MS / 1000}초마다 자동 갱신</span>
         </div>
       </div>
     </section>

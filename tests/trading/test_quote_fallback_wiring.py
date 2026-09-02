@@ -103,6 +103,7 @@ def test_admission_api_and_directive_worker_share_one_wiring() -> None:
 # --- one-sided order books ------------------------------------------------
 
 from directives.market_data import (  # noqa: E402
+    LsPaperFallbackMarketDataProvider,
     MarketDataError,
     require_two_sided_book,
 )
@@ -133,11 +134,25 @@ def test_zero_and_negative_count_as_an_absent_side(absent) -> None:
     assert raised.value.code == "TRADING_MARKET_NO_ASK"
 
 
-def test_two_sided_and_wholly_empty_books_are_left_alone() -> None:
+def test_a_two_sided_book_is_left_alone() -> None:
     require_two_sided_book("10680", "10690")
-    # Both sides gone is an empty book, not a limit-up/limit-down state; the
-    # existing INVALID path still owns it.
-    require_two_sided_book(None, None)
+
+
+def test_an_empty_book_is_unavailable_so_the_broker_still_gets_asked() -> None:
+    """INVALID is the one quote code with no fallback, so it must not own this.
+
+    2026-09-02: 207940/402340 came back with neither side and killed two KRX
+    top-10 baskets outright, while every other member quoted fine. An empty
+    projection row is not proof of an empty market.
+    """
+
+    with pytest.raises(MarketDataError) as raised:
+        require_two_sided_book(None, None)
+    assert raised.value.code == "TRADING_MARKET_QUOTE_UNAVAILABLE"
+    assert (
+        raised.value.code
+        in LsPaperFallbackMarketDataProvider._FALLBACK_CODES
+    ), "empty-book code must be retried against the broker"
 
 
 def test_a_one_sided_projection_is_reverified_against_the_broker() -> None:

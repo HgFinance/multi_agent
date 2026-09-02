@@ -1002,6 +1002,9 @@ def test_market_closed_guard_is_visible_to_the_user(monkeypatch) -> None:
     )
 
     assert view.last_guard_code == "MARKET_CLOSED_NO_ORDER"
+    assert str(view.fund_id) == FUND_ID
+    assert str(view.book_id) == BOOK_ID
+    assert view.raw_instruction == "test"
     assert "장이 열려 있지 않아" in (view.status_message or "")
     assert "체결·원장 반영도 없습니다" in (view.status_message or "")
 

@@ -736,7 +736,21 @@ async def run_capture(
         # 단일 repository connection을 모든 sink가 공유한다.
         repository = TimescaleMarketRepository(dsn)
         repos = [repository]
-        sinks = [MarketSink(repository) for _ in shards]
+        # Sink도 커넥션과 함께 **하나만** 둔다.
+        #
+        # shard마다 Sink를 두면 배치가 shard 수만큼 잘게 쪼개진다: 전 종목 26
+        # sockets에서 각 Sink는 max_batch(200)에 한참 못 미친 채 max_delay(2초)로
+        # flush하고, flush 하나가 write_ticks/write_quotes 두 번의 왕복이므로
+        # 초당 26회 가까운 동기 왕복이 **이벤트 루프 위에서** 일어난다. 그 사이
+        # 26개 소켓을 아무도 못 비워 수신이 밀리고, 지연이 분당 20초씩 자라다가
+        # 재접속 때마다 리셋되는 톱니가 된다(2026-09-02 실측: event_time →
+        # received_at 평균 36초·최대 69초, 반면 DB 쓰기 자체는 0.5초).
+        #
+        # 버퍼를 합치면 같은 유입량이 200행 배치를 채우고 왕복은 십수 분의 일로
+        # 준다. 모든 worker가 같은 event loop에 있고 add/flush 안에 await이 없어
+        # 버퍼가 중간에 끼어들 수 없다 - 커넥션을 공유할 수 있는 이유와 같다.
+        sink = MarketSink(repository)
+        sinks = [sink]
         try:
             workers = [
                 LsRealtimeWorker(
@@ -747,7 +761,7 @@ async def run_capture(
                     sink=sink,
                     is_trading_day=make_trading_day_check(trading_days, stats=sink.stats),
                 )
-                for shard, sink in zip(shards, sinks)
+                for shard in shards
             ]
             run_tasks = [
                 asyncio.create_task(
@@ -809,8 +823,9 @@ async def run_capture(
                 updated_symbols = refresh_task.result()
                 if updated_symbols is not None:
                     return updated_symbols
-            for i, s in enumerate(sinks):
-                print(f"  소켓{i}: {s.stats.summary()}", flush=True)
+            # Sink가 하나라 통계도 전 소켓 합산이다. 소켓별로 찍으면 같은 수를
+            # 소켓 수만큼 반복해 보여줘 거짓말이 된다.
+            print(f"  전체({len(shards)} 소켓): {sink.stats.summary()}", flush=True)
             if stop.is_set():
                 return symbols
             # max_seconds 만료로 정상 반환 - 창도 끝났는지 위에서 재확인한다

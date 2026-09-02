@@ -61,7 +61,15 @@ services:
       # Natural-language admission and Kanban binding add processing time
       # before Trading reads L1. Keep a bounded cushion while still rejecting
       # genuinely stale market data.
-      TRADING_MARKET_QUOTE_MAX_AGE_SECONDS: ${TRADING_MARKET_QUOTE_MAX_AGE_SECONDS:-30}
+      #
+      # 30초는 이 배포에서 만족 불가능한 값이었다: market_quotes의 적재 지연
+      # (event_time -> ingested_at)이 실측 평균 39.5초·최대 76초라, 읽는 순간
+      # 이미 정책을 넘긴다. 그래서 모든 종목이 상시 LS REST 폴백으로 새고
+      # (t1101은 초당 1회 스로틀) 10종목 바스켓이 산발적으로 죽었다.
+      # 90초는 실측 최대 위의 최소 여유값이다. 이 시세는 시장가 주문의 **수량
+      # 산출**에만 쓰이고 체결가는 브로커가 정하며, 수량은 lot 단위로 내림한다.
+      # 근본 해결은 이 값이 아니라 40초 적재 지연을 줄이는 것이다.
+      TRADING_MARKET_QUOTE_MAX_AGE_SECONDS: ${TRADING_MARKET_QUOTE_MAX_AGE_SECONDS:-90}
       # Read-only t1101 quote fallback for admission.  The TSDB projection only
       # covers the bounded realtime subscription basket and goes stale whenever
       # the collector stalls, which failed triggered conditional rules with
@@ -114,6 +122,10 @@ services:
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
       TRADING_DIRECTIVE_WORKER_POLL_SECONDS: ${TRADING_DIRECTIVE_WORKER_POLL_SECONDS:-1.0}
       TRADING_DIRECTIVE_WORKER_BATCH_SIZE: ${TRADING_DIRECTIVE_WORKER_BATCH_SIZE:-100}
+      # 이 값이 없으면 워커만 코드 기본값 10초를 쓴다 - 실제로 바스켓을 산출·집행하는
+      # 서비스가 admission(30초)보다 빡빡한 예산으로 돌아, 같은 시세로 admission은
+      # 통과한 주문이 워커에서 QUOTE_STALE로 죽었다(2026-09-02). 두 경로가 한 값을 쓴다.
+      TRADING_MARKET_QUOTE_MAX_AGE_SECONDS: ${TRADING_MARKET_QUOTE_MAX_AGE_SECONDS:-90}
       # Read-only t1101 quote fallback for admission.  The TSDB projection only
       # covers the bounded realtime subscription basket and goes stale whenever
       # the collector stalls, which failed triggered conditional rules with

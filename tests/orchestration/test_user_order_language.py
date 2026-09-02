@@ -1523,6 +1523,17 @@ _AGGREGATE_SENTENCES = [
     "보유중인 종목 전부 다 시장가 매도해줘",
     "보유종목 전량 시장가 매도",
     "내 계좌 주식 모두 시장가로 팔아줘",
+    # 조사는 명사 뒤 어디에나 붙는다. 슬롯을 일반화하기 전에는 조사 하나
+    # 차이로 같은 지시가 CLARIFY 됐다(2026-09-02).
+    "보유중인 종목을 전량 시장가 매도해줘",
+    "보유중인 종목은 전량 시장가 매도해줘",
+    "보유 종목도 전량 매도해줘",
+    "내 계좌의 주식을 전부 시장가로 팔아줘",
+    "계좌에서 보유중인 종목을 모두 시장가 매도해주세요",
+    "보유중인 종목 전량을 시장가 매도해줘",
+    "내 계좌 주식 전부를 시장가로 팔아주세요",
+    "미체결 주문을 전부 취소해줘",
+    "대기 중인 주문은 모두 철회해줘",
 ]
 
 
@@ -1609,6 +1620,8 @@ _SELL_POSITION_SENTENCES = [
     "보유중인 삼성전자를 전량 매도해줘",
     "내 계좌 LG전자 모두 팔아줘",
     "005930 전량 시장가 매도해줘",
+    "보유중인 삼성전자를 전량 시장가 매도해줘",
+    "보유중인 현대로템을 전량 매도해줘",
 ]
 
 
@@ -1751,3 +1764,140 @@ def test_sell_position_instrument_mention_must_match_the_source() -> None:
     result = verify_order_candidate(raw, payload)
     assert isinstance(result, OrderClarification)
     assert OrderReasonCode.CANDIDATE_MISMATCH in result.reason_codes
+
+
+# 조사 슬롯 일반화(2026-09-02)의 인수 조건.  이 열 문장은 "조사가 붙어도 같은
+# 지시"라는 규칙이 실제로 성립하는지를 결정적 빠른 경로 전체로 확인한다.
+# 사람이 실제로 치는 문장이므로, 문법을 손볼 때 이 목록이 먼저 깨져야 한다.
+_PARTICLE_PROBE_SENTENCES = [
+    ("보유중인 종목을 전량 시장가 매도해줘", DirectiveAction.SELL_ALL, None),
+    ("보유중인 종목은 전량 시장가 매도해줘", DirectiveAction.SELL_ALL, None),
+    ("보유 종목도 전량 매도해줘", DirectiveAction.SELL_ALL, None),
+    ("내 계좌의 주식을 전부 시장가로 팔아줘", DirectiveAction.SELL_ALL, None),
+    ("계좌에서 보유중인 종목을 모두 시장가 매도해주세요", DirectiveAction.SELL_ALL, None),
+    ("보유중인 종목 전량을 시장가 매도해줘", DirectiveAction.SELL_ALL, None),
+    ("내 계좌 주식 전부를 시장가로 팔아주세요", DirectiveAction.SELL_ALL, None),
+    ("미체결 주문을 전부 취소해줘", DirectiveAction.CANCEL_ALL, None),
+    ("대기 중인 주문은 모두 철회해줘", DirectiveAction.CANCEL_ALL, None),
+    (
+        "보유중인 삼성전자를 전량 시장가 매도해줘",
+        DirectiveAction.SELL_POSITION,
+        "삼성전자",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_action", "expected_mention"), _PARTICLE_PROBE_SENTENCES
+)
+def test_particle_slot_accepts_every_designated_probe_sentence(
+    raw: str,
+    expected_action: DirectiveAction,
+    expected_mention: str | None,
+) -> None:
+    candidate = deterministic_order_candidate(raw)
+    assert candidate is not None, f"{raw!r}: 결정적 후보를 만들지 못했다"
+    assert candidate.decision is CandidateDecision.EXECUTE, (
+        f"{raw!r}: {candidate.decision} {candidate.reason_codes}"
+    )
+    result = verify_order_candidate(raw, candidate)
+    assert isinstance(result, VerifiedPaperDirective), (
+        f"{raw!r} -> {getattr(result, 'reason_codes', result)}"
+    )
+    assert result.action is expected_action
+    if expected_mention is None:
+        return
+    assert result.payload is not None
+    # 조사는 종목명이 아니다. 스팬이 조사를 삼키면 카탈로그 조회가 빗나간다.
+    assert result.payload.instrument_mention == expected_mention
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # 조사를 허용해도 부정·질문·조회·미지원 가격 문장은 그대로 막혀야 한다.
+        "보유중인 종목을 전량 매도하지 마",
+        "보유중인 종목을 전량 매도할까요?",
+        "보유중인 종목을 전량 매도해도 돼?",
+        "보유중인 종목의 수량을 알려줘",
+        "보유중인 종목을 전량 매도한 내역 보여줘",
+        "실계좌의 종목을 전량 시장가 매도해줘",
+        "보유중인 종목을 전량 지정가 매도해줘",
+        "보유중인 종목을 전량 70000원에 매도해줘",
+        "보유중인 종목을 전량 매도하고 현금을 인출해줘",
+    ],
+)
+def test_particle_slot_does_not_widen_the_executable_grammar(raw: str) -> None:
+    candidate = deterministic_order_candidate(raw)
+    if candidate is None:
+        return
+    if candidate.decision is not CandidateDecision.EXECUTE:
+        return
+    result = verify_order_candidate(raw, candidate)
+    assert not isinstance(result, VerifiedPaperDirective), (
+        f"{raw!r}가 실행 가능한 지시로 통과했다"
+    )
+
+
+def test_particle_is_never_part_of_the_evidence_span() -> None:
+    """조사는 문장을 통과시킬 뿐 증거 스팬에는 들어가지 않는다."""
+
+    from orchestration.user_order_language import _aggregate_match
+
+    raw = "보유중인 종목 전량을 시장가 매도해줘"
+    action, action_match, scope_match = _aggregate_match(raw)
+    assert action is DirectiveAction.SELL_ALL
+    assert scope_match.group(0) == "전량"
+    assert action_match.group(0) == "매도해줘"
+
+
+# 조사·복수 표지 슬롯 일반화(2026-09-02)를 고정하는 10개 지정 질의.  같은 지시를
+# 한국어가 실제로 쓰는 형태들이다: 조사 없음/있음, 복수 "들", 조사가 종목 명사에
+# 붙는 경우와 수량 부사에 붙는 경우, 세 가지 action 전부.  이 목록이 통과하는데
+# `_AGGREGATE_SENTENCES`가 깨지면 슬롯이 조사를 훔친 것이고, 반대면 슬롯이 빠진
+# 것이다 - 그래서 두 목록을 함께 둔다.
+_PARTICLE_SENTENCES = [
+    ("보유중인 종목을 전량 시장가 매도해줘", DirectiveAction.SELL_ALL),
+    ("보유중인 종목은 전량 매도해줘", DirectiveAction.SELL_ALL),
+    ("보유 중인 주식을 전부 시장가로 팔아줘", DirectiveAction.SELL_ALL),
+    ("내 계좌의 종목들을 전량 시장가 매도해줘", DirectiveAction.SELL_ALL),
+    ("계좌에 있는 주식들은 모두 시장가 매도해 주세요", DirectiveAction.SELL_ALL),
+    ("보유종목을 전량 매도해", DirectiveAction.SELL_ALL),
+    ("보유중인 종목 전량을 시장가 매도해줘", DirectiveAction.SELL_ALL),
+    ("미체결 주문을 전량 취소해줘", DirectiveAction.CANCEL_ALL),
+    ("대기 중인 주문들을 모두 철회해 주세요", DirectiveAction.CANCEL_ALL),
+    ("보유중인 삼성전자를 전량 시장가 매도해줘", DirectiveAction.SELL_POSITION),
+]
+
+
+@pytest.mark.parametrize("raw, action", _PARTICLE_SENTENCES)
+def test_particle_and_plural_slots_accept_every_designated_sentence(
+    raw: str, action: DirectiveAction
+) -> None:
+    if action is DirectiveAction.SELL_POSITION:
+        # 결정적 fast path에는 아직 SELL_POSITION 후보 빌더가 없다. 문장 게이트와
+        # 검증기는 이미 이 action을 온전히 지원하므로 그 두 계층으로 확인한다.
+        test_single_holding_liquidation_verifies_for_any_valid_span(raw)
+        return
+    candidate = deterministic_order_candidate(raw)
+    assert candidate is not None, f"{raw!r} 후보를 만들지 못했다"
+    result = verify_order_candidate(raw, candidate)
+    assert isinstance(result, VerifiedPaperDirective), (
+        f"{raw!r} -> {getattr(result, 'reason_codes', result)}"
+    )
+    assert result.action is action
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # 조사 슬롯은 뜻이 정해진 낱말을 종목명으로 흘려보내면 안 된다.
+        "시장가를 전량 매도해줘",
+        "지정가를 전량 매도해줘",
+        "시장가들을 전량 매도해줘",
+    ],
+)
+def test_order_type_marker_never_becomes_an_instrument(raw: str) -> None:
+    from orchestration.user_order_language import _sell_position_match
+
+    assert _sell_position_match(raw) is None

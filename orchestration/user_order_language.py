@@ -190,9 +190,14 @@ _BUY_VERB = (
     r"구매(?:해\s*줘|해줘|해주세요|하세요|해)?|"
     r"사\s*줘|사줘|사주세요|사라|사자|사)"
 )
+# 문장 게이트의 꼬리 `(?:\s*(?:주세요|줘))?`가 "팔아주세요"를 받아주는 동안
+# 이 어휘에는 그 형태가 없었다.  게이트는 문장을 통과시키는데 스팬 스캐너
+# (`_AGGREGATE_SELL_RE`)가 동사를 못 찾아 일괄매도 전체가 조용히 CLARIFY 됐다
+# (2026-09-02).  "매도해주세요"는 이미 있었으므로 "팔아주세요"만 비어 있던
+# 자리다.  긴 형태가 앞에 와야 `팔아`가 먼저 잡고 경계에서 탈락하지 않는다.
 _SELL_VERB = (
     r"(?:매도(?:해\s*줘|해줘|해주세요|하세요|해|하자|할게)?|"
-    r"팔아\s*줘|팔아줘|팔아|파세요|팔자)"
+    r"팔아\s*주세요|팔아\s*줘|팔아줘|팔아|파세요|팔자)"
 )
 _CANCEL_VERB = (
     r"(?:취소(?:해\s*줘|해줘|해주세요|하세요|해|하자)?|"
@@ -200,6 +205,57 @@ _CANCEL_VERB = (
 )
 _WORD_LEFT = r"(?<![가-힣A-Za-z0-9])"
 _WORD_RIGHT = r"(?![가-힣A-Za-z0-9])"
+
+# 한국어 명사 뒤에는 조사가 자유롭게 붙는다 - "종목 전량"과 "종목을 전량"은 같은
+# 지시다.  슬롯마다 조사 목록을 손으로 적어두면 하나를 늘릴 때 나머지가 조용히
+# 뒤처진다: 실제로 계좌 슬롯만 `(?:에|의|에서)?`를 갖고 종목 슬롯은 아무 조사도
+# 못 받아서, 조사 하나 차이로 같은 문장이 CLARIFY 됐다(2026-09-02).  조사는 여기
+# 한 곳에서만 정의하고 모든 명사 슬롯이 `particled()`로 그것을 받는다.
+#
+# 교대는 첫 성공을 택하므로 긴 형태가 앞에 와야 한다 - "에서"가 "에"보다 뒤에
+# 있으면 "계좌에서"가 "계좌에" + 잔여 "서"로 쪼개져 문장 전체가 탈락한다.
+# 접속조사(과/와/랑)는 일부러 뺐다: 바스켓 문법이 그 자리를 소유한다.
+NOUN_PARTICLES = (
+    "에서",
+    "에게",
+    "으로",
+    "까지",
+    "부터",
+    "조차",
+    "마저",
+    "이나",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "도",
+    "만",
+    "의",
+    "에",
+    "로",
+    "나",
+)
+_NOUN_PARTICLE = "(?:" + "|".join(NOUN_PARTICLES) + ")"
+# 조사를 **실제로 소비했을 때만** 단어 경계를 요구한다.  경계를 무조건 붙이면
+# 지금까지 통과하던 무공백 표기("보유종목전량매도")가 소리 없이 탈락하므로, 이
+# 슬롯은 기존 문법에 대해 순수 additive여야 한다.  경계가 조사에 붙어 있는 덕에
+# 조사가 다음 낱말의 첫 글자를 훔칠 수도 없다("현대로템"의 "로"는 조사가 아니다).
+PARTICLE_SUFFIX = rf"(?:{_NOUN_PARTICLE}{_WORD_RIGHT})?"
+# 복수 표지 "들"은 조사와 같은 자리에서 같은 이유로 무시된다 - "종목들을 전량"과
+# "종목을 전량"은 한 글자 차이로 같은 지시다.  조사만 일반화하고 이것을 빼두면
+# 셀 수 있는 명사에서 정확히 같은 종류의 구멍이 다시 열린다(2026-09-02).  "들"은
+# 조사 **앞**에만 설 수 있으므로 순서가 고정이고, 셀 수 없는 슬롯(시장가·지정가·
+# 전량 같은 수량 부사)은 이것을 받지 않는다 - "시장가들"은 문장이 아니다.
+_PLURAL_SUFFIX = r"(?:들)?"
+
+
+def particled(slot: str, *, plural: bool = False) -> str:
+    """Allow any Korean particle - and for count nouns 들 - to trail one slot."""
+
+    return slot + (_PLURAL_SUFFIX if plural else "") + PARTICLE_SUFFIX
+
 
 _BUY_RE = re.compile(_WORD_LEFT + _BUY_VERB + _WORD_RIGHT)
 _SELL_RE = re.compile(_WORD_LEFT + _SELL_VERB + _WORD_RIGHT)
@@ -215,10 +271,10 @@ _MALFORMED_ARABIC_QUANTITY_RE = re.compile(
 )
 
 _MARKET_RE = re.compile(
-    r"(?<![가-힣A-Za-z0-9])시장가(?:로|에)?(?![가-힣A-Za-z0-9])"
+    _WORD_LEFT + particled("시장가") + _WORD_RIGHT
 )
 _LIMIT_MARKER_RE = re.compile(
-    r"(?<![가-힣A-Za-z0-9])지정가(?:는|로|에)?(?![가-힣A-Za-z0-9])"
+    _WORD_LEFT + particled("지정가") + _WORD_RIGHT
 )
 _WON_AMOUNT_RE = re.compile(
     rf"(?<![가-힣A-Za-z0-9,])(?P<token>{_INTEGER_TOKEN})\s*"
@@ -250,9 +306,12 @@ _AGGREGATE_SCOPE_PHRASE = (
     + rf"(?:\s*{_WORD_LEFT}{_AGGREGATE_SCOPE_WORD}){{0,2}}"
 )
 
+# 문장 게이트용 슬롯. 스팬 증거는 조사를 포함하지 않아야 하므로 스캐너
+# (`_AGGREGATE_SCOPE_RE`)는 조사를 **전방탐색으로만** 보고 그룹 밖에 남긴다.
+_AGGREGATE_SCOPE_SLOT = particled(_AGGREGATE_SCOPE_PHRASE)
 _AGGREGATE_SCOPE_RE = re.compile(
     _WORD_LEFT + _AGGREGATE_SCOPE_PHRASE
-    + rf"(?:{_WORD_RIGHT}|{_BEFORE_AGGREGATE_VERB})"
+    + rf"(?:{_WORD_RIGHT}|(?={_NOUN_PARTICLE}{_WORD_RIGHT})|{_BEFORE_AGGREGATE_VERB})"
 )
 _AGGREGATE_SELL_RE = re.compile(
     rf"(?:{_WORD_LEFT}|{_AFTER_AGGREGATE_SCOPE}){_SELL_VERB}{_WORD_RIGHT}"
@@ -262,14 +321,14 @@ _AGGREGATE_CANCEL_RE = re.compile(
 )
 _SELL_ALL_RE = re.compile(
     rf"^\s*(?:(?:내|현재)\s*)?"
-    rf"(?:(?:보유\s*)?계좌(?:에|의|에서)?\s*)?"
+    rf"(?:(?:보유\s*)?{particled('계좌', plural=True)}\s*)?"
     rf"(?:(?:보유(?:한|\s*중인)?|있는)\s*)?"
-    rf"(?:(?:종목|주식)\s*)?"
+    rf"(?:{particled('(?:종목|주식)', plural=True)}\s*)?"
     # SELL_ALL is always a MARKET liquidation, so an explicit 시장가 marker
     # only restates what the action already means and must not push the
     # sentence out of the grammar ("보유종목 전량 시장가 매도해줘" clarified
     # before, 2026-08-31).  지정가 stays out: a limit sell-all is unsupported.
-    rf"{_AGGREGATE_SCOPE_PHRASE}\s*(?:시장가(?:로|에)?\s*)?{_SELL_VERB}"
+    rf"{_AGGREGATE_SCOPE_SLOT}\s*(?:{particled('시장가')}\s*)?{_SELL_VERB}"
     rf"(?:\s*(?:주세요|줘))?[.!]*\s*$"
 )
 # "보유중인 한온시스템 전부 다 시장가 매도해줘" - liquidate ONE named holding.
@@ -278,26 +337,35 @@ _SELL_ALL_RE = re.compile(
 # excluded here.  Like SELL_ALL this is MARKET-only: 지정가 stays unsupported.
 _SELL_POSITION_RE = re.compile(
     rf"^\s*(?:(?:내|현재)\s*)?"
-    rf"(?:(?:보유\s*)?계좌(?:에|의|에서)?\s*)?"
+    rf"(?:(?:보유\s*)?{particled('계좌', plural=True)}\s*)?"
     rf"(?:(?:보유(?:한|\s*중인)?|있는)\s*)?"
-    rf"(?!{_AGGREGATE_SCOPE_WORD}{_WORD_RIGHT})(?!(?:종목|주식){_WORD_RIGHT})"
+    # 조사가 붙은 "종목을"/"전량은"도 SELL_ALL의 낱말이지 종목명이 아니다.
+    # 조사를 뺀 채로만 배제하면 `_aggregate_match`가 스팬 계수에서 탈락한
+    # 문장이 여기로 흘러와 instrument="종목을"으로 실주문이 나간다.
+    rf"(?!{particled(_AGGREGATE_SCOPE_WORD)}{_WORD_RIGHT})"
+    rf"(?!{particled('(?:종목|주식)', plural=True)}{_WORD_RIGHT})"
+    # 주문 유형 표기도 종목명이 아니다.  이 슬롯만 배제 목록이 없어서
+    # "시장가를 전량 매도해줘"가 instrument="시장가"로 검증을 통과했다(HEAD
+    # 기준 재현).  카탈로그 조회에서 어차피 죽지만, 언어 계층이 뜻이 정해진
+    # 낱말을 종목명으로 넘기면 그 뒤 계층의 실패가 사용자에게는 원인 불명이 된다.
+    rf"(?!{particled('(?:시장가|지정가)', plural=True)}{_WORD_RIGHT})"
     # Lazy so a trailing particle stays out of the mention ("삼성전자를" ->
     # "삼성전자").  No 종목/주식 slot here: allowing one would let the engine
     # backtrack "보유중인 종목 ..." into instrument="중인" and place a real
     # order against a fragment of the honorific prefix.
     rf"(?P<instrument>[가-힣A-Za-z0-9][가-힣A-Za-z0-9.\-]{{0,39}}?)"
-    rf"(?:은|는|을|를)?\s*"
-    rf"{_AGGREGATE_SCOPE_PHRASE}\s*"
-    rf"(?:시장가(?:로|에)?\s*)?{_SELL_VERB}"
+    rf"{PARTICLE_SUFFIX}\s*"
+    rf"{_AGGREGATE_SCOPE_SLOT}\s*"
+    rf"(?:{particled('시장가')}\s*)?{_SELL_VERB}"
     rf"(?:\s*(?:주세요|줘))?[.!]*\s*$"
 )
 _CANCEL_ALL_RE = re.compile(
     rf"^\s*(?:(?:내|현재)\s*)?"
     rf"(?:"
-    rf"(?:(?:미체결|대기\s*중인|대기|열린)\s*)?(?:주문|오더)\s*"
-    rf"{_AGGREGATE_SCOPE_PHRASE}"
-    rf"|{_AGGREGATE_SCOPE_PHRASE}\s*"
-    rf"(?:(?:미체결|대기\s*중인|대기|열린)\s*)?(?:주문|오더)"
+    rf"(?:(?:미체결|대기\s*중인|대기|열린)\s*)?{particled('(?:주문|오더)', plural=True)}\s*"
+    rf"{_AGGREGATE_SCOPE_SLOT}"
+    rf"|{_AGGREGATE_SCOPE_SLOT}\s*"
+    rf"(?:(?:미체결|대기\s*중인|대기|열린)\s*)?{particled('(?:주문|오더)', plural=True)}"
     rf")\s*{_CANCEL_VERB}(?:\s*(?:주세요|줘))?[.!]*\s*$"
 )
 
@@ -318,13 +386,13 @@ _READ_ONLY_RE = re.compile(
 # an arbitrary sentence containing "확인" cannot cross the execution boundary.
 _HOLDINGS_PREFLIGHT_RE = re.compile(
     r"(?<![가-힣A-Za-z0-9])(?:(?:내|현재)\s*)?(?:보유\s*)?"
-    r"(?:수량|잔고)(?:을|를)?\s*(?:확인|조회)"
+    rf"(?:수량|잔고){PARTICLE_SUFFIX}\s*(?:확인|조회)"
     r"(?:하고|해서|한\s*(?:뒤|후)|\s*후)(?![가-힣A-Za-z0-9])"
 )
 _PAPER_ACCOUNT_SCOPE_RE = re.compile(
     r"(?<![가-힣A-Za-z0-9])(?:내\s*)?"
-    r"(?:paper|페이퍼|모의\s*투자|모의)\s*계좌(?:에서|에|로)?"
-    r"(?![가-힣A-Za-z0-9])",
+    rf"(?:paper|페이퍼|모의\s*투자|모의)\s*{particled('계좌', plural=True)}"
+    rf"{_WORD_RIGHT}",
     re.IGNORECASE,
 )
 _PAPER_MODE_SCOPE_RE = re.compile(
@@ -2020,6 +2088,61 @@ def _deterministic_aggregate_candidate(raw_text: str) -> HermesOrderCandidate | 
     )
 
 
+def _deterministic_sell_position_candidate(
+    raw_text: str,
+) -> HermesOrderCandidate | None:
+    """Build exact evidence for liquidating ONE named holding in full.
+
+    ``_verify_sell_position`` has always known how to check this shape, but no
+    builder ever produced it, so the deterministic fast path answered CLARIFY
+    for every single-holding liquidation - including this module's own
+    documented example (2026-09-02).  Like the aggregate builder this grants no
+    authority: the candidate is handed straight back to the verifier and
+    discarded unless that independent pass accepts it.
+    """
+
+    matched = _sell_position_match(raw_text)
+    if matched is None:
+        return None
+    sentence, action_match, scope_match = matched
+    instrument_start, instrument_end = sentence.span("instrument")
+    mention = raw_text[instrument_start:instrument_end]
+    candidate = HermesOrderCandidate(
+        raw_text_sha256=raw_text_sha256(raw_text),
+        decision=CandidateDecision.EXECUTE,
+        action=DirectiveAction.SELL_POSITION,
+        instrument_mention=mention,
+        evidence=(
+            TextEvidence(
+                field=EvidenceField.ACTION,
+                start=action_match.start(),
+                end=action_match.end(),
+                text=action_match.group(0),
+                normalized=DirectiveAction.SELL_POSITION.value,
+            ),
+            TextEvidence(
+                field=EvidenceField.AGGREGATE_SCOPE,
+                start=scope_match.start(),
+                end=scope_match.end(),
+                text=scope_match.group(0),
+                normalized="ALL",
+            ),
+            TextEvidence(
+                field=EvidenceField.INSTRUMENT,
+                start=instrument_start,
+                end=instrument_end,
+                text=mention,
+                normalized=mention,
+            ),
+        ),
+    )
+    return (
+        candidate
+        if isinstance(verify_order_candidate(raw_text, candidate), VerifiedPaperDirective)
+        else None
+    )
+
+
 def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
     """Build exact evidence for one unambiguous PAPER command without an LLM.
 
@@ -2051,6 +2174,10 @@ def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
     aggregate_candidate = _deterministic_aggregate_candidate(raw_text)
     if aggregate_candidate is not None:
         return aggregate_candidate
+
+    sell_position_candidate = _deterministic_sell_position_candidate(raw_text)
+    if sell_position_candidate is not None:
+        return sell_position_candidate
 
     basket_candidate = _deterministic_basket_candidate(raw_text)
     if basket_candidate is not None:
@@ -2240,6 +2367,9 @@ def deterministic_delayed_order_plan(raw_text: str) -> DelayedPaperOrderPlan | N
 
 __all__ = [
     "MAX_PRICE",
+    "NOUN_PARTICLES",
+    "PARTICLE_SUFFIX",
+    "particled",
     "MAX_QUANTITY",
     "MAX_TEXT_LENGTH",
     "MAX_RELATIVE_DELAY_SECONDS",

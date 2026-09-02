@@ -38,6 +38,8 @@ TR 은 (시장, 자산군, 데이터종류) 조합마다 다르다. 종목이 �
 """
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
@@ -164,7 +166,17 @@ WEBSOCKET_PATH = "/websocket"
 # 소켓 하나에 몇 건까지 붙일지. LS 는 동시 구독 상한을 문서에 적어두지 않았고
 # 재일님이 무제한이라고 확인했지만(2026-07-30), 한 소켓에 수천 건을 몰면 재접속 때
 # 복구가 오래 걸린다. 운영상 나누기 위한 값이며 벤더 제한이 아니다.
-SUBSCRIPTIONS_PER_SOCKET = 200
+#
+# 200은 100종목(체결+호가=200구독)을 정확히 소켓 **하나**에 몰아넣는 값이었고,
+# 그 소켓의 전송 처리량이 상한이 됐다: 우리 쪽은 CPU 8%에 DB 쓰기 30ms로 놀고
+# 있는데 수신이 분당 20초씩 밀리다 재접속마다 리셋되는 톱니가 나왔다
+# (2026-09-02 실측: event_time -> received_at 평균 36초·최대 277초). 소비자가
+# 놀고 있는데 데이터가 늦게 온다는 건 큐가 우리 쪽이 아니라 소켓 저쪽에 있다는
+# 뜻이라, 구독을 여러 소켓으로 나눠 큐를 분산한다. 환경변수로 연 이유는 종목
+# 수가 바뀌면 적정값도 바뀌기 때문이다.
+SUBSCRIPTIONS_PER_SOCKET = max(
+    1, int(os.environ.get("LS_WS_SUBSCRIPTIONS_PER_SOCKET") or 50)
+)
 
 
 class ScopeStatus(StrEnum):

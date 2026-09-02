@@ -33,14 +33,29 @@ MAX_UNIVERSE_MEMBERS = 20
 _SYMBOL_RE = re.compile(r"^[0-9A-Z]{6}$")
 _NAME_RE = re.compile(r"^[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,72}$")
 
-# "시가총액 상위" / "시총 상위" / "시가총액 기준 상위". The ranking word must be
+# "시가총액 상위" / "시총 상위" / "KRX 시가총액 기준 상위". This order lane
+# is backed by the KRX ranking snapshot, so an omitted venue is canonically KRX;
+# it is not a request for a global or US ranking. The ranking word must still be
 # present: a bare "상위 10종목" names no metric and stays ambiguous.
 _UNIVERSE_RE = re.compile(
+    r"(?:(?:krx|한국\s*거래소)\s*)?"
     r"(?:시가\s*총액|시총)\s*(?:기준\s*)?(?:상위|top)(?![가-힣A-Za-z0-9])",
     re.IGNORECASE,
 )
+# A named foreign/global venue is not an omitted venue. Refuse it instead of
+# finding the shorter ``시가총액 상위`` substring and silently rebinding it to
+# KRX. This remains a scope guard around the same parser, not a second parser.
+_NON_KRX_UNIVERSE_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])"
+    r"(?:미국|해외|글로벌|세계|일본|중국|홍콩|유럽|"
+    r"nasdaq|nyse|amex|나스닥|뉴욕\s*증권\s*거래소|홍콩\s*거래소)"
+    r"(?:\s*(?:주식|증권))?\s*(?:시장(?:의|에서)?\s*)?"
+    r"(?=(?:시가\s*총액|시총))",
+    re.IGNORECASE,
+)
 _TOP_N_RE = re.compile(
-    r"(?<![0-9])(?P<n>[1-9][0-9]?)\s*(?:개\s*)?종목(?![가-힣A-Za-z0-9])"
+    r"(?<![0-9])(?P<n>[1-9][0-9]?)\s*(?:개\s*)?종목"
+    r"(?:을|를|은|는)?(?![가-힣A-Za-z0-9])"
 )
 # Same shape as the basket grammar's "N만원씩" so an expanded sentence lands on
 # the allocation form that already exists downstream.
@@ -64,6 +79,7 @@ _QUANTITY_RE = re.compile(
 _LIMIT_RE = re.compile(r"(?<![가-힣A-Za-z0-9])지정가(?![가-힣A-Za-z0-9])")
 
 RANKING_KIND = "market_cap"
+MARKET_SCOPE = "KRX"
 
 
 @dataclass(frozen=True)
@@ -73,13 +89,18 @@ class DynamicUniversePlan:
     ranking_kind: str
     top_n: int
     notional_krw: int
+    market_scope: str = MARKET_SCOPE
 
 
 def parse_dynamic_universe_order(raw_text: str) -> DynamicUniversePlan | None:
     """Recognise "시가총액 상위 N종목 M만원씩 매수", or return None."""
 
     text = " ".join(str(raw_text or "").split())
-    if not text or _UNIVERSE_RE.search(text) is None:
+    if (
+        not text
+        or _NON_KRX_UNIVERSE_RE.search(text) is not None
+        or _UNIVERSE_RE.search(text) is None
+    ):
         return None
     if _SELL_RE.search(text) is not None or _LIMIT_RE.search(text) is not None:
         return None
@@ -104,7 +125,10 @@ def parse_dynamic_universe_order(raw_text: str) -> DynamicUniversePlan | None:
     if notional_krw <= 0:
         return None
     return DynamicUniversePlan(
-        ranking_kind=RANKING_KIND, top_n=top_n, notional_krw=notional_krw
+        ranking_kind=RANKING_KIND,
+        top_n=top_n,
+        notional_krw=notional_krw,
+        market_scope=MARKET_SCOPE,
     )
 
 
@@ -155,6 +179,7 @@ def expand_to_basket_instruction(
 
 __all__ = [
     "MAX_UNIVERSE_MEMBERS",
+    "MARKET_SCOPE",
     "MIN_UNIVERSE_MEMBERS",
     "RANKING_KIND",
     "DynamicUniversePlan",

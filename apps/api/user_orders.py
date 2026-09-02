@@ -29,6 +29,7 @@ from pydantic import (
 )
 from orchestration.user_order_language import (
     normalize_shared_allocation_instrument_mention,
+    particled,
     quoted_instrument_spans,
 )
 
@@ -424,20 +425,28 @@ _BASKET_MEMBER_NOTIONAL_PATTERN = re.compile(
 # Aggregate directives are deliberately full-sentence grammars.  A substring
 # such as "취소" or "전량 매도" inside a question, negation, or audit request
 # must never become an executable instruction.
+# 이 문법은 `orchestration.user_order_language`의 일괄 문법과 **같은 문장을
+# 같게 판정해야 한다**.  두 벌을 손으로 유지하다가 여기만 `시장가` 슬롯과
+# 조사 슬롯이 빠져, 컨트롤룸이 실행하는 문장을 이 경로는 거절했다
+# (2026-09-02).  조사 어휘는 그쪽 한 곳에서만 정의하고 여기서는 `particled`로
+# 받는다 - 어휘가 늘면 두 문법이 함께 늘어난다.
 _SELL_ALL_PATTERN = re.compile(
     r"^(?:(?:내|현재)\s*)?"
-    r"(?:(?:보유\s*)?계좌(?:에|의|에서)?\s*)?"
-    r"(?:(?:보유(?:한|중인)?|있는)\s*)?"
-    r"(?:(?:종목|주식)\s*)?"
-    r"(?:전량|전부|모두|전체|다)\s*"
+    rf"(?:(?:보유\s*)?{particled('계좌', plural=True)}\s*)?"
+    r"(?:(?:보유(?:한|\s*중인)?|있는)\s*)?"
+    rf"(?:{particled('(?:종목|주식)', plural=True)}\s*)?"
+    rf"{particled('(?:전량|전부|모두|전체|다)')}\s*"
+    # SELL_ALL은 본래 시장가 청산이다. 그 말을 소리 내어 한다고 문법 밖으로
+    # 밀려나면 안 된다. 지정가는 여전히 미지원이라 여기 들어오지 않는다.
+    rf"(?:{particled('시장가')}\s*)?"
     r"(?:매도(?:해\s*줘|해줘|해주세요|해|하세요|하자|할게)?|"
-    r"팔아\s*줘|팔아줘|팔아|파세요|팔자)"
+    r"팔아\s*주세요|팔아\s*줘|팔아줘|팔아|파세요|팔자)"
     r"(?:\s*(?:주세요|줘))?[.!]*$"
 )
 _CANCEL_ALL_PATTERN = re.compile(
     r"^(?:(?:내|현재)\s*)?"
-    r"(?:미체결|대기\s*중인|대기|열린)\s*(?:주문|오더)\s*"
-    r"(?:전량|전부|모두|전체|다)\s*"
+    rf"(?:미체결|대기\s*중인|대기|열린)\s*{particled('(?:주문|오더)', plural=True)}\s*"
+    rf"{particled('(?:전량|전부|모두|전체|다)')}\s*"
     r"(?:취소(?:해\s*줘|해줘|해주세요|해|하세요|하자)?|"
     r"철회(?:해\s*줘|해줘|해주세요|해|하세요|하자)?)"
     r"(?:\s*(?:주세요|줘))?[.!]*$"

@@ -338,8 +338,24 @@ def test_realtime_shards_share_one_timescale_repository_connection():
 
     assert "repository = TimescaleMarketRepository(dsn)" in source
     assert "repos = [repository]" in source
-    assert "MarketSink(repository) for _ in shards" in source
     assert "TimescaleMarketRepository(dsn) for _ in shards" not in source
+
+
+def test_realtime_shards_share_one_sink_so_batches_are_not_split():
+    """shard마다 Sink를 두면 하나뿐인 동기 커넥션에 왕복이 shard 수만큼 곱해진다.
+
+    각 Sink가 max_batch(200)를 못 채운 채 max_delay(2초)로 flush하고, flush마다
+    ticks/quotes 두 번의 왕복이 **이벤트 루프 위에서** 일어난다. 26 sockets에서는
+    그 사이 아무도 소켓을 비우지 못해 수신이 밀렸다 - 2026-09-02 실측으로
+    event_time -> received_at 평균 36초·최대 69초(DB 쓰기 자체는 0.5초)이고,
+    지연이 분당 20초씩 자라다 재접속마다 리셋되는 톱니가 나왔다.
+    """
+
+    source = Path(ls_realtime_service.__file__).read_text(encoding="utf-8")
+
+    assert "sink = MarketSink(repository)" in source
+    assert "sinks = [sink]" in source
+    assert "MarketSink(repository) for _ in shards" not in source
 
 
 def test_capture_scope_merges_active_rules_without_duplicates():

@@ -225,6 +225,9 @@ class ConditionalRuleView(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     rule_id: UUID
+    fund_id: UUID
+    book_id: UUID
+    raw_instruction: str = Field(min_length=1, max_length=4000)
     state: RuleState
     rule_version: int
     spec_sha256: str
@@ -360,6 +363,9 @@ def conditional_status_message(
 def _view(record: ConditionalRuleRecord) -> ConditionalRuleView:
     return ConditionalRuleView(
         rule_id=UUID(record.rule_id),
+        fund_id=UUID(record.fund_id),
+        book_id=UUID(record.book_id),
+        raw_instruction=record.raw_instruction,
         state=record.state,
         rule_version=record.rule_version,
         spec_sha256=record.spec_sha256,

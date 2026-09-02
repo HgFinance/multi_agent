@@ -1274,6 +1274,10 @@
         },
         {
           "method": "GET",
+          "path": "/ui/portfolio/live/signal"
+        },
+        {
+          "method": "GET",
           "path": "/ui/portfolio/ledger"
         },
         {

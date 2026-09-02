@@ -7,6 +7,7 @@ import pytest
 from apps.api.conditional_rule_language import looks_like_conditional_paper_rule
 from orchestration.ceo_request_classifier import classify_ceo_request
 from orchestration.dynamic_universe_orders import (
+    MARKET_SCOPE,
     MAX_UNIVERSE_MEMBERS,
     expand_to_basket_instruction,
     parse_dynamic_universe_order,
@@ -57,6 +58,67 @@ def test_the_rejected_sentence_becomes_a_ten_leg_basket() -> None:
     assert len(verified.payload.orders) == 10
     assert {str(item.notional_krw) for item in verified.payload.orders} == {"3000000"}
     assert {item.side.value for item in verified.payload.orders} == {"BUY"}
+
+
+def test_bare_market_cap_is_canonical_krx_market_cap() -> None:
+    """Omitting the venue is an alias for KRX, not an unscoped ranking."""
+
+    bare = parse_dynamic_universe_order(
+        "시가총액 상위 10개 종목을 300만원씩 시장가 매수"
+    )
+    explicit = parse_dynamic_universe_order(
+        "KRX 시가총액 상위 10개 종목을 300만원씩 시장가 매수"
+    )
+    korean_name = parse_dynamic_universe_order(
+        "한국거래소 시가총액 상위 10개 종목을 300만원씩 시장가 매수"
+    )
+
+    assert bare is not None
+    assert bare.market_scope == MARKET_SCOPE == "KRX"
+    assert explicit == bare
+    assert korean_name == bare
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "미국 시가총액 상위 10개 종목을 300만원씩 시장가 매수",
+        "NASDAQ 시가총액 상위 10개 종목을 300만원씩 시장가 매수",
+        "해외 주식 시장 시가총액 상위 10개 종목을 300만원씩 시장가 매수",
+    ),
+)
+def test_explicit_non_krx_scope_is_not_silently_rebound_to_krx(query: str) -> None:
+    assert parse_dynamic_universe_order(query) is None
+
+
+def test_object_particle_and_each_max_are_one_dynamic_basket_command() -> None:
+    """The exact 2026-09-02 sentence that fell through as MULTIPLE_COMMANDS.
+
+    ``10개 종목을`` is the natural object form of ``10개 종목``.  Missing the
+    particle kept the ranking from being expanded, after which the generic
+    single-order guard saw ``각각`` and treated it as a command separator.
+    """
+
+    query = (
+        "현재 KRX 시가총액 상위 10개 종목을 각각 최대 300만원씩 "
+        "PAPER 시장가로 매수해줘."
+    )
+
+    plan = parse_dynamic_universe_order(query)
+    assert plan is not None
+    assert (plan.top_n, plan.notional_krw) == (10, 3_000_000)
+    assert looks_like_conditional_paper_rule(query) is False
+    route = classify_ceo_request(query)
+    assert route.lane == "immediate_order"
+    assert route.reason_codes == ("order_grammar.dynamic_universe",)
+
+    sentence = expand_to_basket_instruction(plan, TOP_ROWS)
+    assert sentence is not None
+    candidate = deterministic_order_candidate(sentence)
+    assert candidate is not None
+    verified = verify_order_candidate(sentence, candidate)
+    assert verified.decision.value == "EXECUTE"
+    assert len(verified.payload.orders) == 10
 
 
 def test_ranking_word_is_top_not_a_conditional_trigger_typo() -> None:

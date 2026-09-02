@@ -50,6 +50,7 @@ class ConditionalRuleRecord:
     confirmed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    raw_instruction: str
     last_execution_state: str | None = None
     last_guard_code: str | None = None
     directive_id: str | None = None
@@ -108,7 +109,7 @@ class InMemoryConditionalRuleRepository:
         client_request_id: str,
         parser_source: str,
     ) -> ConditionalRuleRecord:
-        del raw_instruction, parser_source
+        del parser_source
         key = (str(spec.authority.user_id), client_request_id)
         digest = rule_fingerprint(spec)
         with self._lock:
@@ -134,6 +135,7 @@ class InMemoryConditionalRuleRepository:
                 confirmed_at=None,
                 created_at=now,
                 updated_at=now,
+                raw_instruction=raw_instruction,
                 effective_expires_at=spec.expires_at,
             )
             self._records[record.rule_id] = record
@@ -284,7 +286,7 @@ r.current_version,v.spec,v.spec_sha256,r.confirmed_at,r.created_at,r.updated_at,
   where evaluation.rule_id=r.rule_id
     and evaluation.error_code is not null
   order by evaluation.data_watermark desc,evaluation.created_at desc limit 1),
-r.expires_at
+r.expires_at,v.raw_instruction
 """
 
 
@@ -329,6 +331,7 @@ class PostgresConditionalRuleRepository:
             confirmed_at=row[9],
             created_at=row[10],
             updated_at=row[11],
+            raw_instruction=str(row[18]),
             last_execution_state=str(row[12]) if row[12] is not None else None,
             last_guard_code=str(row[13]) if row[13] is not None else None,
             directive_id=str(row[14]) if row[14] is not None else None,

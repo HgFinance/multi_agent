@@ -49,6 +49,9 @@ export type ConditionalRuleSpec = {
 
 export type ConditionalRuleView = {
   rule_id: string;
+  fund_id: string;
+  book_id: string;
+  raw_instruction: string;
   state: string;
   rule_version: number;
   spec_sha256: string;
@@ -85,7 +88,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isConditionalRule(value: unknown): value is ConditionalRuleView {
-  if (!isRecord(value) || typeof value.rule_id !== "string" || typeof value.state !== "string") {
+  if (
+    !isRecord(value) ||
+    typeof value.rule_id !== "string" ||
+    typeof value.fund_id !== "string" ||
+    typeof value.book_id !== "string" ||
+    typeof value.raw_instruction !== "string" ||
+    value.raw_instruction.trim().length === 0 ||
+    typeof value.state !== "string"
+  ) {
     return false;
   }
   const spec = value.spec;
@@ -121,6 +132,48 @@ export async function fetchConditionalRules(): Promise<ConditionalRuleView[]> {
     throw new ConditionalRuleError("조건주문 응답 계약이 올바르지 않습니다.", response.status);
   }
   return body;
+}
+
+async function transitionConditionalRule(
+  ruleId: string,
+  method: "POST" | "DELETE",
+  suffix = "",
+): Promise<ConditionalRuleView> {
+  let response: Response;
+  try {
+    response = await bffFetch(
+      `/ui/conditional-rules/${encodeURIComponent(ruleId)}${suffix}`,
+      {
+        method,
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      },
+    );
+  } catch {
+    throw new ConditionalRuleError(`BFF(${BFF})에 연결하지 못했습니다.`, 0);
+  }
+
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new ConditionalRuleError(explain(body, response.status), response.status);
+  }
+  if (!isConditionalRule(body)) {
+    throw new ConditionalRuleError("조건주문 응답 계약이 올바르지 않습니다.", response.status);
+  }
+  return body;
+}
+
+export function pauseConditionalRule(ruleId: string): Promise<ConditionalRuleView> {
+  return transitionConditionalRule(ruleId, "POST", "/pause");
+}
+
+export function resumeConditionalRule(ruleId: string): Promise<ConditionalRuleView> {
+  return transitionConditionalRule(ruleId, "POST", "/resume");
+}
+
+/** 감사 레코드는 보존하고 실행 가능한 규칙 상태만 CANCELLED로 전환한다. */
+export function cancelConditionalRule(ruleId: string): Promise<ConditionalRuleView> {
+  return transitionConditionalRule(ruleId, "DELETE");
 }
 
 const FIELD_LABELS: Record<string, string> = {

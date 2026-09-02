@@ -28,6 +28,7 @@ DB는 쓰지 않는다. 저장(`repository.py`)과 실 DB 왕복은 각 모듈 �
 """
 from __future__ import annotations
 
+import inspect
 import sys
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -141,6 +142,16 @@ class AccountingCloseLoopTest(unittest.TestCase):
         before = len(self.ledger.journals)
         consume_fill(self.ledger, self.fill(Side.BUY))
         self.assertEqual(len(self.ledger.journals), before, "같은 체결이 두 번 분개됐다")
+
+    def test_recovered_fills_use_broker_time_not_discovery_order(self) -> None:
+        source = inspect.getsource(fill_consumer_module.pending_fill_events)
+        normalized = " ".join(source.split()).lower()
+
+        self.assertIn(
+            "order by delivered.event_time, delivered.outbox_id",
+            normalized,
+        )
+        self.assertNotIn("order by delivered.outbox_id", normalized)
 
     # -- 2. Mark 없으면 NAV를 만들지 않는다 (fail-closed) ---------------------
 

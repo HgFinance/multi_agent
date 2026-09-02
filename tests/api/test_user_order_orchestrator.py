@@ -669,6 +669,26 @@ def test_priority_wait_is_reported_as_pending_not_rejected(
     assert "자동 재시도하지 않습니다" not in message
 
 
+def test_quote_delay_is_reported_as_pending_without_failure_wording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    response = _directive_response(
+        context.record,
+        state=DirectiveState.RECEIVED,
+        error_code="TRADING_MARKET_QUOTE_PENDING",
+    )
+
+    message = orchestrator._directive_user_message(
+        record=context.record, response=response
+    )
+
+    assert message.startswith("PAPER 주문 대기 중:")
+    assert "최신 KRX 시세 확보 후 동일 지시로 자동 재시도" in message
+    assert "주문 실패" not in message
+    assert "추가 주문은 자동으로 제출하지 않았습니다" not in message
+
+
 def test_changed_interpretation_replay_conflicts_even_after_directive_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

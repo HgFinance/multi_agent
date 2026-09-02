@@ -166,7 +166,14 @@ def pending_fill_events(repo: LedgerRepository, fund_id: UUID, book_id: UUID) ->
                    and c.event_id is null
                    and directive.fund_id=%s and directive.book_id=%s
               ) delivered
-             order by delivered.outbox_id
+             -- Recovery can discover an older broker fill after a newer one
+             -- has already been relayed. outbox_id is discovery order, not
+             -- economic order; consuming a recovered SELL before its earlier
+             -- BUY makes the position projection fail forever and prevents
+             -- either envelope from being acknowledged. The immutable broker
+             -- event_time is canonical. outbox_id remains a deterministic
+             -- tie-breaker for fills with the same timestamp.
+             order by delivered.event_time, delivered.outbox_id
             """,
             (
                 CONSUMER, FILL_EVENT, fund_id, book_id,

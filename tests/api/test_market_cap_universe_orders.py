@@ -33,7 +33,10 @@ TOP_ROWS = [
     {"symbol": "105560", "name": "KB금융"},
     {"symbol": "329180", "name": "HD현대중공업"},
 ]
-QUERY = "현재 기준 시가총액 상위 10종목 300만원씩 매수해줘"
+QUERY = (
+    "현재 KRX 시가총액 상위 10개 종목을 각각 최대 300만원씩 "
+    "PAPER 시장가로 매수해줘."
+)
 
 
 @pytest.fixture(autouse=True)

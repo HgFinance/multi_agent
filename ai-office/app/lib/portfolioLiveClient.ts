@@ -12,6 +12,7 @@
  */
 
 import { BFF, bffFetch } from "./bffClient";
+import { subscribeBffSse } from "./sseClient";
 
 /** 주문 생명주기. 화면 순서도 이 순서다. */
 export const ORDER_KINDS = ["ACCEPTED", "FILLED", "AMENDED", "CANCELLED", "REJECTED"] as const;
@@ -162,6 +163,45 @@ function hasLiveShape(value: unknown): value is PortfolioLive {
     !!holdings &&
     Array.isArray(holdings.rows)
   );
+}
+
+/**
+ * FEED가 바뀌었다는 사실만 나르는 리비전. 값 자체는 화면이 쓰지 않고,
+ * 이전과 다른지만 본다 - 실제 데이터는 `fetchPortfolioLive`가 가져온다.
+ */
+export type PortfolioLiveRevision = {
+  seq: number;
+  stream_status: string;
+  holdings_as_of: string | null;
+  today_activity_as_of: string | null;
+};
+
+/**
+ * 거래 신호 구독. 주문이 접수·체결·정정·취소·거부되거나 잔고가 다시 맞춰지면
+ * 콜백이 불린다.
+ *
+ * 폴링을 대체하지 않는다. 이 채널이 끊겨도 화면은 기존 주기로 계속 갱신되고,
+ * 여기서는 지연만 사라진다. 스트림은 서버가 25초쯤에 스스로 닫고
+ * `subscribeBffSse`가 마지막 리비전을 커서로 들고 다시 붙으므로, 아무 일도
+ * 없는 계좌는 재연결해도 콜백이 불리지 않는다.
+ */
+export function subscribePortfolioLiveRevision(
+  onRevision: (revision: PortfolioLiveRevision) => void,
+): () => void {
+  return subscribeBffSse({
+    path: (cursor) =>
+      cursor
+        ? `/ui/portfolio/live/signal?after=${encodeURIComponent(cursor)}`
+        : "/ui/portfolio/live/signal",
+    onEvent: (event) => {
+      if (event.event !== "revision") return;
+      try {
+        onRevision(JSON.parse(event.data) as PortfolioLiveRevision);
+      } catch {
+        // 깨진 프레임 하나가 구독을 끊게 두지 않는다. 다음 신호나 폴링이 받는다.
+      }
+    },
+  });
 }
 
 export async function fetchPortfolioLive(limit = 50): Promise<PortfolioLive> {

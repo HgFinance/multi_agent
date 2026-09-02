@@ -71,19 +71,32 @@ def _is_absent(value: Any) -> bool:
 
 
 def require_two_sided_book(bid: Any, ask: Any) -> None:
-    """Name a one-sided book instead of calling the whole quote invalid.
+    """Name a one-sided or empty book instead of calling the whole quote invalid.
 
     At 상한가 there is no ask and at 하한가 there is no bid, which is a normal
     market state a market order simply cannot cross.  Reporting it as
     TRADING_MARKET_QUOTE_INVALID told the user their data was broken when the
-    real answer was "nobody is selling" (2026-08-28, 001210 at 10,680).  Both
-    sides missing is a genuinely empty book and stays INVALID.
+    real answer was "nobody is selling" (2026-08-28, 001210 at 10,680).
+
+    Both sides missing used to fall through to that same INVALID path, and
+    INVALID is the one quote code with no broker fallback - so a projection row
+    that simply had not been filled in yet killed the whole basket with no
+    retry (2026-09-02: 207940 and 402340 failed two KRX top-10 baskets while
+    every other member quoted fine).  An empty *projection row* is not the same
+    fact as an empty *market*, and only the broker read can tell them apart -
+    exactly the argument the one-sided cases above already won.  So this is
+    UNAVAILABLE: the projection has nothing usable, go ask LS.  If the broker
+    also comes back empty, the fallback re-raises this same code and the caller
+    sees an honest "no quote" instead of "your data is malformed".
     """
 
     bid_absent = _is_absent(bid)
     ask_absent = _is_absent(ask)
     if bid_absent and ask_absent:
-        return
+        raise MarketDataError(
+            "TRADING_MARKET_QUOTE_UNAVAILABLE",
+            "order book has neither bid nor ask",
+        )
     if ask_absent:
         raise MarketDataError(
             "TRADING_MARKET_NO_ASK",

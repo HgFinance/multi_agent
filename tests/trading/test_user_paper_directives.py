@@ -479,6 +479,71 @@ def test_basket_preflight_advances_injected_quote_clock(monkeypatch):
     assert len(record.legs) == 3
 
 
+def test_basket_quote_clock_includes_book_guard_wait(monkeypatch):
+    """A fresh fallback quote must survive time spent waiting on the book.
+
+    ``submit`` stamps the admission time before the durable book guard.  The
+    prior basket clock started only after that guard, so a two-second lock wait
+    plus a throttled t1101 read made the just-received quote appear too far in
+    the future and surfaced as TRADING_MARKET_QUOTE_STALE.
+    """
+
+    h = Harness()
+    clock = {"seconds": 0.0}
+    monkeypatch.setattr(
+        directive_service_module.time,
+        "monotonic",
+        lambda: clock["seconds"],
+    )
+    original_book_guard = h.repository.book_guard
+
+    @contextmanager
+    def delayed_book_guard(fund_id, book_id):
+        with original_book_guard(fund_id, book_id):
+            clock["seconds"] = 3.0
+            yield
+
+    monkeypatch.setattr(h.repository, "book_guard", delayed_book_guard)
+
+    class FreshAfterWaitMarket:
+        def __init__(self):
+            self.quote_times: list[datetime] = []
+
+        def quote(self, instrument, *, now, max_age_seconds=None):
+            self.quote_times.append(now)
+            observed_at = NOW + timedelta(seconds=3)
+            if now < observed_at - timedelta(seconds=2):
+                raise MarketDataError(
+                    "TRADING_MARKET_QUOTE_STALE",
+                    "fresh quote was compared with the pre-lock clock",
+                    409,
+                )
+            return TrustedQuote(
+                str(instrument.instrument_id),
+                instrument.symbol,
+                observed_at,
+                Decimal("69900"),
+                Decimal("70000"),
+                Decimal("1000"),
+                Decimal("1000"),
+                "fresh-after-book-wait",
+            )
+
+    market = FreshAfterWaitMarket()
+    h.service = UserDirectiveService(h.repository, market)
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("1000000"))
+    request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-basket-book-wait-clock-0001",
+        payload=_quantity_basket_payload((h.instrument, "1"), side="BUY"),
+    )
+
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert market.quote_times == [NOW + timedelta(seconds=3)]
+    assert len(record.legs) == 1
+
+
 def test_same_notional_paper_basket_preflights_all_members_and_tracks_all_legs():
     h = Harness()
     second = InstrumentRef(uuid4(), "000660", Decimal(1), None, "KRW")
@@ -513,6 +578,114 @@ def test_same_notional_paper_basket_preflights_all_members_and_tracks_all_legs()
     ]
     assert all(leg.state is DirectiveLegState.FILLED for leg in record.legs)
     assert len(h.repository.state.direct_fills) == 2
+
+
+def test_exact_krx_market_cap_query_completes_ten_isolated_paper_buy_legs_e2e():
+    """Exact reported query reaches the existing in-memory PAPER fill boundary."""
+
+    from orchestration.contracts.user_paper_order import VerifiedPaperDirective
+    from orchestration.dynamic_universe_orders import (
+        expand_to_basket_instruction,
+        parse_dynamic_universe_order,
+    )
+    from orchestration.user_order_language import (
+        deterministic_order_candidate,
+        verify_order_candidate,
+    )
+
+    raw_query = (
+        "현재 KRX 시가총액 상위 10개 종목을 각각 최대 300만원씩 "
+        "PAPER 시장가로 매수해줘."
+    )
+    top_ten = (
+        ("005930", "삼성전자", Decimal("70000")),
+        ("000660", "SK하이닉스", Decimal("100000")),
+        ("005935", "삼성전자우", Decimal("150000")),
+        ("402340", "SK스퀘어", Decimal("200000")),
+        ("009150", "삼성전기", Decimal("250000")),
+        ("207940", "삼성바이오로직스", Decimal("300000")),
+        ("373220", "LG에너지솔루션", Decimal("500000")),
+        ("012450", "한화에어로스페이스", Decimal("750000")),
+        ("105560", "KB금융", Decimal("1000000")),
+        ("329180", "HD현대중공업", Decimal("1500000")),
+    )
+
+    plan = parse_dynamic_universe_order(raw_query)
+    assert plan is not None
+    assert plan.market_scope == "KRX"
+    expanded = expand_to_basket_instruction(
+        plan,
+        [{"symbol": symbol, "name": name} for symbol, name, _ in top_ten],
+    )
+    assert expanded is not None
+    candidate = deterministic_order_candidate(expanded)
+    assert candidate is not None
+    verified = verify_order_candidate(expanded, candidate)
+    assert isinstance(verified, VerifiedPaperDirective)
+    assert len(verified.payload.orders) == 10
+
+    h = Harness()
+    catalog = {h.instrument.symbol: h.instrument}
+    asks = {symbol: ask for symbol, _, ask in top_ten}
+    for symbol, _name, ask in top_ten[1:]:
+        instrument = InstrumentRef(uuid4(), symbol, Decimal(1), None, "KRW")
+        catalog[symbol] = instrument
+        h.repository.add_instrument(instrument)
+        h.market.set_quote(
+            TrustedQuote(
+                str(instrument.instrument_id),
+                symbol,
+                NOW,
+                ask - Decimal("100"),
+                ask,
+                Decimal("1000"),
+                Decimal("1000"),
+                "isolated-e2e-fixture",
+            )
+        )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("35000000"))
+    payload = {
+        "orders": [
+            {
+                "instrument_id": str(catalog[item.instrument_mention].instrument_id),
+                "symbol": item.instrument_mention,
+                "notional_krw": item.notional_krw,
+                "quantity": None,
+                "side": item.side.value,
+                "order_type": item.order_type.value,
+                "time_in_force": item.time_in_force,
+            }
+            for item in verified.payload.orders
+        ]
+    }
+    request = UserDirectiveRequest(
+        fund_id=h.fund,
+        book_id=h.book,
+        action=DirectiveAction.PLACE_BASKET,
+        instruction_ref="exact-krx-market-cap-e2e",
+        idempotency_key="exact-krx-market-cap-e2e-0001",
+        payload=payload,
+    )
+
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert record.action is DirectiveAction.PLACE_BASKET
+    assert record.state is DirectiveState.IN_PROGRESS
+    assert len(record.legs) == 10
+    assert all(leg.state is DirectiveLegState.FILLED for leg in record.legs)
+    assert all(
+        leg.requested_quantity * asks[str(leg.symbol)] <= Decimal("3000000")
+        for leg in record.legs
+    )
+    assert len(h.repository.state.direct_fills) == 10
+
+    for leg in record.legs:
+        h.repository.acknowledge_direct_fills(leg.leg_id)
+    outcome = run_directive_worker_once(h.service, batch=100, now=NOW)
+
+    assert outcome["errors"] == []
+    assert record.state is DirectiveState.COMPLETED
+    assert len(record.legs) == 10
 
 
 def test_member_notionals_preserve_each_buy_ceiling_before_basket_submission():
@@ -822,6 +995,61 @@ def test_ls_paper_adapter_uses_broker_fill_and_never_resubmits() -> None:
     )
     assert same.directive_id == record.directive_id
     assert broker.placements == 1
+    assert len(h.repository.state.direct_fills) == 1
+
+
+def test_ls_paper_read_only_status_recovers_unknown_acknowledged_leg_to_fill() -> None:
+    class Broker:
+        state = "ACKNOWLEDGED"
+
+        def __init__(self) -> None:
+            self.placements = 0
+
+        def place_order(self, **_kwargs):
+            self.placements += 1
+            return LSPaperOrderAck("7935", "090000", "005930")
+
+        def order_status(self, broker_order_id, *, order_date=None):
+            assert broker_order_id == "7935"
+            filled = Decimal(1) if self.state == "FILLED" else Decimal(0)
+            return LSPaperOrderStatus(
+                broker_order_id="7935",
+                state=self.state,
+                requested_quantity=Decimal(1),
+                filled_quantity=filled,
+                fill_price=Decimal(70000) if filled else None,
+                order_date=NOW.date(),
+            )
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=broker,  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+    request = h.request(DirectiveAction.PLACE_ORDER, key="idem-ls-paper-recover-unknown")
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+    leg = h.repository.mark_broker_leg_unknown(
+        record,
+        record.legs[0],
+        error_code="LS_PAPER_CANCEL_AMBIGUOUS",
+        error_message="cancel outcome unknown",
+    )
+    assert leg.state is DirectiveLegState.UNKNOWN
+
+    broker.state = "FILLED"
+    recovered = h.service.get_status(
+        record.directive_id,
+        _read_token(record, h.user),
+        now=NOW,
+    )
+
+    assert broker.placements == 1
+    assert recovered.legs[0].state is DirectiveLegState.FILLED
+    assert recovered.legs[0].filled_quantity == Decimal(1)
+    assert recovered.legs[0].error_code is None
     assert len(h.repository.state.direct_fills) == 1
 
 
@@ -1319,10 +1547,99 @@ def test_market_buy_requires_fresh_quote_cash_and_reserves_cost_buffer():
     h2.repository.set_cash(h2.fund, h2.book, "KRW", Decimal("100000"))
     h2.market.quotes.clear()
     request2 = h2.request(DirectiveAction.PLACE_ORDER)
-    with pytest.raises(DirectiveServiceError) as missing:
-        h2.service.submit(request2, _execute_token(request2, h2.user), now=NOW)
-    assert missing.value.code == "TRADING_MARKET_QUOTE_UNAVAILABLE"
+    waiting = h2.service.submit(
+        request2, _execute_token(request2, h2.user), now=NOW
+    )
+    assert waiting.state is DirectiveState.RECEIVED
+    assert waiting.error_code == "TRADING_MARKET_QUOTE_PENDING"
+    assert waiting.legs == []
     assert h2.repository.available_cash(h2.fund, h2.book, "KRW") == Decimal("100000")
+
+
+def test_transient_basket_quote_failure_waits_then_reuses_same_directive() -> None:
+    """No-leg quote delay is queued and resumed without a second placement."""
+
+    h = Harness()
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+
+    class RecoveringMarket:
+        available = False
+        reads = 0
+
+        def quote(self, instrument, *, now, max_age_seconds=None):
+            self.reads += 1
+            if not self.available:
+                raise MarketDataError(
+                    "TRADING_MARKET_QUOTE_UNAVAILABLE",
+                    "projection and broker read are still pending",
+                    503,
+                )
+            return h.market.quote(
+                instrument, now=now, max_age_seconds=max_age_seconds
+            )
+
+    market = RecoveringMarket()
+    h.service = UserDirectiveService(h.repository, market)
+    request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-basket-quote-wait-0001",
+        payload=_quantity_basket_payload((h.instrument, "1"), side="BUY"),
+    )
+
+    waiting = h.service.submit(
+        request, _execute_token(request, h.user), now=NOW
+    )
+
+    assert waiting.state is DirectiveState.RECEIVED
+    assert waiting.error_code == "TRADING_MARKET_QUOTE_PENDING"
+    assert waiting.legs == []
+    assert directive_service_module.is_market_quote_deferred(waiting)
+
+    first = run_directive_worker_once(h.service, batch=100, now=NOW)
+    assert first["errors"] == []
+    assert first["deferred"] == [
+        f"{waiting.directive_id}:TRADING_MARKET_QUOTE_PENDING"
+    ]
+    assert waiting.legs == []
+
+    market.available = True
+    resumed = run_directive_worker_once(h.service, batch=100, now=NOW)
+
+    assert resumed["errors"] == []
+    assert resumed["deferred"] == []
+    assert waiting.state is DirectiveState.IN_PROGRESS
+    assert waiting.error_code == "TRADING_FILL_ACCOUNTING_PENDING"
+    assert len(waiting.legs) == 1
+    assert len(h.repository.state.direct_fills) == 1
+
+
+def test_structurally_invalid_quote_still_fails_instead_of_waiting() -> None:
+    """Malformed data is permanent input failure, not a retryable delay."""
+
+    h = Harness()
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+
+    class InvalidMarket:
+        def quote(self, *_args, **_kwargs):
+            raise MarketDataError(
+                "TRADING_MARKET_QUOTE_INVALID", "best_bid is malformed", 503
+            )
+
+    h.service = UserDirectiveService(h.repository, InvalidMarket())
+    request = h.request(
+        DirectiveAction.PLACE_BASKET,
+        key="idem-basket-invalid-quote-0001",
+        payload=_quantity_basket_payload((h.instrument, "1"), side="BUY"),
+    )
+
+    with pytest.raises(DirectiveServiceError) as denied:
+        h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert denied.value.code == "TRADING_MARKET_QUOTE_INVALID"
+    record = h.repository.get(denied.value.directive_id)
+    assert record is not None
+    assert record.state is DirectiveState.FAILED
+    assert record.legs == []
 
 
 def test_cancel_all_releases_direct_reservation_and_is_actual_for_local_leg():

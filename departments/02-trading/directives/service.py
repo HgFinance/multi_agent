@@ -49,6 +49,13 @@ DEFERRED_MARKET_SESSION_CODES = frozenset(
         "TRADING_MARKET_SESSION_UNAVAILABLE",
     }
 )
+DEFERRED_MARKET_QUOTE_SOURCE_CODES = frozenset(
+    {
+        "TRADING_MARKET_QUOTE_STALE",
+        "TRADING_MARKET_QUOTE_UNAVAILABLE",
+    }
+)
+DEFERRED_MARKET_QUOTE_CODE = "TRADING_MARKET_QUOTE_PENDING"
 _MARKET_SESSION_REQUIRED_ACTIONS = frozenset(
     {
         DirectiveAction.PLACE_ORDER,
@@ -67,6 +74,40 @@ def is_market_session_deferred(record: DirectiveRecord) -> bool:
         and record.action in _MARKET_SESSION_REQUIRED_ACTIONS
         and not record.legs
         and record.error_code in DEFERRED_MARKET_SESSION_CODES
+    )
+
+
+def is_market_quote_deferred(record: DirectiveRecord) -> bool:
+    """Return whether a no-effect directive is waiting for a usable quote.
+
+    Only the synthetic PENDING code is durable. STALE/UNAVAILABLE are source
+    read outcomes and are translated to this state before leaving the service
+    boundary, so Control Room reports an active order instead of a failure.
+    """
+
+    return (
+        record.state is DirectiveState.RECEIVED
+        and record.action in _MARKET_SESSION_REQUIRED_ACTIONS
+        and not record.legs
+        and record.error_code == DEFERRED_MARKET_QUOTE_CODE
+    )
+
+
+def _is_retryable_quote_wait(
+    failure: "DirectiveServiceError", record: DirectiveRecord
+) -> bool:
+    return (
+        failure.code in DEFERRED_MARKET_QUOTE_SOURCE_CODES
+        and record.action in _MARKET_SESSION_REQUIRED_ACTIONS
+        and not record.legs
+    )
+
+
+def _elapsed_market_time(base: datetime, monotonic_started: float) -> datetime:
+    """Advance an injected wall-clock stamp across admission/lock waits."""
+
+    return base + timedelta(
+        seconds=max(0.0, time.monotonic() - monotonic_started)
     )
 
 
@@ -289,6 +330,7 @@ class UserDirectiveService:
         *,
         now: datetime | None = None,
     ) -> DirectiveRecord:
+        admission_clock_started = time.monotonic()
         current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         try:
             proof = decode_directive_proof(authorization, now=current_time.timestamp())
@@ -296,7 +338,12 @@ class UserDirectiveService:
         except Exception as exc:  # authentication/admission is fail-closed
             raise _translate(exc) from exc
 
-        return self._submit_bound(request, proof, current_time=current_time)
+        return self._submit_bound(
+            request,
+            proof,
+            current_time=current_time,
+            admission_clock_started=admission_clock_started,
+        )
 
     def submit_trusted_rule(
         self,
@@ -315,6 +362,7 @@ class UserDirectiveService:
         browser field can select the authority identifiers on this path.
         """
 
+        admission_clock_started = time.monotonic()
         current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         try:
             bind_proof(proof, request)
@@ -324,6 +372,7 @@ class UserDirectiveService:
             request,
             proof,
             current_time=current_time,
+            admission_clock_started=admission_clock_started,
             market_quote_max_age_seconds=market_quote_max_age_seconds,
             conditional_quantity_validator=conditional_quantity_validator,
         )
@@ -334,6 +383,7 @@ class UserDirectiveService:
         proof: DirectiveProof,
         *,
         current_time: datetime,
+        admission_clock_started: float,
         market_quote_max_age_seconds: float | None = None,
         conditional_quantity_validator: Callable[[InstrumentRef, TrustedQuote], None]
         | None = None,
@@ -368,18 +418,36 @@ class UserDirectiveService:
                     result = self._place(
                         record,
                         request,
-                        now=current_time,
+                        now=_elapsed_market_time(
+                            current_time, admission_clock_started
+                        ),
                         market_quote_max_age_seconds=market_quote_max_age_seconds,
                         conditional_quantity_validator=conditional_quantity_validator,
                     )
                 elif request.action is DirectiveAction.PLACE_BASKET:
-                    result = self._place_basket(record, request, now=current_time)
+                    result = self._place_basket(
+                        record,
+                        request,
+                        now=current_time,
+                        quote_clock_started=admission_clock_started,
+                    )
                 elif request.action is DirectiveAction.CANCEL_ALL:
                     result = self._cancel_all(record)
                 elif request.action is DirectiveAction.SELL_POSITION:
-                    result = self._sell_position(record, request, now=current_time)
+                    result = self._sell_position(
+                        record,
+                        request,
+                        now=_elapsed_market_time(
+                            current_time, admission_clock_started
+                        ),
+                    )
                 else:
-                    result = self._sell_all(record, now=current_time)
+                    result = self._sell_all(
+                        record,
+                        now=_elapsed_market_time(
+                            current_time, admission_clock_started
+                        ),
+                    )
             except Exception as exc:
                 failure = _translate(exc, record.directive_id)
                 current = self.repository.get(record.directive_id) or record
@@ -422,6 +490,29 @@ class UserDirectiveService:
                         error_message=(
                             "queued until the canonical KRX REGULAR session "
                             "is available"
+                        ),
+                    )
+                if _is_retryable_quote_wait(failure, current):
+                    # A stale/missing read before the first durable leg is an
+                    # admission delay, not evidence that the order failed.
+                    # Requeue this same directive; the worker reconstructs its
+                    # canonical payload and therefore cannot widen the request
+                    # or create a second idempotency identity. Once any leg
+                    # exists this branch is deliberately unavailable because a
+                    # broker effect may already have happened.
+                    self.repository.release_barrier(record)
+                    logger.info(
+                        "PAPER directive %s is waiting for a fresh quote (%s)",
+                        record.directive_id,
+                        failure.code,
+                    )
+                    return self.repository.set_state(
+                        record.directive_id,
+                        DirectiveState.RECEIVED,
+                        error_code=DEFERRED_MARKET_QUOTE_CODE,
+                        error_message=(
+                            "waiting for a fresh executable KRX quote; no "
+                            "PAPER order leg has been submitted"
                         ),
                     )
                 active_order_effect = any(
@@ -499,6 +590,7 @@ class UserDirectiveService:
         user proof.  It may only resume rows whose proof/admission was already
         committed by ``accept``.
         """
+        reconcile_clock_started = time.monotonic()
         current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         reconciled: list[DirectiveRecord] = []
         errors: list[str] = []
@@ -537,7 +629,13 @@ class UserDirectiveService:
                                     "payload": current.payload,
                                 }
                             )
-                            current = self._place(current, request, now=current_time)
+                            current = self._place(
+                                current,
+                                request,
+                                now=_elapsed_market_time(
+                                    current_time, reconcile_clock_started
+                                ),
+                            )
                         elif current.action is DirectiveAction.PLACE_BASKET:
                             request = UserDirectiveRequest.model_validate(
                                 {
@@ -549,7 +647,12 @@ class UserDirectiveService:
                                     "payload": current.payload,
                                 }
                             )
-                            current = self._place_basket(current, request, now=current_time)
+                            current = self._place_basket(
+                                current,
+                                request,
+                                now=current_time,
+                                quote_clock_started=reconcile_clock_started,
+                            )
                         elif current.action is DirectiveAction.CANCEL_ALL:
                             current = self._cancel_all(current)
                         elif current.action is DirectiveAction.SELL_POSITION:
@@ -564,10 +667,19 @@ class UserDirectiveService:
                                 }
                             )
                             current = self._sell_position(
-                                current, request, now=current_time
+                                current,
+                                request,
+                                now=_elapsed_market_time(
+                                    current_time, reconcile_clock_started
+                                ),
                             )
                         else:
-                            current = self._sell_all(current, now=current_time)
+                            current = self._sell_all(
+                                current,
+                                now=_elapsed_market_time(
+                                    current_time, reconcile_clock_started
+                                ),
+                            )
                     else:
                         current = self._status_locked(current, now=current_time)
                     reconciled.append(current)
@@ -604,6 +716,20 @@ class UserDirectiveService:
                             error_message=(
                                 "queued until the canonical KRX REGULAR "
                                 "session is available"
+                            ),
+                        )
+                    )
+                    continue
+                if _is_retryable_quote_wait(translated, current):
+                    self.repository.release_barrier(current)
+                    reconciled.append(
+                        self.repository.set_state(
+                            queued.directive_id,
+                            DirectiveState.RECEIVED,
+                            error_code=DEFERRED_MARKET_QUOTE_CODE,
+                            error_message=(
+                                "waiting for a fresh executable KRX quote; no "
+                                "PAPER order leg has been submitted"
                             ),
                         )
                     )
@@ -872,6 +998,26 @@ class UserDirectiveService:
                     ),
                 )
             return leg
+        if (
+            leg.state is DirectiveLegState.UNKNOWN
+            and status.state in {"ACKNOWLEDGED", "PARTIALLY_FILLED", "FILLED"}
+        ):
+            # UNKNOWN means the preceding placement/cancellation transport
+            # could not prove its result; it is not a terminal broker state.
+            # A read-only lookup by the already-durable LS order number is the
+            # authoritative reconciliation proof.  Restore the existing leg
+            # to ACKNOWLEDGED before recording a cumulative fill, otherwise
+            # the repository correctly refuses to fabricate a fill from an
+            # UNKNOWN leg and the directive can never recover.  This does not
+            # place or cancel anything and reuses the original broker IDs.
+            leg = self.repository.acknowledge_broker_leg(
+                record,
+                leg,
+                broker_order_id=broker_order_id,
+                broker_event_id=str(
+                    leg.broker_event_id or f"ls-paper:status:{raw_order_id}"
+                ),
+            )
         delta = status.filled_quantity - Decimal(leg.filled_quantity)
         if delta > 0:
             if status.fill_price is None or status.fill_price <= 0:
@@ -1299,6 +1445,7 @@ class UserDirectiveService:
         request: UserDirectiveRequest,
         *,
         now: datetime,
+        quote_clock_started: float | None = None,
     ) -> DirectiveRecord:
         """Submit a bounded PAPER basket after one complete preflight.
 
@@ -1317,7 +1464,8 @@ class UserDirectiveService:
         # A PAPER basket may need one throttled LS quote per member. Keep the
         # injected admission clock moving with that bounded preflight so a
         # freshly observed later quote is not classified as a future quote.
-        quote_clock_started = time.monotonic()
+        if quote_clock_started is None:
+            quote_clock_started = time.monotonic()
         for item in basket.orders:
             instrument = self.repository.resolve_instrument(
                 record.fund_id,
@@ -1341,7 +1489,14 @@ class UserDirectiveService:
             quote_now = now + timedelta(
                 seconds=max(0.0, time.monotonic() - quote_clock_started)
             )
-            quote = self.market_data.quote(instrument, now=quote_now)
+            try:
+                quote = self.market_data.quote(instrument, now=quote_now)
+            except MarketDataError as exc:
+                raise MarketDataError(
+                    exc.code,
+                    f"basket member {instrument.symbol}: {exc}",
+                    exc.status_code,
+                ) from exc
             if item.quantity is not None:
                 quantity = item.quantity
             else:
@@ -2104,7 +2259,9 @@ class UserDirectiveService:
 
 
 __all__ = [
+    "DEFERRED_MARKET_QUOTE_CODE",
     "DirectiveServiceError",
     "UserDirectiveService",
+    "is_market_quote_deferred",
     "require_paper_execution_mode",
 ]

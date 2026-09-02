@@ -252,7 +252,10 @@ def test_market_cap_top_ten_is_frozen_once_and_submitted_as_one_shot_basket(
 
     response = ceo.ceo_query(
         ceo.CeoAsk(
-            query="현재 기준 시가총액 상위 10종목 300만원씩 시장가로 매수해줘",
+            query=(
+                "현재 KRX 시가총액 상위 10개 종목을 각각 최대 300만원씩 "
+                "PAPER 시장가로 매수해줘."
+            ),
             request_id="request-market-cap-top-ten-1",
             fund_id=FUND_ID,
             book_id=BOOK_ID,

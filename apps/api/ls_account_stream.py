@@ -50,7 +50,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -2175,6 +2176,124 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
         "authoritative": False,
         "official_nav_source": "/accounting/v1/ledgers/{ledger_id}",
     }
+
+
+
+# --------------------------------------------------------------------------
+# 변경 신호
+# --------------------------------------------------------------------------
+
+# 화면은 3초 폴링을 그대로 유지한다. 이 채널이 대신하는 것은 **지연**뿐이다 -
+# 브로커 사건이 FEED에 닿는 순간 "바뀌었다"만 알리고, 실제 조회는 지금처럼
+# `/ui/portfolio/live`가 한다. 그래서 여기서는 TR도 DB도 부르지 않고 프로세스
+# 안의 FEED 상태만 읽는다: 연결이 몇 개가 되든 LS 호출 한도를 갉아먹지 않고,
+# 신호가 죽어도 폴링이 그대로 살아 있어 화면이 조용히 멈추지 않는다.
+PORTFOLIO_SIGNAL_SECONDS = float(os.getenv("UI_PORTFOLIO_SIGNAL_SECONDS", "25"))
+# FEED 읽기는 순수 메모리 접근이라 이 간격이 비용이 되지 않는다. 폴링 3초를
+# 대체하는 게 아니라 그 안쪽 지연을 없애는 값이다.
+PORTFOLIO_SIGNAL_POLL_SECONDS = 0.25
+PORTFOLIO_SIGNAL_HEARTBEAT_SECONDS = 2.5
+
+
+# `sync_holdings`/`sync_today_activity`는 값이 그대로여도 호출될 때마다 as_of에
+# 새 시각을 찍는다. 그래서 as_of를 리비전에 그대로 넣으면 조용한 계좌에서도
+# 브로커 재동기화 주기마다 신호가 나가고, 그건 신호가 아니라 폴링을 하나 더
+# 얹는 것이다(측정: 아무 일도 없는 4초에 3번 발화). 리비전은 **내용**으로
+# 잡는다 - 잔고와 당일 요약이 실제로 달라졌을 때만 토큰이 바뀐다.
+#
+# as_of는 버리지 않고 캐시 키로만 쓴다: 동기화가 없었으면 내용 해시를 다시
+# 계산할 이유도 없으므로, 정지 상태의 250ms 틱은 정수 비교 몇 번으로 끝난다.
+_revision_cache: tuple[tuple[Any, ...], str] | None = None
+
+
+def portfolio_revision() -> tuple[str, dict[str, Any]]:
+    """지금 화면이 보고 있어야 할 FEED 리비전.
+
+    `seq`는 접수·체결·정정·취소·거부가 하나 들어올 때마다 오른다. 토큰은 값이
+    아니라 **동일성**만 나르므로 해시로 줄여 URL 커서로 되돌려받기 좋게 한다.
+    """
+
+    global _revision_cache
+
+    payload: dict[str, Any] = {
+        "seq": FEED.seq,
+        "stream_status": FEED.status,
+        "holdings_as_of": FEED.holdings_as_of,
+        "today_activity_as_of": FEED.today_activity_as_of,
+    }
+    cache_key = (
+        FEED.seq,
+        FEED.status,
+        FEED.holdings_as_of,
+        FEED.today_activity_as_of,
+    )
+    cached = _revision_cache
+    if cached is not None and cached[0] == cache_key:
+        return cached[1], payload
+
+    token = hashlib.sha256(
+        json.dumps(
+            {
+                "seq": FEED.seq,
+                "stream_status": FEED.status,
+                "holdings": FEED.holdings,
+                "today_activity": FEED.today_activity,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+            # 잔고 행에 Decimal이 섞여도 신호 채널이 죽지 않는다.
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    _revision_cache = (cache_key, token)
+    return token, payload
+
+
+@router.get("/ui/portfolio/live/signal", operation_id="portfolio_live_signal")
+async def portfolio_live_signal(
+    after: str | None = Query(default=None, max_length=64),
+) -> StreamingResponse:
+    """거래 신호가 확인되면 알리는 짧은 SSE. 데이터는 싣지 않는다."""
+
+    if PORTFOLIO_LIVE_MODE != "fixture":
+        if not ENABLE_LS_ORDER_EVENTS:
+            raise HTTPException(
+                503,
+                "브로커 실시간 연동은 기본 비활성화 상태입니다 "
+                "(ENABLE_LS_ORDER_EVENTS=true 로 엽니다).",
+            )
+        FEED.start()
+
+    # **비동기 generator 여야 한다.** 동기 generator를 StreamingResponse에 주면
+    # Starlette가 `iterate_in_threadpool`로 감싸고, 열려 있는 화면 수만큼
+    # anyio 스레드풀 토큰을 붙잡아 다른 동기 엔드포인트를 굶긴다
+    # (`ceo_mirror_api.mirror_event_stream`에 같은 사고 기록이 있다).
+    async def generate():
+        # 클라이언트가 마지막으로 본 리비전을 그대로 돌려주면 재연결마다 같은
+        # 값을 다시 쏘지 않는다 - 25초짜리 스트림이라 이게 없으면 아무 일도
+        # 없는 계좌가 25초마다 한 번씩 헛 재조회를 하게 된다.
+        last = after
+        deadline = time.monotonic() + max(1.0, PORTFOLIO_SIGNAL_SECONDS)
+        since_heartbeat = 0.0
+        while time.monotonic() < deadline:
+            token, payload = portfolio_revision()
+            if token != last:
+                last = token
+                since_heartbeat = 0.0
+                data = json.dumps(payload, ensure_ascii=False)
+                yield f"id: {token}\nevent: revision\ndata: {data}\n\n"
+            else:
+                since_heartbeat += PORTFOLIO_SIGNAL_POLL_SECONDS
+                if since_heartbeat >= PORTFOLIO_SIGNAL_HEARTBEAT_SECONDS:
+                    since_heartbeat = 0.0
+                    yield ": heartbeat\n\n"
+            await asyncio.sleep(PORTFOLIO_SIGNAL_POLL_SECONDS)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 _ledger_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}

@@ -763,38 +763,54 @@ class LSPaperBroker:
                 ):
                     return cached[1]
             try:
-                body = self._post_tr(
-                    "CSPAQ13700",
-                    {
-                        "CSPAQ13700InBlock1": {
-                            "OrdMktCode": "00",
-                            "BnsTpCode": "0",
-                            "IsuNo": "",
-                            "ExecYn": "0",
-                            "OrdDt": target_date.strftime("%Y%m%d"),
-                            "SrtOrdNo2": 0,
-                            "BkseqTpCode": "0",
-                            "OrdPtnCode": "00",
-                        }
-                    },
-                    path="/stock/accno",
-                )
-                raw_rows = body.get("CSPAQ13700OutBlock3")
-                if isinstance(raw_rows, dict):
-                    raw_rows = [raw_rows]
-                if not isinstance(raw_rows, list) or any(
-                    not isinstance(row, dict) for row in raw_rows
-                ):
-                    raise LSPaperBrokerError(
-                        "LS_PAPER_RESPONSE_INVALID", "LS order history rows are invalid"
+                try:
+                    body = self._post_tr(
+                        "CSPAQ13700",
+                        {
+                            "CSPAQ13700InBlock1": {
+                                "OrdMktCode": "00",
+                                "BnsTpCode": "0",
+                                "IsuNo": "",
+                                "ExecYn": "0",
+                                "OrdDt": target_date.strftime("%Y%m%d"),
+                                "SrtOrdNo2": 0,
+                                "BkseqTpCode": "0",
+                                "OrdPtnCode": "00",
+                            }
+                        },
+                        path="/stock/accno",
                     )
+                    raw_rows = body.get("CSPAQ13700OutBlock3")
+                    if isinstance(raw_rows, dict):
+                        raw_rows = [raw_rows]
+                    if not isinstance(raw_rows, list) or any(
+                        not isinstance(row, dict) for row in raw_rows
+                    ):
+                        raise LSPaperBrokerError(
+                            "LS_PAPER_RESPONSE_INVALID",
+                            "LS order history rows are invalid",
+                        )
+                    rows = tuple(dict(row) for row in raw_rows)
+                except LSPaperBrokerError as exc:
+                    # LS PAPER currently answers CSPAQ13700 with 00704 even
+                    # for same-session orders that t0425 returns immediately.
+                    # t0425 is current-day only, so it is a safe fallback only
+                    # when the requested trading day is today in KST.  It is
+                    # read-only and preserves the broker order number, fill
+                    # quantity, and fill price required for exact ledger
+                    # reconciliation; no placement or cancellation is retried.
+                    if (
+                        exc.code != "LS_PAPER_QUERY_REJECTED"
+                        or target_date != datetime.now(KST).date()
+                    ):
+                        raise
+                    rows = self._today_execution_status_rows()
             except LSPaperBrokerError as exc:
                 with self._history_cache_lock:
                     self._history_error = (exc.code, str(exc), exc.ambiguous)
                     self._history_error_at = time.monotonic()
                 raise
 
-            rows = tuple(dict(row) for row in raw_rows)
             with self._history_cache_lock:
                 self._history_error = None
                 self._history_error_at = 0.0
@@ -807,6 +823,60 @@ class LSPaperBroker:
                     ]:
                         self._history_cache.pop(stale, None)
                 return rows
+
+    def _today_execution_status_rows(self) -> tuple[dict[str, Any], ...]:
+        """Normalize read-only t0425 rows into the order-history contract."""
+
+        body = self._post_tr(
+            "t0425",
+            {
+                "t0425InBlock": {
+                    "expcode": "",
+                    "chegb": "0",
+                    "medosu": "0",
+                    "sortgb": "1",
+                    "cts_ordno": "",
+                }
+            },
+            path="/stock/accno",
+        )
+        raw_rows = body.get("t0425OutBlock1")
+        if isinstance(raw_rows, dict):
+            raw_rows = [raw_rows]
+        if not isinstance(raw_rows, list) or any(
+            not isinstance(row, dict) for row in raw_rows
+        ):
+            raise LSPaperBrokerError(
+                "LS_PAPER_RESPONSE_INVALID",
+                "LS execution status rows are invalid",
+            )
+
+        normalized: list[dict[str, Any]] = []
+        for row in raw_rows:
+            side = str(row.get("medosu") or "").strip()
+            if side == "1" or "매도" in side:
+                side_code = "1"
+            elif side == "2" or "매수" in side:
+                side_code = "2"
+            else:
+                side_code = side
+            normalized.append(
+                {
+                    "OrdNo": row.get("ordno"),
+                    "OrgOrdNo": row.get("orgordno"),
+                    "OrdTime": row.get("ordtime"),
+                    "LastExecTime": row.get("ordtime"),
+                    "IsuNo": row.get("expcode"),
+                    "BnsTpCode": side_code,
+                    "OrdQty": row.get("qty"),
+                    "OrdPrc": row.get("price"),
+                    "AllExecQty": row.get("cheqty"),
+                    "ExecPrc": row.get("cheprice"),
+                    "OrdTrxPtnNm": row.get("status"),
+                    "OrdPtnNm": row.get("ordgb"),
+                }
+            )
+        return tuple(normalized)
 
     def cancel_order(
         self,

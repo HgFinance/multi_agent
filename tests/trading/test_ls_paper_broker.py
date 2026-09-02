@@ -425,6 +425,94 @@ def test_order_status_accepts_ls_account_query_success_code_and_caches_snapshot(
     assert history_requests == 1
 
 
+def test_current_day_order_status_falls_back_to_t0425_and_caches_snapshot() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(
+                200, json={"access_token": "token", "expires_in": 3600}
+            )
+        tr_code = request.headers["tr_cd"]
+        requests.append(tr_code)
+        if tr_code == "CSPAQ13700":
+            return httpx.Response(200, json={"rsp_cd": "00704"})
+        assert tr_code == "t0425"
+        assert __import__("json").loads(request.content) == {
+            "t0425InBlock": {
+                "expcode": "",
+                "chegb": "0",
+                "medosu": "0",
+                "sortgb": "1",
+                "cts_ordno": "",
+            }
+        }
+        return httpx.Response(
+            200,
+            json={
+                "rsp_cd": "00000",
+                "t0425OutBlock1": [
+                    {
+                        "ordno": 8204,
+                        "expcode": "000660",
+                        "medosu": "매도",
+                        "qty": 1,
+                        "price": 0,
+                        "cheqty": 1,
+                        "cheprice": 1650000,
+                        "ordrem": 0,
+                        "status": "체결",
+                        "orgordno": 0,
+                        "ordgb": "시장가",
+                        "ordtime": "093849",
+                    },
+                    {
+                        "ordno": 8205,
+                        "expcode": "005930",
+                        "medosu": "매수",
+                        "qty": 2,
+                        "price": 0,
+                        "cheqty": 0,
+                        "cheprice": 0,
+                        "ordrem": 2,
+                        "status": "접수",
+                        "orgordno": 0,
+                        "ordgb": "시장가",
+                        "ordtime": "093850",
+                    },
+                ],
+            },
+        )
+
+    broker = _broker(handler)
+    today = datetime.now(KST).date()
+    filled = broker.order_status("8204", order_date=today)
+    acknowledged = broker.order_status("8205", order_date=today)
+
+    assert filled is not None and filled.state == "FILLED"
+    assert filled.filled_quantity == Decimal("1")
+    assert filled.fill_price == Decimal("1650000")
+    assert acknowledged is not None and acknowledged.state == "ACKNOWLEDGED"
+    assert requests == ["CSPAQ13700", "t0425"]
+
+
+def test_prior_day_order_status_does_not_use_current_day_t0425_fallback() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token"})
+        requests.append(request.headers["tr_cd"])
+        return httpx.Response(200, json={"rsp_cd": "00704"})
+
+    broker = _broker(handler)
+    with pytest.raises(LSPaperBrokerError) as caught:
+        broker.order_status("8204", order_date=date(2026, 8, 20))
+
+    assert caught.value.code == "LS_PAPER_QUERY_REJECTED"
+    assert requests == ["CSPAQ13700"]
+
+
 def test_order_history_failure_is_memoized_for_the_rate_limit_window() -> None:
     history_requests = 0
 

@@ -401,6 +401,7 @@ def _directive_user_message(
     elif response.error_code in {
         "TRADING_HIGHER_PRIORITY_ACTIVE",
         "trading_higher_priority_directive_active",
+        "TRADING_MARKET_QUOTE_PENDING",
     }:
         headline = "PAPER 주문 대기 중"
     else:
@@ -448,6 +449,10 @@ def _directive_user_message(
         "trading_higher_priority_directive_active",
     }:
         detail_parts.append("기존 고우선순위 PAPER 주문이 정리될 때까지 제출 대기")
+    elif response.error_code == "TRADING_MARKET_QUOTE_PENDING":
+        detail_parts.append(
+            "최신 KRX 시세 확보 후 동일 지시로 자동 재시도; 제출된 주문 leg 없음"
+        )
     unknown_cancel_count = sum(
         1
         for leg in response.legs

@@ -944,6 +944,9 @@ services:
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
       LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
       LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
+      # 구독을 소켓 하나에 몰면 그 소켓의 전송 처리량이 수신 지연이 된다
+      # (2026-09-02: 100종목=200구독이 소켓 1개에 들어가 분당 20초씩 밀렸다).
+      LS_WS_SUBSCRIPTIONS_PER_SOCKET: ${LS_WS_SUBSCRIPTIONS_PER_SOCKET:-50}
       # LS는 앱키당 활성 토큰 하나를 유지한다. Trading PAPER 주문기와 같은
       # 기존 파일 캐시 규격을 공유해 별도 발급이 서로를 무효화하지 않게 한다.
       LS_TOKEN_CACHE_DIR: /var/lib/ls-token-cache

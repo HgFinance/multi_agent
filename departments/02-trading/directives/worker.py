@@ -17,6 +17,7 @@ from .service import (
     DEFERRED_MARKET_SESSION_CODES,
     DirectiveServiceError,
     UserDirectiveService,
+    is_market_quote_deferred,
     is_market_session_deferred,
     require_paper_execution_mode,
 )
@@ -111,7 +112,7 @@ def run_once(
     deferred = [
         f"{record.directive_id}:{record.error_code}"
         for record in records
-        if is_market_session_deferred(record)
+        if is_market_session_deferred(record) or is_market_quote_deferred(record)
     ]
     return {
         "reconciled": len(records),
